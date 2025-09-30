@@ -1,0 +1,25 @@
+{
+  "author": [
+    "FARA-Assistant"
+  ],
+  "install_msg": "SessionTester installed. Load with [p]load session_tester",
+  "name": "SessionTester",
+  "short": "Tests CookieManager session",
+  "description": "Minimal owner-only cog to verify that CookieManager returns a working aiohttp session.",
+  "disabled": false,
+  "min_bot_version": "3.5.0",
+  "hidden": false,
+  "tags": [
+    "missionchief",
+    "testing",
+    "cookies"
+  ],
+  "requirements": [],
+  "end_user_data_statement": "This cog stores no user data.",
+  "type": "COG",
+  "min_python_version": [
+    3,
+    9,
+    0
+  ]
+}
