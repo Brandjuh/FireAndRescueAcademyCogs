@@ -1,0 +1,30 @@
+{
+  "author": [
+    "FARA-Assistant"
+  ],
+  "install_msg": "CookieManager installed. Load with [p]load cookie_manager",
+  "name": "CookieManager",
+  "short": "MissionChief login/session cookie manager",
+  "description": "Owner-only cog that logs into MissionChief, stores encrypted credentials/cookies locally, exposes aiohttp session to other cogs, and auto-refreshes.",
+  "disabled": false,
+  "min_bot_version": "3.5.0",
+  "hidden": false,
+  "tags": [
+    "missionchief",
+    "auth",
+    "cookies",
+    "scraping"
+  ],
+  "requirements": [
+    "aiohttp",
+    "cryptography",
+    "beautifulsoup4"
+  ],
+  "end_user_data_statement": "This cog stores credentials and website cookies locally on your machine (Raspberry Pi). Credentials and cookies are encrypted with a locally stored key. No data is sent to third parties.",
+  "type": "COG",
+  "min_python_version": [
+    3,
+    9,
+    0
+  ]
+}
