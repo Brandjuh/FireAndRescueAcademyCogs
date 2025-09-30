@@ -87,7 +87,7 @@ class AllianceScraper(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xFA11A9E55CR, force_registration=True)
+        self.config = Config.get_conf(self, identifier=0xFA11A9E55C, force_registration=True)
         self.config.register_global(**DEFAULTS)
         self.data_path = cog_data_path(self)
         self.db_path = self.data_path / "alliance.db"
