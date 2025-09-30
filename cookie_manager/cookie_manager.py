@@ -1,7 +1,6 @@
-# cookie_manager.py
+# cookie_manager.py (v4)
 # Red cog: Cookie/session manager for MissionChief scraping
-# Requirements: aiohttp, cryptography, bs4
-# Language in user-facing strings: English (per server policy)
+# Fixes: import cog_data_path from redbot.core.data_manager, DM check, safer logging
 from __future__ import annotations
 
 import os
@@ -10,6 +9,7 @@ import json
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 from http.cookies import SimpleCookie
+import logging
 
 import aiohttp
 from aiohttp import ClientSession, ClientTimeout, CookieJar
@@ -17,8 +17,9 @@ from bs4 import BeautifulSoup
 from cryptography.fernet import Fernet
 
 from redbot.core import commands, Config, checks
-from redbot.core.utils import chat_formatting as cf
-from redbot.core.utils import cog_data_path
+from redbot.core.data_manager import cog_data_path  # <-- fixed import
+
+log = logging.getLogger("red.FARA.CookieManager")
 
 DEFAULTS = {
     "login_url": "https://www.missionchief.com/login",
@@ -30,7 +31,7 @@ DEFAULTS = {
     "csrf_field_names": ["authenticity_token", "csrf_token", "_token", "__RequestVerificationToken"],
     "username_field": "username",
     "password_field": "password",
-    "extra_form_fields": {},  # dict of {field: value} if needed
+    "extra_form_fields": {},
 }
 
 class CookieManager(commands.Cog):
@@ -42,13 +43,12 @@ class CookieManager(commands.Cog):
         self.config.register_global(**DEFAULTS)
         self.data_path = cog_data_path(self)
         os.makedirs(self.data_path, exist_ok=True)
-        # file paths
+
         self._keyfile = os.path.join(self.data_path, "fernet.key")
         self._credfile = os.path.join(self.data_path, "credentials.bin")
         self._cookiefile = os.path.join(self.data_path, "cookies.bin")
         self._meta_file = os.path.join(self.data_path, "cookie_meta.json")
 
-        # runtime
         self._fernet: Optional[Fernet] = None
         self._cookie_lock = asyncio.Lock()
         self._bg_task: Optional[asyncio.Task] = None
@@ -56,9 +56,7 @@ class CookieManager(commands.Cog):
         self._init_key()
         self.bot.loop.create_task(self._maybe_start_background())
 
-    # ----------------------
-    # Key / encryption utils
-    # ----------------------
+    # Encryption
     def _init_key(self):
         if not os.path.exists(self._keyfile):
             key = Fernet.generate_key()
@@ -73,16 +71,12 @@ class CookieManager(commands.Cog):
         self._fernet = Fernet(key)
 
     def _encrypt(self, data: bytes) -> bytes:
-        assert self._fernet is not None
-        return self._fernet.encrypt(data)
+        return self._fernet.encrypt(data)  # type: ignore
 
     def _decrypt(self, token: bytes) -> bytes:
-        assert self._fernet is not None
-        return self._fernet.decrypt(token)
+        return self._fernet.decrypt(token)  # type: ignore
 
-    # ----------------------
-    # Credential management
-    # ----------------------
+    # Credentials
     async def _save_credentials(self, username: str, password: str):
         data = json.dumps({"username": username, "password": password}).encode()
         token = self._encrypt(data)
@@ -104,9 +98,7 @@ class CookieManager(commands.Cog):
         except Exception:
             return None
 
-    # ----------------------
-    # Cookie storage
-    # ----------------------
+    # Cookies
     async def _save_cookies(self, cookies: List[Dict[str, Any]], meta: Dict[str, Any]):
         payload = {"cookies": cookies, "meta": meta}
         token = self._encrypt(json.dumps(payload).encode())
@@ -130,12 +122,8 @@ class CookieManager(commands.Cog):
         except Exception:
             return None
 
-    # ----------------------
-    # Build sessions
-    # ----------------------
     def _cookie_dicts_to_simplecookie(self, cookies: List[Dict[str, Any]]) -> SimpleCookie:
         sc = SimpleCookie()
-        # Preserve common attributes in case site is picky; note that aiohttp uses response_url to scope
         for c in cookies:
             name = c.get("name")
             value = c.get("value")
@@ -143,7 +131,6 @@ class CookieManager(commands.Cog):
                 continue
             sc[name] = value
             morsel = sc[name]
-            # Preserve flags/attrs as notes (best-effort)
             if c.get("domain"):
                 morsel["domain"] = c["domain"]
             if c.get("path"):
@@ -167,14 +154,12 @@ class CookieManager(commands.Cog):
 
         if stored and "cookies" in stored and stored["cookies"]:
             simple = self._cookie_dicts_to_simplecookie(stored["cookies"])
-            # Attach per cookie using a plausible response_url to scope domain/path
             for c in stored["cookies"]:
                 domain = c.get("domain", "www.missionchief.com")
                 url = f"https://{domain.lstrip('.').strip('/')}/"
                 try:
                     jar.update_cookies({c["name"]: c["value"]}, response_url=url)
                 except Exception:
-                    # fallback: update whole jar with SimpleCookie (less precise scoping)
                     jar.update_cookies(simple)
                     break
         return session
@@ -183,13 +168,11 @@ class CookieManager(commands.Cog):
         async with self._cookie_lock:
             return await self.build_session_from_store()
 
-    # ----------------------
-    # Login flow
-    # ----------------------
+    # Login
     async def _perform_login(self) -> bool:
         creds = await self._load_credentials()
         if not creds:
-            await self._log_admin("No credentials stored. Use DM: !cookie setcreds <username> <password>")
+            await self._log_admin("No credentials stored. DM the bot: `!cookie setcreds <username> <password>`")
             return False
 
         username = creds["username"]
@@ -215,7 +198,6 @@ class CookieManager(commands.Cog):
             token_value = None
             try:
                 soup = BeautifulSoup(text, "lxml")
-                # Try multiple CSRF field names
                 for fname in csrf_field_names:
                     token_input = soup.find("input", {"name": fname})
                     if token_input and token_input.has_attr("value"):
@@ -224,34 +206,25 @@ class CookieManager(commands.Cog):
             except Exception:
                 pass
 
-            payload = {
-                username_field: username,
-                password_field: password,
-            }
+            payload = {username_field: username, password_field: password}
             if token_value is not None:
-                # insert token under first matching name
                 payload[next((n for n in csrf_field_names if n), "csrf_token")] = token_value
-            # Merge any extra required fields (site-specific)
             payload.update(extra_fields)
 
-            # POST login
             try:
                 post = await s.post(login_url, data=payload, allow_redirects=True)
-                await post.text()  # ensure body read
+                await post.text()
             except Exception as e:
                 await self._log_admin(f"Login POST failed: {e}")
                 return False
 
-            # Validate by hitting check_url
+            # Validate
             try:
                 chk = await s.get(check_url, allow_redirects=True)
                 chk_text = await chk.text()
-                # Heuristics: look for logout link, account name, or alliance slug
                 success = any(x in chk_text for x in ["Logout", "/logout", username, "Alliance"])
                 if success:
-                    # dump cookies best-effort including flags
                     cookies_list = []
-                    # Access underlying cookies
                     try:
                         cj = s.cookie_jar._cookies  # type: ignore[attr-defined]
                         for domain, path_map in cj.items():
@@ -271,7 +244,6 @@ class CookieManager(commands.Cog):
                                         item["samesite"] = morsel["samesite"]
                                     cookies_list.append(item)
                     except Exception:
-                        # Fallback: best effort from jar filter_cookies
                         fc = s.cookie_jar.filter_cookies(check_url)
                         for k, v in fc.items():
                             cookies_list.append({"name": k, "value": v.value, "domain": "www.missionchief.com", "path": "/"})
@@ -291,15 +263,13 @@ class CookieManager(commands.Cog):
                         pass
                     return True
                 else:
-                    await self._log_admin("Login appears to have failed: validation page did not contain expected markers.")
+                    await self._log_admin("Login appears to have failed: validation page missing expected markers.")
                     return False
             except Exception as e:
                 await self._log_admin(f"Login validation failed: {e}")
                 return False
 
-    # ----------------------
-    # Commands (owner only)
-    # ----------------------
+    # Commands
     @commands.group(name="cookie")
     @checks.is_owner()
     async def cookie(self, ctx: commands.Context):
@@ -311,7 +281,8 @@ class CookieManager(commands.Cog):
         Store credentials (encrypted) and attempt login. Use this in DM.
         Usage: !cookie setcreds <username> <password>
         """
-        if not isinstance(ctx.channel, (type(ctx.author.dm_channel),)) and ctx.guild is not None:
+        # Simple and reliable: only allow in DMs
+        if ctx.guild is not None:
             await ctx.send("For security, please DM the bot: `!cookie setcreds <username> <password>`")
             return
         if username is None or password is None:
@@ -320,20 +291,14 @@ class CookieManager(commands.Cog):
         await self._save_credentials(username, password)
         await ctx.send("Credentials stored (encrypted). Attempting login...")
         ok = await self._perform_login()
-        if ok:
-            await ctx.send("Login successful and cookies saved.")
-        else:
-            await ctx.send("Login failed. Check credentials and try `!cookie login`.")
+        await ctx.send("Login successful and cookies saved." if ok else "Login failed. Check credentials or configure form fields.")
 
     @cookie.command(name="login")
     async def login(self, ctx: commands.Context):
         """Force a login/refresh now."""
         await ctx.send("Attempting login...")
         ok = await self._perform_login()
-        if ok:
-            await ctx.send("Login successful.")
-        else:
-            await ctx.send("Login failed. Use DM `!cookie setcreds <u> <p>` if not set.")
+        await ctx.send("Login successful." if ok else "Login failed. Use DM `!cookie setcreds <u> <p>` if not set.")
 
     @cookie.command(name="logout")
     async def logout(self, ctx: commands.Context):
@@ -390,7 +355,6 @@ class CookieManager(commands.Cog):
             except Exception as e:
                 await ctx.send(f"Invalid JSON for extra_form_fields: {e}")
         elif key in DEFAULTS:
-            # coerce ints if needed
             if key in ["auto_refresh_minutes", "cookie_warn_before_minutes"]:
                 try:
                     value_int = int(value)
@@ -431,11 +395,12 @@ class CookieManager(commands.Cog):
         except Exception as e:
             await ctx.send(f"Test request failed: {e}")
 
-    # ----------------------
-    # Background tasks
-    # ----------------------
     async def _maybe_start_background(self):
-        await self.bot.wait_until_red_ready()
+        # Wait until bot is ready to avoid noisy errors
+        try:
+            await self.bot.wait_until_red_ready()
+        except Exception:
+            pass
         if self._bg_task is None:
             self._bg_task = asyncio.create_task(self._background_worker())
 
@@ -451,7 +416,7 @@ class CookieManager(commands.Cog):
                         try:
                             saved_dt = datetime.fromisoformat(saved_at)
                         except Exception:
-                            saved_dt = datetime.utcnow() - timedelta(minutes=10000)
+                            saved_dt = datetime.utcnow() - timedelta(days=365)
                         warn_before = int(cfg.get("cookie_warn_before_minutes", 60))
                         if datetime.utcnow() - saved_dt > timedelta(minutes=warn_before):
                             await self._log_admin("Cookie older than warn threshold. Attempting automatic refresh...")
@@ -467,28 +432,21 @@ class CookieManager(commands.Cog):
                 await self._log_admin(f"Background worker error: {e}")
             await asyncio.sleep(max(60, 60 * int((await self.config.auto_refresh_minutes()))))
 
-    # ----------------------
-    # Admin logging helper
-    # ----------------------
     async def _log_admin(self, message: str):
         cfg = await self.config.all()
         cid = cfg.get("admin_channel_id")
         prefix = "[CookieManager]"
-        try:
-            if cid:
+        if cid:
+            try:
                 ch = self.bot.get_channel(int(cid))
                 if ch:
                     await ch.send(f"{prefix} {message}")
                     return
-        except Exception:
-            pass
-        # Fallback: log to console
-        try:
-            self.bot.log.info(f"{prefix} {message}")
-        except Exception:
-            print(f"{prefix} {message}")
+            except Exception:
+                pass
+        # Fallback to log
+        log.info(f"{prefix} {message}")
 
 
 async def setup(bot):
-    cog = CookieManager(bot)
-    await bot.add_cog(cog)
+    await bot.add_cog(CookieManager(bot))

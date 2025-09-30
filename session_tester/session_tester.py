@@ -1,6 +1,4 @@
 # session_tester.py
-# Minimal cog to verify CookieManager session works.
-
 from __future__ import annotations
 from redbot.core import commands, checks
 
@@ -25,7 +23,6 @@ class SessionTester(commands.Cog):
             r = await session.get(url)
             text = await r.text()
             await session.close()
-            # Report short info, not dumping body
             await ctx.send(f"GET {url} -> {r.status}; length={len(text)}")
         except Exception as e:
             await ctx.send(f"Request failed: {e}")
