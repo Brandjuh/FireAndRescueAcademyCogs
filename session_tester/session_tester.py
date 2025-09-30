@@ -20,10 +20,11 @@ class SessionTester(commands.Cog):
             url = await cookie_cog.config.check_url()
         session = await cookie_cog.get_session()
         try:
-            r = await session.get(url)
+            r = await session.get(url, allow_redirects=True)
             text = await r.text()
+            final_url = str(r.url)
             await session.close()
-            await ctx.send(f"GET {url} -> {r.status}; length={len(text)}")
+            await ctx.send(f"GET {url} -> {r.status}; final={final_url}; length={len(text)}")
         except Exception as e:
             await ctx.send(f"Request failed: {e}")
 

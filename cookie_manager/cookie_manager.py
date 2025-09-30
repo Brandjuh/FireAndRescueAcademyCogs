@@ -1,15 +1,14 @@
-# cookie_manager.py (v4)
-# Red cog: Cookie/session manager for MissionChief scraping
-# Fixes: import cog_data_path from redbot.core.data_manager, DM check, safer logging
+# cookie_manager.py (v5)
 from __future__ import annotations
 
 import os
 import asyncio
 import json
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime, timedelta
 from http.cookies import SimpleCookie
 import logging
+from urllib.parse import urljoin
 
 import aiohttp
 from aiohttp import ClientSession, ClientTimeout, CookieJar
@@ -17,21 +16,24 @@ from bs4 import BeautifulSoup
 from cryptography.fernet import Fernet
 
 from redbot.core import commands, Config, checks
-from redbot.core.data_manager import cog_data_path  # <-- fixed import
+from redbot.core.data_manager import cog_data_path
 
 log = logging.getLogger("red.FARA.CookieManager")
 
 DEFAULTS = {
-    "login_url": "https://www.missionchief.com/login",
-    "check_url": "https://www.missionchief.com/alliances/1621",
+    "login_url": "https://www.missionchief.com/users/sign_in",
+    "check_url": "https://www.missionchief.com/buildings",
     "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
     "auto_refresh_minutes": 30,
     "cookie_warn_before_minutes": 60,
     "admin_channel_id": None,
     "csrf_field_names": ["authenticity_token", "csrf_token", "_token", "__RequestVerificationToken"],
-    "username_field": "username",
-    "password_field": "password",
+    "username_field": "user[email]",
+    "password_field": "user[password]",
     "extra_form_fields": {},
+    "success_markers": ["Logout", "/logout", "Sign out", "My profile"],
+    "success_url_contains": ["/buildings", "/dashboard", "/missions"],
+    "login_failure_url_contains": ["/users/sign_in", "/login"],
 }
 
 class CookieManager(commands.Cog):
@@ -122,6 +124,7 @@ class CookieManager(commands.Cog):
         except Exception:
             return None
 
+    # Helpers
     def _cookie_dicts_to_simplecookie(self, cookies: List[Dict[str, Any]]) -> SimpleCookie:
         sc = SimpleCookie()
         for c in cookies:
@@ -169,6 +172,51 @@ class CookieManager(commands.Cog):
             return await self.build_session_from_store()
 
     # Login
+    def _parse_login_form(self, html: str, login_url: str) -> Tuple[str, Dict[str, str]]:
+        """Return (action_url, fields) parsed from the first POST form."""
+        soup = BeautifulSoup(html, "lxml")
+        form = soup.find("form", method=lambda x: x and x.lower() == "post")
+        action_url = login_url
+        fields: Dict[str, str] = {}
+        if form is not None:
+            action = form.get("action")
+            if action:
+                action_url = urljoin(login_url, action)
+            # collect inputs
+            for inp in form.find_all("input"):
+                name = inp.get("name")
+                if not name:
+                    continue
+                # default to existing value or empty string
+                val = inp.get("value", "")
+                fields[name] = val
+        return action_url, fields
+
+    def _inject_credentials(self, fields: Dict[str, str], username: str, password: str, cfg: Dict[str, Any]) -> Dict[str, str]:
+        # Try configured names first
+        ufield = cfg.get("username_field", DEFAULTS["username_field"])
+        pfield = cfg.get("password_field", DEFAULTS["password_field"])
+        fields[ufield] = username
+        fields[pfield] = password
+
+        # Fallback: try to guess by typical names if config names not present
+        if ufield not in fields:
+            for k in list(fields.keys()):
+                if "email" in k or "user" in k and "[email]" in k:
+                    fields[k] = username
+                    break
+        if pfield not in fields:
+            for k in list(fields.keys()):
+                if "password" in k:
+                    fields[k] = password
+                    break
+        # Add extra fields if configured
+        extra = cfg.get("extra_form_fields", {}) or {}
+        for k, v in extra.items():
+            fields[k] = v
+        # CSRF: ensure one of the known names exists if we parsed a token earlier; handled by parsed fields already
+        return fields
+
     async def _perform_login(self) -> bool:
         creds = await self._load_credentials()
         if not creds:
@@ -181,49 +229,47 @@ class CookieManager(commands.Cog):
         login_url = cfg["login_url"]
         check_url = cfg["check_url"]
         ua = cfg["user_agent"]
-        csrf_field_names: List[str] = cfg.get("csrf_field_names", DEFAULTS["csrf_field_names"])
-        username_field = cfg.get("username_field", DEFAULTS["username_field"])
-        password_field = cfg.get("password_field", DEFAULTS["password_field"])
-        extra_fields = cfg.get("extra_form_fields", {}) or {}
+        failure_frags: List[str] = cfg.get("login_failure_url_contains", DEFAULTS["login_failure_url_contains"])
+        success_frags: List[str] = cfg.get("success_url_contains", DEFAULTS["success_url_contains"])
+        markers: List[str] = cfg.get("success_markers", DEFAULTS["success_markers"])
 
         async with aiohttp.ClientSession(headers={"User-Agent": ua}) as s:
             # GET login page
             try:
                 r = await s.get(login_url, allow_redirects=True)
-                text = await r.text()
+                html = await r.text()
             except Exception as e:
                 await self._log_admin(f"Login GET failed: {e}")
                 return False
 
-            token_value = None
-            try:
-                soup = BeautifulSoup(text, "lxml")
-                for fname in csrf_field_names:
-                    token_input = soup.find("input", {"name": fname})
-                    if token_input and token_input.has_attr("value"):
-                        token_value = token_input["value"]
-                        break
-            except Exception:
-                pass
+            action_url, parsed_fields = self._parse_login_form(html, login_url)
+            # Merge credentials
+            payload = self._inject_credentials(parsed_fields, username, password, cfg)
 
-            payload = {username_field: username, password_field: password}
-            if token_value is not None:
-                payload[next((n for n in csrf_field_names if n), "csrf_token")] = token_value
-            payload.update(extra_fields)
-
+            # POST to form action with referer
             try:
-                post = await s.post(login_url, data=payload, allow_redirects=True)
-                await post.text()
+                post = await s.post(action_url, data=payload, allow_redirects=True, headers={"Referer": login_url})
+                post_html = await post.text()
             except Exception as e:
                 await self._log_admin(f"Login POST failed: {e}")
                 return False
 
-            # Validate
+            # Early detect failure by final URL
+            if any(frag in str(post.url) for frag in failure_frags):
+                await self._log_admin("Login appears to have failed (redirected back to sign-in).")
+                return False
+
+            # Validate by hitting check_url and also inspecting URL/markers
             try:
-                chk = await s.get(check_url, allow_redirects=True)
+                chk = await s.get(check_url, allow_redirects=True, headers={"Referer": action_url})
                 chk_text = await chk.text()
-                success = any(x in chk_text for x in ["Logout", "/logout", username, "Alliance"])
+                final_url = str(chk.url)
+                ok_by_url = any(frag in final_url for frag in success_frags) and not any(f in final_url for f in failure_frags)
+                ok_by_markers = any(m in chk_text for m in markers) or (username in chk_text)
+                success = ok_by_url or ok_by_markers
+
                 if success:
+                    # store cookies
                     cookies_list = []
                     try:
                         cj = s.cookie_jar._cookies  # type: ignore[attr-defined]
@@ -252,7 +298,9 @@ class CookieManager(commands.Cog):
                         "saved_at_utc": datetime.utcnow().isoformat(),
                         "saved_for_user": username,
                         "login_url": login_url,
+                        "action_url": action_url,
                         "check_url": check_url,
+                        "final_url": final_url,
                         "user_agent": ua,
                     }
                     await self._save_cookies(cookies_list, meta)
@@ -263,7 +311,7 @@ class CookieManager(commands.Cog):
                         pass
                     return True
                 else:
-                    await self._log_admin("Login appears to have failed: validation page missing expected markers.")
+                    await self._log_admin("Login appears to have failed: validation page missing expected markers/URLs.")
                     return False
             except Exception as e:
                 await self._log_admin(f"Login validation failed: {e}")
@@ -277,11 +325,7 @@ class CookieManager(commands.Cog):
 
     @cookie.command(name="setcreds")
     async def setcreds(self, ctx: commands.Context, username: str = None, password: str = None):
-        """
-        Store credentials (encrypted) and attempt login. Use this in DM.
-        Usage: !cookie setcreds <username> <password>
-        """
-        # Simple and reliable: only allow in DMs
+        """Store credentials (encrypted) and attempt login. Use this in DM."""
         if ctx.guild is not None:
             await ctx.send("For security, please DM the bot: `!cookie setcreds <username> <password>`")
             return
@@ -291,14 +335,14 @@ class CookieManager(commands.Cog):
         await self._save_credentials(username, password)
         await ctx.send("Credentials stored (encrypted). Attempting login...")
         ok = await self._perform_login()
-        await ctx.send("Login successful and cookies saved." if ok else "Login failed. Check credentials or configure form fields.")
+        await ctx.send("Login successful and cookies saved." if ok else "Login failed. Check credentials or adjust config (fields/tokens).")
 
     @cookie.command(name="login")
     async def login(self, ctx: commands.Context):
         """Force a login/refresh now."""
         await ctx.send("Attempting login...")
         ok = await self._perform_login()
-        await ctx.send("Login successful." if ok else "Login failed. Use DM `!cookie setcreds <u> <p>` if not set.")
+        await ctx.send("Login successful." if ok else "Login failed. See `!cookie debug loginflow`.")
 
     @cookie.command(name="logout")
     async def logout(self, ctx: commands.Context):
@@ -320,6 +364,8 @@ class CookieManager(commands.Cog):
         if stored and stored.get("meta"):
             lines.append(f"Cookies saved: yes")
             lines.append(f"Saved at (UTC): {stored['meta'].get('saved_at_utc')}")
+            if stored["meta"].get("final_url"):
+                lines.append(f"Last final URL: {stored['meta'].get('final_url')}")
         else:
             lines.append("Cookies saved: no")
         lines.append(f"Login URL: {cfg['login_url']}")
@@ -338,14 +384,17 @@ class CookieManager(commands.Cog):
         """
         Set a config value.
         Keys: login_url, check_url, user_agent, auto_refresh_minutes, cookie_warn_before_minutes, username_field, password_field
-        Special keys: csrf_field_names (comma-separated), extra_form_fields (JSON dict)
+        Special keys: csrf_field_names (comma-separated), extra_form_fields (JSON dict),
+                      success_markers (comma-separated), success_url_contains (comma-separated), login_failure_url_contains (comma-separated)
         """
         key = key.strip().lower()
-        if key == "csrf_field_names":
+        listy = ["csrf_field_names", "success_markers", "success_url_contains", "login_failure_url_contains"]
+        if key in listy:
             arr = [x.strip() for x in value.split(",") if x.strip()]
-            await self.config.csrf_field_names.set(arr or DEFAULTS["csrf_field_names"])
-            await ctx.send(f"Set csrf_field_names to: {arr}")
-        elif key == "extra_form_fields":
+            await getattr(self.config, key).set(arr)
+            await ctx.send(f"Set {key} to: {arr}")
+            return
+        if key == "extra_form_fields":
             try:
                 obj = json.loads(value)
                 if not isinstance(obj, dict):
@@ -354,22 +403,21 @@ class CookieManager(commands.Cog):
                 await ctx.send("Set extra_form_fields JSON.")
             except Exception as e:
                 await ctx.send(f"Invalid JSON for extra_form_fields: {e}")
-        elif key in DEFAULTS:
-            if key in ["auto_refresh_minutes", "cookie_warn_before_minutes"]:
-                try:
-                    value_int = int(value)
-                except Exception:
-                    await ctx.send("Value must be an integer.")
-                    return
-                await getattr(self.config, key).set(value_int)
-            else:
-                await getattr(self.config, key).set(value)
+            return
+        if key in ["auto_refresh_minutes", "cookie_warn_before_minutes"]:
+            try:
+                value_int = int(value)
+            except Exception:
+                await ctx.send("Value must be an integer.")
+                return
+            await getattr(self.config, key).set(value_int)
             await ctx.send(f"Set {key}.")
-        elif key in ["username_field", "password_field"]:
+            return
+        if key in ["login_url", "check_url", "user_agent", "username_field", "password_field"]:
             await getattr(self.config, key).set(value)
             await ctx.send(f"Set {key}.")
-        else:
-            await ctx.send("Unknown key.")
+            return
+        await ctx.send("Unknown key.")
 
     @cookie.command(name="setadminchannel")
     async def setadminchannel(self, ctx: commands.Context, channel_id: int = None):
@@ -385,18 +433,42 @@ class CookieManager(commands.Cog):
         """Make a test request using stored cookies and report success/failure."""
         session = await self.get_session()
         try:
-            check = await session.get(await self.config.check_url())
-            text = await check.text()
+            url = await self.config.check_url()
+            r = await session.get(url, allow_redirects=True)
+            text = await r.text()
+            final_url = str(r.url)
             await session.close()
-            if ("Logout" in text) or ("/logout" in text):
+            failure = any(f in final_url for f in (await self.config.login_failure_url_contains()))
+            if failure:
+                await ctx.send(f"Test request indicates NOT logged in (final url: {final_url}).")
+                return
+            markers = await self.config.success_markers()
+            if any(m in text for m in markers):
                 await ctx.send("Test request OK — login markers detected.")
             else:
-                await ctx.send("Test request completed — login markers not detected.")
+                await ctx.send(f"Test request completed — no markers, final url: {final_url}.")
         except Exception as e:
             await ctx.send(f"Test request failed: {e}")
 
+    @cookie.command(name="debug")
+    async def debug(self, ctx: commands.Context, action: str):
+        """Debug helpers: `!cookie debug loginflow`"""
+        if action.lower() != "loginflow":
+            await ctx.send("Unknown debug action. Try: `!cookie debug loginflow`")
+            return
+        cfg = await self.config.all()
+        await ctx.send("```\n"
+                       f"login_url={cfg['login_url']}\n"
+                       f"check_url={cfg['check_url']}\n"
+                       f"username_field={cfg['username_field']}\n"
+                       f"password_field={cfg['password_field']}\n"
+                       f"csrf_field_names={cfg['csrf_field_names']}\n"
+                       f"success_markers={cfg['success_markers']}\n"
+                       f"success_url_contains={cfg['success_url_contains']}\n"
+                       f"login_failure_url_contains={cfg['login_failure_url_contains']}\n"
+                       "```")
+
     async def _maybe_start_background(self):
-        # Wait until bot is ready to avoid noisy errors
         try:
             await self.bot.wait_until_red_ready()
         except Exception:
@@ -444,7 +516,6 @@ class CookieManager(commands.Cog):
                     return
             except Exception:
                 pass
-        # Fallback to log
         log.info(f"{prefix} {message}")
 
 
