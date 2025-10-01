@@ -1,4 +1,4 @@
-# alliance_logs_pub.py v0.4.3
+
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +12,7 @@ import discord
 from redbot.core import commands, checks, Config
 from redbot.core.data_manager import cog_data_path
 
-__version__ = "0.4.3"
+__version__ = "0.4.5"
 
 log = logging.getLogger("red.FARA.AllianceLogsPub")
 
@@ -22,10 +22,10 @@ DEFAULTS = {
     "main_channel_id": None,
     "mirrors": {},
     "interval_minutes": 5,
-    "style": "minimal",
+    "style": "minimal",               # minimal | compact | fields
     "emoji_titles": True,
     "strict_titles": True,
-    "show_executor_minimal": False,
+    "show_executor_minimal": True,    # default ON so you get the executor after date
     "colors": {},
     "icons": {},
 }
@@ -170,9 +170,24 @@ class AllianceLogsPub(commands.Cog):
     async def _desc_minimal(self, row: Dict[str, Any]) -> str:
         lines: List[str] = []
         ts = row.get("ts") or "-"
-        lines.append(f"`{ts}` —")
+        # First line: date and (optional) executor
+        first = f"`{ts}` —"
+        if await self.config.show_executor_minimal():
+            by = row.get("executed_name") or "-"
+            if row.get("executed_mc_id"):
+                url = self._profile_url(str(row["executed_mc_id"]))
+                by = f"[{by}]({url})"
+                did = await self._discord_id_for_mc(str(row["executed_mc_id"]))
+                if did:
+                    by += f" [[D]]({self._discord_profile_url(did)})"
+            first += f" by {by}"
+        lines.append(first)
+
+        # Second line: description
         desc = row.get("description") or row.get("action_text") or "-"
         lines.append(str(desc))
+
+        # Third line: target (affected or fallback to executor link)
         aff_name = row.get("affected_name") or ""
         aff_url = row.get("affected_url") or ""
         block: Optional[str] = None
@@ -191,15 +206,7 @@ class AllianceLogsPub(commands.Cog):
                 block = f"→ [{label}]({exec_url})" if exec_url else f"→ {label}"
         if block:
             lines.append(block)
-        if await self.config.show_executor_minimal():
-            by = row.get("executed_name") or "-"
-            if row.get("executed_mc_id"):
-                url = self._profile_url(str(row["executed_mc_id"]))
-                by = f"[{by}]({url})"
-                did = await self._discord_id_for_mc(str(row["executed_mc_id"]))
-                if did:
-                    by += f" [[D]]({self._discord_profile_url(did)})"
-            lines.append(f"*By:* {by}")
+
         return NL.join(lines)
 
     async def _desc_compact(self, row: Dict[str, Any]) -> str:
@@ -337,24 +344,20 @@ class AllianceLogsPub(commands.Cog):
     @alog_group.command(name="version")
     async def version(self, ctx: commands.Context):
         cfg = await self.config.all()
-        await ctx.send(
-            "```
-"
-            f"AllianceLogsPub version: {__version__}
-"
-            f"Style: {cfg['style']}  Emoji titles: {cfg['emoji_titles']}  Strict titles: {cfg['strict_titles']}
-"
-            f"Mirrors configured: {len(cfg.get('mirrors', {}))}
-"
-            "```"
-        )
+        lines = [
+            "```",
+            f"AllianceLogsPub version: {__version__}",
+            f"Style: {cfg['style']}  Emoji titles: {cfg['emoji_titles']}  Strict titles: {cfg['strict_titles']}",
+            f"Mirrors configured: {len(cfg.get('mirrors', {}))}",
+            "```",
+        ]
+        await ctx.send(NL.join(lines))
 
     @alog_group.command(name="listactions")
     async def listactions(self, ctx: commands.Context):
         lines = [f"{t}  —  key: `{k}`" for k, (t, _, _) in DISPLAY.items()]
-        msg = "**Valid actions:**
-" + NL.join(lines)
-        await ctx.send(msg if len(msg) < 1800 else msg[:1800] + "\n...")
+        msg = "**Valid actions:**" + NL + NL.join(lines)
+        await ctx.send(msg if len(msg) < 1800 else msg[:1800] + NL + "...")
 
     @alog_group.command(name="setchannel")
     async def setchannel(self, ctx: commands.Context, channel: discord.TextChannel):
@@ -380,6 +383,11 @@ class AllianceLogsPub(commands.Cog):
         await self.config.emoji_titles.set(bool(enabled))
         await ctx.send(f"Emoji in titles set to {bool(enabled)}")
 
+    @alog_group.command(name="showexecutorminimal")
+    async def showexecutorminimal(self, ctx: commands.Context, enabled: bool):
+        await self.config.show_executor_minimal.set(bool(enabled))
+        await ctx.send(f"Show executor on minimal set to {bool(enabled)}")
+
     @alog_group.command(name="resetformat")
     async def resetformat(self, ctx: commands.Context):
         await self.config.style.set(DEFAULTS["style"])
@@ -394,14 +402,14 @@ class AllianceLogsPub(commands.Cog):
     @checks.admin_or_permissions(manage_guild=True)
     async def mirror_root(self, ctx: commands.Context):
         """Manage per-action mirror channels."""
+        pass
 
     @alog_group.group(name="mirror")
     async def mirror_alias_group(self, ctx: commands.Context):
         """Alias group for mirror management."""
+        pass
 
-    @mirror_root.command(name="add")
-    @mirror_alias_group.command(name="add")
-    async def mirror_add(self, ctx: commands.Context, action: str, channel: discord.TextChannel):
+    async def _mirror_add_impl(self, ctx: commands.Context, action: str, channel: discord.TextChannel):
         key = _map_user_action_input(action)
         if not key:
             await ctx.send("Unknown action. Use `alog listactions` to see valid options.")
@@ -415,9 +423,7 @@ class AllianceLogsPub(commands.Cog):
         await self.config.mirrors.set(mirrors)
         await ctx.send(f"Mirror added for `{DISPLAY[key][0]}` → {channel.mention} (enabled)")
 
-    @mirror_root.command(name="remove")
-    @mirror_alias_group.command(name="remove")
-    async def mirror_remove(self, ctx: commands.Context, action: str, channel: discord.TextChannel):
+    async def _mirror_remove_impl(self, ctx: commands.Context, action: str, channel: discord.TextChannel):
         key = _map_user_action_input(action)
         if not key:
             await ctx.send("Unknown action. Use `alog listactions`.")
@@ -429,9 +435,7 @@ class AllianceLogsPub(commands.Cog):
         await self.config.mirrors.set(mirrors)
         await ctx.send(f"Mirror removed for `{DISPLAY[key][0]}` from {channel.mention}")
 
-    @mirror_root.command(name="enable")
-    @mirror_alias_group.command(name="enable")
-    async def mirror_enable(self, ctx: commands.Context, action: str, enabled: bool):
+    async def _mirror_enable_impl(self, ctx: commands.Context, action: str, enabled: bool):
         key = _map_user_action_input(action)
         if not key:
             await ctx.send("Unknown action. Use `alog listactions`.")
@@ -443,21 +447,42 @@ class AllianceLogsPub(commands.Cog):
         await self.config.mirrors.set(mirrors)
         await ctx.send(f"Mirror for `{DISPLAY[key][0]}` set to enabled={bool(enabled)}")
 
+    @mirror_root.command(name="add")
+    async def mirror_add_root(self, ctx: commands.Context, action: str, channel: discord.TextChannel):
+        await self._mirror_add_impl(ctx, action, channel)
+
+    @mirror_root.command(name="remove")
+    async def mirror_remove_root(self, ctx: commands.Context, action: str, channel: discord.TextChannel):
+        await self._mirror_remove_impl(ctx, action, channel)
+
+    @mirror_root.command(name="enable")
+    async def mirror_enable_root(self, ctx: commands.Context, action: str, enabled: bool):
+        await self._mirror_enable_impl(ctx, action, enabled)
+
+    @mirror_alias_group.command(name="add")
+    async def mirror_add_alias(self, ctx: commands.Context, action: str, channel: discord.TextChannel):
+        await self._mirror_add_impl(ctx, action, channel)
+
+    @mirror_alias_group.command(name="remove")
+    async def mirror_remove_alias(self, ctx: commands.Context, action: str, channel: discord.TextChannel):
+        await self._mirror_remove_impl(ctx, action, channel)
+
+    @mirror_alias_group.command(name="enable")
+    async def mirror_enable_alias(self, ctx: commands.Context, action: str, enabled: bool):
+        await self._mirror_enable_impl(ctx, action, enabled)
+
     @alog_group.command(name="mirrorstatus")
     async def mirrorstatus(self, ctx: commands.Context):
         mirrors = await self.config.mirrors()
         if not mirrors:
-            await ctx.send("```
-No mirrors configured.
-```")
+            await ctx.send("```\nNo mirrors configured.\n```")
             return
         lines = []
         for k, v in mirrors.items():
             chans = ", ".join(f"<#{cid}>" for cid in (v.get("channels") or []))
             lines.append(f"{DISPLAY.get(k, ('?', '', ''))[0]}: enabled={v.get('enabled')} channels=[{chans}]")
-        await ctx.send("```
-" + NL.join(lines) + "
-```")
+        msg = "```\n" + NL.join(lines) + "\n```"
+        await ctx.send(msg if len(msg) < 1900 else "```Too many mirrors to display.```")
 
     @alog_group.command(name="testpost")
     async def testpost(self, ctx: commands.Context, *, action: str):
@@ -482,9 +507,7 @@ No mirrors configured.
             return
         e = discord.Embed(
             title=title_text,
-            description="`01 Oct 06:40` —
-Example description
-→ [Example link](https://example.com)",
+            description="`01 Oct 06:40` — by [Example User](https://example.com)" + NL + "Example description" + NL + "→ [Example link](https://example.com)",
             color=color,
             timestamp=datetime.utcnow(),
         )
@@ -494,18 +517,14 @@ Example description
     @alog_group.command(name="sanity")
     async def sanity(self, ctx: commands.Context):
         cfg = await self.config.all()
-        ch = cfg.get("main_channel_id")
-        await ctx.send(
-            "```
-"
-            f"AllianceLogsPub {__version__}
-"
-            f"Main channel: {ch}
-"
-            f"Style: {cfg['style']}  Emoji titles: {cfg['emoji_titles']}
-"
-            "```"
-        )
+        lines = [
+            "```",
+            f"AllianceLogsPub {__version__}",
+            f"Main channel: {cfg.get('main_channel_id')}",
+            f"Style: {cfg['style']}  Emoji titles: {cfg['emoji_titles']}  ShowExecutorMinimal: {cfg['show_executor_minimal']}",
+            "```",
+        ]
+        await ctx.send(NL.join(lines))
 
     @alog_group.command(name="run")
     async def run(self, ctx: commands.Context):
