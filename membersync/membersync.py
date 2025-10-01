@@ -1,4 +1,4 @@
-# membersync.py (v0.1.4) - fix Embed.Empty reference
+# membersync.py (v0.1.5) - require MC user_id unless explicitly allowed
 from __future__ import annotations
 
 import asyncio
@@ -30,6 +30,7 @@ DEFAULTS = {
     "auto_prune_interval_hours": 24,
     "profile_url_template": "https://www.missionchief.com/users/{id}",
     "require_nickname": True,
+    "allow_no_id": False,  # NEW: don't allow reviews without numeric MC user_id by default
 }
 
 def now_utc() -> str:
@@ -244,22 +245,18 @@ class MemberSync(commands.Cog):
             return None
         if mmode != "strict" and best_score < threshold:
             return None
-        return {"mc_user_id": str(best.get("user_id")), "mc_name": best.get("name"), "match_type": "fuzzy" if mmode != "strict" else "strict", "confidence": float(best_score)}
+        return {"mc_user_id": (str(best.get("user_id")) if best.get("user_id") is not None else ""), "mc_name": best.get("name"), "match_type": "fuzzy" if mmode != "strict" else "strict", "confidence": float(best_score)}
 
     async def _create_review_embed(self, guild: discord.Guild, member: discord.Member, cand: Dict[str, Any]) -> discord.Embed:
-        mc_id = cand["mc_user_id"]
+        mc_id = cand["mc_user_id"] or "Unknown"
         mc_name = cand["mc_name"]
-        url = f"https://www.missionchief.com/users/{mc_id}"
+        url = f"https://www.missionchief.com/users/{mc_id}" if mc_id and mc_id.isdigit() else "https://www.missionchief.com/verband/mitglieder"
         e = discord.Embed(title="Verification request", color=discord.Color.blurple(), timestamp=datetime.utcnow())
         e.add_field(name="MissionChief", value=f"[{mc_name}]({url})\nID: `{mc_id}`", inline=False)
         e.add_field(name="Discord", value=f"{member.mention}\nID: `{member.id}`\nGuild Nick: `{member.nick or 'None'}`", inline=False)
         e.add_field(name="Match", value=f"Type: `{cand.get('match_type')}`  •  Confidence: `{cand.get('confidence'):.2f}`", inline=False)
-        # Safe thumbnail handling across lib variants
         try:
             thumb_url = getattr(getattr(member, "display_avatar", None), "url", None)
-        except Exception:
-            thumb_url = None
-        try:
             e.set_thumbnail(url=thumb_url)
         except Exception:
             pass
@@ -274,9 +271,14 @@ class MemberSync(commands.Cog):
             if not rv:
                 return "This review is no longer pending."
             discord_id = int(rv["discord_id"])
-            mc_user_id = str(rv["mc_user_id"])
+            mc_user_id = str(rv["mc_user_id"] or "")
             mc_name = rv["mc_name"]
             message_id = int(rv["message_id"]) if rv["message_id"] else None
+        # Enforce ID presence unless config allows it
+        allow_no_id = await self.config.allow_no_id()
+        if (not mc_user_id) or (not mc_user_id.isdigit()):
+            if not allow_no_id:
+                return "Cannot approve: MissionChief user ID is missing. Ask the user to run `!verify <MC_ID>` or refresh the roster in the scraper."
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
             INSERT INTO links(discord_id, mc_user_id, mc_name, status, requested_at, approved_at, approved_by, rejected_reason, last_check_utc)
@@ -302,7 +304,8 @@ class MemberSync(commands.Cog):
                         log.warning("Failed to add role: %s", e)
         try:
             if mem:
-                await mem.send(f"You have been verified as **{mc_name}** (ID `{mc_user_id}`).")
+                uid_txt = mc_user_id if mc_user_id else "Unknown"
+                await mem.send(f"You have been verified as **{mc_name}** (ID `{uid_txt}`).")
         except Exception:
             pass
         if message_id and (await self.config.delete_admin_message_on_decision()):
@@ -314,7 +317,8 @@ class MemberSync(commands.Cog):
                 except Exception:
                     pass
         emb = discord.Embed(title="Member verified", color=discord.Color.green(), timestamp=datetime.utcnow())
-        emb.add_field(name="MissionChief", value=f"{mc_name} (`{mc_user_id}`)", inline=False)
+        uid_txt = mc_user_id if mc_user_id else "Unknown"
+        emb.add_field(name="MissionChief", value=f"{mc_name} (`{uid_txt}`)", inline=False)
         emb.add_field(name="Discord", value=f"<@{discord_id}> (`{discord_id}`)", inline=False)
         emb.add_field(name="Approved by", value=f"<@{approver.id}>", inline=False)
         await self._send_log(guild, emb)
@@ -350,7 +354,7 @@ class MemberSync(commands.Cog):
                 await interaction.response.send_message("This review is no longer pending.", ephemeral=True)
                 return
             discord_id = int(rv["discord_id"])
-            mc_user_id = str(rv["mc_user_id"])
+            mc_user_id = str(rv["mc_user_id"] or "")
             mc_name = rv["mc_name"]
             message_id = int(rv["message_id"]) if rv["message_id"] else None
             await db.execute("UPDATE reviews SET status='finished' WHERE id=?", (review_id,))
@@ -365,7 +369,8 @@ class MemberSync(commands.Cog):
         mem = guild.get_member(discord_id)
         try:
             if mem:
-                await mem.send(f"Your verification was rejected for **{mc_name}** (ID `{mc_user_id}`).\nReason: {reason}")
+                uid_txt = mc_user_id if mc_user_id else "Unknown"
+                await mem.send(f"Your verification was rejected for **{mc_name}** (ID `{uid_txt}`).\nReason: {reason}")
         except Exception:
             pass
         if message_id and (await self.config.delete_admin_message_on_decision()):
@@ -377,7 +382,8 @@ class MemberSync(commands.Cog):
                 except Exception:
                     pass
         emb = discord.Embed(title="Member verification rejected", color=discord.Color.red(), timestamp=datetime.utcnow())
-        emb.add_field(name="MissionChief", value=f"{mc_name} (`{mc_user_id}`)", inline=False)
+        uid_txt = mc_user_id if mc_user_id else "Unknown"
+        emb.add_field(name="MissionChief", value=f"{mc_name} (`{uid_txt}`)", inline=False)
         emb.add_field(name="Discord", value=f"<@{discord_id}> (`{discord_id}`)", inline=False)
         emb.add_field(name="Rejected by", value=f"<@{interaction.user.id}>", inline=False)
         emb.add_field(name="Reason", value=reason[:400], inline=False)
@@ -449,7 +455,7 @@ class MemberSync(commands.Cog):
             rows = await cur.fetchall()
         for row in rows:
             discord_id = int(row["discord_id"])
-            mc_user_id = str(row["mc_user_id"])
+            mc_user_id = str(row["mc_user_id"] or "")
             if not mc_user_id or mc_user_id not in in_alliance_ids:
                 mem = guild.get_member(discord_id)
                 if mem and role in mem.roles:
@@ -487,6 +493,7 @@ class MemberSync(commands.Cog):
             f"Admin roles: {cfg['admin_role_ids']}",
             f"Match mode: {cfg['match_mode']} threshold={cfg['fuzzy_threshold']}",
             f"Require nickname: {cfg['require_nickname']}",
+            f"Allow no ID: {cfg['allow_no_id']}",
             f"Auto prune: enabled={cfg['auto_prune_enabled']} interval_h={cfg['auto_prune_interval_hours']}",
         ])
         await ctx.send(f"```\n{msg}\n```")
@@ -503,6 +510,7 @@ class MemberSync(commands.Cog):
                        f"Without user_id: {without_id}\n"
                        f"Match mode: {cfg['match_mode']} (threshold={cfg['fuzzy_threshold']})\n"
                        f"Require nickname: {cfg['require_nickname']}\n"
+                       f"Allow no ID: {cfg['allow_no_id']}\n"
                        "```")
 
     @membersync_group.command(name="debugfind")
@@ -590,6 +598,11 @@ class MemberSync(commands.Cog):
         await self.config.require_nickname.set(bool(required))
         await ctx.send(f"Require guild nickname set to {bool(required)}")
 
+    @config_group.command(name="setallownoid")
+    async def set_allow_no_id(self, ctx: commands.Context, allow: bool):
+        await self.config.allow_no_id.set(bool(allow))
+        await ctx.send(f"Allow review without MC user ID: {bool(allow)}")
+
     @config_group.command(name="setautoprune")
     async def set_auto_prune(self, ctx: commands.Context, enabled: bool, interval_hours: Optional[int] = None):
         await self.config.auto_prune_enabled.set(bool(enabled))
@@ -606,28 +619,6 @@ class MemberSync(commands.Cog):
     async def set_autodelete(self, ctx: commands.Context, seconds: int):
         await self.config.autodelete_user_feedback_seconds.set(int(seconds))
         await ctx.send("User feedback auto-delete updated.")
-
-    @membersync_group.command(name="approve")
-    async def approve_cmd(self, ctx: commands.Context, message_id: int):
-        if not await self._is_approver(ctx.author):
-            await ctx.send("You are not allowed to approve reviews.")
-            return
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cur = await db.execute("SELECT id FROM reviews WHERE message_id=? AND status='pending'", (int(message_id),))
-            rv = await cur.fetchone()
-        if not rv:
-            await ctx.send("No pending review for that message id.")
-            return
-        msg = await self._process_approve(ctx.guild, rv["id"], ctx.author)  # type: ignore
-        await ctx.send(msg)
-
-    @membersync_group.command(name="reject")
-    async def reject_cmd(self, ctx: commands.Context, message_id: int, *, reason: str):
-        if not await self._is_approver(ctx.author):
-            await ctx.send("You are not allowed to reject reviews.")
-            return
-        await self._handle_reject_interaction(type("X",(object,),{"guild":ctx.guild,"user":ctx.author,"response":type("Y",(object,),{"send_message":ctx.send})()})(), str(message_id), reason)  # type: ignore
 
     @commands.command(name="verify")
     async def verify(self, ctx: commands.Context, mc_id: Optional[str] = None):
@@ -654,6 +645,23 @@ class MemberSync(commands.Cog):
                 except Exception:
                     pass
             return
+        # Enforce ID presence unless allowed
+        allow_no_id = await self.config.allow_no_id()
+        mc_user_id = cand.get("mc_user_id") or ""
+        if (not mc_user_id) or (not mc_user_id.isdigit()):
+            if not allow_no_id:
+                await feedback.edit(content=(
+                    f"Found candidate **{cand['mc_name']}**, but your MissionChief **user ID is missing** in the roster.\n"
+                    "Please run `[p]scraper run members full` to refresh the roster and try again, **or** run `!verify <MC_ID>` explicitly."
+                ))
+                secs = int(await self.config.autodelete_user_feedback_seconds())
+                if secs > 0:
+                    try:
+                        await asyncio.sleep(secs)
+                        await feedback.delete()
+                    except Exception:
+                        pass
+                return
         admin_ch_id = await self.config.admin_channel_id()
         if not admin_ch_id:
             await feedback.edit(content="Verification is not configured yet. Please tell an admin to set the admin review channel.")
@@ -670,9 +678,9 @@ class MemberSync(commands.Cog):
             await db.execute("""
             INSERT INTO reviews(id, message_id, channel_id, discord_id, mc_user_id, mc_name, match_type, confidence, created_at, status)
             VALUES(?,?,?,?,?,?,?,?,?,?)
-            """, (review_id, int(msg.id), int(msg.channel.id), int(ctx.author.id), str(cand["mc_user_id"]), str(cand["mc_name"]), cand["match_type"], float(cand["confidence"]), now_utc(), "pending"))
+            """, (review_id, int(msg.id), int(msg.channel.id), int(ctx.author.id), str(cand.get("mc_user_id") or ""), str(cand["mc_name"]), cand["match_type"], float(cand["confidence"]), now_utc(), "pending"))
             await db.commit()
-        await feedback.edit(content=f"Found candidate **{cand['mc_name']}** (ID `{cand['mc_user_id']}`). Waiting for admin review.")
+        await feedback.edit(content=f"Found candidate **{cand['mc_name']}** (ID `{mc_user_id or 'Unknown'}`). Waiting for admin review.")
         secs = int(await self.config.autodelete_user_feedback_seconds())
         if secs > 0:
             try:
