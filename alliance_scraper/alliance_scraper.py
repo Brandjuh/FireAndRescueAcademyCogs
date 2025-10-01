@@ -1,683 +1,380 @@
-# alliance_scraper.py (v1.2.2)
+# alliance_scraper.py (v0.6.1) - robust member ID resolution and backfill
 from __future__ import annotations
 
 import asyncio
-import csv
-import io
-import json
-import logging
-import re
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
-
-import aiohttp
 import aiosqlite
-from bs4 import BeautifulSoup, Tag
+import aiohttp
+import re
+import random
+import logging
+from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime
+
+from bs4 import BeautifulSoup
+
 from redbot.core import commands, checks, Config
 from redbot.core.data_manager import cog_data_path
 
 log = logging.getLogger("red.FARA.AllianceScraper")
 
 DEFAULTS = {
-    # Source URLs
-    "members_url": "https://www.missionchief.com/verband/mitglieder/1621",
-    "logs_url": "https://www.missionchief.com/alliance_logfiles",
-    "schoolings_url": "https://www.missionchief.com/schoolings",
-    "kasse_url": "https://www.missionchief.com/verband/kasse",
-    # Scheduling (minutes)
-    "interval_members": 60,
-    "interval_logs": 5,
-    "interval_schoolings": 60,
-    "interval_kasse": 5,
-    # Rate limiting
-    "per_request_delay_seconds": 3,
-    "per_request_jitter_seconds": 1,
-    # Pagination hints
-    "page_param": "page",
-    # Member ID extraction regexes (first capture group should be the numeric id)
-    "member_id_href_patterns": [r"/users/(\\d+)", r"/profile/(\\d+)", r"user_id=(\\d+)", r"/user/(\\d+)"]
+    "base_url": "https://www.missionchief.com",
+    "alliance_id": 1621,
+    "pages_per_minute": 10,
+    "members_refresh_minutes": 60,
+    "backfill_auto": True,
+    "backfill_concurrency": 5,
+    "backfill_retry": 3,
+    "backfill_jitter_ms": 250,
+    "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+    "members_path_template": "/verband/mitglieder/{alliance_id}?page={page}",
 }
 
-# Header synonyms for robust parsing (EN/DE)
-HEADER_MAP = {
-    "members": {
-        "name": ["name", "mitglied", "member", "benutzer", "username"],
-        "role": ["role", "rolle"],
-        "earned_credits": ["earned credits", "verdiente credits", "verdiente", "credits"],
-        "contrib_rate": ["contribution rate", "beitragsquote", "contribution", "alliance contribution rate"],
-    },
-    "logs": {
-        "date": ["date", "datum"],
-        "executed_by": ["executed by", "ausgeführt von", "von", "user"],
-        "description": ["description", "beschreibung"],
-        "affected": ["affected", "betroffen"],
-    },
-    "schoolings": {
-        "course": ["course", "lehrgang", "training"],
-        "time_left": ["time left", "restzeit", "dauer"],
-        "user": ["user", "leiter", "host", "owner", "benutzer"],
-    },
-    "kasse": {
-        "date": ["date", "datum"],
-        "description": ["description", "beschreibung", "verwendungszweck"],
-        "amount": ["amount", "betrag"],
-        "balance": ["balance", "kontostand"],
-        "type": ["type", "art"],
-    }
-}
+ID_REGEXPS = [
+    re.compile(r"/users/(\d+)", re.I),
+    re.compile(r"/profile/(\d+)", re.I),
+]
 
-def _norm(s: str) -> str:
-    return " ".join((s or "").strip().lower().split())
-
-def _header_index_map(headers: List[str], wanted_map: Dict[str, List[str]]) -> Dict[str, int]:
-    index = {}
-    for i, h in enumerate(headers):
-        nh = _norm(h)
-        for key, variants in wanted_map.items():
-            if key in index:
-                continue
-            for v in variants:
-                nv = _norm(v)
-                if nv == nh or nv in nh or nh in nv:
-                    index[key] = i
-                    break
-    return index
+def now_utc() -> str:
+    return datetime.utcnow().isoformat()
 
 class AllianceScraper(commands.Cog):
-    """Scrapes MissionChief alliance data using CookieManager session and stores into SQLite.
-       v1.2.2: robust schema migration, fix race in setup, add !scraper fixdb.
-    """
+    """Scrape alliance data with robust member ID extraction and backfill."""
 
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xFA11A9E55C, force_registration=True)
+        self.config = Config.get_conf(self, identifier=0xFA11A9E55C0, force_registration=True)
         self.config.register_global(**DEFAULTS)
         self.data_path = cog_data_path(self)
         self.db_path = self.data_path / "alliance.db"
         self._bg_task: Optional[asyncio.Task] = None
-        self._locks = {
-            "members": asyncio.Lock(),
-            "logs": asyncio.Lock(),
-            "schoolings": asyncio.Lock(),
-            "kasse": asyncio.Lock(),
-        }
-        self._migrated = False
 
-    # ----------------- DB init & migration -----------------
+    async def cog_load(self):
+        await self._init_db()
+        await self._maybe_start_background()
+
     async def _init_db(self):
         self.data_path.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
-            CREATE TABLE IF NOT EXISTS members_current (
-                member_id TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS members_current(
                 user_id TEXT,
                 name TEXT,
                 role TEXT,
                 earned_credits INTEGER,
-                contrib_rate REAL,
-                last_seen_utc TEXT,
-                source_page INTEGER,
-                updated_at_utc TEXT
+                contribution_rate REAL,
+                profile_href TEXT,
+                scraped_at TEXT
             )
             """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_members_current_name ON members_current(name)")
             await db.execute("""
-            CREATE TABLE IF NOT EXISTS members_history (
+            CREATE TABLE IF NOT EXISTS members_history(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id TEXT,
-                member_id TEXT,
                 name TEXT,
                 role TEXT,
                 earned_credits INTEGER,
-                contrib_rate REAL,
-                snapshot_utc TEXT
-            )
-            """)
-            await db.execute("""
-            CREATE TABLE IF NOT EXISTS alliance_logs (
-                id TEXT PRIMARY KEY, -- hash key
-                date_utc TEXT,
-                executed_by TEXT,
-                description TEXT,
-                affected TEXT,
-                raw_hash TEXT, 
-                inserted_at_utc TEXT
-            )
-            """)
-            await db.execute("""
-            CREATE TABLE IF NOT EXISTS schoolings_open (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                course TEXT,
-                time_left TEXT,
-                user TEXT,
-                snapshot_utc TEXT
-            )
-            """)
-            await db.execute("""
-            CREATE TABLE IF NOT EXISTS kasse_transactions (
-                id TEXT PRIMARY KEY, -- hash key
-                date_utc TEXT,
-                description TEXT,
-                amount TEXT,
-                balance TEXT,
-                type TEXT,
-                raw_hash TEXT,
-                inserted_at_utc TEXT
+                contribution_rate REAL,
+                profile_href TEXT,
+                scraped_at TEXT
             )
             """)
             await db.commit()
-        await self._migrate_schema()
-        self._migrated = True
 
-    async def _migrate_schema(self):
-        async with aiosqlite.connect(self.db_path) as db:
-            # members_current.user_id
-            cols = [r[1] for r in await (await db.execute("PRAGMA table_info(members_current)")).fetchall()]
-            if "user_id" not in cols:
-                await db.execute("ALTER TABLE members_current ADD COLUMN user_id TEXT")
-            # members_history.user_id
-            cols = [r[1] for r in await (await db.execute("PRAGMA table_info(members_history)")).fetchall()]
-            if "user_id" not in cols:
-                await db.execute("ALTER TABLE members_history ADD COLUMN user_id TEXT")
-            # indexes
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_members_user_id ON members_current(user_id)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_logs_date ON alliance_logs(date_utc)")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_kasse_date ON kasse_transactions(date_utc)")
-            await db.commit()
-
-    async def _ensure_migrated(self):
-        if not self._migrated:
-            await self._init_db()
-
-    # ----------------- Public API for other cogs -----------------
-    async def get_members(self) -> List[Dict[str, Any]]:
-        await self._ensure_migrated()
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cur = await db.execute("SELECT * FROM members_current ORDER BY earned_credits DESC")
-            rows = await cur.fetchall()
-            return [dict(r) for r in rows]
-
-    async def get_logs_since(self, since_utc: Optional[str] = None, limit: int = 500) -> List[Dict[str, Any]]:
-        await self._ensure_migrated()
-        query = "SELECT * FROM alliance_logs"
-        params: List[Any] = []
-        if since_utc:
-            query += " WHERE date_utc >= ?"
-            params.append(since_utc)
-        query += " ORDER BY date_utc DESC LIMIT ?"
-        params.append(limit)
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cur = await db.execute(query, params)
-            rows = await cur.fetchall()
-            return [dict(r) for r in rows]
-
-    async def get_schoolings(self) -> List[Dict[str, Any]]:
-        await self._ensure_migrated()
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cur = await db.execute("SELECT * FROM schoolings_open ORDER BY snapshot_utc DESC, course ASC")
-            rows = await cur.fetchall()
-            return [dict(r) for r in rows]
-
-    async def get_kasse_transactions(self, limit: int = 500) -> List[Dict[str, Any]]:
-        await self._ensure_migrated()
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cur = await db.execute("SELECT * FROM kasse_transactions ORDER BY date_utc DESC LIMIT ?", (limit,))
-            rows = await cur.fetchall()
-            return [dict(r) for r in rows]
-
-    # ----------------- Internal helpers -----------------
-    async def _get_session(self) -> aiohttp.ClientSession:
+    # ---------------- Session helpers ----------------
+    async def _get_auth_session(self) -> Tuple[aiohttp.ClientSession, bool]:
+        """Try to reuse CookieManager session; otherwise create a new one.
+        Returns (session, own_session_flag) to decide whether to close it.
+        """
+        headers = {"User-Agent": (await self.config.user_agent())}
+        timeout = aiohttp.ClientTimeout(total=30)
         cm = self.bot.get_cog("CookieManager")
-        if not cm:
-            raise RuntimeError("CookieManager not loaded")
-        return await cm.get_session()
+        if cm:
+            for attr in ("get_session", "get_aiohttp_session", "session"):
+                try:
+                    maybe = getattr(cm, attr, None)
+                    if maybe:
+                        sess = await maybe() if asyncio.iscoroutinefunction(maybe) else maybe()
+                        try:
+                            sess.headers.update(headers)
+                        except Exception:
+                            pass
+                        return sess, False
+                except Exception:
+                    continue
+        # Fallback
+        sess = aiohttp.ClientSession(headers=headers, timeout=timeout)
+        return sess, True
 
-    async def _fetch_pages(self, base_url: str, cfg: Dict[str, Any], stop_after_seen: Optional[callable] = None) -> List[str]:
-        """Fetch pages using ?page= pagination until no rows or stop_after_seen signals stop."""
-        html_pages: List[str] = []
-        page = 1
-        while True:
-            url = base_url
-            if "?" in base_url:
-                url = f"{base_url}&{cfg['page_param']}={page}"
-            else:
-                url = f"{base_url}?{cfg['page_param']}={page}"
-            session = await self._get_session()
-            try:
-                r = await session.get(url, allow_redirects=True)
-                if r.status != 200:
-                    break
-                html = await r.text()
-            finally:
-                await session.close()
-            soup = BeautifulSoup(html, "lxml")
-            rows = soup.find_all("tr")
-            if not rows or len(rows) <= 1:
-                break
-            html_pages.append(html)
-            if stop_after_seen and stop_after_seen(html):
-                break
-            await asyncio.sleep(max(1, int(cfg.get("per_request_delay_seconds", 3))))
-            page += 1
-            if page > 1000:
-                break
-        return html_pages
+    async def _fetch(self, session: aiohttp.ClientSession, url: str) -> Tuple[str, str]:
+        async with session.get(url, allow_redirects=True) as resp:
+            text = await resp.text()
+            return text, str(resp.url)
 
-    def _parse_table(self, html: str) -> Tuple[List[str], List[List[str]], List[Tag]]:
-        """Return headers, row text cells, and the TR elements for link parsing."""
-        soup = BeautifulSoup(html, "lxml")
-        table = soup.find("table")
-        if not table:
-            return [], [], []
-        headers: List[str] = []
-        thead = table.find("thead")
-        if thead:
-            headers = [th.get_text(strip=True) for th in thead.find_all("th")]
-        else:
-            first = table.find("tr")
-            if first:
-                headers = [th.get_text(strip=True) for th in first.find_all(["th","td"])]
-        rows_text: List[List[str]] = []
-        rows_tr: List[Tag] = []
-        for tr in table.find_all("tr"):
-            tds = tr.find_all("td")
-            if not tds:
-                continue
-            rows_text.append([td.get_text(" ", strip=True) for td in tds])
-            rows_tr.append(tr)
-        return headers, rows_text, rows_tr
-
-    async def _extract_member_id(self, tr: Tag, patterns: List[str]) -> Optional[str]:
-        # 1) data attributes
-        for attr in ["data-user-id", "data-userid", "data-user", "data-member-id", "data-id"]:
-            v = tr.get(attr) or tr.attrs.get(attr)
-            if v and str(v).isdigit():
-                return str(v)
-        # 2) look for anchors with href patterns
-        anchors = tr.find_all("a", href=True)
-        for a in anchors:
-            href = a["href"]
-            for pat in patterns:
-                m = re.search(pat, href)
-                if m:
-                    return m.group(1)
-        # 3) inputs/spans with data-* inside cells
-        for tag in tr.find_all(["span","div","input"]):
-            for attr, val in tag.attrs.items():
-                if attr.startswith("data-") and isinstance(val, (str,int)):
-                    if str(val).isdigit():
-                        return str(val)
+    # ---------------- Parsing helpers ----------------
+    def _extract_id_from_href(self, href: str) -> Optional[str]:
+        if not href:
+            return None
+        for rx in ID_REGEXPS:
+            m = rx.search(href)
+            if m:
+                return m.group(1)
         return None
 
-    # Members
-    async def _scrape_members(self) -> int:
-        await self._ensure_migrated()
-        cfg = await self.config.all()
-        url = cfg["members_url"]
-        patterns = cfg.get("member_id_href_patterns", DEFAULTS["member_id_href_patterns"])
-        async with self._locks["members"]:
-            pages = await self._fetch_pages(url, cfg)
-            total = 0
-            async with aiosqlite.connect(self.db_path) as db:
-                for i, html in enumerate(pages, start=1):
-                    headers, rows, trs = self._parse_table(html)
-                    idx = _header_index_map(headers, HEADER_MAP["members"])
-                    for r, tr in zip(rows, trs):
-                        # parse basics
-                        name = r[idx.get("name", -1)] if idx.get("name", -1) >= 0 and idx.get("name") < len(r) else None
-                        role = r[idx.get("role", -1)] if idx.get("role", -1) >= 0 and idx.get("role") < len(r) else None
-                        earned = r[idx.get("earned_credits", -1)] if idx.get("earned_credits", -1) >= 0 and idx.get("earned_credits") < len(r) else "0"
-                        contrib = r[idx.get("contrib_rate", -1)] if idx.get("contrib_rate", -1) >= 0 and idx.get("contrib_rate") < len(r) else "0"
-                        # extract user_id
-                        user_id = await self._extract_member_id(tr, patterns)
-                        # legacy member_id fallback: normalized name
-                        member_id = user_id or (name or "").strip().lower()
+    def _extract_member_rows(self, html: str) -> List[Dict[str, Any]]:
+        soup = BeautifulSoup(html, "html.parser")
+        rows: List[Dict[str, Any]] = []
+        # Try to find a table with member names; otherwise scan all rows
+        for tr in soup.find_all("tr"):
+            a = tr.find("a", href=True)
+            if not a:
+                continue
+            name = a.get_text(strip=True)
+            if not name:
+                continue
+            href = a["href"]
+            user_id = self._extract_id_from_href(href) or ""
+            # Try to guess other columns
+            tds = tr.find_all("td")
+            role = ""
+            credits = 0
+            rate = 0.0
+            for td in tds:
+                txt = td.get_text(" ", strip=True)
+                if not role and txt and not any(ch.isdigit() for ch in txt) and name not in txt:
+                    role = txt
+                if credits == 0:
+                    m = re.search(r"(\d[\d.,]*)", txt)
+                    if m:
                         try:
-                            earned_i = int("".join(c for c in str(earned) if c.isdigit()))
-                        except Exception:
-                            earned_i = 0
-                        try:
-                            contrib_f = float(str(contrib).replace("%","").replace(",","."))
-                        except Exception:
-                            contrib_f = 0.0
-                        now = datetime.utcnow().isoformat()
-                        await db.execute("""
-                        INSERT INTO members_current(member_id, user_id, name, role, earned_credits, contrib_rate, last_seen_utc, source_page, updated_at_utc)
-                        VALUES(?,?,?,?,?,?,?,?,?)
-                        ON CONFLICT(member_id) DO UPDATE SET
-                            user_id=excluded.user_id,
-                            name=excluded.name,
-                            role=excluded.role,
-                            earned_credits=excluded.earned_credits,
-                            contrib_rate=excluded.contrib_rate,
-                            last_seen_utc=excluded.last_seen_utc,
-                            source_page=excluded.source_page,
-                            updated_at_utc=excluded.updated_at_utc
-                        """, (member_id, user_id, name, role, earned_i, contrib_f, now, i, now))
-                        await db.execute("""
-                        INSERT INTO members_history(user_id, member_id, name, role, earned_credits, contrib_rate, snapshot_utc)
-                        VALUES(?,?,?,?,?,?,?)
-                        """, (user_id, member_id, name, role, earned_i, contrib_f, now))
-                        total += 1
-                await db.commit()
-        if total:
-            try:
-                self.bot.dispatch("fara_members_updated", {"rows": total, "ts": datetime.utcnow().isoformat()})
-            except Exception:
-                pass
-        return total
-
-    # Logs
-    def _log_row_hash(self, row: Dict[str, Any]) -> str:
-        base = f"{row.get('date_utc','')}|{row.get('executed_by','')}|{row.get('description','')}|{row.get('affected','')}"
-        import hashlib
-        return hashlib.sha1(base.encode("utf-8")).hexdigest()
-
-    async def _scrape_logs(self, incremental: bool = True) -> int:
-        await self._ensure_migrated()
-        cfg = await self.config.all()
-        url = cfg["logs_url"]
-        async with self._locks["logs"]:
-            async def stop_after_seen(html: str) -> bool:
-                if not incremental:
-                    return False
-                headers, rows, _ = self._parse_table(html)
-                idx = _header_index_map(headers, HEADER_MAP["logs"])
-                async with aiosqlite.connect(self.db_path) as db:
-                    db.row_factory = aiosqlite.Row
-                    cur = await db.execute("SELECT date_utc FROM alliance_logs ORDER BY date_utc DESC LIMIT 1")
-                    latest = await cur.fetchone()
-                    latest_dt = latest["date_utc"] if latest else None
-                if latest_dt:
-                    for r in rows:
-                        dt = r[idx.get("date", -1)] if idx.get("date", -1) >= 0 and idx.get("date") < len(r) else None
-                        if dt and dt >= latest_dt:
-                            return False
-                    return True
-                return False
-
-            pages = await self._fetch_pages(url, cfg, stop_after_seen=stop_after_seen if incremental else None)
-            inserted = 0
-            async with aiosqlite.connect(self.db_path) as db:
-                for html in pages:
-                    headers, rows, _ = self._parse_table(html)
-                    idx = _header_index_map(headers, HEADER_MAP["logs"])
-                    for r in rows:
-                        date_s = r[idx.get("date", -1)] if idx.get("date", -1) >= 0 and idx.get("date") < len(r) else None
-                        executed_by = r[idx.get("executed_by", -1)] if idx.get("executed_by", -1) >= 0 and idx.get("executed_by") < len(r) else None
-                        description = r[idx.get("description", -1)] if idx.get("description", -1) >= 0 and idx.get("description") < len(r) else None
-                        affected = r[idx.get("affected", -1)] if idx.get("affected", -1) >= 0 and idx.get("affected") < len(r) else None
-                        rowd = {"date_utc": date_s, "executed_by": executed_by, "description": description, "affected": affected}
-                        hid = self._log_row_hash(rowd)
-                        now = datetime.utcnow().isoformat()
-                        try:
-                            await db.execute("""
-                            INSERT INTO alliance_logs(id, date_utc, executed_by, description, affected, raw_hash, inserted_at_utc)
-                            VALUES(?,?,?,?,?,?,?)
-                            """, (hid, date_s, executed_by, description, affected, hid, now))
-                            inserted += 1
+                            credits = int(re.sub(r"[^\d]", "", m.group(1)))
                         except Exception:
                             pass
-                await db.commit()
-        if inserted:
-            try:
-                self.bot.dispatch("fara_logs_updated", {"rows": inserted, "ts": datetime.utcnow().isoformat()})
-            except Exception:
-                pass
-        return inserted
-
-    # Schoolings
-    async def _scrape_schoolings(self) -> int:
-        await self._ensure_migrated()
-        cfg = await self.config.all()
-        url = cfg["schoolings_url"]
-        async with self._locks["schoolings"]:
-            session = await self._get_session()
-            try:
-                r = await session.get(url, allow_redirects=True)
-                html = await r.text()
-            finally:
-                await session.close()
-            headers, rows, _ = self._parse_table(html)
-            idx = _header_index_map(headers, HEADER_MAP["schoolings"])
-            total = 0
-            async with aiosqlite.connect(self.db_path) as db:
-                for r in rows:
-                    course = r[idx.get("course", -1)] if idx.get("course", -1) >= 0 and idx.get("course") < len(r) else None
-                    time_left = r[idx.get("time_left", -1)] if idx.get("time_left", -1) >= 0 and idx.get("time_left") < len(r) else None
-                    user = r[idx.get("user", -1)] if idx.get("user", -1) >= 0 and idx.get("user") < len(r) else None
-                    now = datetime.utcnow().isoformat()
-                    await db.execute("""
-                    INSERT INTO schoolings_open(course, time_left, user, snapshot_utc) VALUES(?,?,?,?)
-                    """, (course, time_left, user, now))
-                    total += 1
-                await db.commit()
-        if total:
-            try:
-                self.bot.dispatch("fara_schoolings_updated", {"rows": total, "ts": datetime.utcnow().isoformat()})
-            except Exception:
-                pass
-        return total
-
-    # Kasse
-    def _kasse_row_hash(self, row: Dict[str, Any]) -> str:
-        s = f"{row.get('date_utc','')}|{row.get('description','')}|{row.get('amount','')}|{row.get('balance','')}|{row.get('type','')}"
-        import hashlib
-        return hashlib.sha1(s.encode("utf-8")).hexdigest()
-
-    async def _scrape_kasse(self, incremental: bool = True) -> int:
-        await self._ensure_migrated()
-        cfg = await self.config.all()
-        url = cfg["kasse_url"]
-
-        async def stop_after_seen(html: str) -> bool:
-            if not incremental:
-                return False
-            headers, rows, _ = self._parse_table(html)
-            idx = _header_index_map(headers, HEADER_MAP["kasse"])
-            async with aiosqlite.connect(self.db_path) as db:
-                db.row_factory = aiosqlite.Row
-                cur = await db.execute("SELECT date_utc FROM kasse_transactions ORDER BY date_utc DESC LIMIT 1")
-                latest = await cur.fetchone()
-                latest_dt = latest["date_utc"] if latest else None
-            if latest_dt:
-                for r in rows:
-                    dt = r[idx.get("date", -1)] if idx.get("date", -1) >= 0 and idx.get("date") < len(r) else None
-                    if dt and dt >= latest_dt:
-                        return False
-                return True
-            return False
-
-        async with self._locks["kasse"]:
-            pages = await self._fetch_pages(url, cfg, stop_after_seen=stop_after_seen if incremental else None)
-            inserted = 0
-            async with aiosqlite.connect(self.db_path) as db:
-                for html in pages:
-                    headers, rows, _ = self._parse_table(html)
-                    idx = _header_index_map(headers, HEADER_MAP["kasse"])
-                    for r in rows:
-                        date_s = r[idx.get("date", -1)] if idx.get("date", -1) >= 0 and idx.get("date") < len(r) else None
-                        description = r[idx.get("description", -1)] if idx.get("description", -1) >= 0 and idx.get("description") < len(r) else None
-                        amount = r[idx.get("amount", -1)] if idx.get("amount", -1) >= 0 and idx.get("amount") < len(r) else None
-                        balance = r[idx.get("balance", -1)] if idx.get("balance", -1) >= 0 and idx.get("balance") < len(r) else None
-                        type_ = r[idx.get("type", -1)] if idx.get("type", -1) >= 0 and idx.get("type") < len(r) else None
-                        rowd = {"date_utc": date_s, "description": description, "amount": amount, "balance": balance, "type": type_}
-                        hid = self._kasse_row_hash(rowd)
-                        now = datetime.utcnow().isoformat()
+                if "%" in txt and rate == 0.0:
+                    m2 = re.search(r"(\d+(?:[.,]\d+)?)\s*%", txt)
+                    if m2:
                         try:
-                            await db.execute("""
-                            INSERT INTO kasse_transactions(id, date_utc, description, amount, balance, type, raw_hash, inserted_at_utc)
-                            VALUES(?,?,?,?,?,?,?,?)
-                            """, (hid, date_s, description, amount, balance, type_, hid, now))
-                            inserted += 1
+                            rate = float(m2.group(1).replace(",", "."))
                         except Exception:
                             pass
-                await db.commit()
-        if inserted:
-            try:
-                self.bot.dispatch("fara_kasse_updated", {"rows": inserted, "ts": datetime.utcnow().isoformat()})
-            except Exception:
-                pass
-        return inserted
+            rows.append({
+                "user_id": user_id,
+                "name": name,
+                "role": role,
+                "earned_credits": credits,
+                "contribution_rate": rate,
+                "profile_href": href,
+            })
+        return rows
 
-    # ----------------- Background scheduling -----------------
-    async def _maybe_start_background(self):
-        await self.bot.wait_until_red_ready()
-        if self._bg_task is None:
-            self._bg_task = asyncio.create_task(self._background_worker())
-
-    async def _background_worker(self):
-        while True:
-            try:
-                cfg = await self.config.all()
-                asyncio.create_task(self._scrape_members())
-                asyncio.create_task(self._scrape_logs(incremental=True))
-                asyncio.create_task(self._scrape_schoolings())
-                asyncio.create_task(self._scrape_kasse(incremental=True))
-            except Exception as e:
-                log.exception("Background worker error: %s", e)
-            mins = min(cfg["interval_members"], cfg["interval_logs"], cfg["interval_schoolings"], cfg["interval_kasse"])
-            await asyncio.sleep(max(60, mins * 60))
-
-    # ----------------- Commands -----------------
-    @commands.group(name="scraper")
-    @checks.is_owner()
-    async def scraper(self, ctx: commands.Context):
-        """AllianceScraper controls (owner only)."""
-
-    @scraper.command(name="fixdb")
-    async def fixdb(self, ctx: commands.Context):
-        """Run DB migration now (safe to run multiple times)."""
-        await self._migrate_schema()
-        self._migrated = True
-        await ctx.send("DB migration completed.")
-
-    @scraper.command(name="status")
-    async def status(self, ctx: commands.Context):
-        """Show scraper status and DB info counts."""
-        await self._ensure_migrated()
+    async def _save_members(self, rows: List[Dict[str, Any]]):
         async with aiosqlite.connect(self.db_path) as db:
-            counts = {}
-            for table in ["members_current", "members_history", "alliance_logs", "schoolings_open", "kasse_transactions"]:
-                cur = await db.execute(f"SELECT COUNT(*) FROM {table}")
-                counts[table] = (await cur.fetchone())[0]
-        cfg = await self.config.all()
-        lines = [
-            f"members_current: {counts['members_current']}",
-            f"members_history: {counts['members_history']}",
-            f"alliance_logs: {counts['alliance_logs']}",
-            f"schoolings_open: {counts['schoolings_open']}",
-            f"kasse_transactions: {counts['kasse_transactions']}",
-            "",
-            f"members_url: {cfg['members_url']}",
-            f"logs_url: {cfg['logs_url']}",
-            f"schoolings_url: {cfg['schoolings_url']}",
-            f"kasse_url: {cfg['kasse_url']}",
-        ]
-        await ctx.send("```\n" + "\n".join(lines) + "\n```")
+            await db.execute("DELETE FROM members_current")
+            for r in rows:
+                await db.execute("""
+                INSERT INTO members_current(user_id, name, role, earned_credits, contribution_rate, profile_href, scraped_at)
+                VALUES(?,?,?,?,?,?,?)
+                """, (r.get("user_id") or "", r.get("name") or "", r.get("role") or "", int(r.get("earned_credits") or 0), float(r.get("contribution_rate") or 0.0), r.get("profile_href") or "", now_utc()))
+                await db.execute("""
+                INSERT INTO members_history(user_id, name, role, earned_credits, contribution_rate, profile_href, scraped_at)
+                VALUES(?,?,?,?,?,?,?)
+                """, (r.get("user_id") or "", r.get("name") or "", r.get("role") or "", int(r.get("earned_credits") or 0), float(r.get("contribution_rate") or 0.0), r.get("profile_href") or "", now_utc()))
+            await db.commit()
 
-    @scraper.command(name="run")
-    async def run(self, ctx: commands.Context, target: str, mode: str = "inc"):
-        """
-        Run a scrape now. Targets: members, logs, schoolings, kasse
-        Mode: inc (incremental) or full
-        """
-        await self._ensure_migrated()
-        target = target.lower().strip()
-        inc = (mode != "full")
-        if target == "members":
-            n = await self._scrape_members()
-        elif target == "logs":
-            n = await self._scrape_logs(incremental=inc)
-        elif target == "schoolings":
-            n = await self._scrape_schoolings()
-        elif target == "kasse":
-            n = await self._scrape_kasse(incremental=inc)
-        else:
-            await ctx.send("Unknown target. Use: members, logs, schoolings, kasse")
-            return
-        await ctx.send(f"Scraped {target}: {n} rows.")
-
-    @scraper.command(name="export")
-    async def export(self, ctx: commands.Context, dataset: str, fmt: str = "csv"):
-        """
-        Export a dataset as CSV or JSON.
-        datasets: members_current, members_history, alliance_logs, schoolings_open, kasse_transactions
-        """
-        await self._ensure_migrated()
-        import discord  # lazy import for file sending
-        dataset = dataset.strip().lower()
-        fmt = fmt.strip().lower()
-        valid = ["members_current", "members_history", "alliance_logs", "schoolings_open", "kasse_transactions"]
-        if dataset not in valid:
-            await ctx.send("Unknown dataset.")
-            return
+    # ---------------- Public API ----------------
+    async def get_members(self) -> List[Dict[str, Any]]:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            cur = await db.execute(f"SELECT * FROM {dataset}")
+            cur = await db.execute("SELECT user_id, name, role, earned_credits, contribution_rate FROM members_current")
+            return [dict(r) for r in await cur.fetchall()]
+
+    # ---------------- Backfill logic ----------------
+    async def _resolve_member_id(self, session: aiohttp.ClientSession, base: str, href: str) -> Optional[str]:
+        if not href:
+            return None
+        uid = self._extract_id_from_href(href)
+        if uid:
+            return uid
+        url = href if href.startswith("http") else f"{base}{href}"
+        try:
+            async with session.get(url, allow_redirects=True) as resp:
+                final_url = str(resp.url)
+                for rx in ID_REGEXPS:
+                    m = rx.search(final_url)
+                    if m:
+                        return m.group(1)
+                text = await resp.text()
+        except Exception:
+            return None
+        for rx in ID_REGEXPS:
+            m = rx.search(text)
+            if m:
+                return m.group(1)
+        return None
+
+    async def _backfill_missing_ids(self, session: aiohttp.ClientSession, base: str, limit: Optional[int] = None) -> int:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            sql = "SELECT rowid, name, profile_href FROM members_current WHERE (user_id IS NULL OR user_id='')"
+            if limit:
+                sql += f" LIMIT {int(limit)}"
+            cur = await db.execute(sql)
             rows = await cur.fetchall()
-            rows = [dict(r) for r in rows]
-        if fmt == "json":
-            data = json.dumps(rows, ensure_ascii=False, indent=2)
-            fp = io.BytesIO(data.encode("utf-8"))
-            fp.seek(0)
-            await ctx.send(file=discord.File(fp, filename=f"{dataset}.json"))
-        else:
-            if not rows:
-                await ctx.send("No data.")
-                return
-            output = io.StringIO()
-            writer = csv.DictWriter(output, fieldnames=list(rows[0].keys()))
-            writer.writeheader()
-            for r in rows:
-                writer.writerow(r)
-            fp = io.BytesIO(output.getvalue().encode("utf-8"))
-            fp.seek(0)
-            await ctx.send(file=discord.File(fp, filename=f"{dataset}.csv"))
+        if not rows:
+            return 0
+        sem = asyncio.Semaphore(int(await self.config.backfill_concurrency()))
+        retry = int(await self.config.backfill_retry())
+        jitter = int(await self.config.backfill_jitter_ms())
 
-    @scraper.group(name="config")
-    async def config_group(self, ctx: commands.Context):
-        """Configure scraper settings."""
+        updated = 0
 
-    @config_group.command(name="set")
-    async def config_set(self, ctx: commands.Context, key: str, *, value: str):
-        """
-        Set a config value.
-        Keys: members_url, logs_url, schoolings_url, kasse_url,
-              interval_members, interval_logs, interval_schoolings, interval_kasse,
-              per_request_delay_seconds, per_request_jitter_seconds,
-              member_id_href_patterns (comma-separated regexes with one capture group)
-        """
-        key = key.strip().lower()
-        ints = ["interval_members", "interval_logs", "interval_schoolings", "interval_kasse",
-                "per_request_delay_seconds", "per_request_jitter_seconds"]
-        if key in ints:
+        async def worker(row):
+            nonlocal updated
+            async with sem:
+                href = row["profile_href"] or ""
+                if not href:
+                    return
+                uid = None
+                for attempt in range(1, retry + 1):
+                    await asyncio.sleep(random.uniform(0, jitter / 1000.0))
+                    try:
+                        uid = await self._resolve_member_id(session, base, href)
+                        if uid:
+                            break
+                    except Exception:
+                        uid = None
+                if uid:
+                    async with aiosqlite.connect(self.db_path) as db2:
+                        await db2.execute("UPDATE members_current SET user_id=? WHERE rowid=?", (uid, row["rowid"]))
+                        await db2.commit()
+                    updated += 1
+
+        await asyncio.gather(*(worker(r) for r in rows))
+        return updated
+
+    # ---------------- Scrape members ----------------
+    async def _scrape_members(self) -> int:
+        base = await self.config.base_url()
+        alliance_id = int(await self.config.alliance_id())
+        tpl = await self.config.members_path_template()
+        pages_per_minute = int(await self.config.pages_per_minute())
+        delay = max(0.0, 60.0 / max(1, pages_per_minute))
+
+        session, own = await self._get_auth_session()
+        try:
+            # Discover last page
+            page1_url = f"{base}{tpl.format(alliance_id=alliance_id, page=1)}"
+            html1, _ = await self._fetch(session, page1_url)
+            soup1 = BeautifulSoup(html1, "html.parser")
+            last_page = 1
+            for a in soup1.find_all("a", href=True):
+                if "page=" in a["href"]:
+                    try:
+                        p = int(re.search(r"page=(\d+)", a["href"]).group(1))
+                        if p > last_page:
+                            last_page = p
+                    except Exception:
+                        pass
+
+            all_rows: List[Dict[str, Any]] = []
+            for p in range(1, last_page + 1):
+                url = f"{base}{tpl.format(alliance_id=alliance_id, page=p)}"
+                try:
+                    html, _ = await self._fetch(session, url)
+                    all_rows.extend(self._extract_member_rows(html))
+                except Exception as e:
+                    log.warning("Failed to fetch members page %s: %s", p, e)
+                await asyncio.sleep(delay)
+
+            await self._save_members(all_rows)
+            if await self.config.backfill_auto():
+                updated = await self._backfill_missing_ids(session, base)
+                log.info("Backfill updated %s member IDs", updated)
+            return len(all_rows)
+        finally:
+            if own:
+                try:
+                    await session.close()
+                except Exception:
+                    pass
+
+    # ---------------- Background ----------------
+    async def _maybe_start_background(self):
+        if self._bg_task is None:
+            self._bg_task = asyncio.create_task(self._bg_loop())
+
+    async def _bg_loop(self):
+        await self.bot.wait_until_red_ready()
+        while True:
             try:
-                v = int(value)
-            except Exception:
-                await ctx.send("Value must be an integer.")
-                return
-            await getattr(self.config, key).set(v)
-            await ctx.send(f"Set {key} = {v}")
-            return
-        str_keys = ["members_url", "logs_url", "schoolings_url", "kasse_url"]
-        if key in str_keys:
-            await getattr(self.config, key).set(value)
-            await ctx.send(f"Set {key}.")
-            return
-        if key == "member_id_href_patterns":
-            pats = [p.strip() for p in value.split(",") if p.strip()]
-            await self.config.member_id_href_patterns.set(pats)
-            await ctx.send(f"Set member_id_href_patterns = {pats}")
-            return
-        await ctx.send("Unknown key.")
+                mins = int(await self.config.members_refresh_minutes())
+                await self._scrape_members()
+            except Exception as e:
+                log.warning("Background scrape error: %s", e)
+            await asyncio.sleep(max(60, mins * 60))
+
+    # ---------------- Commands ----------------
+    @commands.group(name="scraper")
+    @checks.is_owner()
+    async def scraper_group(self, ctx: commands.Context):
+        """AllianceScraper controls."""
+
+    @scraper_group.command(name="status")
+    async def status(self, ctx: commands.Context):
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute("SELECT COUNT(*), SUM(user_id!='') FROM members_current")
+            total, with_id = await cur.fetchone()
+        cfg = await self.config.all()
+        msg = (
+            f"Members total: {total or 0}\n"
+            f"Members with ID: {with_id or 0}\n"
+            f"Backfill auto: {cfg['backfill_auto']} (concurrency={cfg['backfill_concurrency']})\n"
+            f"Refresh minutes: {cfg['members_refresh_minutes']}\n"
+            f"Pages/minute: {cfg['pages_per_minute']}\n"
+        )
+        await ctx.send(f"```\n{msg}```")
+
+    @scraper_group.group(name="members")
+    async def members_group(self, ctx: commands.Context):
+        """Members scraping controls."""
+
+    @members_group.command(name="full")
+    async def members_full(self, ctx: commands.Context):
+        await ctx.send("Scraping all roster pages, then backfilling missing IDs...")
+        n = await self._scrape_members()
+        await ctx.send(f"Done. Parsed {n} rows.")
+
+    @members_group.group(name="backfill")
+    async def backfill_group(self, ctx: commands.Context):
+        """Manage missing-ID backfill."""
+
+    @backfill_group.command(name="now")
+    async def backfill_now(self, ctx: commands.Context, limit: Optional[int] = None):
+        base = await self.config.base_url()
+        session, own = await self._get_auth_session()
+        try:
+            updated = await self._backfill_missing_ids(session, base, limit=limit)
+        finally:
+            if own:
+                try:
+                    await session.close()
+                except Exception:
+                    pass
+        await ctx.send(f"Backfill updated {updated} members.")
+    
+    @backfill_group.command(name="auto")
+    async def backfill_auto(self, ctx: commands.Context, value: bool):
+        await self.config.backfill_auto.set(bool(value))
+        await ctx.send(f"Backfill auto set to {bool(value)}")
+
+    @backfill_group.command(name="status")
+    async def backfill_status(self, ctx: commands.Context):
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute("SELECT COUNT(*) FROM members_current WHERE user_id IS NULL OR user_id=''")
+            missing = (await cur.fetchone())[0]
+        await ctx.send(f"Members missing ID: {missing}")
 
 async def setup(bot):
-    # Ensure DB is fully initialized BEFORE commands are available
     cog = AllianceScraper(bot)
-    await cog._init_db()
     await bot.add_cog(cog)
-    await cog._maybe_start_background()

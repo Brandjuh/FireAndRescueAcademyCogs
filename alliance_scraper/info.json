@@ -4,22 +4,21 @@
   ],
   "install_msg": "AllianceScraper installed. Load with [p]load alliance_scraper",
   "name": "AllianceScraper",
-  "short": "MissionChief Alliance data scraper",
-  "description": "Scrapes alliance members (with numeric user_id), alliance logs, schoolings, and finance using CookieManager. Stores in aiosqlite.",
+  "short": "Scrape alliance roster, logs, trainings, and funds with robust ID capture",
+  "description": "Scrapes alliance data using CookieManager session. Resolves member IDs via /users/<id> or /profile/<id> and backfills missing IDs by visiting profiles.",
   "disabled": false,
   "min_bot_version": "3.5.0",
   "hidden": false,
   "tags": [
     "missionchief",
     "scraper",
-    "cookies"
+    "alliance"
   ],
   "requirements": [
-    "aiohttp",
-    "beautifulsoup4",
-    "aiosqlite"
+    "aiosqlite",
+    "beautifulsoup4"
   ],
-  "end_user_data_statement": "Stores scraped alliance data locally in SQLite on your machine. No data is sent to third parties.",
+  "end_user_data_statement": "Stores scraped alliance metadata locally (SQLite) for your server only.",
   "type": "COG",
   "min_python_version": [
     3,
