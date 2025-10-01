@@ -1,4 +1,4 @@
-# alliance_logs.py v0.3.5
+# alliance_logs.py v0.3.6
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +12,7 @@ import discord
 from redbot.core import commands, checks, Config
 from redbot.core.data_manager import cog_data_path
 
-__version__ = "0.3.5"
+__version__ = "0.3.6"
 
 log = logging.getLogger("red.FARA.AllianceLogs")
 
@@ -22,8 +22,8 @@ DEFAULTS = {
     "interval_minutes": 5,
     "style": "minimal",              # minimal|compact|fields
     "emoji_titles": True,
-    "title_mode": "normalized",      # normalized|raw (honored only if strict_titles=False)
-    "strict_titles": True,           # if True, ALWAYS ignore action_text and use normalized title
+    "title_mode": "normalized",      # ignored if strict_titles True
+    "strict_titles": True,
     "show_executor_minimal": False,
     "colors": {},
     "icons": {},
@@ -45,23 +45,23 @@ DISPLAY = {
     "application_denied": ("Application denied", "red", "❌"),
     "left_alliance": ("Left the alliance", "orange", "🚪"),
     "kicked_from_alliance": ("Kicked from the alliance", "red", "🥾"),
-    "set_transport_admin": ("Set as transport request admin", "blue", "🚚"),
-    "removed_transport_admin": ("Removed as transport request admin", "orange", "🚚❌"),
-    "removed_admin": ("Removed as admin", "orange", "🛡️❌"),
-    "set_admin": ("Set as admin", "blue", "🛡️"),
-    "removed_education_admin": ("Removed as education admin", "orange", "🎓❌"),
-    "set_education_admin": ("Set as education admin", "purple", "🎓"),
-    "set_finance_admin": ("Set as finance admin", "gold", "💰"),
-    "removed_finance_admin": ("Removed as finance admin", "orange", "💰❌"),
-    "set_co_admin": ("Set as co admin", "blue", "🤝"),
-    "removed_co_admin": ("Removed as co admin", "orange", "🤝❌"),
-    "set_mod_action_admin": ("Set as moderator action admin", "blue", "⚙️"),
-    "removed_mod_action_admin": ("Removed as moderator action admin", "orange", "⚙️❌"),
+    "set_transport_request_admin": ("Set as Transport request admin", "blue", "🚚"),
+    "removed_transport_request_admin": ("Removed as Transport request admin", "orange", "🚚❌"),
+    "removed_as_admin": ("Removed as admin", "orange", "🛡️❌"),
+    "set_as_admin": ("Set as admin", "blue", "🛡️"),
+    "removed_as_education_admin": ("Removed as Education admin", "orange", "🎓❌"),
+    "set_as_education_admin": ("Set as Education Admin", "purple", "🎓"),
+    "set_as_finance_admin": ("Set as Finance Admin", "gold", "💰"),
+    "removed_as_finance_admin": ("Removed as Finance Admin", "orange", "💰❌"),
+    "set_as_co_admin": ("Set as Co Admin", "blue", "🤝"),
+    "removed_as_co_admin": ("Removed as Co Admin", "orange", "🤝❌"),
+    "set_as_moderator_action_admin": ("Set as Moderator action admin", "blue", "⚙️"),
+    "removed_as_moderator_action_admin": ("Removed as Moderator action admin", "orange", "⚙️❌"),
     "chat_ban_removed": ("Chat ban removed", "green", "✅"),
     "chat_ban_set": ("Chat ban set", "red", "⛔"),
     "allowed_to_apply": ("Allowed to apply for the alliance", "green", "✅"),
     "not_allowed_to_apply": ("Not allowed to apply for the alliance", "red", "🚫"),
-    "created_course": ("Created a course", "purple", "🧑‍🏫"),
+    "created_a_course": ("Created a course", "purple", "🧑‍🏫"),
     "course_completed": ("Course completed", "green", "🎓✅"),
     "building_destroyed": ("Building destroyed", "red", "💥"),
     "building_constructed": ("Building constructed", "green", "🏗️"),
@@ -71,39 +71,33 @@ DISPLAY = {
     "alliance_event_started": ("Alliance event started", "amber", "🎪"),
     "set_as_staff": ("Set as staff", "blue", "🧑‍💼"),
     "removed_as_staff": ("Removed as staff", "orange", "🧹"),
-    "removed_event_manager": ("Removed as Event Manager", "orange", "🎟️❌"),
-    "removed_custom_large_mission": ("Removed custom large scale mission", "orange", "🗑️"),
-    "promoted_event_manager": ("Promoted to Event Manager", "green", "🎟️"),
+    "removed_as_event_manager": ("Removed as Event Manager", "orange", "🎟️❌"),
+    "removed_custom_large_scale_mission": ("Removed custom large scale mission", "orange", "🗑️"),
+    "promoted_to_event_manager": ("Promoted to Event Manager", "green", "🎟️"),
 }
 
-DATE_PATTERNS = [
-    r"\b\d{4}-\d{2}-\d{2}\b",
-    r"\b\d{2}/\d{2}/\d{4}\b",
-    r"\b\d{2}-\d{2}-\d{4}\b",
-    r"\b\d{1,2}:\d{2}(?::\d{2})?\b",
-    r"\b[0-3]?\d [A-Za-z]{3,9} \d{4}\b",
-    r"\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b",
-    r"\(\s*\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2}:\d{2}(?::\d{2})?\s*\)",
-]
+TITLE_TO_KEY = {v[0].lower(): k for k, v in DISPLAY.items()}
 
-def _strip_dates(text: str) -> str:
-    t = text or ""
-    for pat in DATE_PATTERNS:
-        t = re.sub(pat, "", t, flags=re.I)
-    t = re.sub(r"[\(\[\{]\s*[\d:\-\/\sA-Za-z]{3,}\s*[\)\]\}]", "", t)
-    t = re.sub(r"\s{2,}", " ", t).strip(" -•–—:_")
-    return t
+def _norm_key(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s
 
-def _sanitize_title(text: str) -> str:
-    t = _strip_dates(text)
-    return (t or "Alliance log")[:200]
-
-def _humanize_key(key: str) -> str:
-    k = (key or "").strip().lower()
-    k = re.sub(r"[^a-z0-9]+", " ", k)
-    k = re.sub(r"\b\d+\b", "", k)
-    k = re.sub(r"\s{2,}", " ", k).strip()
-    return k[:1].upper() + k[1:] if k else "Alliance log"
+def _map_user_action_input(s: str) -> str:
+    if not s:
+        return ""
+    raw = s.strip()
+    k = _norm_key(raw)
+    if k in DISPLAY:
+        return k
+    t = raw.lower()
+    if t in TITLE_TO_KEY:
+        return TITLE_TO_KEY[t]
+    nk = _norm_key(raw)
+    if nk in DISPLAY:
+        return nk
+    return ""
 
 def now_utc() -> str:
     return datetime.utcnow().isoformat()
@@ -111,7 +105,7 @@ def now_utc() -> str:
 class AllianceLogs(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xFA109A18, force_registration=True)
+        self.config = Config.get_conf(self, identifier=0xFA109A19, force_registration=True)
         self.config.register_global(**DEFAULTS)
         self.data_path = cog_data_path(self)
         self.db_path = self.data_path / "state.db"
@@ -120,23 +114,12 @@ class AllianceLogs(commands.Cog):
     async def cog_load(self):
         await self._init_db()
         await self._maybe_start_background()
-        await self._maybe_migrate_mirrors()
 
     async def _init_db(self):
         self.data_path.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("CREATE TABLE IF NOT EXISTS state(k TEXT PRIMARY KEY, v TEXT)")
             await db.commit()
-
-    async def _maybe_migrate_mirrors(self):
-        mirrors = await self.config.mirrors()
-        changed = False
-        for k, v in list(mirrors.items()):
-            if isinstance(v, dict) and "channel_id" in v:
-                mirrors[k] = {"enabled": bool(v.get("enabled", True)), "channels": [int(v.get("channel_id"))] if v.get("channel_id") else []}
-                changed = True
-        if changed:
-            await self.config.mirrors.set(mirrors)
 
     async def _get_last_id(self) -> int:
         async with aiosqlite.connect(self.db_path) as db:
@@ -170,14 +153,21 @@ class AllianceLogs(commands.Cog):
             log.debug("MemberSync lookup failed: %s", e)
         return None
 
-    # -------- descriptions --------
-    async def _build_description_minimal(self, row: Dict[str, Any]) -> str:
+    def _title_from_row(self, row: Dict[str, Any]) -> Tuple[str, int, str, str]:
+        key_raw = str(row.get("action_key") or "")
+        key = _map_user_action_input(key_raw) or _map_user_action_input(row.get("action_text") or "")
+        if not key:
+            return "Alliance log", PALETTE["grey"], "ℹ️", ""
+        title, palette_key, emoji = DISPLAY[key]
+        color = PALETTE.get(palette_key, PALETTE["grey"])
+        return title, color, emoji, key
+
+    async def _desc_minimal(self, row: Dict[str, Any]) -> str:
         lines = []
         ts = row.get("ts") or "-"
         lines.append(f"`{ts}` —")
         desc = row.get("description") or row.get("action_text") or "-"
-        desc = _strip_dates(str(desc))
-        lines.append(desc)
+        lines.append(str(desc))
         aff_name = row.get("affected_name") or ""
         aff_url = row.get("affected_url") or ""
         block = None
@@ -207,7 +197,7 @@ class AllianceLogs(commands.Cog):
             lines.append(f"*By:* {by}")
         return "\n".join(lines)
 
-    async def _build_description_compact(self, row: Dict[str, Any]) -> str:
+    async def _desc_compact(self, row: Dict[str, Any]) -> str:
         lines = []
         by = row.get("executed_name") or "-"
         if row.get("executed_mc_id"):
@@ -228,39 +218,12 @@ class AllianceLogs(commands.Cog):
                 if did:
                     aff_text += f" [[D]]({self._discord_profile_url(did)})"
             lines.append(f"**Affected:** {aff_text}")
-        details = _strip_dates(str(row.get("description") or "-"))
+        details = str(row.get("description") or "-")
         lines.append(f"**Details:** {details}")
         ts = row.get("ts") or "-"
         lines.append(f"**Date:** `{ts}`")
         return "\n".join(lines)
 
-    # -------- title helpers --------
-    def _resolve_title_color_icon(self, row: Dict[str, Any], title_mode: str, strict: bool) -> Tuple[str, int, str]:
-        key = str(row.get("action_key") or "").lower().strip()
-        default_title, color_key, default_icon = DISPLAY.get(key, ("Alliance log", "grey", "ℹ️"))
-        if strict:
-            title = default_title if key in DISPLAY else _humanize_key(key)
-        else:
-            if title_mode == "raw":
-                raw = str(row.get("action_text") or "").strip().replace("\n", " ")
-                title = raw if raw else default_title
-            else:
-                title = default_title if key in DISPLAY else _humanize_key(key)
-        title = _sanitize_title(title)
-        base_color = PALETTE.get(color_key, PALETTE["grey"])
-        return title, base_color, default_icon
-
-    async def _apply_overrides(self, action_key: str, title: str, color: int, icon: str) -> Tuple[str, int, str]:
-        key = (action_key or "").lower().strip()
-        colors = await self.config.colors()
-        icons = await self.config.icons()
-        if isinstance(colors.get(key), int):
-            color = int(colors[key])
-        if icons.get(key):
-            icon = str(icons[key])
-        return title, color, icon
-
-    # -------- publish --------
     async def _publish_rows(self, rows: List[Dict[str, Any]]) -> int:
         guild = self.bot.guilds[0] if self.bot.guilds else None
         if not guild:
@@ -274,21 +237,17 @@ class AllianceLogs(commands.Cog):
         mirrors = await self.config.mirrors()
         style = (await self.config.style()).lower()
         emoji_titles = bool(await self.config.emoji_titles())
-        title_mode = (await self.config.title_mode()).lower()
-        strict = bool(await self.config.strict_titles())
 
         posted = 0
         for row in rows:
-            key = str(row.get("action_key") or "").lower().strip()
-            title, color, icon = self._resolve_title_color_icon(row, title_mode, strict)
-            title, color, icon = await self._apply_overrides(key, title, color, icon)
-            title_text = f"{icon} {title}" if emoji_titles and icon else title
+            title, color, emoji, key = self._title_from_row(row)
+            title_text = f"{emoji} {title}" if emoji_titles and emoji else title
 
             if style == "minimal":
-                desc = await self._build_description_minimal(row)
+                desc = await self._desc_minimal(row)
                 e = discord.Embed(title=title_text, description=desc, color=color, timestamp=datetime.utcnow())
             elif style == "compact":
-                desc = await self._build_description_compact(row)
+                desc = await self._desc_compact(row)
                 e = discord.Embed(title=title_text, description=desc, color=color, timestamp=datetime.utcnow())
             else:
                 e = discord.Embed(title=title_text, color=color, timestamp=datetime.utcnow())
@@ -312,7 +271,7 @@ class AllianceLogs(commands.Cog):
                         if did:
                             aff_value += f" [[D]]({self._discord_profile_url(did)})"
                 e.add_field(name="Affected", value=aff_value, inline=False)
-                e.add_field(name="Details", value=_strip_dates(str(row.get("description") or "-")), inline=False)
+                e.add_field(name="Details", value=str(row.get("description") or "-"), inline=False)
                 e.add_field(name="Date", value=f"`{row.get('ts') or '-'}`", inline=False)
 
             try:
@@ -322,17 +281,17 @@ class AllianceLogs(commands.Cog):
                 log.warning("Failed to post main embed: %s", ex)
                 continue
 
-            m = mirrors.get(key, {})
-            if not m or not m.get("enabled"):
-                continue
-            for cid in m.get("channels") or []:
-                mch = guild.get_channel(int(cid))
-                if not isinstance(mch, discord.TextChannel):
-                    continue
-                try:
-                    await mch.send(embed=e)
-                except Exception as mex:
-                    log.debug("Mirror failed to %s: %s", cid, mex)
+            if key:
+                m = mirrors.get(key, {})
+                if m and m.get("enabled"):
+                    for cid in m.get("channels") or []:
+                        mch = guild.get_channel(int(cid))
+                        if not isinstance(mch, discord.TextChannel):
+                            continue
+                        try:
+                            await mch.send(embed=e)
+                        except Exception as mex:
+                            log.debug("Mirror failed to %s: %s", cid, mex)
 
         return posted
 
@@ -377,42 +336,19 @@ class AllianceLogs(commands.Cog):
 
     @alog_group.command(name="version")
     async def version(self, ctx: commands.Context):
-        last_id = await self._get_last_id()
         cfg = await self.config.all()
         await ctx.send("```\n"
                        f"AllianceLogs version: {__version__}\n"
-                       f"Style: {cfg['style']}  Emoji titles: {cfg['emoji_titles']}  Title mode: {cfg['title_mode']}  Strict titles: {cfg['strict_titles']}\n"
-                       f"Show executor (minimal): {cfg['show_executor_minimal']}\n"
-                       f"Interval minutes: {cfg['interval_minutes']}\n"
-                       f"Last seen id: {last_id}\n"
+                       f"Style: {cfg['style']}  Emoji titles: {cfg['emoji_titles']}  Strict titles: {cfg['strict_titles']}\n"
+                       f"Mirrors configured: {len(cfg.get('mirrors', {}))}\n"
                        "```")
 
-    @alog_group.command(name="resetformat")
-    async def resetformat(self, ctx: commands.Context):
-        """Reset visual formatting to defaults (does not touch channels/mirrors/last_id)."""
-        await self.config.style.set(DEFAULTS["style"])
-        await self.config.emoji_titles.set(DEFAULTS["emoji_titles"])
-        await self.config.title_mode.set(DEFAULTS["title_mode"])
-        await self.config.strict_titles.set(DEFAULTS["strict_titles"])
-        await self.config.show_executor_minimal.set(DEFAULTS["show_executor_minimal"])
-        await self.config.colors.set({})
-        await self.config.icons.set({})
-        await ctx.send("Formatting reset to defaults (style, emoji titles, title mode, strict titles, executor line, colors, icons).")
-
-    @alog_group.command(name="status")
-    async def status(self, ctx: commands.Context):
-        last_id = await self._get_last_id()
-        cfg = await self.config.all()
-        mirrors = cfg.get("mirrors", {})
-        mirrors_count = sum(len((v or {}).get("channels") or []) for v in mirrors.values())
-        await ctx.send("```\n"
-                       f"Main channel: {cfg['main_channel_id']}\n"
-                       f"Interval minutes: {cfg['interval_minutes']}\n"
-                       f"Style: {cfg['style']}  Emoji titles: {cfg['emoji_titles']}  Title mode: {cfg['title_mode']}  Strict titles: {cfg['strict_titles']}\n"
-                       f"Show executor (minimal): {cfg['show_executor_minimal']}\n"
-                       f"Last seen id: {last_id}\n"
-                       f"Mirrors (actions): {len(mirrors)} total mirror channels: {mirrors_count}\n"
-                       "```")
+    @alog_group.command(name="listactions")
+    async def listactions(self, ctx: commands.Context):
+        lines = [f"{t}  —  key: `{k}`" for k, (t, _, _) in DISPLAY.items()]
+        await ctx.send("**Valid actions:**\n" + "\n".join(lines[:25]))
+        if len(lines) > 25:
+            await ctx.send("\n".join(lines[25:]))
 
     @alog_group.command(name="setchannel")
     async def setchannel(self, ctx: commands.Context, channel: discord.TextChannel):
@@ -429,36 +365,93 @@ class AllianceLogs(commands.Cog):
         style = style.lower().strip()
         if style not in {"minimal", "compact", "fields"}:
             await ctx.send("Style must be `minimal`, `compact`, or `fields`.")
-            return
-        await self.config.style.set(style)
-        await ctx.send(f"Style set to {style}")
-
-    @alog_group.command(name="setshowexecutor")
-    async def setshowexecutor(self, ctx: commands.Context, enabled: bool):
-        await self.config.show_executor_minimal.set(bool(enabled))
-        await ctx.send(f"Show executor line in minimal style: {bool(enabled)}")
+        else:
+            await self.config.style.set(style)
+            await ctx.send(f"Style set to {style}")
 
     @alog_group.command(name="setemojititles")
     async def setemojititles(self, ctx: commands.Context, enabled: bool):
         await self.config.emoji_titles.set(bool(enabled))
         await ctx.send(f"Emoji in titles set to {bool(enabled)}")
 
-    @alog_group.command(name="settitlemode")
-    async def settitlemode(self, ctx: commands.Context, mode: str):
-        mode = mode.lower().strip()
-        if mode not in {"normalized", "raw"}:
-            await ctx.send("Title mode must be `normalized` or `raw`.")
-            return
-        await self.config.title_mode.set(mode)
-        await ctx.send(f"Title mode set to {mode}")
+    @alog_group.command(name="resetformat")
+    async def resetformat(self, ctx: commands.Context):
+        await self.config.style.set(DEFAULTS["style"])
+        await self.config.emoji_titles.set(DEFAULTS["emoji_titles"])
+        await self.config.strict_titles.set(DEFAULTS["strict_titles"])
+        await self.config.show_executor_minimal.set(DEFAULTS["show_executor_minimal"])
+        await self.config.colors.set({})
+        await self.config.icons.set({})
+        await ctx.send("Formatting reset to defaults.")
 
-    @alog_group.command(name="setstricttitles")
-    async def setstricttitles(self, ctx: commands.Context, enabled: bool):
-        await self.config.strict_titles.set(bool(enabled))
-        await ctx.send(f"Strict titles set to {bool(enabled)}")
+    @commands.group(name="alogmirror", aliases=["alog_mirror"])
+    @checks.admin_or_permissions(manage_guild=True)
+    async def mirror_root(self, ctx: commands.Context):
+        """Manage per-action mirror channels."""
+
+    @alog_group.group(name="mirror")
+    async def mirror_group_alias(self, ctx: commands.Context):
+        """Alias to alogmirror."""
+
+    @mirror_root.command(name="add")
+    async def mirror_add(self, ctx: commands.Context, action: str, channel: discord.TextChannel):
+        key = _map_user_action_input(action)
+        if not key:
+            await ctx.send("Unknown action. Use `alog listactions` to see valid options.")
+            return
+        mirrors = await self.config.mirrors()
+        m = mirrors.get(key, {"enabled": True, "channels": []})
+        if int(channel.id) not in m["channels"]:
+            m["channels"].append(int(channel.id))
+        m["enabled"] = True
+        mirrors[key] = m
+        await self.config.mirrors.set(mirrors)
+        await ctx.send(f"Mirror added for `{DISPLAY[key][0]}` → {channel.mention} (enabled)")
+
+    @mirror_root.command(name="remove")
+    async def mirror_remove(self, ctx: commands.Context, action: str, channel: discord.TextChannel):
+        key = _map_user_action_input(action)
+        if not key:
+            await ctx.send("Unknown action. Use `alog listactions`.")
+            return
+        mirrors = await self.config.mirrors()
+        m = mirrors.get(key, {"enabled": True, "channels": []})
+        m["channels"] = [cid for cid in m["channels"] if cid != int(channel.id)]
+        mirrors[key] = m
+        await self.config.mirrors.set(mirrors)
+        await ctx.send(f"Mirror removed for `{DISPLAY[key][0]}` from {channel.mention}")
+
+    @mirror_root.command(name="enable")
+    async def mirror_enable(self, ctx: commands.Context, action: str, enabled: bool):
+        key = _map_user_action_input(action)
+        if not key:
+            await ctx.send("Unknown action. Use `alog listactions`.")
+            return
+        mirrors = await self.config.mirrors()
+        m = mirrors.get(key, {"enabled": bool(enabled), "channels": []})
+        m["enabled"] = bool(enabled)
+        mirrors[key] = m
+        await self.config.mirrors.set(mirrors)
+        await ctx.send(f"Mirror for `{DISPLAY[key][0]}` set to enabled={bool(enabled)}")
+
+    @alog_group.command(name="mirrorstatus")
+    async def mirrorstatus(self, ctx: commands.Context):
+        mirrors = await self.config.mirrors()
+        if not mirrors:
+            await ctx.send("```\nNo mirrors configured.\n```")
+            return
+        lines = []
+        for k, v in mirrors.items():
+            chans = ", ".join(f"<#{cid}>" for cid in (v.get("channels") or []))
+            lines.append(f"{DISPLAY.get(k, ('?', '', ''))[0]}: enabled={v.get('enabled')} channels=[{chans}]")
+        await ctx.send("```\n" + "\n".join(lines) + "\n```")
 
     @alog_group.command(name="setcolor")
-    async def setcolor(self, ctx: commands.Context, action_key: str, hex_color: str):
+    async def setcolor(self, ctx: commands.Context, action: str, hex_color: str):
+        key = _map_user_action_input(action)
+        if not key:
+            await ctx.send("Unknown action. Use `alog listactions`.")
+            return
         try:
             if hex_color.startswith("#"):
                 hex_color = hex_color[1:]
@@ -467,84 +460,39 @@ class AllianceLogs(commands.Cog):
             await ctx.send("Invalid hex color. Example: #2ECC71")
             return
         colors = await self.config.colors()
-        colors[str(action_key).lower()] = val
+        colors[key] = val
         await self.config.colors.set(colors)
-        await ctx.send(f"Color for `{action_key}` set to #{val:06X}")
+        await ctx.send(f"Color for `{DISPLAY[key][0]}` set to #{val:06X}")
 
     @alog_group.command(name="seticon")
-    async def seticon(self, ctx: commands.Context, action_key: str, *, emoji: str):
+    async def seticon(self, ctx: commands.Context, action: str, *, emoji: str):
+        key = _map_user_action_input(action)
+        if not key:
+            await ctx.send("Unknown action. Use `alog listactions`.")
+            return
         icons = await self.config.icons()
-        icons[str(action_key).lower()] = emoji.strip()
+        icons[key] = emoji.strip()
         await self.config.icons.set(icons)
-        await ctx.send(f"Icon for `{action_key}` set to {emoji}")
+        await ctx.send(f"Icon for `{DISPLAY[key][0]}` set to {emoji}")
 
-    @commands.group(name="alogmirror")
-    @checks.admin_or_permissions(manage_guild=True)
-    async def mirror_group(self, ctx: commands.Context):
-        """Manage per-action mirror channels."""
-
-    @mirror_group.command(name="add")
-    async def mirror_add(self, ctx: commands.Context, action_key: str, channel: discord.TextChannel):
-        mirrors = await self.config.mirrors()
-        m = mirrors.get(action_key, {"enabled": True, "channels": []})
-        if int(channel.id) not in m["channels"]:
-            m["channels"].append(int(channel.id))
-        m["enabled"] = True
-        mirrors[action_key] = m
-        await self.config.mirrors.set(mirrors)
-        await ctx.send(f"Mirror added for `{action_key}` → {channel.mention} (enabled)")
-
-    @mirror_group.command(name="remove")
-    async def mirror_remove(self, ctx: commands.Context, action_key: str, channel: discord.TextChannel):
-        mirrors = await self.config.mirrors()
-        m = mirrors.get(action_key, {"enabled": True, "channels": []})
-        m["channels"] = [cid for cid in m["channels"] if cid != int(channel.id)]
-        mirrors[action_key] = m
-        await self.config.mirrors.set(mirrors)
-        await ctx.send(f"Mirror removed for `{action_key}` from {channel.mention}")
-
-    @mirror_group.command(name="enable")
-    async def mirror_enable(self, ctx: commands.Context, action_key: str, enabled: bool):
-        mirrors = await self.config.mirrors()
-        m = mirrors.get(action_key, {"enabled": bool(enabled), "channels": []})
-        m["enabled"] = bool(enabled)
-        mirrors[action_key] = m
-        await self.config.mirrors.set(mirrors)
-        await ctx.send(f"Mirror for `{action_key}` set to enabled={bool(enabled)}")
-
-    @alog_group.command(name="mirrorstatus")
-    async def mirrorstatus(self, ctx: commands.Context):
-        mirrors = await self.config.mirrors()
-        if not mirrors:
-            await ctx.send("```\nNo mirrors configured.\n```")
-        else:
-            lines = []
-            for k, v in mirrors.items():
-                chans = ", ".join(f"<#{cid}>" for cid in (v.get("channels") or []))
-                lines.append(f"{k}: enabled={v.get('enabled')} channels=[{chans}]")
-            await ctx.send("```\n" + "\n".join(lines) + "\n```")
-
-    @alog_group.command(name="debug")
-    async def debug(self, ctx: commands.Context, which: str = "last", n: int = 3):
-        sc = self.bot.get_cog("AllianceScraper")
-        if not sc or not hasattr(sc, "get_logs_after"):
-            await ctx.send("AllianceScraper with get_logs_after not available.")
+    @alog_group.command(name="testpost")
+    async def testpost(self, ctx: commands.Context, *, action: str):
+        key = _map_user_action_input(action)
+        if not key:
+            await ctx.send("Unknown action. Use `alog listactions`.")
             return
-        try:
-            rows = await sc.get_logs_after(0, limit=5000)  # type: ignore
-            rows = rows[-max(1, min(n, 10)):] if which == "last" else rows[:max(1, min(n, 10))]
-        except Exception as e:
-            await ctx.send(f"Debug fetch failed: {e}")
+        title, color, emoji, _ = self._title_from_row({"action_key": key})
+        emoji_titles = await self.config.emoji_titles()
+        title_text = f"{emoji} {title}" if emoji_titles and emoji else title
+        ch_id = await self.config.main_channel_id()
+        if not ch_id:
+            await ctx.send("Main channel not set.")
             return
-        posted = await self._publish_rows(rows)
-        await ctx.send(f"(debug) echoed {posted} item(s) with current formatting).")
-
-    @alog_group.command(name="purgecache")
-    async def purgecache(self, ctx: commands.Context):
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("DELETE FROM state WHERE k='last_id'")
-            await db.commit()
-        await ctx.send("AllianceLogs: last_id reset.")
+        guild = ctx.guild or self.bot.guilds[0]
+        ch = guild.get_channel(int(ch_id))
+        e = discord.Embed(title=title_text, description="`01 Oct 06:40` —\nExample description\n→ [Example link](https://example.com)", color=color, timestamp=datetime.utcnow())
+        await ch.send(embed=e)
+        await ctx.send("Test post sent.")
 
     @alog_group.command(name="run")
     async def run(self, ctx: commands.Context):
