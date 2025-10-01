@@ -1,4 +1,4 @@
-# alliance_logs.py v0.3.6
+# alliance_logs.py v0.3.7
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +12,7 @@ import discord
 from redbot.core import commands, checks, Config
 from redbot.core.data_manager import cog_data_path
 
-__version__ = "0.3.6"
+__version__ = "0.3.7"
 
 log = logging.getLogger("red.FARA.AllianceLogs")
 
@@ -105,7 +105,7 @@ def now_utc() -> str:
 class AllianceLogs(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xFA109A19, force_registration=True)
+        self.config = Config.get_conf(self, identifier=0xFA109A1A, force_registration=True)
         self.config.register_global(**DEFAULTS)
         self.data_path = cog_data_path(self)
         self.db_path = self.data_path / "state.db"
@@ -384,21 +384,15 @@ class AllianceLogs(commands.Cog):
         await self.config.icons.set({})
         await ctx.send("Formatting reset to defaults.")
 
-    @commands.group(name="alogmirror", aliases=["alog_mirror"])
-    @checks.admin_or_permissions(manage_guild=True)
-    async def mirror_root(self, ctx: commands.Context):
+    # ---- MIRROR group under [p]alog mirror ----
+    @alog_group.group(name="mirror")
+    async def mirror_group(self, ctx: commands.Context):
         """Manage per-action mirror channels."""
 
-    @alog_group.group(name="mirror")
-    async def mirror_group_alias(self, ctx: commands.Context):
-        """Alias to alogmirror."""
-
-    @mirror_root.command(name="add")
-    async def mirror_add(self, ctx: commands.Context, action: str, channel: discord.TextChannel):
+    async def _mirror_add(self, action: str, channel: discord.TextChannel) -> str:
         key = _map_user_action_input(action)
         if not key:
-            await ctx.send("Unknown action. Use `alog listactions` to see valid options.")
-            return
+            return "Unknown action. Use `alog listactions`."
         mirrors = await self.config.mirrors()
         m = mirrors.get(key, {"enabled": True, "channels": []})
         if int(channel.id) not in m["channels"]:
@@ -406,33 +400,54 @@ class AllianceLogs(commands.Cog):
         m["enabled"] = True
         mirrors[key] = m
         await self.config.mirrors.set(mirrors)
-        await ctx.send(f"Mirror added for `{DISPLAY[key][0]}` → {channel.mention} (enabled)")
+        return f"Mirror added for `{DISPLAY[key][0]}` → {channel.mention} (enabled)"
 
-    @mirror_root.command(name="remove")
-    async def mirror_remove(self, ctx: commands.Context, action: str, channel: discord.TextChannel):
+    async def _mirror_remove(self, action: str, channel: discord.TextChannel) -> str:
         key = _map_user_action_input(action)
         if not key:
-            await ctx.send("Unknown action. Use `alog listactions`.")
-            return
+            return "Unknown action. Use `alog listactions`."
         mirrors = await self.config.mirrors()
         m = mirrors.get(key, {"enabled": True, "channels": []})
         m["channels"] = [cid for cid in m["channels"] if cid != int(channel.id)]
         mirrors[key] = m
         await self.config.mirrors.set(mirrors)
-        await ctx.send(f"Mirror removed for `{DISPLAY[key][0]}` from {channel.mention}")
+        return f"Mirror removed for `{DISPLAY[key][0]}` from {channel.mention}"
 
-    @mirror_root.command(name="enable")
-    async def mirror_enable(self, ctx: commands.Context, action: str, enabled: bool):
+    async def _mirror_enable(self, action: str, enabled: bool) -> str:
         key = _map_user_action_input(action)
         if not key:
-            await ctx.send("Unknown action. Use `alog listactions`.")
-            return
+            return "Unknown action. Use `alog listactions`."
         mirrors = await self.config.mirrors()
         m = mirrors.get(key, {"enabled": bool(enabled), "channels": []})
         m["enabled"] = bool(enabled)
         mirrors[key] = m
         await self.config.mirrors.set(mirrors)
-        await ctx.send(f"Mirror for `{DISPLAY[key][0]}` set to enabled={bool(enabled)}")
+        return f"Mirror for `{DISPLAY[key][0]}` set to enabled={bool(enabled)}"
+
+    @mirror_group.command(name="add")
+    async def mirror_add_cmd(self, ctx: commands.Context, *, action_and_channel: str):
+        if not ctx.message.channel_mentions:
+            await ctx.send("Usage: `[p]alog mirror add <action title|key> #channel`  — try `[p]alog listactions`.")
+            return
+        channel = ctx.message.channel_mentions[0]
+        action = action_and_channel.replace(f"<#{channel.id}>", "").strip()
+        msg = await self._mirror_add(action, channel)
+        await ctx.send(msg)
+
+    @mirror_group.command(name="remove")
+    async def mirror_remove_cmd(self, ctx: commands.Context, *, action_and_channel: str):
+        if not ctx.message.channel_mentions:
+            await ctx.send("Usage: `[p]alog mirror remove <action title|key> #channel`.")
+            return
+        channel = ctx.message.channel_mentions[0]
+        action = action_and_channel.replace(f"<#{channel.id}>", "").strip()
+        msg = await self._mirror_remove(action, channel)
+        await ctx.send(msg)
+
+    @mirror_group.command(name="enable")
+    async def mirror_enable_cmd(self, ctx: commands.Context, action: str, enabled: bool):
+        msg = await self._mirror_enable(action, enabled)
+        await ctx.send(msg)
 
     @alog_group.command(name="mirrorstatus")
     async def mirrorstatus(self, ctx: commands.Context):
@@ -446,35 +461,38 @@ class AllianceLogs(commands.Cog):
             lines.append(f"{DISPLAY.get(k, ('?', '', ''))[0]}: enabled={v.get('enabled')} channels=[{chans}]")
         await ctx.send("```\n" + "\n".join(lines) + "\n```")
 
-    @alog_group.command(name="setcolor")
-    async def setcolor(self, ctx: commands.Context, action: str, hex_color: str):
-        key = _map_user_action_input(action)
-        if not key:
-            await ctx.send("Unknown action. Use `alog listactions`.")
-            return
-        try:
-            if hex_color.startswith("#"):
-                hex_color = hex_color[1:]
-            val = int(hex_color, 16)
-        except Exception:
-            await ctx.send("Invalid hex color. Example: #2ECC71")
-            return
-        colors = await self.config.colors()
-        colors[key] = val
-        await self.config.colors.set(colors)
-        await ctx.send(f"Color for `{DISPLAY[key][0]}` set to #{val:06X}")
+    # ---- Also offer `[p]alogmirror ...` as an alias group that calls helpers ----
+    @commands.group(name="alogmirror", aliases=["alog_mirror"])
+    @checks.admin_or_permissions(manage_guild=True)
+    async def alogmirror_group(self, ctx: commands.Context):
+        \"\"\"Alias group for mirror management.\"\"\"
 
-    @alog_group.command(name="seticon")
-    async def seticon(self, ctx: commands.Context, action: str, *, emoji: str):
-        key = _map_user_action_input(action)
-        if not key:
-            await ctx.send("Unknown action. Use `alog listactions`.")
+    @alogmirror_group.command(name="add")
+    async def alogmirror_add(self, ctx: commands.Context, *, action_and_channel: str):
+        if not ctx.message.channel_mentions:
+            await ctx.send("Usage: `[p]alogmirror add <action title|key> #channel`.")
             return
-        icons = await self.config.icons()
-        icons[key] = emoji.strip()
-        await self.config.icons.set(icons)
-        await ctx.send(f"Icon for `{DISPLAY[key][0]}` set to {emoji}")
+        channel = ctx.message.channel_mentions[0]
+        action = action_and_channel.replace(f"<#{channel.id}>", "").strip()
+        msg = await self._mirror_add(action, channel)
+        await ctx.send(msg)
 
+    @alogmirror_group.command(name="remove")
+    async def alogmirror_remove(self, ctx: commands.Context, *, action_and_channel: str):
+        if not ctx.message.channel_mentions:
+            await ctx.send("Usage: `[p]alogmirror remove <action title|key> #channel`.")
+            return
+        channel = ctx.message.channel_mentions[0]
+        action = action_and_channel.replace(f"<#{channel.id}>", "").strip()
+        msg = await self._mirror_remove(action, channel)
+        await ctx.send(msg)
+
+    @alogmirror_group.command(name="enable")
+    async def alogmirror_enable(self, ctx: commands.Context, action: str, enabled: bool):
+        msg = await self._mirror_enable(action, enabled)
+        await ctx.send(msg)
+
+    # ---- debug/test ----
     @alog_group.command(name="testpost")
     async def testpost(self, ctx: commands.Context, *, action: str):
         key = _map_user_action_input(action)
