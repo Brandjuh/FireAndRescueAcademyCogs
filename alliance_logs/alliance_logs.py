@@ -1,4 +1,4 @@
-# alliance_logs.py v0.3.4
+# alliance_logs.py v0.3.5
 from __future__ import annotations
 
 import asyncio
@@ -12,16 +12,18 @@ import discord
 from redbot.core import commands, checks, Config
 from redbot.core.data_manager import cog_data_path
 
+__version__ = "0.3.5"
+
 log = logging.getLogger("red.FARA.AllianceLogs")
 
 DEFAULTS = {
     "main_channel_id": None,
     "mirrors": {},
     "interval_minutes": 5,
-    "style": "minimal",
+    "style": "minimal",              # minimal|compact|fields
     "emoji_titles": True,
-    "title_mode": "normalized",
-    "strict_titles": True,
+    "title_mode": "normalized",      # normalized|raw (honored only if strict_titles=False)
+    "strict_titles": True,           # if True, ALWAYS ignore action_text and use normalized title
     "show_executor_minimal": False,
     "colors": {},
     "icons": {},
@@ -109,7 +111,7 @@ def now_utc() -> str:
 class AllianceLogs(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xFA109A17, force_registration=True)
+        self.config = Config.get_conf(self, identifier=0xFA109A18, force_registration=True)
         self.config.register_global(**DEFAULTS)
         self.data_path = cog_data_path(self)
         self.db_path = self.data_path / "state.db"
@@ -373,6 +375,30 @@ class AllianceLogs(commands.Cog):
     async def alog_group(self, ctx: commands.Context):
         """AllianceLogs publisher (consumer mode)."""
 
+    @alog_group.command(name="version")
+    async def version(self, ctx: commands.Context):
+        last_id = await self._get_last_id()
+        cfg = await self.config.all()
+        await ctx.send("```\n"
+                       f"AllianceLogs version: {__version__}\n"
+                       f"Style: {cfg['style']}  Emoji titles: {cfg['emoji_titles']}  Title mode: {cfg['title_mode']}  Strict titles: {cfg['strict_titles']}\n"
+                       f"Show executor (minimal): {cfg['show_executor_minimal']}\n"
+                       f"Interval minutes: {cfg['interval_minutes']}\n"
+                       f"Last seen id: {last_id}\n"
+                       "```")
+
+    @alog_group.command(name="resetformat")
+    async def resetformat(self, ctx: commands.Context):
+        """Reset visual formatting to defaults (does not touch channels/mirrors/last_id)."""
+        await self.config.style.set(DEFAULTS["style"])
+        await self.config.emoji_titles.set(DEFAULTS["emoji_titles"])
+        await self.config.title_mode.set(DEFAULTS["title_mode"])
+        await self.config.strict_titles.set(DEFAULTS["strict_titles"])
+        await self.config.show_executor_minimal.set(DEFAULTS["show_executor_minimal"])
+        await self.config.colors.set({})
+        await self.config.icons.set({})
+        await ctx.send("Formatting reset to defaults (style, emoji titles, title mode, strict titles, executor line, colors, icons).")
+
     @alog_group.command(name="status")
     async def status(self, ctx: commands.Context):
         last_id = await self._get_last_id()
@@ -452,7 +478,8 @@ class AllianceLogs(commands.Cog):
         await self.config.icons.set(icons)
         await ctx.send(f"Icon for `{action_key}` set to {emoji}")
 
-    @alog_group.group(name="mirror")
+    @commands.group(name="alogmirror")
+    @checks.admin_or_permissions(manage_guild=True)
     async def mirror_group(self, ctx: commands.Context):
         """Manage per-action mirror channels."""
 

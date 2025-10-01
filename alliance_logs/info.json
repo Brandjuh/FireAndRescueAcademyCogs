@@ -2,10 +2,10 @@
   "author": [
     "FARA-Assistant"
   ],
-  "install_msg": "AllianceLogs v0.3.4 installed. Load with [p]load alliance_logs",
+  "install_msg": "AllianceLogs v0.3.5 installed. Load with [p]load alliance_logs",
   "name": "AllianceLogs",
   "short": "Publish MissionChief alliance logs from AllianceScraper to Discord",
-  "description": "Strict normalized titles (no dates), minimal/compact/fields styles, per-action multi-mirror, icons/colors.",
+  "description": "Strict normalized titles (no dates). Minimal/compact/fields styles. Per-action multi-mirror. Icons/colors. Debug preview. Version & resetformat commands.",
   "disabled": false,
   "min_bot_version": "3.5.0",
   "hidden": false,
