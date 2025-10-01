@@ -1,4 +1,4 @@
-# membersync.py (v0.1.1)
+# membersync.py (v0.1.3) - enforce guild nickname
 from __future__ import annotations
 
 import asyncio
@@ -29,6 +29,7 @@ DEFAULTS = {
     "auto_prune_enabled": True,
     "auto_prune_interval_hours": 24,
     "profile_url_template": "https://www.missionchief.com/users/{id}",
+    "require_nickname": True,  # NEW: strictly require guild nickname for matching
 }
 
 def now_utc() -> str:
@@ -185,7 +186,6 @@ class MemberSync(commands.Cog):
         await self._audit(None, f"external:{action}", kwargs)
         # Minimal reactions for common actions
         if action in {"unlink", "removed_from_alliance"}:
-            # Unlink if known
             discord_id = kwargs.get("discord_id")
             mc_user_id = kwargs.get("mc_user_id")
             if discord_id is not None:
@@ -237,12 +237,18 @@ class MemberSync(commands.Cog):
             for m in members:
                 if str(m.get("user_id")) == str(mc_id_hint):
                     return {"mc_user_id": str(m.get("user_id")), "mc_name": m.get("name"), "match_type": "id", "confidence": 1.0}
+        # nickname-only policy
+        require_nick = await self.config.require_nickname()
+        nick = member.nick  # strictly guild nickname
+        if not nick:
+            if require_nick:
+                return None
+            # if not required, we could fallback, but default is True -> no fallback
         # name-based
         mmode = await self.config.match_mode()
         threshold = float(await self.config.fuzzy_threshold())
-        nick = member.nick or member.display_name or member.name
         def norm(s): return norm_name(s)
-        nick_n = norm(nick)
+        nick_n = norm(nick or "")
         best = None
         best_score = 0.0
         for m in members:
@@ -265,7 +271,7 @@ class MemberSync(commands.Cog):
         url = f"https://www.missionchief.com/users/{mc_id}"
         e = discord.Embed(title="Verification request", color=discord.Color.blurple(), timestamp=datetime.utcnow())
         e.add_field(name="MissionChief", value=f"[{mc_name}]({url})\nID: `{mc_id}`", inline=False)
-        e.add_field(name="Discord", value=f"{member.mention}\nID: `{member.id}`", inline=False)
+        e.add_field(name="Discord", value=f"{member.mention}\nID: `{member.id}`\nGuild Nick: `{member.nick or 'None'}`", inline=False)
         e.add_field(name="Match", value=f"Type: `{cand.get('match_type')}`  •  Confidence: `{cand.get('confidence'):.2f}`", inline=False)
         e.set_thumbnail(url=getattr(member.display_avatar, "url", discord.Embed.Empty))
         e.set_footer(text="Click Approve to link and assign role, or Reject to decline.")
@@ -458,7 +464,7 @@ class MemberSync(commands.Cog):
         if not guild:
             return
         members = await self._get_alliance_members()
-        in_alliance_ids = {str(m.get("user_id")) for m in members}
+        in_alliance_ids = {str(m.get("user_id")) for m in members if m.get("user_id")}
         role_id = await self.config.verified_role_id()
         if not role_id:
             return
@@ -472,7 +478,7 @@ class MemberSync(commands.Cog):
         for row in rows:
             discord_id = int(row["discord_id"])
             mc_user_id = str(row["mc_user_id"])
-            if mc_user_id not in in_alliance_ids:
+            if not mc_user_id or mc_user_id not in in_alliance_ids:
                 mem = guild.get_member(discord_id)
                 if mem and role in mem.roles:
                     try:
@@ -511,9 +517,58 @@ class MemberSync(commands.Cog):
             f"Verified role: {cfg['verified_role_id']}",
             f"Admin roles: {cfg['admin_role_ids']}",
             f"Match mode: {cfg['match_mode']} threshold={cfg['fuzzy_threshold']}",
+            f"Require nickname: {cfg['require_nickname']}",
             f"Auto prune: enabled={cfg['auto_prune_enabled']} interval_h={cfg['auto_prune_interval_hours']}",
         ])
         await ctx.send(f"```\n{msg}\n```")
+
+    @membersync_group.command(name="diag")
+    async def diag(self, ctx: commands.Context):
+        """Diagnostic: count alliance members with/without numeric user_id and show match settings."""
+        sc_members = await self._get_alliance_members()
+        with_id = sum(1 for m in sc_members if m.get("user_id"))
+        without_id = sum(1 for m in sc_members if not m.get("user_id"))
+        cfg = await self.config.all()
+        await ctx.send("```\n"
+                       f"Alliance members total: {len(sc_members)}\n"
+                       f"With user_id: {with_id}\n"
+                       f"Without user_id: {without_id}\n"
+                       f"Match mode: {cfg['match_mode']} (threshold={cfg['fuzzy_threshold']})\n"
+                       f"Require nickname: {cfg['require_nickname']}\n"
+                       "```")
+
+    @membersync_group.command(name="debugfind")
+    async def debugfind(self, ctx: commands.Context, *, name_or_mention: Optional[str] = None):
+        """Show top name matches for a given guild nickname or @mention. Approvers/admins only."""
+        if not await self._is_approver(ctx.author):
+            await ctx.send("You are not allowed to run debugfind.")
+            return
+        target_name = None
+        if ctx.message.mentions:
+            m = ctx.message.mentions[0]
+            target_name = m.nick  # strictly guild nick
+        else:
+            if name_or_mention:
+                target_name = name_or_mention
+            else:
+                target_name = ctx.author.nick  # strictly guild nick
+        if not target_name:
+            await ctx.send("No guild nickname found. Please set a server nickname for this test.")
+            return
+        nick_n = norm_name(target_name)
+        members = await self._get_alliance_members()
+        scored = []
+        for m in members:
+            mcname = m.get("name") or ""
+            score = 1.0 if norm_name(mcname) == nick_n else fuzzy_ratio(nick_n, norm_name(mcname))
+            scored.append((score, mcname, str(m.get("user_id") or ""), m))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top = scored[:5]
+        if not top:
+            await ctx.send("No alliance members loaded.")
+            return
+        lines = [f"{i+1}. {t[1]} | user_id={t[2] or 'None'} | score={t[0]:.3f}" for i, t in enumerate(top)]
+        await ctx.send("```\n" + "\n".join(lines) + "\n```")
 
     @membersync_group.group(name="config")
     @checks.is_owner()
@@ -566,6 +621,11 @@ class MemberSync(commands.Cog):
                 return
         await ctx.send("Match settings updated.")
 
+    @config_group.command(name="setnickrequired")
+    async def set_nick_required(self, ctx: commands.Context, required: bool):
+        await self.config.require_nickname.set(bool(required))
+        await ctx.send(f"Require guild nickname set to {bool(required)}")
+
     @config_group.command(name="setautoprune")
     async def set_auto_prune(self, ctx: commands.Context, enabled: bool, interval_hours: Optional[int] = None):
         await self.config.auto_prune_enabled.set(bool(enabled))
@@ -616,10 +676,22 @@ class MemberSync(commands.Cog):
         """Verify yourself as a MissionChief member. Optionally provide MC user id: `!verify 123456`."""
         # Feedback message
         feedback = await ctx.send("Searching the alliance roster for your account... this can take a moment.")
+        # If nickname required and missing, bail out clearly
+        require_nick = await self.config.require_nickname()
+        if require_nick and not ctx.author.nick:  # strictly guild nickname
+            await feedback.edit(content="No server nickname set. Please set your Discord **server nickname** to your MissionChief name, then run `!verify` again. Or use `!verify <MC_ID>` as a fallback.")
+            secs = int(await self.config.autodelete_user_feedback_seconds())
+            if secs > 0:
+                try:
+                    await asyncio.sleep(secs)
+                    await feedback.delete()
+                except Exception:
+                    pass
+            return
         # Find candidate
         cand = await self._find_candidate(ctx.guild, ctx.author, mc_id)  # type: ignore
         if not cand:
-            await feedback.edit(content="No matching MissionChief member was found. Please set your server nickname to match your MC name, or run `!verify <MC_ID>` as a fallback.")
+            await feedback.edit(content="No matching MissionChief member was found. Ensure your **server nickname** matches your MissionChief name exactly, or run `!verify <MC_ID>` as a fallback.")
             # optional auto delete
             secs = int(await self.config.autodelete_user_feedback_seconds())
             if secs > 0:
