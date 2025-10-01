@@ -5,7 +5,7 @@
   "install_msg": "AllianceScraper installed. Load with [p]load alliance_scraper",
   "name": "AllianceScraper",
   "short": "MissionChief Alliance data scraper",
-  "description": "Scrapes alliance members, alliance logs, schoolings, and finance (kasse) using CookieManager session. Stores data in aiosqlite and exposes getters.",
+  "description": "Scrapes alliance members (with numeric user_id), alliance logs, schoolings, and finance using CookieManager. Stores in aiosqlite.",
   "disabled": false,
   "min_bot_version": "3.5.0",
   "hidden": false,

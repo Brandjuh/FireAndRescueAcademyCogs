@@ -1,4 +1,4 @@
-# alliance_scraper.py (v1)
+# alliance_scraper.py (v1.2)
 from __future__ import annotations
 
 import asyncio
@@ -6,14 +6,13 @@ import csv
 import io
 import json
 import logging
-from dataclasses import dataclass
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urljoin, urlencode, urlparse, parse_qs
 
 import aiohttp
 import aiosqlite
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 from redbot.core import commands, checks, Config
 from redbot.core.data_manager import cog_data_path
 
@@ -35,6 +34,8 @@ DEFAULTS = {
     "per_request_jitter_seconds": 1,
     # Pagination hints
     "page_param": "page",
+    # Member ID extraction regexes (first capture group should be the numeric id)
+    "member_id_href_patterns": [r"/users/(\\d+)", r"/profile/(\\d+)", r"user_id=(\\d+)", r"/user/(\\d+)"]
 }
 
 # Header synonyms for robust parsing (EN/DE)
@@ -83,7 +84,9 @@ def _header_index_map(headers: List[str], wanted_map: Dict[str, List[str]]) -> D
     return index
 
 class AllianceScraper(commands.Cog):
-    """Scrapes MissionChief alliance data using CookieManager session and stores into SQLite."""
+    """Scrapes MissionChief alliance data using CookieManager session and stores into SQLite.
+       v1.2 adds numeric user_id extraction and schema migration.
+    """
 
     def __init__(self, bot):
         self.bot = bot
@@ -107,9 +110,11 @@ class AllianceScraper(commands.Cog):
     async def _init_db(self):
         self.data_path.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.db_path) as db:
+            # Base tables
             await db.execute("""
             CREATE TABLE IF NOT EXISTS members_current (
                 member_id TEXT PRIMARY KEY,
+                user_id TEXT,
                 name TEXT,
                 role TEXT,
                 earned_credits INTEGER,
@@ -122,6 +127,7 @@ class AllianceScraper(commands.Cog):
             await db.execute("""
             CREATE TABLE IF NOT EXISTS members_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
                 member_id TEXT,
                 name TEXT,
                 role TEXT,
@@ -162,12 +168,15 @@ class AllianceScraper(commands.Cog):
                 inserted_at_utc TEXT
             )
             """)
-            await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_logs_date ON alliance_logs(date_utc)
-            """)
-            await db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_kasse_date ON kasse_transactions(date_utc)
-            """)
+            # Migrations: ensure user_id column exists in members_current (older installs)
+            # and add index for faster joins if needed.
+            try:
+                await db.execute("SELECT user_id FROM members_current LIMIT 1")
+            except Exception:
+                await db.execute("ALTER TABLE members_current ADD COLUMN user_id TEXT")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_members_user_id ON members_current(user_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_logs_date ON alliance_logs(date_utc)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_kasse_date ON kasse_transactions(date_utc)")
             await db.commit()
 
     # ----------------- Public API for other cogs -----------------
@@ -244,12 +253,13 @@ class AllianceScraper(commands.Cog):
                 break
         return html_pages
 
-    def _parse_table(self, html: str) -> Tuple[List[str], List[List[str]]]:
+    def _parse_table(self, html: str) -> Tuple[List[str], List[List[str]], List[Tag]]:
+        """Return headers, row text cells, and the TR elements for link parsing."""
         soup = BeautifulSoup(html, "lxml")
         table = soup.find("table")
         if not table:
-            return [], []
-        headers = []
+            return [], [], []
+        headers: List[str] = []
         thead = table.find("thead")
         if thead:
             headers = [th.get_text(strip=True) for th in thead.find_all("th")]
@@ -257,33 +267,62 @@ class AllianceScraper(commands.Cog):
             first = table.find("tr")
             if first:
                 headers = [th.get_text(strip=True) for th in first.find_all(["th","td"])]
-        rows = []
+        rows_text: List[List[str]] = []
+        rows_tr: List[Tag] = []
         for tr in table.find_all("tr"):
             tds = tr.find_all("td")
             if not tds:
                 continue
-            rows.append([td.get_text(" ", strip=True) for td in tds])
-        return headers, rows
+            rows_text.append([td.get_text(" ", strip=True) for td in tds])
+            rows_tr.append(tr)
+        return headers, rows_text, rows_tr
+
+    async def _extract_member_id(self, tr: Tag, patterns: List[str]) -> Optional[str]:
+        # 1) data attributes
+        for attr in ["data-user-id", "data-userid", "data-user", "data-member-id", "data-id"]:
+            v = tr.get(attr) or tr.attrs.get(attr)
+            if v and str(v).isdigit():
+                return str(v)
+        # 2) look for anchors with href patterns
+        anchors = tr.find_all("a", href=True)
+        for a in anchors:
+            href = a["href"]
+            for pat in patterns:
+                m = re.search(pat, href)
+                if m:
+                    return m.group(1)
+        # 3) inputs/spans with data-* inside cells
+        for tag in tr.find_all(["span","div","input"]):
+            for attr, val in tag.attrs.items():
+                if attr.startswith("data-") and isinstance(val, (str,int)):
+                    if str(val).isdigit():
+                        return str(val)
+        return None
 
     # Members
     async def _scrape_members(self) -> int:
         cfg = await self.config.all()
         url = cfg["members_url"]
+        patterns = cfg.get("member_id_href_patterns", DEFAULTS["member_id_href_patterns"])
         async with self._locks["members"]:
             pages = await self._fetch_pages(url, cfg)
             total = 0
             async with aiosqlite.connect(self.db_path) as db:
                 for i, html in enumerate(pages, start=1):
-                    headers, rows = self._parse_table(html)
-                    idx = self._header_index_map(headers, HEADER_MAP["members"])
-                    for r in rows:
+                    headers, rows, trs = self._parse_table(html)
+                    idx = _header_index_map(headers, HEADER_MAP["members"])
+                    for r, tr in zip(rows, trs):
+                        # parse basics
                         name = r[idx.get("name", -1)] if idx.get("name", -1) >= 0 and idx.get("name") < len(r) else None
                         role = r[idx.get("role", -1)] if idx.get("role", -1) >= 0 and idx.get("role") < len(r) else None
                         earned = r[idx.get("earned_credits", -1)] if idx.get("earned_credits", -1) >= 0 and idx.get("earned_credits") < len(r) else "0"
                         contrib = r[idx.get("contrib_rate", -1)] if idx.get("contrib_rate", -1) >= 0 and idx.get("contrib_rate") < len(r) else "0"
-                        member_id = (name or "").strip().lower()
+                        # extract user_id
+                        user_id = await self._extract_member_id(tr, patterns)
+                        # legacy member_id fallback: normalized name
+                        member_id = user_id or (name or "").strip().lower()
                         try:
-                            earned_i = int("".join(c for c in earned if c.isdigit()))
+                            earned_i = int("".join(c for c in str(earned) if c.isdigit()))
                         except Exception:
                             earned_i = 0
                         try:
@@ -292,9 +331,10 @@ class AllianceScraper(commands.Cog):
                             contrib_f = 0.0
                         now = datetime.utcnow().isoformat()
                         await db.execute("""
-                        INSERT INTO members_current(member_id, name, role, earned_credits, contrib_rate, last_seen_utc, source_page, updated_at_utc)
-                        VALUES(?,?,?,?,?,?,?,?)
+                        INSERT INTO members_current(member_id, user_id, name, role, earned_credits, contrib_rate, last_seen_utc, source_page, updated_at_utc)
+                        VALUES(?,?,?,?,?,?,?,?,?)
                         ON CONFLICT(member_id) DO UPDATE SET
+                            user_id=excluded.user_id,
                             name=excluded.name,
                             role=excluded.role,
                             earned_credits=excluded.earned_credits,
@@ -302,11 +342,11 @@ class AllianceScraper(commands.Cog):
                             last_seen_utc=excluded.last_seen_utc,
                             source_page=excluded.source_page,
                             updated_at_utc=excluded.updated_at_utc
-                        """, (member_id, name, role, earned_i, contrib_f, now, i, now))
+                        """, (member_id, user_id, name, role, earned_i, contrib_f, now, i, now))
                         await db.execute("""
-                        INSERT INTO members_history(member_id, name, role, earned_credits, contrib_rate, snapshot_utc)
-                        VALUES(?,?,?,?,?,?)
-                        """, (member_id, name, role, earned_i, contrib_f, now))
+                        INSERT INTO members_history(user_id, member_id, name, role, earned_credits, contrib_rate, snapshot_utc)
+                        VALUES(?,?,?,?,?,?,?)
+                        """, (user_id, member_id, name, role, earned_i, contrib_f, now))
                         total += 1
                 await db.commit()
         if total:
@@ -315,9 +355,6 @@ class AllianceScraper(commands.Cog):
             except Exception:
                 pass
         return total
-
-    def _header_index_map(self, headers: List[str], wanted_map: Dict[str, List[str]]) -> Dict[str, int]:
-        return _header_index_map(headers, wanted_map)
 
     # Logs
     def _log_row_hash(self, row: Dict[str, Any]) -> str:
@@ -332,8 +369,8 @@ class AllianceScraper(commands.Cog):
             async def stop_after_seen(html: str) -> bool:
                 if not incremental:
                     return False
-                headers, rows = self._parse_table(html)
-                idx = self._header_index_map(headers, HEADER_MAP["logs"])
+                headers, rows, _ = self._parse_table(html)
+                idx = _header_index_map(headers, HEADER_MAP["logs"])
                 async with aiosqlite.connect(self.db_path) as db:
                     db.row_factory = aiosqlite.Row
                     cur = await db.execute("SELECT date_utc FROM alliance_logs ORDER BY date_utc DESC LIMIT 1")
@@ -351,8 +388,8 @@ class AllianceScraper(commands.Cog):
             inserted = 0
             async with aiosqlite.connect(self.db_path) as db:
                 for html in pages:
-                    headers, rows = self._parse_table(html)
-                    idx = self._header_index_map(headers, HEADER_MAP["logs"])
+                    headers, rows, _ = self._parse_table(html)
+                    idx = _header_index_map(headers, HEADER_MAP["logs"])
                     for r in rows:
                         date_s = r[idx.get("date", -1)] if idx.get("date", -1) >= 0 and idx.get("date") < len(r) else None
                         executed_by = r[idx.get("executed_by", -1)] if idx.get("executed_by", -1) >= 0 and idx.get("executed_by") < len(r) else None
@@ -388,8 +425,8 @@ class AllianceScraper(commands.Cog):
                 html = await r.text()
             finally:
                 await session.close()
-            headers, rows = self._parse_table(html)
-            idx = self._header_index_map(headers, HEADER_MAP["schoolings"])
+            headers, rows, _ = self._parse_table(html)
+            idx = _header_index_map(headers, HEADER_MAP["schoolings"])
             total = 0
             async with aiosqlite.connect(self.db_path) as db:
                 for r in rows:
@@ -422,8 +459,8 @@ class AllianceScraper(commands.Cog):
         async def stop_after_seen(html: str) -> bool:
             if not incremental:
                 return False
-            headers, rows = self._parse_table(html)
-            idx = self._header_index_map(headers, HEADER_MAP["kasse"])
+            headers, rows, _ = self._parse_table(html)
+            idx = _header_index_map(headers, HEADER_MAP["kasse"])
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 cur = await db.execute("SELECT date_utc FROM kasse_transactions ORDER BY date_utc DESC LIMIT 1")
@@ -442,8 +479,8 @@ class AllianceScraper(commands.Cog):
             inserted = 0
             async with aiosqlite.connect(self.db_path) as db:
                 for html in pages:
-                    headers, rows = self._parse_table(html)
-                    idx = self._header_index_map(headers, HEADER_MAP["kasse"])
+                    headers, rows, _ = self._parse_table(html)
+                    idx = _header_index_map(headers, HEADER_MAP["kasse"])
                     for r in rows:
                         date_s = r[idx.get("date", -1)] if idx.get("date", -1) >= 0 and idx.get("date") < len(r) else None
                         description = r[idx.get("description", -1)] if idx.get("description", -1) >= 0 and idx.get("description") < len(r) else None
@@ -584,7 +621,8 @@ class AllianceScraper(commands.Cog):
         Set a config value.
         Keys: members_url, logs_url, schoolings_url, kasse_url,
               interval_members, interval_logs, interval_schoolings, interval_kasse,
-              per_request_delay_seconds, per_request_jitter_seconds
+              per_request_delay_seconds, per_request_jitter_seconds,
+              member_id_href_patterns (comma-separated regexes with one capture group)
         """
         key = key.strip().lower()
         ints = ["interval_members", "interval_logs", "interval_schoolings", "interval_kasse",
@@ -602,6 +640,11 @@ class AllianceScraper(commands.Cog):
         if key in str_keys:
             await getattr(self.config, key).set(value)
             await ctx.send(f"Set {key}.")
+            return
+        if key == "member_id_href_patterns":
+            pats = [p.strip() for p in value.split(",") if p.strip()]
+            await self.config.member_id_href_patterns.set(pats)
+            await ctx.send(f"Set member_id_href_patterns = {pats}")
             return
         await ctx.send("Unknown key.")
 
