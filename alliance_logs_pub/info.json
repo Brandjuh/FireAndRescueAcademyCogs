@@ -1,0 +1,27 @@
+{
+  "author": [
+    "FARA-Assistant"
+  ],
+  "install_msg": "AllianceLogsPub v0.4.3 installed. Load with [p]load alliance_logs_pub",
+  "name": "AllianceLogsPub",
+  "short": "Publish MissionChief alliance logs (clean namespace)",
+  "description": "Strict title whitelist, emojis/colors, per-action mirrors. Clean return lines (NL.join).",
+  "disabled": false,
+  "min_bot_version": "3.5.0",
+  "hidden": false,
+  "tags": [
+    "missionchief",
+    "logs",
+    "publisher"
+  ],
+  "requirements": [
+    "aiosqlite"
+  ],
+  "end_user_data_statement": "Stores posting state and UI config locally.",
+  "type": "COG",
+  "min_python_version": [
+    3,
+    9,
+    0
+  ]
+}
