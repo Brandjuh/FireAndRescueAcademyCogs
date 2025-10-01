@@ -1,4 +1,4 @@
-# alliance_logs.py v0.3.2
+# alliance_logs.py v0.3.3
 from __future__ import annotations
 
 import asyncio
@@ -18,9 +18,10 @@ DEFAULTS = {
     "main_channel_id": None,
     "mirrors": {},
     "interval_minutes": 5,
-    "style": "compact",
+    "style": "compact",           # minimal|compact|fields
     "emoji_titles": True,
-    "title_mode": "normalized",  # normalized|raw
+    "title_mode": "normalized",   # normalized|raw (still sanitized)
+    "show_executor_minimal": False,  # extra line in minimal style
     "colors": {},
     "icons": {},
 }
@@ -72,30 +73,36 @@ DISPLAY = {
     "promoted_event_manager": ("Promoted to Event Manager", "green", "🎟️"),
 }
 
+# Date/time scrubbing patterns
 DATE_PATTERNS = [
-    r"\b\d{4}-\d{2}-\d{2}\b",         # 2025-10-01
-    r"\b\d{2}/\d{2}/\d{4}\b",         # 01/10/2025
-    r"\b\d{2}-\d{2}-\d{4}\b",         # 01-10-2025
-    r"\b\d{1,2}:\d{2}(?::\d{2})?\b",  # 9:24 or 09:24:10
-    r"\b[0-3]?\d [A-Za-z]{3,9} \d{4}\b", # 1 Oct 2025
-    r"\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b", # weekdays
+    r"\b\d{4}-\d{2}-\d{2}\b",                 # 2025-10-01
+    r"\b\d{2}/\d{2}/\d{4}\b",                 # 01/10/2025
+    r"\b\d{2}-\d{2}-\d{4}\b",                 # 01-10-2025
+    r"\b\d{1,2}:\d{2}(?::\d{2})?\b",          # 9:24 or 09:24:10
+    r"\b[0-3]?\d [A-Za-z]{3,9} \d{4}\b",      # 1 Oct 2025
+    r"\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b",   # weekdays (EN)
+    r"\(\s*\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2}:\d{2}(?::\d{2})?\s*\)",  # (01 Oct 08:37)
 ]
 
-def _sanitize_title(title: str) -> str:
-    t = title or ""
+def _strip_dates(text: str) -> str:
+    t = text or ""
     for pat in DATE_PATTERNS:
         t = re.sub(pat, "", t, flags=re.I)
-    # remove stray brackets with only numbers or dates inside
+    # collapse extra spaces and punctuation
+    t = re.sub(r"\s{2,}", " ", t).strip(" -•–—:_")
+    return t.strip()
+
+def _sanitize_title(title: str) -> str:
+    t = _strip_dates(title)
+    # also remove brackets that only contain numbers/time/date
     t = re.sub(r"[\(\[\{]\s*[\d:\-\/\sA-Za-z]{3,}\s*[\)\]\}]", "", t)
-    # collapse spaces and punctuation noise
     t = re.sub(r"[_\s]{2,}", " ", t).strip(" -•–—:_")
-    # clamp
     return (t or "Alliance log")[:200]
 
 def _humanize_key(key: str) -> str:
     k = (key or "").strip().lower()
     k = re.sub(r"[^a-z0-9]+", " ", k)
-    k = re.sub(r"\b\d+\b", "", k)  # kill lone number tokens
+    k = re.sub(r"\b\d+\b", "", k)
     k = re.sub(r"\s{2,}", " ", k).strip()
     if not k:
         return "Alliance log"
@@ -107,7 +114,7 @@ def now_utc() -> str:
 class AllianceLogs(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xFA109A15, force_registration=True)
+        self.config = Config.get_conf(self, identifier=0xFA109A16, force_registration=True)
         self.config.register_global(**DEFAULTS)
         self.data_path = cog_data_path(self)
         self.db_path = self.data_path / "state.db"
@@ -166,7 +173,53 @@ class AllianceLogs(commands.Cog):
             log.debug("MemberSync lookup failed: %s", e)
         return None
 
-    async def _build_description(self, row: Dict[str, Any]) -> str:
+    # --------- description builders ----------
+    async def _build_description_minimal(self, row: Dict[str, Any]) -> str:
+        lines = []
+        # 1) date line
+        ts = row.get("ts") or "-"
+        lines.append(f"`{ts}` —")
+        # 2) cleaned description
+        desc = row.get("description") or row.get("action_text") or "-"
+        desc = _strip_dates(str(desc))
+        lines.append(desc)
+        # 3) destination link (affected preferred, else executed)
+        aff_name = row.get("affected_name") or ""
+        aff_url = row.get("affected_url") or ""
+        block = None
+        if aff_name or aff_url:
+            label = aff_name or "link"
+            if aff_url:
+                block = f"→ [{label}]({aff_url})"
+            else:
+                block = f"→ {label}"
+            if str(row.get("affected_type") or "") == "user" and row.get("affected_mc_id"):
+                did = await self._discord_id_for_mc(str(row.get("affected_mc_id")))
+                if did:
+                    block += f" [[D]]({self._discord_profile_url(did)})"
+        else:
+            # fallback to executor
+            exec_name = row.get("executed_name") or ""
+            exec_url = self._profile_url(str(row.get("executed_mc_id"))) if row.get("executed_mc_id") else ""
+            if exec_name or exec_url:
+                label = exec_name or "profile"
+                block = f"→ [{label}]({exec_url})" if exec_url else f"→ {label}"
+        if block:
+            lines.append(block)
+        # optional executor line if enabled
+        if await self.config.show_executor_minimal():
+            by = row.get("executed_name") or "-"
+            if row.get("executed_mc_id"):
+                url = self._profile_url(str(row["executed_mc_id"]))
+                by = f"[{by}]({url})"
+                did = await self._discord_id_for_mc(str(row["executed_mc_id"]))
+                if did:
+                    by += f" [[D]]({self._discord_profile_url(did)})"
+            lines.append(f"*By:* {by}")
+        return "\n".join(lines)
+
+    async def _build_description_compact(self, row: Dict[str, Any]) -> str:
+        # legacy compact: By / Affected / Details / Date
         lines = []
         by = row.get("executed_name") or "-"
         if row.get("executed_mc_id"):
@@ -193,6 +246,7 @@ class AllianceLogs(commands.Cog):
         lines.append(f"**Date:** `{ts}`")
         return "\n".join(lines)
 
+    # --------- title helpers ----------
     def _resolve_title_color_icon(self, row: Dict[str, Any], title_mode: str) -> Tuple[str, int, str]:
         key = str(row.get("action_key") or "").lower().strip()
         default_title, color_key, default_icon = DISPLAY.get(key, ("Alliance log", "grey", "ℹ️"))
@@ -201,8 +255,7 @@ class AllianceLogs(commands.Cog):
             title = raw if raw else default_title
         else:
             title = default_title if key in DISPLAY else _humanize_key(key)
-        # sanitize regardless, to kill dates in any weird text
-        title = _sanitize_title(title)
+        title = _sanitize_title(title)  # always sanitize to kill dates
         base_color = PALETTE.get(color_key, PALETTE["grey"])
         return title, base_color, default_icon
 
@@ -216,6 +269,7 @@ class AllianceLogs(commands.Cog):
             icon = str(icons[key])
         return title, color, icon
 
+    # --------- publish loop ----------
     async def _publish_rows(self, rows: List[Dict[str, Any]]) -> int:
         guild = self.bot.guilds[0] if self.bot.guilds else None
         if not guild:
@@ -238,19 +292,40 @@ class AllianceLogs(commands.Cog):
             title, color, icon = await self._apply_overrides(key, title, color, icon)
             title_text = f"{icon} {title}" if emoji_titles and icon else title
 
-            if style == "compact":
-                desc = await self._build_description(row)
+            if style == "minimal":
+                desc = await self._build_description_minimal(row)
+                e = discord.Embed(title=title_text, description=desc, color=color, timestamp=datetime.utcnow())
+            elif style == "compact":
+                desc = await self._build_description_compact(row)
                 e = discord.Embed(title=title_text, description=desc, color=color, timestamp=datetime.utcnow())
             else:
-                e = discord.Embed(title=title_text, color=color, timestamp=datetime.utcnow())
                 # fields variant
-                by_line = (await self._build_description(row)).split("\n")[0].replace("**By:** ", "")
-                e.add_field(name="By", value=by_line, inline=False)
-                # try to find Affected line if present
-                desc_lines = (await self._build_description(row)).split("\n")
-                aff_line = next((l for l in desc_lines if l.startswith("**Affected:**")), None)
-                e.add_field(name="Affected", value=(aff_line or "**Affected:** -").replace("**Affected:** ", ""), inline=False)
-                e.add_field(name="Details", value=row.get("description") or "-", inline=False)
+                e = discord.Embed(title=title_text, color=color, timestamp=datetime.utcnow())
+                # By
+                by = row.get("executed_name") or "-"
+                if row.get("executed_mc_id"):
+                    url = self._profile_url(str(row["executed_mc_id"]))
+                    by = f"[{by}]({url})"
+                    did = await self._discord_id_for_mc(str(row["executed_mc_id"]))
+                    if did:
+                        by += f" [[D]]({self._discord_profile_url(did)})"
+                e.add_field(name="By", value=by, inline=False)
+                # Affected
+                aff_name = row.get("affected_name") or ""
+                aff_url = row.get("affected_url") or ""
+                aff_value = "-"
+                if aff_name or aff_url:
+                    aff_value = aff_name or "link"
+                    if aff_url:
+                        aff_value = f"[{aff_name}]({aff_url})" if aff_name else f"[link]({aff_url})"
+                    if str(row.get("affected_type") or "") == "user" and row.get("affected_mc_id"):
+                        did = await self._discord_id_for_mc(str(row["affected_mc_id"]))
+                        if did:
+                            aff_value += f" [[D]]({self._discord_profile_url(did)})"
+                e.add_field(name="Affected", value=aff_value, inline=False)
+                # Details
+                e.add_field(name="Details", value=_strip_dates(str(row.get("description") or "-")), inline=False)
+                # Date
                 e.add_field(name="Date", value=f"`{row.get('ts') or '-'}`", inline=False)
 
             try:
@@ -307,6 +382,7 @@ class AllianceLogs(commands.Cog):
             mins = max(1, int(await self.config.interval_minutes()))
             await asyncio.sleep(mins * 60)
 
+    # -------------- Commands --------------
     @commands.group(name="alog")
     @checks.admin_or_permissions(manage_guild=True)
     async def alog_group(self, ctx: commands.Context):
@@ -322,6 +398,7 @@ class AllianceLogs(commands.Cog):
                        f"Main channel: {cfg['main_channel_id']}\n"
                        f"Interval minutes: {cfg['interval_minutes']}\n"
                        f"Style: {cfg['style']}  Emoji titles: {cfg['emoji_titles']}  Title mode: {cfg['title_mode']}\n"
+                       f"Show executor (minimal): {cfg['show_executor_minimal']}\n"
                        f"Last seen id: {last_id}\n"
                        f"Mirrors (actions): {len(mirrors)} total mirror channels: {mirrors_count}\n"
                        "```")
@@ -339,11 +416,16 @@ class AllianceLogs(commands.Cog):
     @alog_group.command(name="setstyle")
     async def setstyle(self, ctx: commands.Context, style: str):
         style = style.lower().strip()
-        if style not in {"compact", "fields"}:
-            await ctx.send("Style must be `compact` or `fields`.")
+        if style not in {"minimal", "compact", "fields"}:
+            await ctx.send("Style must be `minimal`, `compact`, or `fields`.")
             return
         await self.config.style.set(style)
         await ctx.send(f"Style set to {style}")
+
+    @alog_group.command(name="setshowexecutor")
+    async def setshowexecutor(self, ctx: commands.Context, enabled: bool):
+        await self.config.show_executor_minimal.set(bool(enabled))
+        await ctx.send(f"Show executor line in minimal style: {bool(enabled)}")
 
     @alog_group.command(name="setemojititles")
     async def setemojititles(self, ctx: commands.Context, enabled: bool):
