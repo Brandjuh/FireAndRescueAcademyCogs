@@ -5,7 +5,7 @@
   "install_msg": "CookieManager installed. Load with [p]load cookie_manager",
   "name": "CookieManager",
   "short": "MissionChief login/session cookie manager",
-  "description": "Owner-only cog that logs into MissionChief, stores encrypted credentials/cookies locally, exposes aiohttp session to other cogs, and auto-refreshes.",
+  "description": "Owner-only cog that logs into MissionChief, stores encrypted credentials/cookies locally, exposes aiohttp session to other cogs, and auto-refreshes with smarter validation.",
   "disabled": false,
   "min_bot_version": "3.5.0",
   "hidden": false,
