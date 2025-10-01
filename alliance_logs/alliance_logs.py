@@ -1,4 +1,4 @@
-# alliance_logs.py v0.4.1
+# alliance_logs.py v0.4.2
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +12,7 @@ import discord
 from redbot.core import commands, checks, Config
 from redbot.core.data_manager import cog_data_path
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 log = logging.getLogger("red.FARA.AllianceLogs")
 
@@ -20,7 +20,7 @@ DEFAULTS = {
     "main_channel_id": None,
     "mirrors": {},
     "interval_minutes": 5,
-    "style": "minimal",              # minimal|compact|fields
+    "style": "minimal",
     "emoji_titles": True,
     "strict_titles": True,
     "show_executor_minimal": False,
@@ -104,7 +104,7 @@ def now_utc() -> str:
 class AllianceLogs(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xFA109A1E, force_registration=True)
+        self.config = Config.get_conf(self, identifier=0xFA109A2A, force_registration=True)
         self.config.register_global(**DEFAULTS)
         self.data_path = cog_data_path(self)
         self.db_path = self.data_path / "state.db"
@@ -152,8 +152,8 @@ class AllianceLogs(commands.Cog):
             link = await ms.get_link_for_mc(str(mc_user_id))
             if link and link.get("status") == "approved":
                 return int(link["discord_id"])
-        except Exception as e:
-            log.debug("MemberSync lookup failed: %s", e)
+        except Exception:
+            pass
         return None
 
     def _title_from_row(self, row: Dict[str, Any]) -> Tuple[str, int, str, str]:
@@ -198,8 +198,8 @@ class AllianceLogs(commands.Cog):
                 if did:
                     by += f" [[D]]({self._discord_profile_url(did)})"
             lines.append(f"*By:* {by}")
-        return "\n".join(lines).replace("\n", "
-")
+        return "
+".join(lines)
 
     async def _desc_compact(self, row: Dict[str, Any]) -> str:
         lines: List[str] = []
@@ -226,8 +226,8 @@ class AllianceLogs(commands.Cog):
         lines.append(f"**Details:** {details}")
         ts = row.get("ts") or "-"
         lines.append(f"**Date:** `{ts}`")
-        return "\n".join(lines).replace("\n", "
-")
+        return "
+".join(lines)
 
     async def _publish_rows(self, rows: List[Dict[str, Any]]) -> int:
         guild = self.bot.guilds[0] if self.bot.guilds else None
@@ -294,21 +294,19 @@ class AllianceLogs(commands.Cog):
                             continue
                         try:
                             await mch.send(embed=e)
-                        except Exception as mex:
-                            log.debug("Mirror failed to %s: %s", cid, mex)
+                        except Exception:
+                            pass
 
         return posted
 
     async def _tick_once(self) -> int:
         sc = self.bot.get_cog("AllianceScraper")
         if not sc or not hasattr(sc, "get_logs_after"):
-            log.debug("AllianceScraper with get_logs_after not available")
             return 0
         last_id = await self._get_last_id()
         try:
             rows = await sc.get_logs_after(int(last_id), limit=500)  # type: ignore
-        except Exception as e:
-            log.debug("get_logs_after failed: %s", e)
+        except Exception:
             return 0
         if not rows:
             return 0
@@ -327,12 +325,11 @@ class AllianceLogs(commands.Cog):
         while True:
             try:
                 await self._tick_once()
-            except Exception as e:
-                log.warning("AllianceLogs tick error: %s", e)
+            except Exception:
+                pass
             mins = max(1, int(await self.config.interval_minutes()))
             await asyncio.sleep(mins * 60)
 
-    # -------------- Commands --------------
     @commands.group(name="alog")
     @checks.admin_or_permissions(manage_guild=True)
     async def alog_group(self, ctx: commands.Context):
@@ -396,7 +393,6 @@ class AllianceLogs(commands.Cog):
         await self.config.icons.set({})
         await ctx.send("Formatting reset to defaults.")
 
-    # Mirror command roots
     @commands.group(name="alogmirror", aliases=["alog_mirror"])
     @checks.admin_or_permissions(manage_guild=True)
     async def mirror_root(self, ctx: commands.Context):
@@ -406,7 +402,6 @@ class AllianceLogs(commands.Cog):
     async def mirror_alias_group(self, ctx: commands.Context):
         """Alias group for mirror management."""
 
-    # Subcommands registered under BOTH roots
     @mirror_root.command(name="add")
     @mirror_alias_group.command(name="add")
     async def mirror_add(self, ctx: commands.Context, action: str, channel: discord.TextChannel):
@@ -502,7 +497,6 @@ Example description
 
     @alog_group.command(name="sanity")
     async def sanity(self, ctx: commands.Context):
-        """Quick sanity check: shows version, style and whether main channel is set."""
         cfg = await self.config.all()
         ch = cfg.get("main_channel_id")
         await ctx.send(
