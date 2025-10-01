@@ -1,4 +1,4 @@
-# membersync.py (v0.1)
+# membersync.py (v0.1.1)
 from __future__ import annotations
 
 import asyncio
@@ -47,9 +47,6 @@ def fuzzy_ratio(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 class ReviewView(ui.View):
-    def __init.subclass__(cls, **kwargs):
-        return super().__init_subclass__(**kwargs)
-
     def __init__(self, cog: "MemberSync", review_id: str, timeout: Optional[float] = None):
         super().__init__(timeout=timeout)
         self.cog = cog
@@ -436,7 +433,7 @@ class MemberSync(commands.Cog):
             try:
                 await interaction.response.send_modal(modal)
             except Exception as e:
-                # Fallback: simple ephemeral prompt
+                # Fallback
                 await interaction.response.send_message("Please use `!membersync reject <message_id> <reason>` as fallback.", ephemeral=True)
 
     # ---------- Background ----------
