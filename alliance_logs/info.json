@@ -2,10 +2,10 @@
   "author": [
     "FARA-Assistant"
   ],
-  "install_msg": "AllianceLogs v0.3.0 installed. Load with [p]load alliance_logs",
+  "install_msg": "AllianceLogs v0.3.1 installed. Load with [p]load alliance_logs",
   "name": "AllianceLogs",
   "short": "Publish MissionChief alliance logs from AllianceScraper to Discord",
-  "description": "Consumes logs from AllianceScraper and posts embeds to configured channels. Per-action colors/icons, style, and multi-channel mirroring.",
+  "description": "Consumes logs from AllianceScraper and posts embeds to configured channels. Normalized titles, style switch, per-action multi-mirror, icons/colors.",
   "disabled": false,
   "min_bot_version": "3.5.0",
   "hidden": false,
@@ -17,7 +17,7 @@
   "requirements": [
     "aiosqlite"
   ],
-  "end_user_data_statement": "Stores only posting state (last seen id) and UI config. No external transmissions.",
+  "end_user_data_statement": "Stores only posting state (last seen id) and UI config.",
   "type": "COG",
   "min_python_version": [
     3,
