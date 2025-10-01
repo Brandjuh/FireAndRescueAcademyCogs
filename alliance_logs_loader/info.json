@@ -1,0 +1,24 @@
+{
+  "author": [
+    "FARA-Assistant"
+  ],
+  "install_msg": "AllianceLogsLoader v0.0.1 installed. Load with [p]load alliance_logs_loader",
+  "name": "AllianceLogsLoader",
+  "short": "Sanity loader for AllianceLogs",
+  "description": "Tiny cog to verify clean load path.",
+  "disabled": false,
+  "min_bot_version": "3.5.0",
+  "hidden": false,
+  "tags": [
+    "test",
+    "loader"
+  ],
+  "requirements": [],
+  "end_user_data_statement": "Stores nothing.",
+  "type": "COG",
+  "min_python_version": [
+    3,
+    9,
+    0
+  ]
+}
