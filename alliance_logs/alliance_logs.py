@@ -1,4 +1,4 @@
-# alliance_logs.py v0.3.9
+# alliance_logs.py v0.4.0
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +12,7 @@ import discord
 from redbot.core import commands, checks, Config
 from redbot.core.data_manager import cog_data_path
 
-__version__ = "0.3.9"
+__version__ = "0.4.0"
 
 log = logging.getLogger("red.FARA.AllianceLogs")
 
@@ -104,7 +104,7 @@ def now_utc() -> str:
 class AllianceLogs(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xFA109A1C, force_registration=True)
+        self.config = Config.get_conf(self, identifier=0xFA109A1D, force_registration=True)
         self.config.register_global(**DEFAULTS)
         self.data_path = cog_data_path(self)
         self.db_path = self.data_path / "state.db"
@@ -198,7 +198,7 @@ class AllianceLogs(commands.Cog):
                 if did:
                     by += f" [[D]]({self._discord_profile_url(did)})"
             lines.append(f"*By:* {by}")
-        return "\n".join(lines).replace("\n", "
+        return "\n".join(lines).replace("\n", "\n").replace("\\n", "\n").encode("utf-8").decode("utf-8").replace("\n", "
 ")
 
     async def _desc_compact(self, row: Dict[str, Any]) -> str:
