@@ -1,4 +1,4 @@
-# alliance_scraper.py (v0.6.2) - DB migrations + robust ID backfill
+# alliance_scraper.py (v0.6.3) - clamp huge integers to avoid SQLite overflow
 from __future__ import annotations
 
 import asyncio
@@ -35,8 +35,52 @@ ID_REGEXPS = [
     re.compile(r"/profile/(\d+)", re.I),
 ]
 
+INT64_MAX = 9223372036854775807
+INT64_MIN = -9223372036854775808
+
 def now_utc() -> str:
     return datetime.utcnow().isoformat()
+
+def parse_int64_from_text(txt: str) -> int:
+    """
+    Extract the first number-like token from txt and clamp to 64-bit signed integer range.
+    Returns 0 if none found.
+    """
+    if not txt:
+        return 0
+    m = re.search(r"(-?\d[\d.,]*)", txt)
+    if not m:
+        return 0
+    raw = m.group(1)
+    # normalize: keep leading minus and digits only
+    neg = raw.strip().startswith("-")
+    digits = re.sub(r"[^\d]", "", raw)
+    if not digits:
+        return 0
+    try:
+        val = int(digits)
+    except Exception:
+        # absurdly long; clamp
+        return INT64_MIN if neg else INT64_MAX
+    if neg:
+        val = -val
+    # clamp
+    if val > INT64_MAX:
+        return INT64_MAX
+    if val < INT64_MIN:
+        return INT64_MIN
+    return val
+
+def parse_percent(txt: str) -> float:
+    if not txt or "%" not in txt:
+        return 0.0
+    m = re.search(r"(-?\d+(?:[.,]\d+)?)\s*%", txt)
+    if not m:
+        return 0.0
+    try:
+        return float(m.group(1).replace(",", "."))
+    except Exception:
+        return 0.0
 
 class AllianceScraper(commands.Cog):
     """Scrape alliance data with robust member ID extraction, backfill and safe DB migrations."""
@@ -107,7 +151,7 @@ class AllianceScraper(commands.Cog):
 
     async def _ensure_columns(self, db: aiosqlite.Connection, table: str, cols: List[Tuple[str, str, str]]):
         cur = await db.execute(f"PRAGMA table_info({table})")
-        existing = {row[1] for row in await cur.fetchall()}  # row[1] = name
+        existing = {row[1] for row in await cur.fetchall()}
         for name, coltype, default in cols:
             if name not in existing:
                 try:
@@ -171,20 +215,14 @@ class AllianceScraper(commands.Cog):
                 txt = td.get_text(" ", strip=True)
                 if not role and txt and not any(ch.isdigit() for ch in txt) and name not in txt:
                     role = txt
+                # parse first number-ish as credits, clamp to int64
                 if credits == 0:
-                    m = re.search(r"(\d[\d.,]*)", txt)
-                    if m:
-                        try:
-                            credits = int(re.sub(r"[^\d]", "", m.group(1)))
-                        except Exception:
-                            pass
+                    val = parse_int64_from_text(txt)
+                    if val != 0:
+                        credits = val
+                # parse rate if a percent appears
                 if "%" in txt and rate == 0.0:
-                    m2 = re.search(r"(\d+(?:[.,]\d+)?)\s*%", txt)
-                    if m2:
-                        try:
-                            rate = float(m2.group(1).replace(",", "."))
-                        except Exception:
-                            pass
+                    rate = parse_percent(txt)
             rows.append({
                 "user_id": user_id,
                 "name": name,
@@ -199,14 +237,22 @@ class AllianceScraper(commands.Cog):
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("DELETE FROM members_current")
             for r in rows:
+                # clamp credits at insert time too, for safety
+                credits = r.get("earned_credits") or 0
+                if credits > INT64_MAX:
+                    log.warning("Clamping credits for %s from %s to INT64_MAX", r.get("name"), credits)
+                    credits = INT64_MAX
+                if credits < INT64_MIN:
+                    log.warning("Clamping credits for %s from %s to INT64_MIN", r.get("name"), credits)
+                    credits = INT64_MIN
                 await db.execute("""
                 INSERT INTO members_current(user_id, name, role, earned_credits, contribution_rate, profile_href, scraped_at)
                 VALUES(?,?,?,?,?,?,?)
-                """, (r.get("user_id") or "", r.get("name") or "", r.get("role") or "", int(r.get("earned_credits") or 0), float(r.get("contribution_rate") or 0.0), r.get("profile_href") or "", now_utc()))
+                """, (r.get("user_id") or "", r.get("name") or "", r.get("role") or "", int(credits), float(r.get("contribution_rate") or 0.0), r.get("profile_href") or "", now_utc()))
                 await db.execute("""
                 INSERT INTO members_history(user_id, name, role, earned_credits, contribution_rate, profile_href, scraped_at)
                 VALUES(?,?,?,?,?,?,?)
-                """, (r.get("user_id") or "", r.get("name") or "", r.get("role") or "", int(r.get("earned_credits") or 0), float(r.get("contribution_rate") or 0.0), r.get("profile_href") or "", now_utc()))
+                """, (r.get("user_id") or "", r.get("name") or "", r.get("role") or "", int(credits), float(r.get("contribution_rate") or 0.0), r.get("profile_href") or "", now_utc()))
             await db.commit()
 
     # ---------------- Public API ----------------
@@ -419,6 +465,17 @@ class AllianceScraper(commands.Cog):
                 cols = await cur.fetchall()
                 out.append(f"{table}: " + ", ".join([c[1] for c in cols]))
         await ctx.send("```\n" + "\n".join(out) + "\n```")
+
+    @db_group.command(name="sanitize")
+    async def db_sanitize(self, ctx: commands.Context):
+        """Clamp any out-of-range integers in earned_credits to int64 range."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(f"UPDATE members_current SET earned_credits={INT64_MAX} WHERE earned_credits > {INT64_MAX}")
+            await db.execute(f"UPDATE members_current SET earned_credits={INT64_MIN} WHERE earned_credits < {INT64_MIN}")
+            await db.execute(f"UPDATE members_history SET earned_credits={INT64_MAX} WHERE earned_credits > {INT64_MAX}")
+            await db.execute(f"UPDATE members_history SET earned_credits={INT64_MIN} WHERE earned_credits < {INT64_MIN}")
+            await db.commit()
+        await ctx.send("Sanitized integer ranges for earned_credits.")
 
 async def setup(bot):
     cog = AllianceScraper(bot)
