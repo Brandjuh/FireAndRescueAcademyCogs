@@ -1,4 +1,4 @@
-# alliance_scraper.py (v1.2)
+# alliance_scraper.py (v1.2.1)
 from __future__ import annotations
 
 import asyncio
@@ -85,7 +85,7 @@ def _header_index_map(headers: List[str], wanted_map: Dict[str, List[str]]) -> D
 
 class AllianceScraper(commands.Cog):
     """Scrapes MissionChief alliance data using CookieManager session and stores into SQLite.
-       v1.2 adds numeric user_id extraction and schema migration.
+       v1.2.1 fixes migration for members_history.user_id.
     """
 
     def __init__(self, bot):
@@ -168,12 +168,18 @@ class AllianceScraper(commands.Cog):
                 inserted_at_utc TEXT
             )
             """)
-            # Migrations: ensure user_id column exists in members_current (older installs)
-            # and add index for faster joins if needed.
+            # Migrations
+            # 1) members_current.user_id
             try:
                 await db.execute("SELECT user_id FROM members_current LIMIT 1")
             except Exception:
                 await db.execute("ALTER TABLE members_current ADD COLUMN user_id TEXT")
+            # 2) members_history.user_id
+            try:
+                await db.execute("SELECT user_id FROM members_history LIMIT 1")
+            except Exception:
+                await db.execute("ALTER TABLE members_history ADD COLUMN user_id TEXT")
+            # Indexes
             await db.execute("CREATE INDEX IF NOT EXISTS idx_members_user_id ON members_current(user_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_logs_date ON alliance_logs(date_utc)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_kasse_date ON kasse_transactions(date_utc)")
