@@ -1,4 +1,4 @@
-# alliance_scraper.py (v0.6.1) - robust member ID resolution and backfill
+# alliance_scraper.py (v0.6.2) - DB migrations + robust ID backfill
 from __future__ import annotations
 
 import asyncio
@@ -39,7 +39,7 @@ def now_utc() -> str:
     return datetime.utcnow().isoformat()
 
 class AllianceScraper(commands.Cog):
-    """Scrape alliance data with robust member ID extraction and backfill."""
+    """Scrape alliance data with robust member ID extraction, backfill and safe DB migrations."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -53,6 +53,7 @@ class AllianceScraper(commands.Cog):
         await self._init_db()
         await self._maybe_start_background()
 
+    # ---------------- DB init & migrations ----------------
     async def _init_db(self):
         self.data_path.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.db_path) as db:
@@ -67,7 +68,6 @@ class AllianceScraper(commands.Cog):
                 scraped_at TEXT
             )
             """)
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_members_current_name ON members_current(name)")
             await db.execute("""
             CREATE TABLE IF NOT EXISTS members_history(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,12 +81,42 @@ class AllianceScraper(commands.Cog):
             )
             """)
             await db.commit()
+        await self._migrate_db()
+
+    async def _migrate_db(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            await self._ensure_columns(db, "members_current", [
+                ("user_id", "TEXT", "''"),
+                ("name", "TEXT", "''"),
+                ("role", "TEXT", "''"),
+                ("earned_credits", "INTEGER", "0"),
+                ("contribution_rate", "REAL", "0.0"),
+                ("profile_href", "TEXT", "''"),
+                ("scraped_at", "TEXT", "''"),
+            ])
+            await self._ensure_columns(db, "members_history", [
+                ("user_id", "TEXT", "''"),
+                ("name", "TEXT", "''"),
+                ("role", "TEXT", "''"),
+                ("earned_credits", "INTEGER", "0"),
+                ("contribution_rate", "REAL", "0.0"),
+                ("profile_href", "TEXT", "''"),
+                ("scraped_at", "TEXT", "''"),
+            ])
+            await db.commit()
+
+    async def _ensure_columns(self, db: aiosqlite.Connection, table: str, cols: List[Tuple[str, str, str]]):
+        cur = await db.execute(f"PRAGMA table_info({table})")
+        existing = {row[1] for row in await cur.fetchall()}  # row[1] = name
+        for name, coltype, default in cols:
+            if name not in existing:
+                try:
+                    await db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {coltype} DEFAULT {default}")
+                except Exception as e:
+                    log.warning("Failed to add column %s to %s: %s", name, table, e)
 
     # ---------------- Session helpers ----------------
     async def _get_auth_session(self) -> Tuple[aiohttp.ClientSession, bool]:
-        """Try to reuse CookieManager session; otherwise create a new one.
-        Returns (session, own_session_flag) to decide whether to close it.
-        """
         headers = {"User-Agent": (await self.config.user_agent())}
         timeout = aiohttp.ClientTimeout(total=30)
         cm = self.bot.get_cog("CookieManager")
@@ -103,7 +133,6 @@ class AllianceScraper(commands.Cog):
                         return sess, False
                 except Exception:
                     continue
-        # Fallback
         sess = aiohttp.ClientSession(headers=headers, timeout=timeout)
         return sess, True
 
@@ -125,7 +154,6 @@ class AllianceScraper(commands.Cog):
     def _extract_member_rows(self, html: str) -> List[Dict[str, Any]]:
         soup = BeautifulSoup(html, "html.parser")
         rows: List[Dict[str, Any]] = []
-        # Try to find a table with member names; otherwise scan all rows
         for tr in soup.find_all("tr"):
             a = tr.find("a", href=True)
             if not a:
@@ -135,7 +163,6 @@ class AllianceScraper(commands.Cog):
                 continue
             href = a["href"]
             user_id = self._extract_id_from_href(href) or ""
-            # Try to guess other columns
             tds = tr.find_all("td")
             role = ""
             credits = 0
@@ -263,7 +290,6 @@ class AllianceScraper(commands.Cog):
 
         session, own = await self._get_auth_session()
         try:
-            # Discover last page
             page1_url = f"{base}{tpl.format(alliance_id=alliance_id, page=1)}"
             html1, _ = await self._fetch(session, page1_url)
             soup1 = BeautifulSoup(html1, "html.parser")
@@ -374,6 +400,25 @@ class AllianceScraper(commands.Cog):
             cur = await db.execute("SELECT COUNT(*) FROM members_current WHERE user_id IS NULL OR user_id=''")
             missing = (await cur.fetchone())[0]
         await ctx.send(f"Members missing ID: {missing}")
+
+    @scraper_group.group(name="db")
+    async def db_group(self, ctx: commands.Context):
+        """Database utilities for AllianceScraper."""
+
+    @db_group.command(name="migrate")
+    async def db_migrate(self, ctx: commands.Context):
+        await self._migrate_db()
+        await ctx.send("Database migration completed.")
+
+    @db_group.command(name="schema")
+    async def db_schema(self, ctx: commands.Context):
+        async with aiosqlite.connect(self.db_path) as db:
+            out = []
+            for table in ("members_current", "members_history"):
+                cur = await db.execute(f"PRAGMA table_info({table})")
+                cols = await cur.fetchall()
+                out.append(f"{table}: " + ", ".join([c[1] for c in cols]))
+        await ctx.send("```\n" + "\n".join(out) + "\n```")
 
 async def setup(bot):
     cog = AllianceScraper(bot)

@@ -5,7 +5,7 @@
   "install_msg": "AllianceScraper installed. Load with [p]load alliance_scraper",
   "name": "AllianceScraper",
   "short": "Scrape alliance roster, logs, trainings, and funds with robust ID capture",
-  "description": "Scrapes alliance data using CookieManager session. Resolves member IDs via /users/<id> or /profile/<id> and backfills missing IDs by visiting profiles.",
+  "description": "Scrapes alliance data using CookieManager session. Resolves member IDs via /users/<id> or /profile/<id> and backfills missing IDs by visiting profiles. Includes DB migrations.",
   "disabled": false,
   "min_bot_version": "3.5.0",
   "hidden": false,
