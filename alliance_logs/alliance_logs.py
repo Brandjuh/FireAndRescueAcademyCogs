@@ -1,4 +1,4 @@
-# alliance_logs.py v0.2.0 (consumer-only)
+# alliance_logs.py v0.2.1 (consumer-only, fixed Config identifier)
 from __future__ import annotations
 
 import asyncio
@@ -27,7 +27,8 @@ class AllianceLogs(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xFAL09A12, force_registration=True)
+        # FIX: valid hex literal
+        self.config = Config.get_conf(self, identifier=0xFA109A12, force_registration=True)
         self.config.register_global(**DEFAULTS)
         self.data_path = cog_data_path(self)
         self.db_path = self.data_path / "state.db"
@@ -116,12 +117,11 @@ class AllianceLogs(commands.Cog):
                         aff_text += f" [[D]]({self._discord_profile_url(did)})"
                 e.add_field(name="Affected", value=aff_text, inline=False)
             try:
-                msg = await main_ch.send(embed=e)
+                await main_ch.send(embed=e)
                 posted += 1
             except Exception as ex:
                 log.warning("Failed to post main embed: %s", ex)
                 continue
-            # Mirror
             m = mirrors.get(str(row.get("action_key") or ""))
             if m and m.get("enabled"):
                 mch = guild.get_channel(int(m.get("channel_id") or 0))
@@ -168,7 +168,6 @@ class AllianceLogs(commands.Cog):
             mins = max(1, int(await self.config.interval_minutes()))
             await asyncio.sleep(mins * 60)
 
-    # -------------- Commands --------------
     @commands.group(name="alog")
     @checks.admin_or_permissions(manage_guild=True)
     async def alog_group(self, ctx: commands.Context):
