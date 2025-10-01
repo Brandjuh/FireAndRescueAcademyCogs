@@ -1,4 +1,4 @@
-# alliance_logs.py v0.3.8
+# alliance_logs.py v0.3.9
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +12,7 @@ import discord
 from redbot.core import commands, checks, Config
 from redbot.core.data_manager import cog_data_path
 
-__version__ = "0.3.8"
+__version__ = "0.3.9"
 
 log = logging.getLogger("red.FARA.AllianceLogs")
 
@@ -104,7 +104,7 @@ def now_utc() -> str:
 class AllianceLogs(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xFA109A1B, force_registration=True)
+        self.config = Config.get_conf(self, identifier=0xFA109A1C, force_registration=True)
         self.config.register_global(**DEFAULTS)
         self.data_path = cog_data_path(self)
         self.db_path = self.data_path / "state.db"
@@ -129,7 +129,11 @@ class AllianceLogs(commands.Cog):
 
     async def _set_last_id(self, v: int):
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("INSERT INTO state(k, v) VALUES('last_id', ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (str(int(v)),))
+            await db.execute(
+                "INSERT INTO state(k, v) VALUES('last_id', ?) "
+                "ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                (str(int(v)),),
+            )
             await db.commit()
 
     def _profile_url(self, mc_user_id: str) -> Optional[str]:
@@ -162,14 +166,14 @@ class AllianceLogs(commands.Cog):
         return title, color, emoji, key
 
     async def _desc_minimal(self, row: Dict[str, Any]) -> str:
-        lines = []
+        lines: List[str] = []
         ts = row.get("ts") or "-"
         lines.append(f"`{ts}` —")
         desc = row.get("description") or row.get("action_text") or "-"
         lines.append(str(desc))
         aff_name = row.get("affected_name") or ""
         aff_url = row.get("affected_url") or ""
-        block = None
+        block: Optional[str] = None
         if aff_name or aff_url:
             label = aff_name or "link"
             block = f"→ [{label}]({aff_url})" if aff_url else f"→ {label}"
@@ -194,11 +198,11 @@ class AllianceLogs(commands.Cog):
                 if did:
                     by += f" [[D]]({self._discord_profile_url(did)})"
             lines.append(f"*By:* {by}")
-        return "
-".join(lines)
+        return "\n".join(lines).replace("\n", "
+")
 
     async def _desc_compact(self, row: Dict[str, Any]) -> str:
-        lines = []
+        lines: List[str] = []
         by = row.get("executed_name") or "-"
         if row.get("executed_mc_id"):
             url = self._profile_url(str(row["executed_mc_id"]))
@@ -222,8 +226,8 @@ class AllianceLogs(commands.Cog):
         lines.append(f"**Details:** {details}")
         ts = row.get("ts") or "-"
         lines.append(f"**Date:** `{ts}`")
-        return "
-".join(lines)
+        return "\n".join(lines).replace("\n", "
+")
 
     async def _publish_rows(self, rows: List[Dict[str, Any]]) -> int:
         guild = self.bot.guilds[0] if self.bot.guilds else None
@@ -337,25 +341,26 @@ class AllianceLogs(commands.Cog):
     @alog_group.command(name="version")
     async def version(self, ctx: commands.Context):
         cfg = await self.config.all()
-        await ctx.send("```
+        await ctx.send(
+            "```
 "
-                       f"AllianceLogs version: {__version__}
+            f"AllianceLogs version: {__version__}
 "
-                       f"Style: {cfg['style']}  Emoji titles: {cfg['emoji_titles']}  Strict titles: {cfg['strict_titles']}
+            f"Style: {cfg['style']}  Emoji titles: {cfg['emoji_titles']}  Strict titles: {cfg['strict_titles']}
 "
-                       f"Mirrors configured: {len(cfg.get('mirrors', {}))}
+            f"Mirrors configured: {len(cfg.get('mirrors', {}))}
 "
-                       "```")
+            "```"
+        )
 
     @alog_group.command(name="listactions")
     async def listactions(self, ctx: commands.Context):
         lines = [f"{t}  —  key: `{k}`" for k, (t, _, _) in DISPLAY.items()]
-        await ctx.send("**Valid actions:**
+        msg = "**Valid actions:**
 " + "
-".join(lines[:25]))
-        if len(lines) > 25:
-            await ctx.send("
-".join(lines[25:]))
+".join(lines)
+        await ctx.send(msg if len(msg) < 1800 else msg[:1800] + "
+...")
 
     @alog_group.command(name="setchannel")
     async def setchannel(self, ctx: commands.Context, channel: discord.TextChannel):
@@ -372,9 +377,9 @@ class AllianceLogs(commands.Cog):
         style = style.lower().strip()
         if style not in {"minimal", "compact", "fields"}:
             await ctx.send("Style must be `minimal`, `compact`, or `fields`.")
-        else:
-            await self.config.style.set(style)
-            await ctx.send(f"Style set to {style}")
+            return
+        await self.config.style.set(style)
+        await ctx.send(f"Style set to {style}")
 
     @alog_group.command(name="setemojititles")
     async def setemojititles(self, ctx: commands.Context, enabled: bool):
@@ -476,13 +481,41 @@ No mirrors configured.
         if not ch_id:
             await ctx.send("Main channel not set.")
             return
-        guild = ctx.guild or self.bot.guilds[0]
+        guild = ctx.guild or (self.bot.guilds[0] if self.bot.guilds else None)
+        if not guild:
+            await ctx.send("No guild available.")
+            return
         ch = guild.get_channel(int(ch_id))
-        e = discord.Embed(title=title_text, description="`01 Oct 06:40` —
+        if not isinstance(ch, discord.TextChannel):
+            await ctx.send("Main channel is not a text channel.")
+            return
+        e = discord.Embed(
+            title=title_text,
+            description="`01 Oct 06:40` —
 Example description
-→ [Example link](https://example.com)", color=color, timestamp=datetime.utcnow())
+→ [Example link](https://example.com)",
+            color=color,
+            timestamp=datetime.utcnow(),
+        )
         await ch.send(embed=e)
         await ctx.send("Test post sent.")
+
+    @alog_group.command(name="sanity")
+    async def sanity(self, ctx: commands.Context):
+        """Quick sanity check: shows version, style and whether main channel is set."""
+        cfg = await self.config.all()
+        ch = cfg.get("main_channel_id")
+        await ctx.send(
+            "```
+"
+            f"AllianceLogs {__version__}
+"
+            f"Main channel: {ch}
+"
+            f"Style: {cfg['style']}  Emoji titles: {cfg['emoji_titles']}
+"
+            "```"
+        )
 
     @alog_group.command(name="run")
     async def run(self, ctx: commands.Context):
