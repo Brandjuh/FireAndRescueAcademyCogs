@@ -1,4 +1,4 @@
-# membersync.py (v0.1.3) - enforce guild nickname
+# membersync.py (v0.1.4) - fix Embed.Empty reference
 from __future__ import annotations
 
 import asyncio
@@ -29,7 +29,7 @@ DEFAULTS = {
     "auto_prune_enabled": True,
     "auto_prune_interval_hours": 24,
     "profile_url_template": "https://www.missionchief.com/users/{id}",
-    "require_nickname": True,  # NEW: strictly require guild nickname for matching
+    "require_nickname": True,
 }
 
 def now_utc() -> str:
@@ -37,7 +37,6 @@ def now_utc() -> str:
 
 def norm_name(s: str) -> str:
     s = (s or "").strip().lower()
-    # collapse spaces; allow letters, digits and spaces
     import re
     s = re.sub(r"[^a-z0-9 ]+", " ", s)
     s = " ".join(s.split())
@@ -52,12 +51,10 @@ class ReviewView(ui.View):
         super().__init__(timeout=timeout)
         self.cog = cog
         self.review_id = review_id
-        # persistent custom_ids
         self.add_item(ui.Button(label="Approve", style=ButtonStyle.success, custom_id=f"msync:approve:{review_id}"))
         self.add_item(ui.Button(label="Reject", style=ButtonStyle.danger, custom_id=f"msync:reject:{review_id}"))
 
     async def interaction_check(self, interaction: Interaction) -> bool:
-        # Only configured approvers or owner can use
         if await self.cog._is_approver(interaction.user):
             return True
         await interaction.response.send_message("You are not allowed to approve or reject verification requests.", ephemeral=True)
@@ -86,7 +83,6 @@ class MemberSync(commands.Cog):
         self._bg_task: Optional[asyncio.Task] = None
         self._loaded = False
 
-    # ---------- Setup & DB ----------
     async def _init_db(self):
         self.data_path.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.db_path) as db:
@@ -132,7 +128,6 @@ class MemberSync(commands.Cog):
         self._loaded = True
 
     async def _reattach_pending_views(self):
-        # Reattach persistent views for any pending reviews
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute("SELECT id, message_id FROM reviews WHERE status='pending' AND message_id IS NOT NULL")
@@ -150,9 +145,7 @@ class MemberSync(commands.Cog):
         await self._reattach_pending_views()
         await self._maybe_start_background()
 
-    # ---------- Permissions ----------
     async def _is_approver(self, user: discord.abc.User) -> bool:
-        # Owner always allowed
         try:
             if await self.bot.is_owner(user):
                 return True
@@ -163,7 +156,6 @@ class MemberSync(commands.Cog):
         admin_roles: List[int] = await self.config.admin_role_ids()
         return any(r.id in admin_roles for r in user.roles)
 
-    # ---------- Public API (for other cogs) ----------
     async def get_link_for_discord(self, discord_id: int) -> Optional[Dict[str, Any]]:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -179,12 +171,7 @@ class MemberSync(commands.Cog):
             return dict(row) if row else None
 
     async def report_external(self, action: str, **kwargs) -> None:
-        """
-        External cogs can report events, e.g. action='unlink', 'removed_from_alliance', 'name_changed'.
-        kwargs may include: discord_id, mc_user_id, note
-        """
         await self._audit(None, f"external:{action}", kwargs)
-        # Minimal reactions for common actions
         if action in {"unlink", "removed_from_alliance"}:
             discord_id = kwargs.get("discord_id")
             mc_user_id = kwargs.get("mc_user_id")
@@ -195,7 +182,6 @@ class MemberSync(commands.Cog):
                 if link:
                     await self._unlink_discord(int(link["discord_id"]), reason=f"external:{action}")
 
-    # ---------- Helpers ----------
     async def _audit(self, actor: Optional[discord.abc.User], action: str, details: Dict[str, Any]):
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
@@ -215,8 +201,7 @@ class MemberSync(commands.Cog):
                     log.warning("Failed to send log: %s", e)
 
     def _profile_url(self, mc_user_id: str) -> str:
-        tpl = "https://www.missionchief.com/users/{id}"
-        return tpl.format(id=mc_user_id)
+        return f"https://www.missionchief.com/users/{mc_user_id}"
 
     async def _get_alliance_members(self) -> List[Dict[str, Any]]:
         sc = self.bot.get_cog("AllianceScraper")
@@ -237,14 +222,10 @@ class MemberSync(commands.Cog):
             for m in members:
                 if str(m.get("user_id")) == str(mc_id_hint):
                     return {"mc_user_id": str(m.get("user_id")), "mc_name": m.get("name"), "match_type": "id", "confidence": 1.0}
-        # nickname-only policy
         require_nick = await self.config.require_nickname()
-        nick = member.nick  # strictly guild nickname
-        if not nick:
-            if require_nick:
-                return None
-            # if not required, we could fallback, but default is True -> no fallback
-        # name-based
+        nick = member.nick
+        if not nick and require_nick:
+            return None
         mmode = await self.config.match_mode()
         threshold = float(await self.config.fuzzy_threshold())
         def norm(s): return norm_name(s)
@@ -273,12 +254,19 @@ class MemberSync(commands.Cog):
         e.add_field(name="MissionChief", value=f"[{mc_name}]({url})\nID: `{mc_id}`", inline=False)
         e.add_field(name="Discord", value=f"{member.mention}\nID: `{member.id}`\nGuild Nick: `{member.nick or 'None'}`", inline=False)
         e.add_field(name="Match", value=f"Type: `{cand.get('match_type')}`  •  Confidence: `{cand.get('confidence'):.2f}`", inline=False)
-        e.set_thumbnail(url=getattr(member.display_avatar, "url", discord.Embed.Empty))
+        # Safe thumbnail handling across lib variants
+        try:
+            thumb_url = getattr(getattr(member, "display_avatar", None), "url", None)
+        except Exception:
+            thumb_url = None
+        try:
+            e.set_thumbnail(url=thumb_url)
+        except Exception:
+            pass
         e.set_footer(text="Click Approve to link and assign role, or Reject to decline.")
         return e
 
     async def _process_approve(self, guild: discord.Guild, review_id: str, approver: discord.Member) -> str:
-        # Load review
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute("SELECT * FROM reviews WHERE id=? AND status='pending'", (review_id,))
@@ -289,7 +277,6 @@ class MemberSync(commands.Cog):
             mc_user_id = str(rv["mc_user_id"])
             mc_name = rv["mc_name"]
             message_id = int(rv["message_id"]) if rv["message_id"] else None
-        # Link record
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
             INSERT INTO links(discord_id, mc_user_id, mc_name, status, requested_at, approved_at, approved_by, rejected_reason, last_check_utc)
@@ -303,7 +290,6 @@ class MemberSync(commands.Cog):
             """, (discord_id, mc_user_id, mc_name, "approved", now_utc(), now_utc(), int(approver.id), None, now_utc()))
             await db.execute("UPDATE reviews SET status='finished' WHERE id=?", (review_id,))
             await db.commit()
-        # Assign role
         mem = guild.get_member(discord_id)
         if mem:
             role_id = await self.config.verified_role_id()
@@ -314,13 +300,11 @@ class MemberSync(commands.Cog):
                         await mem.add_roles(role, reason="MemberSync verification approved")
                     except Exception as e:
                         log.warning("Failed to add role: %s", e)
-        # DM user
         try:
             if mem:
                 await mem.send(f"You have been verified as **{mc_name}** (ID `{mc_user_id}`).")
         except Exception:
             pass
-        # Delete admin message
         if message_id and (await self.config.delete_admin_message_on_decision()):
             ch = guild.get_channel(int(await self.config.admin_channel_id() or 0))
             if ch:
@@ -329,18 +313,15 @@ class MemberSync(commands.Cog):
                     await msg.delete()
                 except Exception:
                     pass
-        # Log
         emb = discord.Embed(title="Member verified", color=discord.Color.green(), timestamp=datetime.utcnow())
         emb.add_field(name="MissionChief", value=f"{mc_name} (`{mc_user_id}`)", inline=False)
         emb.add_field(name="Discord", value=f"<@{discord_id}> (`{discord_id}`)", inline=False)
         emb.add_field(name="Approved by", value=f"<@{approver.id}>", inline=False)
         await self._send_log(guild, emb)
-        # Audit
         await self._audit(approver, "approve", {"discord_id": discord_id, "mc_user_id": mc_user_id})
         return "Approved."
 
     async def _unlink_discord(self, discord_id: int, reason: str):
-        # Update status and remove role if present
         guild = self.bot.guilds[0] if self.bot.guilds else None
         if guild:
             mem = guild.get_member(discord_id)
@@ -357,7 +338,6 @@ class MemberSync(commands.Cog):
             await db.commit()
 
     async def _handle_reject_interaction(self, interaction: Interaction, review_id: str, reason: str) -> None:
-        # Load review
         guild = interaction.guild
         if not guild:
             await interaction.response.send_message("This can only be used in a server.", ephemeral=True)
@@ -382,14 +362,12 @@ class MemberSync(commands.Cog):
                 rejected_reason=excluded.rejected_reason
             """, (discord_id, mc_user_id, mc_name, "rejected", now_utc(), None, None, reason, now_utc()))
             await db.commit()
-        # DM user
         mem = guild.get_member(discord_id)
         try:
             if mem:
                 await mem.send(f"Your verification was rejected for **{mc_name}** (ID `{mc_user_id}`).\nReason: {reason}")
         except Exception:
             pass
-        # Delete admin message
         if message_id and (await self.config.delete_admin_message_on_decision()):
             ch = guild.get_channel(int(await self.config.admin_channel_id() or 0))
             if ch:
@@ -398,7 +376,6 @@ class MemberSync(commands.Cog):
                     await msg.delete()
                 except Exception:
                     pass
-        # Log
         emb = discord.Embed(title="Member verification rejected", color=discord.Color.red(), timestamp=datetime.utcnow())
         emb.add_field(name="MissionChief", value=f"{mc_name} (`{mc_user_id}`)", inline=False)
         emb.add_field(name="Discord", value=f"<@{discord_id}> (`{discord_id}`)", inline=False)
@@ -408,7 +385,6 @@ class MemberSync(commands.Cog):
         await self._audit(interaction.user, "reject", {"discord_id": discord_id, "mc_user_id": mc_user_id, "reason": reason})
         await interaction.response.send_message("Rejected.", ephemeral=True)
 
-    # ---------- Interaction handlers for persistent buttons ----------
     @commands.Cog.listener("on_interaction")
     async def handle_component(self, interaction: Interaction):
         if not interaction.type == discord.InteractionType.component:
@@ -434,15 +410,12 @@ class MemberSync(commands.Cog):
             except Exception:
                 pass
         elif action == "reject":
-            # Show modal to capture reason
             modal = RejectModal(self, review_id)
             try:
                 await interaction.response.send_modal(modal)
-            except Exception as e:
-                # Fallback
+            except Exception:
                 await interaction.response.send_message("Please use `!membersync reject <message_id> <reason>` as fallback.", ephemeral=True)
 
-    # ---------- Background ----------
     async def _maybe_start_background(self):
         if self._bg_task is None:
             self._bg_task = asyncio.create_task(self._bg_worker())
@@ -459,7 +432,6 @@ class MemberSync(commands.Cog):
             await asyncio.sleep(hrs * 3600)
 
     async def _auto_prune_once(self):
-        # Remove verified role from users no longer in alliance
         guild = self.bot.guilds[0] if self.bot.guilds else None
         if not guild:
             return
@@ -485,7 +457,6 @@ class MemberSync(commands.Cog):
                         await mem.remove_roles(role, reason="MemberSync auto-prune: not in alliance")
                     except Exception:
                         pass
-                # Update status and log
                 async with aiosqlite.connect(self.db_path) as db:
                     await db.execute("UPDATE links SET status='revoked' WHERE discord_id=?", (discord_id,))
                     await db.commit()
@@ -494,7 +465,6 @@ class MemberSync(commands.Cog):
                 emb.add_field(name="Reason", value="Not found in alliance roster", inline=False)
                 await self._send_log(guild, emb)
 
-    # ---------- Commands ----------
     @commands.group(name="membersync")
     @checks.admin_or_permissions(manage_guild=True)
     async def membersync_group(self, ctx: commands.Context):
@@ -502,7 +472,6 @@ class MemberSync(commands.Cog):
 
     @membersync_group.command(name="status")
     async def status(self, ctx: commands.Context):
-        """Show counts and config summary."""
         async with aiosqlite.connect(self.db_path) as db:
             cur = await db.execute("SELECT COUNT(*) FROM links WHERE status='approved'")
             approved = (await cur.fetchone())[0]
@@ -524,7 +493,6 @@ class MemberSync(commands.Cog):
 
     @membersync_group.command(name="diag")
     async def diag(self, ctx: commands.Context):
-        """Diagnostic: count alliance members with/without numeric user_id and show match settings."""
         sc_members = await self._get_alliance_members()
         with_id = sum(1 for m in sc_members if m.get("user_id"))
         without_id = sum(1 for m in sc_members if not m.get("user_id"))
@@ -539,19 +507,15 @@ class MemberSync(commands.Cog):
 
     @membersync_group.command(name="debugfind")
     async def debugfind(self, ctx: commands.Context, *, name_or_mention: Optional[str] = None):
-        """Show top name matches for a given guild nickname or @mention. Approvers/admins only."""
         if not await self._is_approver(ctx.author):
             await ctx.send("You are not allowed to run debugfind.")
             return
         target_name = None
         if ctx.message.mentions:
             m = ctx.message.mentions[0]
-            target_name = m.nick  # strictly guild nick
+            target_name = m.nick
         else:
-            if name_or_mention:
-                target_name = name_or_mention
-            else:
-                target_name = ctx.author.nick  # strictly guild nick
+            target_name = name_or_mention or ctx.author.nick
         if not target_name:
             await ctx.send("No guild nickname found. Please set a server nickname for this test.")
             return
@@ -643,14 +607,11 @@ class MemberSync(commands.Cog):
         await self.config.autodelete_user_feedback_seconds.set(int(seconds))
         await ctx.send("User feedback auto-delete updated.")
 
-    # Fallback text approvals (rare use)
     @membersync_group.command(name="approve")
     async def approve_cmd(self, ctx: commands.Context, message_id: int):
-        """Fallback: approve a pending review by message id."""
         if not await self._is_approver(ctx.author):
             await ctx.send("You are not allowed to approve reviews.")
             return
-        # find review by message id
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute("SELECT id FROM reviews WHERE message_id=? AND status='pending'", (int(message_id),))
@@ -663,22 +624,16 @@ class MemberSync(commands.Cog):
 
     @membersync_group.command(name="reject")
     async def reject_cmd(self, ctx: commands.Context, message_id: int, *, reason: str):
-        """Fallback: reject a pending review by message id with a reason."""
         if not await self._is_approver(ctx.author):
             await ctx.send("You are not allowed to reject reviews.")
             return
-        # emulate modal path
         await self._handle_reject_interaction(type("X",(object,),{"guild":ctx.guild,"user":ctx.author,"response":type("Y",(object,),{"send_message":ctx.send})()})(), str(message_id), reason)  # type: ignore
 
-    # User command
     @commands.command(name="verify")
     async def verify(self, ctx: commands.Context, mc_id: Optional[str] = None):
-        """Verify yourself as a MissionChief member. Optionally provide MC user id: `!verify 123456`."""
-        # Feedback message
         feedback = await ctx.send("Searching the alliance roster for your account... this can take a moment.")
-        # If nickname required and missing, bail out clearly
         require_nick = await self.config.require_nickname()
-        if require_nick and not ctx.author.nick:  # strictly guild nickname
+        if require_nick and not ctx.author.nick:
             await feedback.edit(content="No server nickname set. Please set your Discord **server nickname** to your MissionChief name, then run `!verify` again. Or use `!verify <MC_ID>` as a fallback.")
             secs = int(await self.config.autodelete_user_feedback_seconds())
             if secs > 0:
@@ -688,11 +643,9 @@ class MemberSync(commands.Cog):
                 except Exception:
                     pass
             return
-        # Find candidate
         cand = await self._find_candidate(ctx.guild, ctx.author, mc_id)  # type: ignore
         if not cand:
             await feedback.edit(content="No matching MissionChief member was found. Ensure your **server nickname** matches your MissionChief name exactly, or run `!verify <MC_ID>` as a fallback.")
-            # optional auto delete
             secs = int(await self.config.autodelete_user_feedback_seconds())
             if secs > 0:
                 try:
@@ -701,7 +654,6 @@ class MemberSync(commands.Cog):
                 except Exception:
                     pass
             return
-        # Prepare admin embed
         admin_ch_id = await self.config.admin_channel_id()
         if not admin_ch_id:
             await feedback.edit(content="Verification is not configured yet. Please tell an admin to set the admin review channel.")
@@ -714,14 +666,12 @@ class MemberSync(commands.Cog):
         review_id = str(uuid.uuid4())
         view = ReviewView(self, review_id, timeout=None)
         msg = await admin_ch.send(embed=embed, view=view)
-        # Persist review
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
             INSERT INTO reviews(id, message_id, channel_id, discord_id, mc_user_id, mc_name, match_type, confidence, created_at, status)
             VALUES(?,?,?,?,?,?,?,?,?,?)
             """, (review_id, int(msg.id), int(msg.channel.id), int(ctx.author.id), str(cand["mc_user_id"]), str(cand["mc_name"]), cand["match_type"], float(cand["confidence"]), now_utc(), "pending"))
             await db.commit()
-        # User feedback
         await feedback.edit(content=f"Found candidate **{cand['mc_name']}** (ID `{cand['mc_user_id']}`). Waiting for admin review.")
         secs = int(await self.config.autodelete_user_feedback_seconds())
         if secs > 0:
