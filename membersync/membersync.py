@@ -1,4 +1,4 @@
-# membersync.py (v0.1.5) - require MC user_id unless explicitly allowed
+# membersync.py (v0.1.6) - duplicate verify prevention + clickable links in logs
 from __future__ import annotations
 
 import asyncio
@@ -6,8 +6,8 @@ import aiosqlite
 import json
 import logging
 import uuid
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 import discord
 from discord import ui, Interaction, ButtonStyle
@@ -30,7 +30,7 @@ DEFAULTS = {
     "auto_prune_interval_hours": 24,
     "profile_url_template": "https://www.missionchief.com/users/{id}",
     "require_nickname": True,
-    "allow_no_id": False,  # NEW: don't allow reviews without numeric MC user_id by default
+    "allow_no_id": False,
 }
 
 def now_utc() -> str:
@@ -250,7 +250,7 @@ class MemberSync(commands.Cog):
     async def _create_review_embed(self, guild: discord.Guild, member: discord.Member, cand: Dict[str, Any]) -> discord.Embed:
         mc_id = cand["mc_user_id"] or "Unknown"
         mc_name = cand["mc_name"]
-        url = f"https://www.missionchief.com/users/{mc_id}" if mc_id and mc_id.isdigit() else "https://www.missionchief.com/verband/mitglieder"
+        url = self._profile_url(mc_id) if mc_id and str(mc_id).isdigit() else "https://www.missionchief.com/verband/mitglieder"
         e = discord.Embed(title="Verification request", color=discord.Color.blurple(), timestamp=datetime.utcnow())
         e.add_field(name="MissionChief", value=f"[{mc_name}]({url})\nID: `{mc_id}`", inline=False)
         e.add_field(name="Discord", value=f"{member.mention}\nID: `{member.id}`\nGuild Nick: `{member.nick or 'None'}`", inline=False)
@@ -274,7 +274,6 @@ class MemberSync(commands.Cog):
             mc_user_id = str(rv["mc_user_id"] or "")
             mc_name = rv["mc_name"]
             message_id = int(rv["message_id"]) if rv["message_id"] else None
-        # Enforce ID presence unless config allows it
         allow_no_id = await self.config.allow_no_id()
         if (not mc_user_id) or (not mc_user_id.isdigit()):
             if not allow_no_id:
@@ -318,7 +317,8 @@ class MemberSync(commands.Cog):
                     pass
         emb = discord.Embed(title="Member verified", color=discord.Color.green(), timestamp=datetime.utcnow())
         uid_txt = mc_user_id if mc_user_id else "Unknown"
-        emb.add_field(name="MissionChief", value=f"{mc_name} (`{uid_txt}`)", inline=False)
+        url = self._profile_url(uid_txt) if uid_txt and uid_txt.isdigit() else "https://www.missionchief.com/verband/mitglieder"
+        emb.add_field(name="MissionChief", value=f"[{mc_name}]({url}) (`{uid_txt}`)", inline=False)
         emb.add_field(name="Discord", value=f"<@{discord_id}> (`{discord_id}`)", inline=False)
         emb.add_field(name="Approved by", value=f"<@{approver.id}>", inline=False)
         await self._send_log(guild, emb)
@@ -383,7 +383,8 @@ class MemberSync(commands.Cog):
                     pass
         emb = discord.Embed(title="Member verification rejected", color=discord.Color.red(), timestamp=datetime.utcnow())
         uid_txt = mc_user_id if mc_user_id else "Unknown"
-        emb.add_field(name="MissionChief", value=f"{mc_name} (`{uid_txt}`)", inline=False)
+        url = self._profile_url(uid_txt) if uid_txt and uid_txt.isdigit() else "https://www.missionchief.com/verband/mitglieder"
+        emb.add_field(name="MissionChief", value=f"[{mc_name}]({url}) (`{uid_txt}`)", inline=False)
         emb.add_field(name="Discord", value=f"<@{discord_id}> (`{discord_id}`)", inline=False)
         emb.add_field(name="Rejected by", value=f"<@{interaction.user.id}>", inline=False)
         emb.add_field(name="Reason", value=reason[:400], inline=False)
@@ -467,6 +468,8 @@ class MemberSync(commands.Cog):
                     await db.execute("UPDATE links SET status='revoked' WHERE discord_id=?", (discord_id,))
                     await db.commit()
                 emb = discord.Embed(title="Member auto-pruned", color=discord.Color.orange(), timestamp=datetime.utcnow())
+                url = self._profile_url(mc_user_id) if mc_user_id and mc_user_id.isdigit() else "https://www.missionchief.com/verband/mitglieder"
+                emb.add_field(name="MissionChief", value=f"[{row['mc_name']}]({url}) (`{mc_user_id or 'Unknown'}`)", inline=False)
                 emb.add_field(name="Discord", value=f"<@{discord_id}> (`{discord_id}`)", inline=False)
                 emb.add_field(name="Reason", value="Not found in alliance roster", inline=False)
                 await self._send_log(guild, emb)
@@ -512,35 +515,6 @@ class MemberSync(commands.Cog):
                        f"Require nickname: {cfg['require_nickname']}\n"
                        f"Allow no ID: {cfg['allow_no_id']}\n"
                        "```")
-
-    @membersync_group.command(name="debugfind")
-    async def debugfind(self, ctx: commands.Context, *, name_or_mention: Optional[str] = None):
-        if not await self._is_approver(ctx.author):
-            await ctx.send("You are not allowed to run debugfind.")
-            return
-        target_name = None
-        if ctx.message.mentions:
-            m = ctx.message.mentions[0]
-            target_name = m.nick
-        else:
-            target_name = name_or_mention or ctx.author.nick
-        if not target_name:
-            await ctx.send("No guild nickname found. Please set a server nickname for this test.")
-            return
-        nick_n = norm_name(target_name)
-        members = await self._get_alliance_members()
-        scored = []
-        for m in members:
-            mcname = m.get("name") or ""
-            score = 1.0 if norm_name(mcname) == nick_n else fuzzy_ratio(nick_n, norm_name(mcname))
-            scored.append((score, mcname, str(m.get("user_id") or ""), m))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        top = scored[:5]
-        if not top:
-            await ctx.send("No alliance members loaded.")
-            return
-        lines = [f"{i+1}. {t[1]} | user_id={t[2] or 'None'} | score={t[0]:.3f}" for i, t in enumerate(top)]
-        await ctx.send("```\n" + "\n".join(lines) + "\n```")
 
     @membersync_group.group(name="config")
     @checks.is_owner()
@@ -622,7 +596,46 @@ class MemberSync(commands.Cog):
 
     @commands.command(name="verify")
     async def verify(self, ctx: commands.Context, mc_id: Optional[str] = None):
-        feedback = await ctx.send("Searching the alliance roster for your account... this can take a moment.")
+        feedback = await ctx.send("Checking your verification status...")
+        # Early check: already verified?
+        link = await self.get_link_for_discord(int(ctx.author.id))
+        role_id = await self.config.verified_role_id()
+        role = ctx.guild.get_role(int(role_id)) if role_id else None
+        has_role = role in ctx.author.roles if role else False
+        in_alliance = False
+        if link and link.get("status") == "approved" and link.get("mc_user_id"):
+            members = await self._get_alliance_members()
+            in_alliance = any(str(m.get("user_id")) == str(link["mc_user_id"]) for m in members)
+            if in_alliance and has_role:
+                await feedback.edit(content=f"You are already verified as **{link['mc_name']}** (ID `{link['mc_user_id']}`). No action needed.")
+                secs = int(await self.config.autodelete_user_feedback_seconds())
+                if secs > 0:
+                    try:
+                        await asyncio.sleep(secs)
+                        await feedback.delete()
+                    except Exception:
+                        pass
+                return
+            if in_alliance and (not has_role) and role:
+                try:
+                    await ctx.author.add_roles(role, reason="MemberSync: restoring missing verified role")
+                except Exception:
+                    pass
+                emb = discord.Embed(title="Verified role restored", color=discord.Color.blurple(), timestamp=datetime.utcnow())
+                url = self._profile_url(str(link["mc_user_id"])) if str(link["mc_user_id"]).isdigit() else "https://www.missionchief.com/verband/mitglieder"
+                emb.add_field(name="MissionChief", value=f"[{link['mc_name']}]({url}) (`{link['mc_user_id']}`)", inline=False)
+                emb.add_field(name="Discord", value=f"{ctx.author.mention} (`{ctx.author.id}`)", inline=False)
+                await self._send_log(ctx.guild, emb)
+                await feedback.edit(content=f"You're already verified as **{link['mc_name']}**. Your verified role was missing and has been restored.")
+                secs = int(await self.config.autodelete_user_feedback_seconds())
+                if secs > 0:
+                    try:
+                        await asyncio.sleep(secs)
+                        await feedback.delete()
+                    except Exception:
+                        pass
+                return
+        # Not already fully verified; continue with normal verify flow
         require_nick = await self.config.require_nickname()
         if require_nick and not ctx.author.nick:
             await feedback.edit(content="No server nickname set. Please set your Discord **server nickname** to your MissionChief name, then run `!verify` again. Or use `!verify <MC_ID>` as a fallback.")
@@ -645,14 +658,13 @@ class MemberSync(commands.Cog):
                 except Exception:
                     pass
             return
-        # Enforce ID presence unless allowed
         allow_no_id = await self.config.allow_no_id()
         mc_user_id = cand.get("mc_user_id") or ""
         if (not mc_user_id) or (not mc_user_id.isdigit()):
             if not allow_no_id:
                 await feedback.edit(content=(
-                    f"Found candidate **{cand['mc_name']}**, but your MissionChief **user ID is missing** in the roster.\n"
-                    "Please run `[p]scraper run members full` to refresh the roster and try again, **or** run `!verify <MC_ID>` explicitly."
+                    f"Found candidate **{cand['mc_name']}**, but the MissionChief **user ID is missing** in the roster.\n"
+                    "Run `[p]scraper members full` to refresh the roster or use `!verify <MC_ID>`."
                 ))
                 secs = int(await self.config.autodelete_user_feedback_seconds())
                 if secs > 0:
