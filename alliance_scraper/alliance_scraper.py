@@ -1,4 +1,4 @@
-# alliance_scraper.py (v1.2.1)
+# alliance_scraper.py (v1.2.2)
 from __future__ import annotations
 
 import asyncio
@@ -85,7 +85,7 @@ def _header_index_map(headers: List[str], wanted_map: Dict[str, List[str]]) -> D
 
 class AllianceScraper(commands.Cog):
     """Scrapes MissionChief alliance data using CookieManager session and stores into SQLite.
-       v1.2.1 fixes migration for members_history.user_id.
+       v1.2.2: robust schema migration, fix race in setup, add !scraper fixdb.
     """
 
     def __init__(self, bot):
@@ -101,16 +101,12 @@ class AllianceScraper(commands.Cog):
             "schoolings": asyncio.Lock(),
             "kasse": asyncio.Lock(),
         }
-        self.bot.loop.create_task(self._init())
+        self._migrated = False
 
-    async def _init(self):
-        await self._init_db()
-        await self._maybe_start_background()
-
+    # ----------------- DB init & migration -----------------
     async def _init_db(self):
         self.data_path.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.db_path) as db:
-            # Base tables
             await db.execute("""
             CREATE TABLE IF NOT EXISTS members_current (
                 member_id TEXT PRIMARY KEY,
@@ -168,25 +164,33 @@ class AllianceScraper(commands.Cog):
                 inserted_at_utc TEXT
             )
             """)
-            # Migrations
-            # 1) members_current.user_id
-            try:
-                await db.execute("SELECT user_id FROM members_current LIMIT 1")
-            except Exception:
+            await db.commit()
+        await self._migrate_schema()
+        self._migrated = True
+
+    async def _migrate_schema(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            # members_current.user_id
+            cols = [r[1] for r in await (await db.execute("PRAGMA table_info(members_current)")).fetchall()]
+            if "user_id" not in cols:
                 await db.execute("ALTER TABLE members_current ADD COLUMN user_id TEXT")
-            # 2) members_history.user_id
-            try:
-                await db.execute("SELECT user_id FROM members_history LIMIT 1")
-            except Exception:
+            # members_history.user_id
+            cols = [r[1] for r in await (await db.execute("PRAGMA table_info(members_history)")).fetchall()]
+            if "user_id" not in cols:
                 await db.execute("ALTER TABLE members_history ADD COLUMN user_id TEXT")
-            # Indexes
+            # indexes
             await db.execute("CREATE INDEX IF NOT EXISTS idx_members_user_id ON members_current(user_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_logs_date ON alliance_logs(date_utc)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_kasse_date ON kasse_transactions(date_utc)")
             await db.commit()
 
+    async def _ensure_migrated(self):
+        if not self._migrated:
+            await self._init_db()
+
     # ----------------- Public API for other cogs -----------------
     async def get_members(self) -> List[Dict[str, Any]]:
+        await self._ensure_migrated()
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute("SELECT * FROM members_current ORDER BY earned_credits DESC")
@@ -194,6 +198,7 @@ class AllianceScraper(commands.Cog):
             return [dict(r) for r in rows]
 
     async def get_logs_since(self, since_utc: Optional[str] = None, limit: int = 500) -> List[Dict[str, Any]]:
+        await self._ensure_migrated()
         query = "SELECT * FROM alliance_logs"
         params: List[Any] = []
         if since_utc:
@@ -208,6 +213,7 @@ class AllianceScraper(commands.Cog):
             return [dict(r) for r in rows]
 
     async def get_schoolings(self) -> List[Dict[str, Any]]:
+        await self._ensure_migrated()
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute("SELECT * FROM schoolings_open ORDER BY snapshot_utc DESC, course ASC")
@@ -215,6 +221,7 @@ class AllianceScraper(commands.Cog):
             return [dict(r) for r in rows]
 
     async def get_kasse_transactions(self, limit: int = 500) -> List[Dict[str, Any]]:
+        await self._ensure_migrated()
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute("SELECT * FROM kasse_transactions ORDER BY date_utc DESC LIMIT ?", (limit,))
@@ -307,6 +314,7 @@ class AllianceScraper(commands.Cog):
 
     # Members
     async def _scrape_members(self) -> int:
+        await self._ensure_migrated()
         cfg = await self.config.all()
         url = cfg["members_url"]
         patterns = cfg.get("member_id_href_patterns", DEFAULTS["member_id_href_patterns"])
@@ -369,6 +377,7 @@ class AllianceScraper(commands.Cog):
         return hashlib.sha1(base.encode("utf-8")).hexdigest()
 
     async def _scrape_logs(self, incremental: bool = True) -> int:
+        await self._ensure_migrated()
         cfg = await self.config.all()
         url = cfg["logs_url"]
         async with self._locks["logs"]:
@@ -422,6 +431,7 @@ class AllianceScraper(commands.Cog):
 
     # Schoolings
     async def _scrape_schoolings(self) -> int:
+        await self._ensure_migrated()
         cfg = await self.config.all()
         url = cfg["schoolings_url"]
         async with self._locks["schoolings"]:
@@ -459,6 +469,7 @@ class AllianceScraper(commands.Cog):
         return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
     async def _scrape_kasse(self, incremental: bool = True) -> int:
+        await self._ensure_migrated()
         cfg = await self.config.all()
         url = cfg["kasse_url"]
 
@@ -537,9 +548,17 @@ class AllianceScraper(commands.Cog):
     async def scraper(self, ctx: commands.Context):
         """AllianceScraper controls (owner only)."""
 
+    @scraper.command(name="fixdb")
+    async def fixdb(self, ctx: commands.Context):
+        """Run DB migration now (safe to run multiple times)."""
+        await self._migrate_schema()
+        self._migrated = True
+        await ctx.send("DB migration completed.")
+
     @scraper.command(name="status")
     async def status(self, ctx: commands.Context):
         """Show scraper status and DB info counts."""
+        await self._ensure_migrated()
         async with aiosqlite.connect(self.db_path) as db:
             counts = {}
             for table in ["members_current", "members_history", "alliance_logs", "schoolings_open", "kasse_transactions"]:
@@ -566,6 +585,7 @@ class AllianceScraper(commands.Cog):
         Run a scrape now. Targets: members, logs, schoolings, kasse
         Mode: inc (incremental) or full
         """
+        await self._ensure_migrated()
         target = target.lower().strip()
         inc = (mode != "full")
         if target == "members":
@@ -587,6 +607,7 @@ class AllianceScraper(commands.Cog):
         Export a dataset as CSV or JSON.
         datasets: members_current, members_history, alliance_logs, schoolings_open, kasse_transactions
         """
+        await self._ensure_migrated()
         import discord  # lazy import for file sending
         dataset = dataset.strip().lower()
         fmt = fmt.strip().lower()
@@ -655,4 +676,8 @@ class AllianceScraper(commands.Cog):
         await ctx.send("Unknown key.")
 
 async def setup(bot):
-    await bot.add_cog(AllianceScraper(bot))
+    # Ensure DB is fully initialized BEFORE commands are available
+    cog = AllianceScraper(bot)
+    await cog._init_db()
+    await bot.add_cog(cog)
+    await cog._maybe_start_background()
