@@ -1,0 +1,19 @@
+{
+  "author": [
+    "chatgpt"
+  ],
+  "install_msg": "Training Manager cog installed. Use [p]tmset to configure channels/role, then [p]tmset post to drop the Start Training panel.",
+  "name": "TrainingManager",
+  "short": "Let users request trainings; admins approve/deny; optional reminders at end time.",
+  "description": "Request/approve training classes with discipline->training menu, per-day fee, optional reference, and reminders. Admins approve/deny in a separate channel; cleaned up with logging.",
+  "tags": [
+    "missionchief",
+    "training",
+    "workflows",
+    "approvals"
+  ],
+  "requirements": [],
+  "min_bot_version": "3.5.0",
+  "end_user_data_statement": "Stores training requests and reminder schedules (user id, message links, times) until processed. Deletes admin queue messages when processed. No external services.",
+  "hidden": false
+}
