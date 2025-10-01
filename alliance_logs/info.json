@@ -2,10 +2,10 @@
   "author": [
     "FARA-Assistant"
   ],
-  "install_msg": "AllianceLogs v0.4.0 installed. Load with [p]load alliance_logs",
+  "install_msg": "AllianceLogs v0.4.1 installed. Load with [p]load alliance_logs",
   "name": "AllianceLogs",
   "short": "Publish MissionChief alliance logs from AllianceScraper to Discord",
-  "description": "Strict title whitelist, emojis/colors, per-action mirrors, clean titles, minimal layout.",
+  "description": "Strict title whitelist, emojis/colors, mirrors; safest string handling.",
   "disabled": false,
   "min_bot_version": "3.5.0",
   "hidden": false,
