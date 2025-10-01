@@ -1,9 +1,10 @@
-# alliance_logs.py v0.3.1
+# alliance_logs.py v0.3.2
 from __future__ import annotations
 
 import asyncio
 import aiosqlite
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 
@@ -19,7 +20,7 @@ DEFAULTS = {
     "interval_minutes": 5,
     "style": "compact",
     "emoji_titles": True,
-    "title_mode": "normalized",
+    "title_mode": "normalized",  # normalized|raw
     "colors": {},
     "icons": {},
 }
@@ -71,17 +72,42 @@ DISPLAY = {
     "promoted_event_manager": ("Promoted to Event Manager", "green", "🎟️"),
 }
 
-def now_utc() -> str:
-    return datetime.utcnow().isoformat()
+DATE_PATTERNS = [
+    r"\b\d{4}-\d{2}-\d{2}\b",         # 2025-10-01
+    r"\b\d{2}/\d{2}/\d{4}\b",         # 01/10/2025
+    r"\b\d{2}-\d{2}-\d{4}\b",         # 01-10-2025
+    r"\b\d{1,2}:\d{2}(?::\d{2})?\b",  # 9:24 or 09:24:10
+    r"\b[0-3]?\d [A-Za-z]{3,9} \d{4}\b", # 1 Oct 2025
+    r"\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b", # weekdays
+]
+
+def _sanitize_title(title: str) -> str:
+    t = title or ""
+    for pat in DATE_PATTERNS:
+        t = re.sub(pat, "", t, flags=re.I)
+    # remove stray brackets with only numbers or dates inside
+    t = re.sub(r"[\(\[\{]\s*[\d:\-\/\sA-Za-z]{3,}\s*[\)\]\}]", "", t)
+    # collapse spaces and punctuation noise
+    t = re.sub(r"[_\s]{2,}", " ", t).strip(" -•–—:_")
+    # clamp
+    return (t or "Alliance log")[:200]
 
 def _humanize_key(key: str) -> str:
-    k = (key or "").strip().replace("_", " ")
-    return k[:1].upper() + k[1:] if k else "Alliance log"
+    k = (key or "").strip().lower()
+    k = re.sub(r"[^a-z0-9]+", " ", k)
+    k = re.sub(r"\b\d+\b", "", k)  # kill lone number tokens
+    k = re.sub(r"\s{2,}", " ", k).strip()
+    if not k:
+        return "Alliance log"
+    return k[:1].upper() + k[1:]
+
+def now_utc() -> str:
+    return datetime.utcnow().isoformat()
 
 class AllianceLogs(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xFA109A14, force_registration=True)
+        self.config = Config.get_conf(self, identifier=0xFA109A15, force_registration=True)
         self.config.register_global(**DEFAULTS)
         self.data_path = cog_data_path(self)
         self.db_path = self.data_path / "state.db"
@@ -172,9 +198,11 @@ class AllianceLogs(commands.Cog):
         default_title, color_key, default_icon = DISPLAY.get(key, ("Alliance log", "grey", "ℹ️"))
         if title_mode == "raw":
             raw = str(row.get("action_text") or "").strip().replace("\n", " ")
-            title = raw[:200] if raw else default_title
+            title = raw if raw else default_title
         else:
             title = default_title if key in DISPLAY else _humanize_key(key)
+        # sanitize regardless, to kill dates in any weird text
+        title = _sanitize_title(title)
         base_color = PALETTE.get(color_key, PALETTE["grey"])
         return title, base_color, default_icon
 
@@ -215,14 +243,13 @@ class AllianceLogs(commands.Cog):
                 e = discord.Embed(title=title_text, description=desc, color=color, timestamp=datetime.utcnow())
             else:
                 e = discord.Embed(title=title_text, color=color, timestamp=datetime.utcnow())
-                # make it visibly "fields" style
-                by = (await self._build_description(row)).split("\n")[0].replace("**By:** ", "")
-                e.add_field(name="By", value=by, inline=False)
-                if "Affected:" in await self._build_description(row):
-                    aff = (await self._build_description(row)).split("\n")[1].replace("**Affected:** ", "")
-                else:
-                    aff = "-"
-                e.add_field(name="Affected", value=aff, inline=False)
+                # fields variant
+                by_line = (await self._build_description(row)).split("\n")[0].replace("**By:** ", "")
+                e.add_field(name="By", value=by_line, inline=False)
+                # try to find Affected line if present
+                desc_lines = (await self._build_description(row)).split("\n")
+                aff_line = next((l for l in desc_lines if l.startswith("**Affected:**")), None)
+                e.add_field(name="Affected", value=(aff_line or "**Affected:** -").replace("**Affected:** ", ""), inline=False)
                 e.add_field(name="Details", value=row.get("description") or "-", inline=False)
                 e.add_field(name="Date", value=f"`{row.get('ts') or '-'}`", inline=False)
 
@@ -391,12 +418,12 @@ class AllianceLogs(commands.Cog):
         mirrors = await self.config.mirrors()
         if not mirrors:
             await ctx.send("```\nNo mirrors configured.\n```")
-            return
-        lines = []
-        for k, v in mirrors.items():
-            chans = ", ".join(f"<#{cid}>" for cid in (v.get("channels") or []))
-            lines.append(f"{k}: enabled={v.get('enabled')} channels=[{chans}]")
-        await ctx.send("```\n" + "\n".join(lines) + "\n```")
+        else:
+            lines = []
+            for k, v in mirrors.items():
+                chans = ", ".join(f"<#{cid}>" for cid in (v.get("channels") or []))
+                lines.append(f"{k}: enabled={v.get('enabled')} channels=[{chans}]")
+            await ctx.send("```\n" + "\n".join(lines) + "\n```")
 
     @alog_group.command(name="debug")
     async def debug(self, ctx: commands.Context, which: str = "last", n: int = 3):
