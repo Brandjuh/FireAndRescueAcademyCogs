@@ -1,5 +1,4 @@
-# MemberSync cog (patched minimal build for tuple/dict row safety)
-# v0.3.2
+# MemberSync cog (patched) v0.3.3
 from __future__ import annotations
 
 import asyncio
@@ -10,21 +9,20 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import discord
-from discord.ext import commands
-
-import aiosqlite  # type: ignore
 from pathlib import Path
-from redbot.core import Config, checks
+
+# IMPORTANT: use Red's commands module so we inherit the correct Cog base class
+from redbot.core import Config, checks, commands
 from redbot.core.bot import Red
 from redbot.core.commands import Context
 from redbot.core.data_manager import cog_data_path
 
-log = logging.getLogger("red.FARA.MemberSync")
+import aiosqlite  # type: ignore
 
-__version__ = "0.3.2"
+log = logging.getLogger("red.FARA.MemberSync")
+__version__ = "0.3.3"
 
 # -------- aiosqlite compat shim --------
-# Some environments don't have execute_fetchone/execute_fetchall helpers.
 async def _exec_fetchall(db: aiosqlite.Connection, sql: str, params: Tuple = ()):
     try:
         return await db.execute_fetchall(sql, params)  # type: ignore[attr-defined]
@@ -43,14 +41,14 @@ async def _exec_fetchone(db: aiosqlite.Connection, sql: str, params: Tuple = ())
         await cur.close()
         return row
 
-def _as_dict_row(row):
-    # If row is aiosqlite.Row or dict-like
+def _row_to_dict(row, keys: Optional[List[str]]=None):
     if hasattr(row, "keys"):
         try:
             return dict(row)
         except Exception:
             pass
-    # Fallback: return as tuple wrapper (caller must map indices)
+    if keys:
+        return dict(zip(keys, row))
     return row
 
 # -------- Core Cog --------
@@ -69,11 +67,11 @@ class MemberSync(commands.Cog):
         self.data_path: Path = cog_data_path(self)
         self.db_path: Path = self.data_path / "membersync.db"
         defaults = {
-            "verify_role_id": None,              # role given upon approval
-            "review_channel_id": None,           # admin review channel
-            "log_channel_id": None,              # log channel
-            "review_role_ids": [],               # roles allowed to approve/deny
-            "rate_limit_seconds": 15,            # per-user verify rate limit
+            "verify_role_id": None,
+            "review_channel_id": None,
+            "log_channel_id": None,
+            "review_role_ids": [],
+            "rate_limit_seconds": 15,
         }
         self.config.register_global(**defaults)
 
@@ -86,11 +84,11 @@ class MemberSync(commands.Cog):
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """CREATE TABLE IF NOT EXISTS links(
-                    discord_id     TEXT NOT NULL,
-                    mc_user_id     TEXT NOT NULL,
-                    status         TEXT NOT NULL,         -- 'pending','approved','denied'
-                    created_at_utc TEXT NOT NULL,
-                    approved_by    TEXT,
+                    discord_id      TEXT NOT NULL,
+                    mc_user_id      TEXT NOT NULL,
+                    status          TEXT NOT NULL,
+                    created_at_utc  TEXT NOT NULL,
+                    approved_by     TEXT,
                     approved_at_utc TEXT,
                     UNIQUE(discord_id),
                     UNIQUE(mc_user_id)
@@ -109,7 +107,6 @@ class MemberSync(commands.Cog):
             await db.commit()
 
     # ---------- Alliance DB helpers ----------
-
     def _get_alliance_db_path(self) -> Optional[Path]:
         sc = self.bot.get_cog("AllianceScraper")
         if sc and getattr(sc, "db_path", None):
@@ -117,7 +114,6 @@ class MemberSync(commands.Cog):
                 return Path(getattr(sc, "db_path"))
             except Exception:
                 pass
-        # Fallback to canonical path
         guess = Path.home() / ".local/share/Red-DiscordBot/data" / self.bot.instance_name / "cogs/AllianceScraper/alliance.db"  # type: ignore
         return guess if guess.exists() else None
 
@@ -140,7 +136,7 @@ class MemberSync(commands.Cog):
         con.close()
         return ms, hs
 
-    # ---------- Public API for other cogs ----------
+    # ---------- Public API ----------
     async def get_link_for_mc(self, mc_user_id: str) -> Optional[Dict[str, Any]]:
         async with aiosqlite.connect(self.db_path) as db:
             try:
@@ -150,15 +146,10 @@ class MemberSync(commands.Cog):
             row = await _exec_fetchone(db, "SELECT * FROM links WHERE mc_user_id=?", (str(mc_user_id),))
             if not row:
                 return None
-            row = _as_dict_row(row)
-            if isinstance(row, tuple):
-                # columns: discord_id, mc_user_id, status, created_at_utc, approved_by, approved_at_utc
-                keys = ["discord_id","mc_user_id","status","created_at_utc","approved_by","approved_at_utc"]
-                row = dict(zip(keys, row))
+            row = _row_to_dict(row, ["discord_id","mc_user_id","status","created_at_utc","approved_by","approved_at_utc"])
             return row
 
     # ---------- Commands ----------
-
     @commands.group(name="membersync", invoke_without_command=True)
     async def ms_group(self, ctx: Context):
         """MemberSync: link Discord users to MissionChief accounts and manage verification."""
@@ -180,7 +171,6 @@ class MemberSync(commands.Cog):
         ]
         await ctx.send("```\n" + "\n".join(lines) + "\n```")
 
-    # --------- Retro tools ---------
     @ms_group.group(name="retro")
     @checks.admin_or_permissions(manage_guild=True)
     async def retro(self, ctx: Context):
@@ -189,16 +179,13 @@ class MemberSync(commands.Cog):
     @retro.command(name="scan")
     @checks.admin_or_permissions(manage_guild=True)
     async def retro_scan(self, ctx: Context, role: Optional[discord.Role] = None):
-        """Scan members with the verify role and list how many are not linked to a MC ID."""
+        """Scan members with the verify role and report how many are not linked to a MC ID."""
         role = role or ctx.guild.get_role((await self.config.verify_role_id()) or 0)
         if not role:
             await ctx.send("Verify role is not configured. Use `membersync set verifyrole <role>` first.")
             return
-
-        # Gather guild members with role
         targets = [m for m in ctx.guild.members if role in m.roles]
 
-        # Fetch existing linked discord ids
         linked_ids: set[int] = set()
         async with aiosqlite.connect(self.db_path) as db:
             try:
@@ -208,12 +195,10 @@ class MemberSync(commands.Cog):
             rows = await _exec_fetchall(db, "SELECT discord_id FROM links WHERE status='approved'")
         for r in rows:
             try:
-                linked_ids.add(int(r["discord_id"]))  # Row/dict path
+                linked_ids.add(int(r["discord_id"]))
             except Exception:
-                linked_ids.add(int(r[0]))  # tuple fallback
-
+                linked_ids.add(int(r[0]))
         missing = [m for m in targets if m.id not in linked_ids]
-
         await ctx.send(f"Checked {len(targets)} members with {role.mention}. Missing links: **{len(missing)}**.")
 
     @retro.command(name="apply")
@@ -224,13 +209,11 @@ class MemberSync(commands.Cog):
         if not role:
             await ctx.send("Verify role is not configured. Use `membersync set verifyrole <role>` first.")
             return
-
         adb = self._get_alliance_db_path()
         if not adb or not adb.exists():
             await ctx.send("AllianceScraper database not found. Make sure that cog is loaded and has scraped at least once.")
             return
 
-        # Build name -> mc_user_id map from roster
         con = sqlite3.connect(str(adb))
         con.row_factory = sqlite3.Row
         cur = con.cursor()
@@ -238,12 +221,10 @@ class MemberSync(commands.Cog):
             cur.execute("SELECT name, COALESCE(user_id, mc_user_id, '') as mc_user_id FROM members_current")
             roster = { (r["name"] or "").strip().lower(): str(r["mc_user_id"] or "") for r in cur.fetchall() }
         except Exception:
-            # back-compat field names
             cur.execute("SELECT name, COALESCE(user_id, '') as mc_user_id FROM members_current")
             roster = { (r["name"] or "").strip().lower(): str(r["mc_user_id"] or "") for r in cur.fetchall() }
         con.close()
 
-        # Existing links to avoid duplicates
         linked_ids: set[int] = set()
         async with aiosqlite.connect(self.db_path) as db:
             try:
@@ -278,7 +259,6 @@ class MemberSync(commands.Cog):
 
         await ctx.send(f"Retro apply finished. Newly linked: **{linked}**. Skipped: **{len(targets) - linked}**.")
 
-    # ---------- Small settings helpers ----------
     @ms_group.group(name="set")
     @checks.admin_or_permissions(manage_guild=True)
     async def set_group(self, ctx: Context):
@@ -309,6 +289,5 @@ class MemberSync(commands.Cog):
         await self.config.rate_limit_seconds.set(seconds)
         await ctx.send(f"Rate limit set to {seconds}s")
 
-# ---- setup ----
 async def setup(bot: Red):
     await bot.add_cog(MemberSync(bot))
