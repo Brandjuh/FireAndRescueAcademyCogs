@@ -1,17 +1,17 @@
-# MemberSync cog (patched) v0.3.3
+# MemberSync cog (patched) v0.3.4
 from __future__ import annotations
 
 import asyncio
 import logging
 import sqlite3
+import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import discord
 from pathlib import Path
 
-# IMPORTANT: use Red's commands module so we inherit the correct Cog base class
 from redbot.core import Config, checks, commands
 from redbot.core.bot import Red
 from redbot.core.commands import Context
@@ -20,7 +20,7 @@ from redbot.core.data_manager import cog_data_path
 import aiosqlite  # type: ignore
 
 log = logging.getLogger("red.FARA.MemberSync")
-__version__ = "0.3.3"
+__version__ = "0.3.4"
 
 # -------- aiosqlite compat shim --------
 async def _exec_fetchall(db: aiosqlite.Connection, sql: str, params: Tuple = ()):
@@ -51,7 +51,16 @@ def _row_to_dict(row, keys: Optional[List[str]]=None):
         return dict(zip(keys, row))
     return row
 
-# -------- Core Cog --------
+# Simple normalization for nickname -> roster name
+def _norm_name(s: str) -> str:
+    s = (s or "").strip().lower()
+    # strip common decorations: [TAG], (text), | text, emojis and extra symbols
+    s = re.sub(r"\[[^\]]*\]", "", s)   # remove [ ... ]
+    s = re.sub(r"\([^\)]*\)", "", s)   # remove ( ... )
+    s = re.sub(r"\|.*$", "", s)        # cut after first pipe
+    s = re.sub(r"[^a-z0-9\s]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 @dataclass
 class RetroCandidate:
@@ -70,7 +79,7 @@ class MemberSync(commands.Cog):
             "verify_role_id": None,
             "review_channel_id": None,
             "log_channel_id": None,
-            "review_role_ids": [],
+            "review_role_ids": [],  # roles allowed to approve/deny
             "rate_limit_seconds": 15,
         }
         self.config.register_global(**defaults)
@@ -117,26 +126,7 @@ class MemberSync(commands.Cog):
         guess = Path.home() / ".local/share/Red-DiscordBot/data" / self.bot.instance_name / "cogs/AllianceScraper/alliance.db"  # type: ignore
         return guess if guess.exists() else None
 
-    async def _roster_latest_times(self) -> Tuple[Optional[str], Optional[str]]:
-        adb = self._get_alliance_db_path()
-        if not adb or not adb.exists():
-            return None, None
-        con = sqlite3.connect(str(adb))
-        cur = con.cursor()
-        try:
-            cur.execute("SELECT MAX(scraped_at) FROM members_current")
-            ms = cur.fetchone()[0]
-        except Exception:
-            ms = None
-        try:
-            cur.execute("SELECT MAX(snapshot_utc) FROM members_history")
-            hs = cur.fetchone()[0]
-        except Exception:
-            hs = None
-        con.close()
-        return ms, hs
-
-    # ---------- Public API ----------
+    # ---------- Public API used by other cogs ----------
     async def get_link_for_mc(self, mc_user_id: str) -> Optional[Dict[str, Any]]:
         async with aiosqlite.connect(self.db_path) as db:
             try:
@@ -157,20 +147,35 @@ class MemberSync(commands.Cog):
 
     @ms_group.command(name="status")
     async def status(self, ctx: Context):
-        """Show MemberSync status and latest roster times from AllianceScraper."""
-        ms, hs = await self._roster_latest_times()
+        """Show MemberSync status and current configuration."""
         cfg = await self.config.all()
+        # best effort roster freshness
+        ms = hs = "-"
+        adb = self._get_alliance_db_path()
+        if adb and adb.exists():
+            con = sqlite3.connect(str(adb)); cur = con.cursor()
+            try:
+                cur.execute("SELECT MAX(scraped_at) FROM members_current"); ms = cur.fetchone()[0] or "-"
+            except Exception:
+                pass
+            try:
+                cur.execute("SELECT MAX(snapshot_utc) FROM members_history"); hs = cur.fetchone()[0] or "-"
+            except Exception:
+                pass
+            con.close()
         lines = [
             f"MemberSync v{__version__}",
             f"Verify role ID: {cfg.get('verify_role_id')}",
             f"Review channel ID: {cfg.get('review_channel_id')}",
             f"Log channel ID: {cfg.get('log_channel_id')}",
+            f"Reviewer roles: {cfg.get('review_role_ids')}",
             f"Rate limit: {cfg.get('rate_limit_seconds')}s",
-            f"Roster latest members_current.scraped_at: {ms or '-'}",
-            f"Roster latest members_history.snapshot_utc: {hs or '-'}",
+            f"Roster members_current.scraped_at: {ms}",
+            f"Roster members_history.snapshot_utc: {hs}",
         ]
         await ctx.send("```\n" + "\n".join(lines) + "\n```")
 
+    # ----- Retro tools -----
     @ms_group.group(name="retro")
     @checks.admin_or_permissions(manage_guild=True)
     async def retro(self, ctx: Context):
@@ -217,14 +222,23 @@ class MemberSync(commands.Cog):
         con = sqlite3.connect(str(adb))
         con.row_factory = sqlite3.Row
         cur = con.cursor()
+
+        # Build a robust name -> mcid map from current roster, with normalized variants
+        roster_map: Dict[str, str] = {}
         try:
             cur.execute("SELECT name, COALESCE(user_id, mc_user_id, '') as mc_user_id FROM members_current")
-            roster = { (r["name"] or "").strip().lower(): str(r["mc_user_id"] or "") for r in cur.fetchall() }
-        except Exception:
+        except sqlite3.OperationalError:
             cur.execute("SELECT name, COALESCE(user_id, '') as mc_user_id FROM members_current")
-            roster = { (r["name"] or "").strip().lower(): str(r["mc_user_id"] or "") for r in cur.fetchall() }
+        for r in cur.fetchall():
+            name = (r["name"] or "").strip()
+            mcid = str(r["mc_user_id"] or "").strip()
+            if not name or not mcid:
+                continue
+            roster_map[name.lower()] = mcid
+            roster_map[_norm_name(name)] = mcid
         con.close()
 
+        # Already linked
         linked_ids: set[int] = set()
         async with aiosqlite.connect(self.db_path) as db:
             try:
@@ -241,10 +255,14 @@ class MemberSync(commands.Cog):
         targets = [m for m in ctx.guild.members if role in m.roles and m.id not in linked_ids]
 
         linked = 0
+        tried = 0
         async with aiosqlite.connect(self.db_path) as db:
             for m in targets:
-                name = (m.nick or m.display_name or m.name).strip().lower()
-                mcid = roster.get(name, "")
+                tried += 1
+                disp = (m.nick or m.display_name or m.name).strip()
+                key_exact = disp.lower()
+                key_norm = _norm_name(disp)
+                mcid = roster_map.get(key_exact) or roster_map.get(key_norm)
                 if not mcid:
                     continue
                 try:
@@ -257,12 +275,13 @@ class MemberSync(commands.Cog):
                     pass
             await db.commit()
 
-        await ctx.send(f"Retro apply finished. Newly linked: **{linked}**. Skipped: **{len(targets) - linked}**.")
+        await ctx.send(f"Retro apply finished. Checked: **{tried}**. Newly linked: **{linked}**. Skipped: **{tried - linked}**.")
 
+    # ----- Settings -----
     @ms_group.group(name="set")
     @checks.admin_or_permissions(manage_guild=True)
     async def set_group(self, ctx: Context):
-        """Configure MemberSync settings (verify role, channels, rate limit)."""
+        """Configure MemberSync settings (verify role, channels, reviewer roles, rate limit)."""
 
     @set_group.command(name="verifyrole")
     async def set_verify_role(self, ctx: Context, role: discord.Role):
@@ -288,6 +307,41 @@ class MemberSync(commands.Cog):
         seconds = max(1, int(seconds))
         await self.config.rate_limit_seconds.set(seconds)
         await ctx.send(f"Rate limit set to {seconds}s")
+
+    # Reviewer role management
+    @set_group.group(name="reviewer")
+    async def reviewer_group(self, ctx: Context):
+        """Manage reviewer roles that can approve/deny verifications."""
+
+    @reviewer_group.command(name="add")
+    async def reviewer_add(self, ctx: Context, role: discord.Role):
+        """Add a role that can approve/deny verification requests."""
+        roles = await self.config.review_role_ids()
+        if role.id not in roles:
+            roles.append(role.id)
+            await self.config.review_role_ids.set(roles)
+        await ctx.send(f"Added reviewer role: {role.mention}")
+
+    @reviewer_group.command(name="remove")
+    async def reviewer_remove(self, ctx: Context, role: discord.Role):
+        """Remove a reviewer role."""
+        roles = await self.config.review_role_ids()
+        roles = [r for r in roles if r != role.id]
+        await self.config.review_role_ids.set(roles)
+        await ctx.send(f"Removed reviewer role: {role.mention}")
+
+    @reviewer_group.command(name="list")
+    async def reviewer_list(self, ctx: Context):
+        """List all reviewer roles."""
+        ids = await self.config.review_role_ids()
+        if not ids:
+            await ctx.send("No reviewer roles configured.")
+            return
+        names = []
+        for i in ids:
+            r = ctx.guild.get_role(i)
+            names.append(r.mention if r else f"`{i}`")
+        await ctx.send("Reviewer roles: " + ", ".join(names))
 
 async def setup(bot: Red):
     await bot.add_cog(MemberSync(bot))
