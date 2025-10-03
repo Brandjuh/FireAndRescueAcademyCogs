@@ -109,6 +109,9 @@ DISCIPLINES: Dict[str, List[Tuple[str, int]]] = {
         ("Tactical Medic Training", 4),
         ("Truck Driver's License", 2),
     ],
+    "TEST": [
+        ("TEST DEBUG", 0), 
+    ],
 }
 
 FEE_CHOICES = [0, 100, 200, 300, 400, 500]
