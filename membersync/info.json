@@ -1,24 +1,24 @@
 {
   "author": [
-    "FARA-Assistant"
+    "FireAndRescueAcademy (FARA)"
   ],
-  "install_msg": "MemberSync installed. Load with [p]load membersync",
+  "install_msg": "MemberSync installed. Use `[p]help membersync` to see commands.",
   "name": "MemberSync",
-  "short": "Link Discord users to MissionChief members with admin review",
-  "description": "Users run !verify, approvers review via buttons. Stores Discord<->MC mapping, assigns role, logs, and auto-prunes if user leaves the alliance.",
-  "disabled": false,
-  "min_bot_version": "3.5.0",
-  "hidden": false,
+  "short": "Alliance member verification and sync",
+  "description": "Verify Discord users as alliance members using local AllianceScraper DB, with reviewer workflow, auto-prune and retry queue.",
   "tags": [
     "missionchief",
     "verification",
-    "members"
+    "alliance",
+    "sync"
   ],
-  "requirements": [
-    "aiosqlite"
-  ],
-  "end_user_data_statement": "Stores Discord<->MissionChief links locally on your machine (SQLite). No data is sent to third parties.",
+  "requirements": [],
+  "hidden": false,
+  "disabled": false,
   "type": "COG",
+  "end_user_data_statement": "Stores minimal link and audit data for verification purposes.",
+  "min_bot_version": "3.5.0",
+  "max_bot_version": "999.0.0",
   "min_python_version": [
     3,
     9,

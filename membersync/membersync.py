@@ -1,675 +1,968 @@
-# MemberSync cog (full) v0.3.5
+
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import dataclasses
 import logging
-import sqlite3
+import os
 import re
-from dataclasses import dataclass
+import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import discord
-from pathlib import Path
-
-from redbot.core import Config, checks, commands
+from discord.ext import commands
+from redbot.core import Config, checks
 from redbot.core.bot import Red
-from redbot.core.commands import Context
 from redbot.core.data_manager import cog_data_path
 
-import aiosqlite  # type: ignore
-
 log = logging.getLogger("red.FARA.MemberSync")
-__version__ = "0.3.5"
 
-UTC = timezone.utc
+# -------------------- Defaults provided by user --------------------
+DEFAULT_REVIEWER_ROLE_ID = 544117282167586836
+DEFAULT_VERIFIED_ROLE_ID = 565988933113085952
+DEFAULT_LOG_CHANNEL_ID   = 668874513663918100
+DEFAULT_ADMIN_CHANNEL_ID = 1421256548977606827
 
-# -------- aiosqlite compat shim --------
-async def _exec_fetchall(db: aiosqlite.Connection, sql: str, params: Tuple = ()):
-    try:
-        return await db.execute_fetchall(sql, params)  # type: ignore[attr-defined]
-    except AttributeError:
-        cur = await db.execute(sql, params)
-        rows = await cur.fetchall()
-        await cur.close()
-        return rows
+# -------------------- Config defaults --------------------
+GUILD_DEFAULTS = {
+    "review_channel_id": None,     # where review embeds go
+    "log_channel_id": None,        # where audit/log embeds go
+    "verified_role_id": None,      # role to add/remove
+    "reviewer_roles": [],          # who can approve/deny & run admin commands
+    "stale_window_minutes": 45,    # roster recency threshold
+    "cooldown_seconds": 30,        # verify cooldown per user
+    "queue_retry_seconds": [120]*30,   # 30 attempts, 2 minutes each (max ~60 min), plus event-trigger
+    "queue_max_age_hours": 24,
+}
 
-async def _exec_fetchone(db: aiosqlite.Connection, sql: str, params: Tuple = ()):
-    try:
-        return await db.execute_fetchone(sql, params)  # type: ignore[attr-defined]
-    except AttributeError:
-        cur = await db.execute(sql, params)
-        row = await cur.fetchone()
-        await cur.close()
-        return row
+GLOBAL_DEFAULTS = {
+    "alliance_db_path": None,      # resolved path to alliance.db; discovered automatically if not set
+}
 
-def _row_to_dict(row, keys: Optional[List[str]]=None):
-    if hasattr(row, "keys"):
-        try:
-            return dict(row)
-        except Exception:
-            pass
-    if keys:
-        return dict(zip(keys, row))
-    return row
+NL = "\n"
 
-def now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+# -------------- Dataclasses for clarity --------------
+@dataclasses.dataclass
+class RosterMatch:
+    mc_user_id: Optional[str]
+    mc_name: str
 
-# Simple normalization for nickname -> roster name
-def _norm_name(s: str) -> str:
-    s = (s or "").strip().lower()
-    # strip common decorations: [TAG], (text), | text, emojis and extra symbols
-    s = re.sub(r"\[[^\]]*\]", "", s)   # remove [ ... ]
-    s = re.sub(r"\([^\)]*\)", "", s)   # remove ( ... )
-    s = re.sub(r"\|.*$", "", s)        # cut after first pipe
-    s = re.sub(r"[^a-z0-9\s]+", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+@dataclasses.dataclass
+class PendingEntry:
+    guild_id: int
+    discord_id: int
+    mode: str  # "name" | "id"
+    nickname: Optional[str]
+    mc_id: Optional[str]
+    requested_at: str
+    next_retry_at: str
+    retries: int
+    status: str
+    last_error: Optional[str]
 
-@dataclass
-class RetroCandidate:
-    member: discord.Member
-    display_name: str
-
-class ReviewView(discord.ui.View):
-    def __init__(self, cog: "MemberSync", discord_id: int, mc_user_id: str, timeout: int = 300):
-        super().__init__(timeout=timeout)
-        self.cog = cog
-        self.discord_id = discord_id
-        self.mc_user_id = mc_user_id
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        # Only admins or reviewer roles
-        if not interaction.guild:
-            return False
-        if interaction.user.guild_permissions.manage_guild:
-            return True
-        ids = await self.cog.config.review_role_ids()
-        if any(r.id in ids for r in getattr(interaction.user, "roles", []) or []):
-            return True
-        await interaction.response.send_message("You are not allowed to do this.", ephemeral=True)
-        return False
-
-    @discord.ui.button(label="Approve", style=discord.ButtonStyle.success, emoji="✅")
-    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=False)
-        await self.cog._approve_link(interaction, self.discord_id, self.mc_user_id)
-
-    @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger, emoji="⛔")
-    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(DenyModal(self.cog, self.discord_id, self.mc_user_id))
-
-class DenyModal(discord.ui.Modal, title="Deny verification"):
-    reason = discord.ui.TextInput(label="Reason", style=discord.TextStyle.long, required=True, max_length=500)
-
-    def __init__(self, cog: "MemberSync", discord_id: int, mc_user_id: str):
-        super().__init__()
-        self.cog = cog
-        self.discord_id = discord_id
-        self.mc_user_id = mc_user_id
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        await self.cog._deny_link(interaction, self.discord_id, self.mc_user_id, str(self.reason))
-
+# -------------- Main Cog --------------
 class MemberSync(commands.Cog):
-    """Link Discord users to MissionChief accounts and manage verification flow."""
+    """MemberSync: verify Discord users as alliance members and keep the Verified role in sync.
 
-    def __init__(self, bot: Red):
-        self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xFA11BEEF, force_registration=True)
-        self.data_path: Path = cog_data_path(self)
-        self.db_path: Path = self.data_path / "membersync.db"
-        defaults = {
-            "verify_role_id": None,
-            "review_channel_id": None,
-            "log_channel_id": None,
-            "review_role_ids": [],  # roles allowed to approve/deny
-            "rate_limit_seconds": 15,
-        }
-        self.config.register_global(**defaults)
-        self._last_attempt: Dict[int, datetime] = {}
-        self._bg_task: Optional[asyncio.Task] = None
+    This cog reads the local AllianceScraper SQLite database (read-only) to match users by
+    server nickname or MissionChief ID, and posts review embeds for approvers to approve/deny.
+    Includes a snapshot-aware retry queue for stale roster situations, and an auto-prune loop.
+    """
 
-    async def cog_load(self):
+    def __init__(self, bot: Red) -> None:
+        self.bot: Red = bot
+        self.config: Config = Config.get_conf(self, identifier=0xFA11A97C, force_registration=True)
+        self.config.register_guild(**GUILD_DEFAULTS)
+        self.config.register_global(**GLOBAL_DEFAULTS)
+
+        self.data_path = cog_data_path(self)
+        self.ms_db = self.data_path / "membersync.db"
+        self._bg_queue: Optional[asyncio.Task] = None
+        self._bg_prune: Optional[asyncio.Task] = None
+        self._last_seen_fresh_key: Optional[str] = None  # to detect fresh roster
+
+    # ---------------- Cog lifecycle ----------------
+    async def cog_load(self) -> None:
+        await self._seed_defaults_once()
         await self._init_db()
-        if self._bg_task is None:
-            self._bg_task = asyncio.create_task(self._queue_loop())
+        await self._resolve_alliance_db()
+        await self._maybe_start_background_tasks()
 
-    async def cog_unload(self):
-        if self._bg_task:
-            self._bg_task.cancel()
+    async def cog_unload(self) -> None:
+        for t in (self._bg_queue, self._bg_prune):
+            if t and not t.done():
+                t.cancel()
 
-    # ---------- DB init ----------
-    async def _init_db(self):
+    async def _seed_defaults_once(self) -> None:
+        """Seed the configured IDs if they are not set yet."""
+        # We only seed values if not set for at least one guild.
+        for g in self.bot.guilds:
+            cg = self.config.guild(g)
+            current = await cg.all()
+            changed = False
+            if not current.get("review_channel_id"):
+                await cg.review_channel_id.set(int(DEFAULT_ADMIN_CHANNEL_ID))
+                changed = True
+            if not current.get("log_channel_id"):
+                await cg.log_channel_id.set(int(DEFAULT_LOG_CHANNEL_ID))
+                changed = True
+            if not current.get("verified_role_id"):
+                await cg.verified_role_id.set(int(DEFAULT_VERIFIED_ROLE_ID))
+                changed = True
+            roles = current.get("reviewer_roles") or []
+            if not roles:
+                await cg.reviewer_roles.set([int(DEFAULT_REVIEWER_ROLE_ID)])
+                changed = True
+            if changed:
+                log.info("Seeded default MemberSync config for guild %s", g.id)
+
+    async def _init_db(self) -> None:
         self.data_path.mkdir(parents=True, exist_ok=True)
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                """CREATE TABLE IF NOT EXISTS links(
-                    discord_id      TEXT NOT NULL,
-                    mc_user_id      TEXT NOT NULL,
-                    status          TEXT NOT NULL,
-                    created_at_utc  TEXT NOT NULL,
-                    approved_by     TEXT,
-                    approved_at_utc TEXT,
-                    UNIQUE(discord_id),
-                    UNIQUE(mc_user_id)
-                )"""
+        async def run():
+            con = sqlite3.connect(self.ms_db)
+            cur = con.cursor()
+            # links table: approved/pending/denied
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS links(
+                discord_id   INTEGER PRIMARY KEY,
+                mc_user_id   TEXT,
+                mc_name      TEXT,
+                status       TEXT,          -- pending|approved|denied
+                created_at   TEXT,
+                approved_at  TEXT,
+                approved_by  INTEGER,
+                denied_at    TEXT,
+                denied_by    INTEGER,
+                deny_reason  TEXT
             )
-            await db.execute(
-                """CREATE TABLE IF NOT EXISTS verify_queue(
-                    discord_id        INTEGER NOT NULL,
-                    guild_id          INTEGER NOT NULL,
-                    requested_at_utc  TEXT NOT NULL,
-                    attempts          INTEGER NOT NULL DEFAULT 0,
-                    next_attempt_utc  TEXT NOT NULL,
-                    wanted_mc_id      TEXT
-                )"""
+            """)
+            # reviews table: outstanding review embeds
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS reviews(
+                message_id   INTEGER PRIMARY KEY,
+                channel_id   INTEGER,
+                guild_id     INTEGER,
+                discord_id   INTEGER,
+                mc_user_id   TEXT,
+                mc_name      TEXT,
+                created_at   TEXT
             )
-            await db.commit()
+            """)
+            # audit log
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS audit(
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts           TEXT,
+                guild_id     INTEGER,
+                action       TEXT,
+                discord_id   INTEGER,
+                mc_user_id   TEXT,
+                mc_name      TEXT,
+                meta         TEXT
+            )
+            """)
+            # retry queue
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS queue(
+                guild_id      INTEGER,
+                discord_id    INTEGER,
+                mode          TEXT,     -- name|id
+                nickname      TEXT,
+                mc_id         TEXT,
+                requested_at  TEXT,
+                next_retry_at TEXT,
+                retries       INTEGER,
+                status        TEXT,     -- pending|done|failed
+                last_error    TEXT,
+                PRIMARY KEY(guild_id, discord_id)
+            )
+            """)
+            # unique safety: one mc_user_id shouldn't be linked to multiple discord IDs
+            cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_links_mc ON links(mc_user_id)
+            WHERE mc_user_id IS NOT NULL AND status='approved'
+            """)
+            con.commit()
+            con.close()
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, run)
 
-    # ---------- Alliance DB helpers ----------
-    def _get_alliance_db_path(self) -> Optional[Path]:
-        sc = self.bot.get_cog("AllianceScraper")
-        if sc and getattr(sc, "db_path", None):
+    async def _resolve_alliance_db(self) -> None:
+        # Try stored global config first
+        stored = await self.config.alliance_db_path()
+        path = None
+        if stored and Path(stored).exists():
+            path = Path(stored)
+        else:
+            # Heuristic: scan under Red data root for AllianceScraper/alliance.db
+            candidates: List[Path] = []
             try:
-                return Path(getattr(sc, "db_path"))
+                # Typical root: ~/.local/share/Red-DiscordBot/data/
+                red_data_root = Path.home() / ".local" / "share" / "Red-DiscordBot" / "data"
+                if red_data_root.exists():
+                    for p in red_data_root.rglob("AllianceScraper/alliance.db"):
+                        candidates.append(p)
             except Exception:
                 pass
-        guess = Path.home() / ".local/share/Red-DiscordBot/data" / self.bot.instance_name / "cogs/AllianceScraper/alliance.db"  # type: ignore
-        return guess if guess.exists() else None
+            if candidates:
+                # Pick the most recent file
+                path = max(candidates, key=lambda p: p.stat().st_mtime)
+        if path:
+            await self.config.alliance_db_path.set(str(path))
+            log.info("MemberSync resolved alliance.db at %s", path)
+        else:
+            log.warning("MemberSync could not locate alliance.db automatically. Set it via config.")
 
-    def _roster_lookup(self, name: Optional[str]=None, mcid: Optional[str]=None) -> Optional[Tuple[str,str]]:
-        """Return (name, mcid) if found in members_current by either normalized name or mcid."""
-        adb = self._get_alliance_db_path()
-        if not adb or not adb.exists():
-            return None
-        con = sqlite3.connect(str(adb)); con.row_factory = sqlite3.Row
-        cur = con.cursor()
+    async def _maybe_start_background_tasks(self) -> None:
+        if self._bg_queue is None:
+            self._bg_queue = asyncio.create_task(self._queue_loop())
+        if self._bg_prune is None:
+            self._bg_prune = asyncio.create_task(self._prune_loop())
+
+    # ---------------- Helpers: Discord + Config ----------------
+    async def _get_channels_roles(self, guild: discord.Guild) -> Tuple[Optional[discord.TextChannel], Optional[discord.TextChannel], Optional[discord.Role], List[int]]:
+        cg = self.config.guild(guild)
+        review_ch = guild.get_channel((await cg.review_channel_id()) or 0)
+        log_ch    = guild.get_channel((await cg.log_channel_id()) or 0)
+        ver_role  = guild.get_role((await cg.verified_role_id()) or 0)
+        rr_ids    = await cg.reviewer_roles()
+        return review_ch if isinstance(review_ch, discord.TextChannel) else None, \
+               log_ch if isinstance(log_ch, discord.TextChannel) else None, \
+               ver_role, rr_ids or []
+
+    def _is_reviewer(self, member: discord.Member, reviewer_role_ids: List[int]) -> bool:
+        if member.guild_permissions.administrator or member == member.guild.owner:
+            return True
+        return any((r.id in reviewer_role_ids) for r in member.roles)
+
+    # ---------------- Helpers: DB access ----------------
+    async def _open_alliance(self) -> sqlite3.Connection:
+        path = await self.config.alliance_db_path()
+        if not path:
+            raise RuntimeError("Alliance DB path not set. Use config to set alliance_db_path.")
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+        return con
+
+    async def _latest_fresh_key(self) -> Optional[str]:
+        """Return a string that changes when roster updates. Uses max(scraped_at) and snapshot if available."""
         try:
-            if mcid:
-                try:
-                    cur.execute("SELECT name, COALESCE(user_id, mc_user_id,'') mc FROM members_current WHERE COALESCE(user_id, mc_user_id,'')=?", (str(mcid),))
-                except sqlite3.OperationalError:
-                    cur.execute("SELECT name, COALESCE(user_id,'') mc FROM members_current WHERE COALESCE(user_id,'')=?", (str(mcid),))
-                r = cur.fetchone()
-                if r and (r["mc"] or "").strip():
-                    return (r["name"], str(r["mc"]))
-            if name:
-                key_norm = _norm_name(name)
-                cur.execute("SELECT name, COALESCE(user_id, mc_user_id,'') mc FROM members_current")
-                for r in cur.fetchall():
-                    nm = (r["name"] or "").strip()
-                    if not nm:
-                        continue
-                    if _norm_name(nm) == key_norm:
-                        mc = str((r["mc"] or "").strip())
-                        if mc:
-                            return (nm, mc)
-        finally:
+            con = await self._open_alliance()
+            cur = con.cursor()
+            cur.execute("SELECT MAX(scraped_at) FROM members_current")
+            a = cur.fetchone()[0]
+            with contextlib.suppress(Exception):
+                cur.execute("SELECT MAX(snapshot_utc) FROM members_history")
+                b = cur.fetchone()[0]
             con.close()
+            return f"{a}|{b}"
+        except Exception as e:
+            log.debug("fresh_key error: %s", e)
+            return None
+
+    async def _is_stale(self, minutes: int) -> bool:
+        try:
+            con = await self._open_alliance()
+            cur = con.cursor()
+            cur.execute("SELECT MAX(scraped_at) FROM members_current")
+            s = cur.fetchone()[0]
+            con.close()
+            if not s:
+                return True
+            last = datetime.fromisoformat(s)
+            age = datetime.now(timezone.utc) - last.replace(tzinfo=timezone.utc)
+            return age.total_seconds() > minutes * 60
+        except Exception:
+            return True
+
+    async def _match_member(self, nickname: Optional[str], mc_id: Optional[str]) -> Optional[RosterMatch]:
+        """Try to find a single roster match by mc_id first, then by exact nickname."""
+        try:
+            con = await self._open_alliance()
+            cur = con.cursor()
+            # By MC ID
+            if mc_id and mc_id.isdigit():
+                cur.execute("""
+                    SELECT name, COALESCE(mc_user_id, user_id) as id
+                    FROM members_current
+                    WHERE COALESCE(mc_user_id, user_id) = ?
+                    LIMIT 2
+                """, (mc_id,))
+                rows = cur.fetchall()
+                if len(rows) == 1:
+                    r = rows[0]
+                    return RosterMatch(mc_user_id=str(r["id"]), mc_name=str(r["name"]))
+            # By exact nickname (case-insensitive)
+            if nickname:
+                cur.execute("""
+                    SELECT name, COALESCE(mc_user_id, user_id) as id
+                    FROM members_current
+                    WHERE lower(name) = lower(?)
+                    LIMIT 2
+                """, (nickname.strip(),))
+                rows = cur.fetchall()
+                if len(rows) == 1:
+                    r = rows[0]
+                    return RosterMatch(mc_user_id=str(r["id"]) if r["id"] is not None else None, mc_name=str(r["name"]))
+            con.close()
+        except Exception as e:
+            log.warning("match_member error: %s", e)
         return None
 
-    # ---------- Public API used by other cogs ----------
-    async def get_link_for_mc(self, mc_user_id: str) -> Optional[Dict[str, Any]]:
-        async with aiosqlite.connect(self.db_path) as db:
-            try:
-                db.row_factory = aiosqlite.Row  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            row = await _exec_fetchone(db, "SELECT * FROM links WHERE mc_user_id=?", (str(mc_user_id),))
-            if not row:
-                return None
-            row = _row_to_dict(row, ["discord_id","mc_user_id","status","created_at_utc","approved_by","approved_at_utc"])
-            return row
-
-    # ---------- Commands ----------
-    @commands.group(name="membersync", invoke_without_command=True)
-    async def ms_group(self, ctx: Context):
-        """MemberSync: link Discord users to MissionChief accounts and manage verification."""
-        await ctx.send_help()
-
-    @ms_group.command(name="status")
-    async def status(self, ctx: Context):
-        """Show MemberSync status and current configuration."""
-        cfg = await self.config.all()
-        # best effort roster freshness
-        ms = hs = "-"
-        adb = self._get_alliance_db_path()
-        if adb and adb.exists():
-            con = sqlite3.connect(str(adb)); cur = con.cursor()
-            try:
-                cur.execute("SELECT MAX(scraped_at) FROM members_current"); ms = cur.fetchone()[0] or "-"
-            except Exception:
-                pass
-            try:
-                cur.execute("SELECT MAX(snapshot_utc) FROM members_history"); hs = cur.fetchone()[0] or "-"
-            except Exception:
-                pass
-            con.close()
-        lines = [
-            f"MemberSync v{__version__}",
-            f"Verify role ID: {cfg.get('verify_role_id')}",
-            f"Review channel ID: {cfg.get('review_channel_id')}",
-            f"Log channel ID: {cfg.get('log_channel_id')}",
-            f"Reviewer roles: {cfg.get('review_role_ids')}",
-            f"Rate limit: {cfg.get('rate_limit_seconds')}s",
-            f"Roster members_current.scraped_at: {ms}",
-            f"Roster members_history.snapshot_utc: {hs}",
-        ]
-        await ctx.send("```\n" + "\n".join(lines) + "\n```")
-
-    # ----- VERIFY -----
-    @commands.cooldown(1, 15, commands.BucketType.user)
-    @ms_group.command(name="verify")
-    async def verify(self, ctx: Context, mc_user_id: Optional[str] = None):
-        """Start verification. Tries to match your server nickname to the alliance roster.
-        You may optionally pass your MC user ID."""
-        cfg = await self.config.all()
-        vr_id = cfg.get("verify_role_id")
-        rv_ch_id = cfg.get("review_channel_id")
-        lg_ch_id = cfg.get("log_channel_id")
-
-        if not rv_ch_id:
-            await ctx.reply("Verification is not configured yet. Admins must set a review channel first.")
-            return
-        review_ch = ctx.guild.get_channel(int(rv_ch_id)) if ctx.guild else None
-        if not isinstance(review_ch, discord.TextChannel):
-            await ctx.reply("Configured review channel is invalid.")
-            return
-
-        # Already linked?
-        async with aiosqlite.connect(self.db_path) as db:
-            row = await _exec_fetchone(db, "SELECT status, mc_user_id FROM links WHERE discord_id=?", (str(ctx.author.id),))
-            if row:
-                r = _row_to_dict(row, ["status","mc_user_id"])
-                if r.get("status") == "approved":
-                    # ensure role present
-                    if vr_id:
-                        role = ctx.guild.get_role(int(vr_id))
-                        if role and role not in ctx.author.roles:
-                            try:
-                                await ctx.author.add_roles(role, reason="MemberSync: ensure verified role")
-                            except Exception:
-                                pass
-                    await ctx.reply("You are already verified.")
-                    return
-
-        # Search in roster
-        display = (ctx.author.nick or ctx.author.display_name or ctx.author.name).strip()
-        found = self._roster_lookup(display, mc_user_id)
-        if not found:
-            # queue it
-            await self._queue_request(ctx.guild.id, ctx.author.id, mc_user_id)
-            await ctx.reply("I couldn't find your account in the roster yet. I've queued your request and will retry automatically. You'll be notified.")
-            return
-
-        mc_name, mcid = found
-        # create review embed
-        e = discord.Embed(title="Verification request", color=discord.Color.blurple(), timestamp=datetime.now(UTC))
-        e.add_field(name="Discord", value=f"{ctx.author.mention} (`{ctx.author.id}`)", inline=False)
-        e.add_field(name="MissionChief", value=f"[{mc_name}](https://www.missionchief.com/users/{mcid}) (`{mcid}`)", inline=False)
-        e.set_footer(text=f"Requested by {ctx.author}", icon_url=getattr(ctx.author.display_avatar, "url", discord.Embed.Empty))
-        view = ReviewView(self, ctx.author.id, mcid)
-        try:
-            msg = await review_ch.send(embed=e, view=view)
-        except Exception:
-            await ctx.reply("Could not post to the review channel. Ask an admin to fix my permissions.")
-            return
-
-        await ctx.reply("Found your account. Your request is pending admin review.")
-
-        # log
-        if lg_ch_id:
-            ch = ctx.guild.get_channel(int(lg_ch_id))
-            if isinstance(ch, discord.TextChannel):
-                try:
-                    await ch.send(f"Queued review: {ctx.author.mention} ↔ https://www.missionchief.com/users/{mcid}")
-                except Exception:
-                    pass
-
-    async def _approve_link(self, interaction: discord.Interaction, discord_id: int, mc_user_id: str):
-        guild = interaction.guild
-        if not guild:
-            await interaction.followup.send("No guild context.", ephemeral=True)
-            return
-        cfg = await self.config.all()
-        vr = guild.get_role(int(cfg.get("verify_role_id") or 0)) if cfg.get("verify_role_id") else None
-        member = guild.get_member(discord_id)
-
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                "INSERT OR REPLACE INTO links(discord_id, mc_user_id, status, created_at_utc, approved_by, approved_at_utc) "
-                "VALUES(?,?,?,?,?,?)",
-                (str(discord_id), str(mc_user_id), "approved", now_iso(), str(interaction.user.id), now_iso())
-            )
-            await db.commit()
-
-        if member and vr:
-            try:
-                await member.add_roles(vr, reason="MemberSync verification approved")
-            except Exception:
-                pass
-
-        # DM user
-        try:
-            if member:
-                await member.send(f"✅ Your verification was approved. Linked to MC `{mc_user_id}`.")
-        except Exception:
-            pass
-
-        # log channel
-        lg_id = cfg.get("log_channel_id")
-        if lg_id:
-            ch = guild.get_channel(int(lg_id))
-            if isinstance(ch, discord.TextChannel):
-                try:
-                    await ch.send(f"✅ Approved: <@{discord_id}> ↔ https://www.missionchief.com/users/{mc_user_id} by {interaction.user.mention}")
-                except Exception:
-                    pass
-
-        # delete the review message if possible
-        try:
-            await interaction.message.delete()
-        except Exception:
-            pass
-
-        await interaction.followup.send("Approved.", ephemeral=True)
-
-    async def _deny_link(self, interaction: discord.Interaction, discord_id: int, mc_user_id: str, reason: str):
-        guild = interaction.guild
-        if not guild:
-            await interaction.followup.send("No guild context.", ephemeral=True)
-            return
-        # mark as denied (keeps history simple)
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                "INSERT OR REPLACE INTO links(discord_id, mc_user_id, status, created_at_utc, approved_by, approved_at_utc) "
-                "VALUES(?,?,?,?,?,?)",
-                (str(discord_id), str(mc_user_id), "denied", now_iso(), str(interaction.user.id), now_iso())
-            )
-            await db.commit()
-
-        member = guild.get_member(discord_id)
-        try:
-            if member:
-                await member.send(f"❌ Your verification was denied.\nReason: {reason}")
-        except Exception:
-            pass
-
-        cfg = await self.config.all()
-        lg_id = cfg.get("log_channel_id")
-        if lg_id:
-            ch = guild.get_channel(int(lg_id))
-            if isinstance(ch, discord.TextChannel):
-                try:
-                    await ch.send(f"⛔ Denied: <@{discord_id}> ↔ https://www.missionchief.com/users/{mc_user_id} by {interaction.user.mention}\nReason: {reason}")
-                except Exception:
-                    pass
-
-        try:
-            await interaction.message.delete()
-        except Exception:
-            pass
-
-        await interaction.response.send_message("Denied.", ephemeral=True)
-
-    # ----- QUEUE -----
-    async def _queue_request(self, guild_id: int, discord_id: int, wanted_mcid: Optional[str]):
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                "INSERT INTO verify_queue(discord_id, guild_id, requested_at_utc, attempts, next_attempt_utc, wanted_mc_id) "
-                "VALUES(?,?,?,?,?,?)",
-                (discord_id, guild_id, now_iso(), 0, now_iso(), (wanted_mcid or None))
-            )
-            await db.commit()
-
-    async def _queue_loop(self):
+    # ---------------- Queue engine ----------------
+    async def _queue_loop(self) -> None:
         await self.bot.wait_until_red_ready()
         while True:
             try:
-                await self._queue_tick()
+                await self._process_queue_tick()
             except asyncio.CancelledError:
                 break
-            except Exception:
-                log.exception("queue tick failed")
-            await asyncio.sleep(120)  # every 2 minutes
+            except Exception as e:
+                log.exception("queue loop error: %s", e)
+            await asyncio.sleep(60)  # 1-min loop
 
-    async def _queue_tick(self):
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row  # type: ignore[attr-defined]
-            now = datetime.now(UTC)
-            rows = await _exec_fetchall(db, "SELECT * FROM verify_queue")
-            to_delete = []
-            for r in rows:
-                data = _row_to_dict(r)
-                try:
-                    next_at = datetime.fromisoformat(data["next_attempt_utc"])
-                except Exception:
-                    next_at = now
-                if next_at > now:
-                    continue
-                attempts = int(data.get("attempts", 0))
-                requested = datetime.fromisoformat(data["requested_at_utc"]) if data.get("requested_at_utc") else now
-                # expire after 24h or 30 attempts
-                if attempts >= 30 or (now - requested) > timedelta(hours=24):
-                    # notify and drop
-                    guild = self.bot.get_guild(int(data["guild_id"]))
-                    member = guild.get_member(int(data["discord_id"])) if guild else None
-                    try:
-                        if member:
-                            await member.send("⏳ Verification expired after repeated retries. Please run the command again later.")
-                    except Exception:
-                        pass
-                    to_delete.append((data["discord_id"], data["guild_id"]))
-                    continue
+    async def _process_queue_tick(self) -> None:
+        # If roster got fresher since last tick, trigger immediate retries
+        fresh = await self._latest_fresh_key()
+        freshness_changed = fresh and fresh != self._last_seen_fresh_key
+        if fresh:
+            self._last_seen_fresh_key = fresh
 
-                # Try match
-                guild = self.bot.get_guild(int(data["guild_id"]))
-                member = guild.get_member(int(data["discord_id"])) if guild else None
-                disp = (member.nick or member.display_name or member.name) if member else None
-                found = self._roster_lookup(disp, data.get("wanted_mc_id"))
-                if found and guild:
-                    mc_name, mcid = found
-                    # post to review channel
-                    rv_id = await self.config.review_channel_id()
-                    review_ch = guild.get_channel(int(rv_id)) if rv_id else None
-                    if isinstance(review_ch, discord.TextChannel):
-                        e = discord.Embed(title="Verification request (auto-retry)", color=discord.Color.blurple(), timestamp=now)
-                        md = f"<@{data['discord_id']}> (`{data['discord_id']}`)"
-                        e.add_field(name="Discord", value=md, inline=False)
-                        e.add_field(name="MissionChief", value=f"[{mc_name}](https://www.missionchief.com/users/{mcid}) (`{mcid}`)", inline=False)
-                        view = ReviewView(self, int(data["discord_id"]), str(mcid))
-                        try:
-                            await review_ch.send(embed=e, view=view)
-                            # DM notify
-                            if member:
-                                try:
-                                    await member.send("✅ I found your MC account and queued your verification for admin review.")
-                                except Exception:
-                                    pass
-                            to_delete.append((data["discord_id"], data["guild_id"]))
-                            continue
-                        except Exception:
-                            pass
+        con = sqlite3.connect(self.ms_db)
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+        now = datetime.utcnow()
 
-                # reschedule
-                attempts += 1
-                next_time = now + timedelta(minutes=10)
-                await db.execute("UPDATE verify_queue SET attempts=?, next_attempt_utc=? WHERE discord_id=? AND guild_id=?",
-                                 (attempts, next_time.isoformat(), data["discord_id"], data["guild_id"]))
-            # delete processed
-            for d_id, g_id in to_delete:
-                await db.execute("DELETE FROM verify_queue WHERE discord_id=? AND guild_id=?", (d_id, g_id))
-            await db.commit()
+        # Load due entries or all pending if freshness changed
+        if freshness_changed:
+            cur.execute("SELECT * FROM queue WHERE status='pending'")
+        else:
+            cur.execute("SELECT * FROM queue WHERE status='pending' AND next_retry_at <= ?", (now.isoformat(),))
+        pendings = [dict(r) for r in cur.fetchall()]
 
-    # ----- Retro tools -----
-    @ms_group.group(name="retro")
-    @checks.admin_or_permissions(manage_guild=True)
-    async def retro(self, ctx: Context):
-        """Retroactive linking tools for already-verified members."""
-
-    @retro.command(name="scan")
-    @checks.admin_or_permissions(manage_guild=True)
-    async def retro_scan(self, ctx: Context, role: Optional[discord.Role] = None):
-        """Scan members with the verify role and report how many are not linked to a MC ID."""
-        role = role or ctx.guild.get_role((await self.config.verify_role_id()) or 0)
-        if not role:
-            await ctx.send("Verify role is not configured. Use `membersync set verifyrole <role>` first.")
+        if not pendings:
+            con.close()
             return
-        targets = [m for m in ctx.guild.members if role in m.roles]
 
-        linked_ids: set[int] = set()
-        async with aiosqlite.connect(self.db_path) as db:
+        # Load retry schedule per guild (we'll use guild config but the schedule is fixed per our defaults)
+        for p in pendings:
             try:
-                db.row_factory = aiosqlite.Row  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            rows = await _exec_fetchall(db, "SELECT discord_id FROM links WHERE status='approved'")
-        for r in rows:
+                guild_id = int(p["guild_id"])
+                discord_id = int(p["discord_id"])
+                mc_id = p.get("mc_id")
+                nickname = p.get("nickname")
+                retries = int(p.get("retries") or 0)
+
+                guild = self.bot.get_guild(guild_id)
+                if not guild:
+                    # guild gone; drop it
+                    cur.execute("UPDATE queue SET status='failed', last_error=? WHERE guild_id=? AND discord_id=?",
+                                ("guild unavailable", guild_id, discord_id))
+                    continue
+
+                match = await self._match_member(nickname, mc_id)
+                if match:
+                    # Create review embed automatically
+                    reviewer_ch, log_ch, ver_role, rr_ids = await self._get_channels_roles(guild)
+                    member = guild.get_member(discord_id)
+                    # If no reviewer channel, mark failed gracefully
+                    if not reviewer_ch or not isinstance(reviewer_ch, discord.TextChannel):
+                        cur.execute("UPDATE queue SET status='failed', last_error=? WHERE guild_id=? AND discord_id=?",
+                                    ("review channel missing", guild_id, discord_id))
+                        continue
+
+                    review_msg = await self._post_review_embed(reviewer_ch, guild_id, discord_id, match.mc_user_id, match.mc_name)
+                    # Notify user
+                    if member:
+                        with contextlib.suppress(Exception):
+                            await member.send(f"Your verification has been queued for review: **{match.mc_name}** (ID {match.mc_user_id}).")
+                    # Save review + mark done
+                    cur.execute("""
+                        INSERT OR REPLACE INTO reviews(message_id, channel_id, guild_id, discord_id, mc_user_id, mc_name, created_at)
+                        VALUES(?,?,?,?,?,?,?)
+                    """, (review_msg.id, reviewer_ch.id, guild_id, discord_id, match.mc_user_id, match.mc_name, datetime.utcnow().isoformat()))
+                    cur.execute("UPDATE queue SET status='done' WHERE guild_id=? AND discord_id=?", (guild_id, discord_id))
+                    # audit
+                    self._audit_db(cur, guild_id, "queue_promoted", discord_id, match.mc_user_id, match.mc_name, meta="auto-review")
+                    continue
+
+                # no match yet → schedule next retry
+                guild_conf = self.config.guild(guild)
+                retry_seq = (await guild_conf.queue_retry_seconds()) or GUILD_DEFAULTS["queue_retry_seconds"]
+                max_age_h = (await guild_conf.queue_max_age_hours()) if hasattr(guild_conf, "queue_max_age_hours") else GUILD_DEFAULTS["queue_max_age_hours"]
+
+                req_at = datetime.fromisoformat(p["requested_at"])
+                age_h  = (now - req_at).total_seconds() / 3600
+                if age_h >= max_age_h or retries >= len(retry_seq):
+                    # give up
+                    cur.execute("UPDATE queue SET status='failed', last_error=? WHERE guild_id=? AND discord_id=?",
+                                ("max retries/age reached", guild_id, discord_id))
+                    member = guild.get_member(discord_id)
+                    if member:
+                        with contextlib.suppress(Exception):
+                            await member.send("Verification expired after multiple retries. Please try again later or provide your MissionChief ID.")
+                    self._audit_db(cur, guild_id, "queue_failed", discord_id, None, None, meta="expired")
+                else:
+                    delay = retry_seq[retries] if retries < len(retry_seq) else retry_seq[-1]
+                    next_at = now + timedelta(seconds=int(delay))
+                    cur.execute("UPDATE queue SET retries=?, next_retry_at=? WHERE guild_id=? AND discord_id=?",
+                                (retries + 1, next_at.isoformat(), guild_id, discord_id))
+            except Exception as e:
+                log.exception("queue process error: %s", e)
+                cur.execute("UPDATE queue SET last_error=? WHERE guild_id=? AND discord_id=?",
+                            (str(e), p["guild_id"], p["discord_id"]))
+
+        con.commit()
+        con.close()
+
+    async def _prune_loop(self) -> None:
+        await self.bot.wait_until_red_ready()
+        while True:
             try:
-                linked_ids.add(int(r["discord_id"]))
-            except Exception:
-                linked_ids.add(int(r[0]))
-        missing = [m for m in targets if m.id not in linked_ids]
-        await ctx.send(f"Checked {len(targets)} members with {role.mention}. Missing links: **{len(missing)}**.")
+                await self._run_prune_once()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log.exception("prune loop error: %s", e)
+            await asyncio.sleep(3600)  # hourly
 
-    @retro.command(name="apply")
-    @checks.admin_or_permissions(manage_guild=True)
-    async def retro_apply(self, ctx: Context, role: Optional[discord.Role] = None):
-        """Attempt to auto-link verified members by matching their server nickname to MC roster."""
-        role = role or ctx.guild.get_role((await self.config.verify_role_id()) or 0)
-        if not role:
-            await ctx.send("Verify role is not configured. Use `membersync set verifyrole <role>` first.")
-            return
-        adb = self._get_alliance_db_path()
-        if not adb or not adb.exists():
-            await ctx.send("AllianceScraper database not found. Make sure that cog is loaded and has scraped at least once.")
-            return
-
-        con = sqlite3.connect(str(adb))
+    async def _run_prune_once(self) -> None:
+        # Iterate guilds
+        con = sqlite3.connect(self.ms_db)
         con.row_factory = sqlite3.Row
         cur = con.cursor()
 
-        # Build a robust name -> mcid map from current roster, with normalized variants
-        roster_map: Dict[str, str] = {}
-        try:
-            cur.execute("SELECT name, COALESCE(user_id, mc_user_id, '') as mc_user_id FROM members_current")
-        except sqlite3.OperationalError:
-            cur.execute("SELECT name, COALESCE(user_id, '') as mc_user_id FROM members_current")
-        for r in cur.fetchall():
-            name = (r["name"] or "").strip()
-            mcid = str(r["mc_user_id"] or "").strip()
-            if not name or not mcid:
-                continue
-            roster_map[name.lower()] = mcid
-            roster_map[_norm_name(name)] = mcid
+        cur.execute("SELECT discord_id, mc_user_id FROM links WHERE status='approved'")
+        rows = [dict(r) for r in cur.fetchall()]
         con.close()
 
-        # Already linked
-        linked_ids: set[int] = set()
-        async with aiosqlite.connect(self.db_path) as db:
-            try:
-                db.row_factory = aiosqlite.Row  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            rows = await _exec_fetchall(db, "SELECT discord_id FROM links WHERE status='approved'")
-        for r in rows:
-            try:
-                linked_ids.add(int(r["discord_id"]))
-            except Exception:
-                linked_ids.add(int(r[0]))
+        # Build a set of current roster IDs
+        current_ids: set[str] = set()
+        try:
+            acon = await self._open_alliance()
+            a = acon.cursor()
+            a.execute("SELECT COALESCE(mc_user_id, user_id) AS id FROM members_current WHERE id IS NOT NULL")
+            current_ids.update(str(x["id"]) for x in a.fetchall() if x["id"] is not None)
+            acon.close()
+        except Exception as e:
+            log.warning("prune: cannot read alliance roster: %s", e)
+            return
 
-        targets = [m for m in ctx.guild.members if role in m.roles and m.id not in linked_ids]
-
-        linked = 0
-        tried = 0
-        async with aiosqlite.connect(self.db_path) as db:
-            for m in targets:
-                tried += 1
-                disp = (m.nick or m.display_name or m.name).strip()
-                key_exact = disp.lower()
-                key_norm = _norm_name(disp)
-                mcid = roster_map.get(key_exact) or roster_map.get(key_norm)
-                if not mcid:
+        for guild in self.bot.guilds:
+            reviewer_ch, log_ch, ver_role, rr_ids = await self._get_channels_roles(guild)
+            if not ver_role:
+                continue
+            for r in rows:
+                did = int(r["discord_id"])
+                mid = r.get("mc_user_id")
+                if not mid:
                     continue
-                try:
-                    await db.execute(
-                        "INSERT OR REPLACE INTO links(discord_id, mc_user_id, status, created_at_utc) VALUES(?,?,?,?)",
-                        (str(m.id), str(mcid), "approved", now_iso())
-                    )
-                    linked += 1
-                except Exception:
-                    pass
-            await db.commit()
+                if str(mid) not in current_ids:
+                    member = guild.get_member(did)
+                    if not member:
+                        continue
+                    # remove role
+                    if ver_role in member.roles:
+                        with contextlib.suppress(Exception):
+                            await member.remove_roles(ver_role, reason="Auto-prune: no longer in alliance roster")
+                    # log
+                    if isinstance(log_ch, discord.TextChannel):
+                        with contextlib.suppress(Exception):
+                            await log_ch.send(
+                                embed=discord.Embed(
+                                    title="Auto-prune: removed Verified role",
+                                    description=f"{member.mention} no longer found in alliance roster (MC ID {mid}).",
+                                    color=discord.Color.orange(),
+                                    timestamp=datetime.utcnow()
+                                )
+                            )
 
-        await ctx.send(f"Retro apply finished. Checked: **{tried}**. Newly linked: **{linked}**. Skipped: **{tried - linked}**.")
+    # ---------------- UI: Review embeds ----------------
+    async def _post_review_embed(self, ch: discord.TextChannel, guild_id: int, discord_id: int, mc_id: Optional[str], mc_name: str) -> discord.Message:
+        member = ch.guild.get_member(discord_id)
+        mention = member.mention if member else f"<@{discord_id}>"
+        profile_url = f"https://www.missionchief.com/users/{mc_id}" if mc_id else None
+        title = "Verification request"
+        desc = f"{mention} requests verification as **{mc_name}**"
+        if profile_url:
+            desc += f"\nProfile: <{profile_url}>"
+        e = discord.Embed(title=title, description=desc, color=discord.Color.blurple(), timestamp=datetime.utcnow())
+        view = self._build_review_view(guild_id, discord_id, mc_id, mc_name)
+        return await ch.send(embed=e, view=view)
 
-    # ----- Settings -----
-    @ms_group.group(name="set")
-    @checks.admin_or_permissions(manage_guild=True)
-    async def set_group(self, ctx: Context):
-        """Configure MemberSync settings (verify role, channels, reviewer roles, rate limit)."""
+    def _build_review_view(self, guild_id: int, discord_id: int, mc_id: Optional[str], mc_name: str) -> discord.ui.View:
+        cog = self
 
-    @set_group.command(name="verifyrole")
-    async def set_verify_role(self, ctx: Context, role: discord.Role):
-        """Set the role to assign upon successful verification and to scan in retro tools."""
-        await self.config.verify_role_id.set(role.id)
-        await ctx.send(f"Verify role set to {role.mention}")
+        class ReviewView(discord.ui.View):
+            def __init__(self) -> None:
+                super().__init__(timeout=86400)
 
-    @set_group.command(name="reviewchannel")
-    async def set_review_channel(self, ctx: Context, channel: discord.TextChannel):
-        """Set the admin review channel for verification requests."""
-        await self.config.review_channel_id.set(channel.id)
+            async def interaction_check(self, interaction: discord.Interaction) -> bool:
+                g = interaction.guild
+                if not g or not interaction.user:
+                    return False
+                _, _, _, rr_ids = await cog._get_channels_roles(g)
+                if not isinstance(interaction.user, discord.Member):
+                    return False
+                if not cog._is_reviewer(interaction.user, rr_ids):
+                    await interaction.response.send_message("You are not allowed to review this request.", ephemeral=True)
+                    return False
+                return True
+
+            @discord.ui.button(label="Approve", style=discord.ButtonStyle.success)
+            async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+                await interaction.response.defer(thinking=False)
+                await cog._approve_link(interaction, guild_id, discord_id, mc_id, mc_name, delete_message=True)
+
+            @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger)
+            async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
+                modal = DenyModal()
+                await interaction.response.send_modal(modal)
+
+            async def on_timeout(self) -> None:
+                # Best effort: leave message as-is
+                pass
+
+        class DenyModal(discord.ui.Modal, title="Deny verification"):
+            reason = discord.ui.TextInput(
+                label="Reason",
+                style=discord.TextStyle.paragraph,
+                required=True,
+                max_length=300
+            )
+            async def on_submit(self, interaction: discord.Interaction) -> None:
+                await interaction.response.defer(thinking=False)
+                await cog._deny_link(interaction, guild_id, discord_id, str(self.reason.value), delete_message=True)
+
+        return ReviewView()
+
+    async def _approve_link(self, interaction: discord.Interaction, guild_id: int, discord_id: int, mc_id: Optional[str], mc_name: str, delete_message: bool) -> None:
+        guild = interaction.guild
+        if not guild:
+            return
+        reviewer_ch, log_ch, ver_role, rr_ids = await self._get_channels_roles(guild)
+        member = guild.get_member(discord_id)
+
+        # Persist approval
+        con = sqlite3.connect(self.ms_db)
+        cur = con.cursor()
+        now = datetime.utcnow().isoformat()
+        cur.execute("""
+            INSERT INTO links(discord_id, mc_user_id, mc_name, status, created_at, approved_at, approved_by)
+            VALUES(?,?,?,?,?,?,?)
+            ON CONFLICT(discord_id) DO UPDATE SET
+                mc_user_id=excluded.mc_user_id,
+                mc_name=excluded.mc_name,
+                status='approved',
+                approved_at=excluded.approved_at,
+                approved_by=excluded.approved_by
+        """, (discord_id, mc_id, mc_name, "approved", now, now, interaction.user.id))
+        # Remove any queue entry
+        cur.execute("DELETE FROM queue WHERE guild_id=? AND discord_id=?", (guild_id, discord_id))
+        self._audit_db(cur, guild_id, "approved", discord_id, mc_id, mc_name, meta=f"by {interaction.user.id}")
+        con.commit()
+        con.close()
+
+        # Role assign and DM
+        if member and ver_role:
+            with contextlib.suppress(Exception):
+                await member.add_roles(ver_role, reason="MemberSync: approved")
+            with contextlib.suppress(Exception):
+                await member.send(f"Your verification was approved. You now have the **{ver_role.name}** role.")
+
+        # Log
+        if isinstance(log_ch, discord.TextChannel):
+            with contextlib.suppress(Exception):
+                e = discord.Embed(
+                    title="Verification approved",
+                    description=f"<@{discord_id}> ↔ **{mc_name}** (ID {mc_id})",
+                    color=discord.Color.green(),
+                    timestamp=datetime.utcnow(),
+                )
+                await log_ch.send(embed=e)
+
+        # Delete the review message if possible
+        if delete_message:
+            with contextlib.suppress(Exception):
+                await interaction.message.delete()
+
+    async def _deny_link(self, interaction: discord.Interaction, guild_id: int, discord_id: int, reason: str, delete_message: bool) -> None:
+        guild = interaction.guild
+        if not guild:
+            return
+        reviewer_ch, log_ch, ver_role, rr_ids = await self._get_channels_roles(guild)
+        member = guild.get_member(discord_id)
+
+        con = sqlite3.connect(self.ms_db)
+        cur = con.cursor()
+        now = datetime.utcnow().isoformat()
+
+        cur.execute("""
+            INSERT INTO links(discord_id, status, created_at, denied_at, denied_by, deny_reason)
+            VALUES(?,?,?,?,?,?)
+            ON CONFLICT(discord_id) DO UPDATE SET
+                status='denied',
+                denied_at=excluded.denied_at,
+                denied_by=excluded.denied_by,
+                deny_reason=excluded.deny_reason
+        """, (discord_id, "denied", now, now, interaction.user.id, reason))
+        # Remove any queue entry
+        cur.execute("DELETE FROM queue WHERE guild_id=? AND discord_id=?", (guild_id, discord_id))
+        self._audit_db(cur, guild_id, "denied", discord_id, None, None, meta=f"by {interaction.user.id}: {reason}")
+        con.commit()
+        con.close()
+
+        if member:
+            with contextlib.suppress(Exception):
+                await member.send(f"Your verification was denied: {reason}")
+
+        if isinstance(log_ch, discord.TextChannel):
+            with contextlib.suppress(Exception):
+                e = discord.Embed(
+                    title="Verification denied",
+                    description=f"<@{discord_id}> — reason: {reason}",
+                    color=discord.Color.red(),
+                    timestamp=datetime.utcnow(),
+                )
+                await log_ch.send(embed=e)
+
+        if delete_message:
+            with contextlib.suppress(Exception):
+                await interaction.message.delete()
+
+    def _audit_db(self, cur: sqlite3.Cursor, guild_id: int, action: str, discord_id: Optional[int], mc_id: Optional[str], mc_name: Optional[str], meta: Optional[str] = None) -> None:
+        cur.execute("""
+            INSERT INTO audit(ts, guild_id, action, discord_id, mc_user_id, mc_name, meta)
+            VALUES(?,?,?,?,?,?,?)
+        """, (datetime.utcnow().isoformat(), guild_id, action, discord_id, mc_id, mc_name, meta or ""))
+
+    # ---------------- Commands ----------------
+    @commands.group(name="membersync", invoke_without_command=True, help="Admin and configuration for MemberSync; verify flow with review buttons.")
+    @checks.guildowner_or_permissions(manage_guild=True)
+    async def membersync_group(self, ctx: commands.Context) -> None:
+        await ctx.send_help()
+
+    @membersync_group.command(name="status", help="Show MemberSync configuration, counts and queue stats.")
+    @checks.guildowner_or_permissions(manage_guild=True)
+    async def status(self, ctx: commands.Context) -> None:
+        guild = ctx.guild
+        if not guild:
+            return
+        cg = self.config.guild(guild)
+        cfg = await cg.all()
+        reviewer_ch, log_ch, ver_role, rr_ids = await self._get_channels_roles(guild)
+
+        # quick counts
+        con = sqlite3.connect(self.ms_db)
+        cur = con.cursor()
+        cur.execute("SELECT COUNT(*) FROM links WHERE status='approved'")
+        approved = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM queue WHERE status='pending'")
+        pending = cur.fetchone()[0]
+        con.close()
+
+        e = discord.Embed(title="MemberSync Status", color=discord.Color.blurple(), timestamp=datetime.utcnow())
+        e.add_field(name="Review channel", value=f"<#{cfg.get('review_channel_id') or 0}>", inline=False)
+        e.add_field(name="Log channel", value=f"<#{cfg.get('log_channel_id') or 0}>", inline=False)
+        e.add_field(name="Verified role", value=f"<@&{cfg.get('verified_role_id') or 0}>", inline=False)
+        e.add_field(name="Reviewer roles", value=", ".join(f"<@&{x}>" for x in rr_ids) or "-", inline=False)
+        e.add_field(name="Cooldown", value=f"{cfg.get('cooldown_seconds')} s", inline=True)
+        e.add_field(name="Stale window", value=f"{cfg.get('stale_window_minutes')} min", inline=True)
+        e.add_field(name="Approved links", value=str(approved), inline=True)
+        e.add_field(name="Pending in queue", value=str(pending), inline=True)
+
+        adb = await self.config.alliance_db_path()
+        e.add_field(name="Alliance DB Path", value=adb or "Not set", inline=False)
+        await ctx.send(embed=e)
+
+    @membersync_group.group(name="config", help="Set reviewer channel/roles, log channel, verified role, and stale/queue settings.")
+    @checks.guildowner_or_permissions(manage_guild=True)
+    async def config_group(self, ctx: commands.Context) -> None:
+        pass
+
+    @config_group.command(name="setreviewchannel", help="Set the channel where review embeds are posted. Usage: membersync config setreviewchannel #channel")
+    async def setreviewchannel(self, ctx: commands.Context, channel: discord.TextChannel) -> None:
+        await self.config.guild(ctx.guild).review_channel_id.set(channel.id)
         await ctx.send(f"Review channel set to {channel.mention}")
 
-    @set_group.command(name="logchannel")
-    async def set_log_channel(self, ctx: Context, channel: discord.TextChannel):
-        """Set the log channel for MemberSync actions."""
-        await self.config.log_channel_id.set(channel.id)
+    @config_group.command(name="setlogchannel", help="Set the log channel for approvals/denials/audits. Usage: membersync config setlogchannel #channel")
+    async def setlogchannel(self, ctx: commands.Context, channel: discord.TextChannel) -> None:
+        await self.config.guild(ctx.guild).log_channel_id.set(channel.id)
         await ctx.send(f"Log channel set to {channel.mention}")
 
-    @set_group.command(name="ratelimit")
-    async def set_rate_limit(self, ctx: Context, seconds: int):
-        """Set per-user rate limit for verify attempts (seconds)."""
-        seconds = max(1, int(seconds))
-        await self.config.rate_limit_seconds.set(seconds)
-        await ctx.send(f"Rate limit set to {seconds}s")
+    @config_group.command(name="setverifiedrole", help="Set the Verified role. Usage: membersync config setverifiedrole @Role")
+    async def setverifiedrole(self, ctx: commands.Context, role: discord.Role) -> None:
+        await self.config.guild(ctx.guild).verified_role_id.set(role.id)
+        await ctx.send(f"Verified role set to {role.mention}")
 
-    # Reviewer role management
-    @set_group.group(name="reviewer")
-    async def reviewer_group(self, ctx: Context):
-        """Manage reviewer roles that can approve/deny verifications."""
+    @config_group.command(name="addreviewerrole", help="Add a reviewer role allowed to approve/deny and use admin commands. Usage: membersync config addreviewerrole @Role")
+    async def addreviewerrole(self, ctx: commands.Context, role: discord.Role) -> None:
+        rr = await self.config.guild(ctx.guild).reviewer_roles()
+        if role.id not in rr:
+            rr.append(role.id)
+            await self.config.guild(ctx.guild).reviewer_roles.set(rr)
+        await ctx.send(f"Added reviewer role {role.mention}")
 
-    @reviewer_group.command(name="add")
-    async def reviewer_add(self, ctx: Context, role: discord.Role):
-        """Add a role that can approve/deny verification requests."""
-        roles = await self.config.review_role_ids()
-        if role.id not in roles:
-            roles.append(role.id)
-            await self.config.review_role_ids.set(roles)
-        await ctx.send(f"Added reviewer role: {role.mention}")
-
-    @reviewer_group.command(name="remove")
-    async def reviewer_remove(self, ctx: Context, role: discord.Role):
-        """Remove a reviewer role."""
-        roles = await self.config.review_role_ids()
-        roles = [r for r in roles if r != role.id]
-        await self.config.review_role_ids.set(roles)
-        await ctx.send(f"Removed reviewer role: {role.mention}")
-
-    @reviewer_group.command(name="list")
-    async def reviewer_list(self, ctx: Context):
-        """List all reviewer roles."""
-        ids = await self.config.review_role_ids()
-        if not ids:
-            await ctx.send("No reviewer roles configured.")
+    @config_group.command(name="setalliancedb", help="Set the alliance.db path used for roster lookups. Usage: membersync config setalliancedb /full/path/to/alliance.db")
+    async def setalliancedb(self, ctx: commands.Context, path: str) -> None:
+        p = Path(path)
+        if not p.exists():
+            await ctx.send("That file does not exist.")
             return
-        names = []
-        for i in ids:
-            r = ctx.guild.get_role(i)
-            names.append(r.mention if r else f"`{i}`")
-        await ctx.send("Reviewer roles: " + ", ".join(names))
+        await self.config.alliance_db_path.set(str(p))
+        await ctx.send(f"Alliance DB path set to `{p}`")
 
-async def setup(bot: Red):
-    await bot.add_cog(MemberSync(bot))
+    # ---- Manual link ----
+    @membersync_group.command(name="link", help="Manually link a Discord member to a MissionChief account as approved. Usage: membersync link @member <mc_id> [mc_name ...]")
+    @checks.admin_or_permissions(manage_guild=True)
+    async def link(self, ctx: commands.Context, member: discord.Member, mc_id: str, *, mc_name: Optional[str] = None) -> None:
+        _, log_ch, ver_role, rr_ids = await self._get_channels_roles(ctx.guild)
+        if not self._is_reviewer(ctx.author, rr_ids):
+            await ctx.send("You are not allowed to use this command.")
+            return
+        if not mc_id.isdigit():
+            await ctx.send("MC ID must be numeric.")
+            return
+
+        con = sqlite3.connect(self.ms_db)
+        cur = con.cursor()
+        now = datetime.utcnow().isoformat()
+
+        # Check for collisions: same mc_id already approved elsewhere
+        cur.execute("SELECT discord_id FROM links WHERE mc_user_id=? AND status='approved' AND discord_id<>?", (mc_id, member.id))
+        row = cur.fetchone()
+        if row:
+            con.close()
+            await ctx.send(f"MC ID {mc_id} is already linked to <@{row[0]}>.")
+            return
+
+        cur.execute("""
+            INSERT INTO links(discord_id, mc_user_id, mc_name, status, created_at, approved_at, approved_by)
+            VALUES(?,?,?,?,?,?,?)
+            ON CONFLICT(discord_id) DO UPDATE SET
+                mc_user_id=excluded.mc_user_id,
+                mc_name=excluded.mc_name,
+                status='approved',
+                approved_at=excluded.approved_at,
+                approved_by=excluded.approved_by
+        """, (member.id, mc_id, mc_name or member.display_name, "approved", now, now, ctx.author.id))
+        self._audit_db(cur, ctx.guild.id, "manual_link", member.id, mc_id, mc_name or member.display_name, meta=f"by {ctx.author.id}")
+        con.commit()
+        con.close()
+
+        if ver_role:
+            with contextlib.suppress(Exception):
+                await member.add_roles(ver_role, reason="MemberSync: manual link")
+        if isinstance(log_ch, discord.TextChannel):
+            with contextlib.suppress(Exception):
+                e = discord.Embed(
+                    title="Manual link approved",
+                    description=f"{member.mention} ↔ **{mc_name or member.display_name}** (ID {mc_id})",
+                    color=discord.Color.green(),
+                    timestamp=datetime.utcnow()
+                )
+                await log_ch.send(embed=e)
+        await ctx.tick()
+
+    # ---- Retro scan/apply ----
+    def _retro_cache_key(self, guild_id: int) -> Path:
+        return self.data_path / f"retro_{guild_id}.json"
+
+    @membersync_group.group(name="retro", help="Retro-link tools for existing Verified-role holders without approved links.")
+    @checks.guildowner_or_permissions(manage_guild=True)
+    async def retro_group(self, ctx: commands.Context) -> None:
+        pass
+
+    @retro_group.command(name="scan", help="Scan verified-role holders without approved links and report safe matches. Usage: membersync retro scan")
+    async def retro_scan(self, ctx: commands.Context) -> None:
+        guild = ctx.guild
+        reviewer_ch, log_ch, ver_role, rr_ids = await self._get_channels_roles(guild)
+        if not ver_role:
+            await ctx.send("Verified role is not set.")
+            return
+
+        # Build set of approved links
+        con = sqlite3.connect(self.ms_db)
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+        cur.execute("SELECT discord_id FROM links WHERE status='approved'")
+        linked = set(int(r["discord_id"]) for r in cur.fetchall())
+
+        # Roster lookup map: name -> mc_user_id
+        try:
+            acon = await self._open_alliance()
+            a = acon.cursor()
+            a.execute("SELECT lower(name) as lname, COALESCE(mc_user_id, user_id) AS id, name FROM members_current")
+            roster = [(str(r["name"]), str(r["id"]) if r["id"] is not None else None, str(r["lname"])) for r in a.fetchall()]
+            acon.close()
+        except Exception as e:
+            await ctx.send(f"Alliance roster not available: {e}")
+            return
+
+        name_to_id: Dict[str, Optional[str]] = {ln: mid for _, mid, ln in roster}
+
+        candidates: List[Tuple[int, str, Optional[str]]] = []  # (discord_id, nick, mc_id)
+        for m in guild.members:
+            if ver_role not in m.roles:
+                continue
+            if m.bot or m.id in linked:
+                continue
+            nick = m.display_name
+            mcid = name_to_id.get(nick.lower())
+            if mcid:  # only strict exact matches
+                candidates.append((m.id, nick, mcid))
+
+        # Save cache
+        import json
+        cache_path = self._retro_cache_key(guild.id)
+        cache = [{"discord_id": did, "nickname": n, "mc_id": mid} for (did, n, mid) in candidates]
+        cache_path.write_text(json.dumps(cache, indent=2))
+
+        await ctx.send(f"Retro scan complete: {len(candidates)} safe matches found. Run `membersync retro apply` to link them.")
+
+    @retro_group.command(name="apply", help="Apply last retro scan: link safe matches as approved and assign the Verified role.")
+    async def retro_apply(self, ctx: commands.Context) -> None:
+        guild = ctx.guild
+        reviewer_ch, log_ch, ver_role, rr_ids = await self._get_channels_roles(guild)
+        if not ver_role:
+            await ctx.send("Verified role is not set.")
+            return
+
+        import json
+        cache_path = self._retro_cache_key(guild.id)
+        if not cache_path.exists():
+            await ctx.send("No scan results found. Run `membersync retro scan` first.")
+            return
+        data = json.loads(cache_path.read_text())
+
+        con = sqlite3.connect(self.ms_db)
+        cur = con.cursor()
+        now = datetime.utcnow().isoformat()
+
+        applied = 0
+        for row in data:
+            did = int(row["discord_id"])
+            mcid = str(row["mc_id"])
+            member = guild.get_member(did)
+            if not member:
+                continue
+            # skip if already approved (race-safety)
+            cur.execute("SELECT status FROM links WHERE discord_id=?", (did,))
+            s = cur.fetchone()
+            if s and s[0] == "approved":
+                continue
+            # collision check
+            cur.execute("SELECT discord_id FROM links WHERE mc_user_id=? AND status='approved' AND discord_id<>?", (mcid, did))
+            if cur.fetchone():
+                continue
+
+            cur.execute("""
+                INSERT INTO links(discord_id, mc_user_id, mc_name, status, created_at, approved_at, approved_by)
+                VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(discord_id) DO UPDATE SET
+                    mc_user_id=excluded.mc_user_id,
+                    mc_name=excluded.mc_name,
+                    status='approved',
+                    approved_at=excluded.approved_at,
+                    approved_by=excluded.approved_by
+            """, (did, mcid, member.display_name, "approved", now, now, ctx.author.id))
+            self._audit_db(cur, guild.id, "retro_link", did, mcid, member.display_name, meta=f"by {ctx.author.id}")
+            applied += 1
+
+            if ver_role:
+                with contextlib.suppress(Exception):
+                    await member.add_roles(ver_role, reason="MemberSync: retro link")
+
+        con.commit()
+        con.close()
+
+        if applied and isinstance(log_ch, discord.TextChannel):
+            with contextlib.suppress(Exception):
+                await log_ch.send(embed=discord.Embed(
+                    title="Retro link applied",
+                    description=f"Linked {applied} member(s) as approved and assigned Verified role.",
+                    color=discord.Color.green(),
+                    timestamp=datetime.utcnow(),
+                ))
+        await ctx.send(f"Retro apply complete: {applied} linked.")
+
+    # ---- Verify command (user) ----
+    @commands.command(name="verify", help="Request verification. Uses your server nickname by default; optionally provide your MissionChief ID.")
+    @commands.cooldown(1, 30, commands.BucketType.user)
+    @commands.guild_only()
+    async def verify(self, ctx: commands.Context, mc_id: Optional[str] = None) -> None:
+        guild = ctx.guild
+        member = ctx.author if isinstance(ctx.author, discord.Member) else guild.get_member(ctx.author.id)
+        if not member:
+            return
+        reviewer_ch, log_ch, ver_role, rr_ids = await self._get_channels_roles(guild)
+
+        # Already approved?
+        con = sqlite3.connect(self.ms_db)
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+        cur.execute("SELECT mc_user_id, mc_name, status FROM links WHERE discord_id=?", (member.id,))
+        link = cur.fetchone()
+
+        if link and link["status"] == "approved":
+            # Fix role if missing
+            if ver_role and ver_role not in member.roles:
+                with contextlib.suppress(Exception):
+                    await member.add_roles(ver_role, reason="MemberSync: role repair")
+            await ctx.send("You are already verified.")
+            con.close()
+            return
+
+        # Freshness check
+        stale_window = await self.config.guild(guild).stale_window_minutes()
+        is_stale = await self._is_stale(int(stale_window))
+
+        nickname = member.display_name
+        match = None if is_stale else await self._match_member(nickname, mc_id)
+
+        if match:
+            # Create review embed
+            if not reviewer_ch or not isinstance(reviewer_ch, discord.TextChannel):
+                await ctx.send("Verification queue is unavailable (review channel not configured). Please contact an admin.")
+                con.close()
+                return
+            msg = await self._post_review_embed(reviewer_ch, guild.id, member.id, match.mc_user_id, match.mc_name)
+            # persist review
+            cur.execute("""
+                INSERT OR REPLACE INTO reviews(message_id, channel_id, guild_id, discord_id, mc_user_id, mc_name, created_at)
+                VALUES(?,?,?,?,?,?,?)
+            """, (msg.id, reviewer_ch.id, guild.id, member.id, match.mc_user_id, match.mc_name, datetime.utcnow().isoformat()))
+            self._audit_db(cur, guild.id, "review_created", member.id, match.mc_user_id, match.mc_name, meta="manual verify")
+            con.commit()
+            con.close()
+            await ctx.send("Verification request sent for review.")
+            return
+
+        # Queue path
+        now = datetime.utcnow()
+        # Upsert queue entry
+        try:
+            cur.execute("""
+                INSERT INTO queue(guild_id, discord_id, mode, nickname, mc_id, requested_at, next_retry_at, retries, status, last_error)
+                VALUES(?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(guild_id, discord_id) DO UPDATE SET
+                    mode=excluded.mode,
+                    nickname=excluded.nickname,
+                    mc_id=excluded.mc_id,
+                    next_retry_at=excluded.next_retry_at,
+                    last_error=NULL
+            """, (guild.id, member.id, "id" if (mc_id and mc_id.isdigit()) else "name", nickname, mc_id if (mc_id and mc_id.isdigit()) else None,
+                  now.isoformat(), (now + timedelta(seconds=120)).isoformat(), 0, "pending", None))
+            self._audit_db(cur, guild.id, "queued", member.id, mc_id if (mc_id and mc_id.isdigit()) else None, nickname, meta="stale or not found")
+            con.commit()
+        finally:
+            con.close()
+
+        eta = (datetime.now() + timedelta(minutes=2)).strftime("%H:%M")
+        await ctx.send(f"Roster not up-to-date yet or no unique match. I've queued your verification and will retry automatically. Next attempt around **{eta}**. You'll get a DM once this is resolved.")
+
+def setup(bot: Red) -> None:
+    bot.add_cog(MemberSync(bot))
