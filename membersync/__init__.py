@@ -1,3 +1,4 @@
-from .membersync import setup
+from .membersync import MemberSync
 
-__all__ = ["setup"]
+async def setup(bot):
+    await bot.add_cog(MemberSync(bot))
