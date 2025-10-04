@@ -1,0 +1,20 @@
+{
+  "author": [
+    "ChatGPT"
+  ],
+  "install_msg": "TopPlayers cog installed. Configure with `[p]tplayers setchannel` and `[p]tplayers settime`.",
+  "name": "TopPlayers",
+  "short": "Daily/Monthly Top Players",
+  "description": "Posts daily and monthly Top Players embeds (uses DailyBriefing rendering under the hood).",
+  "tags": [
+    "missionchief",
+    "top",
+    "players",
+    "daily",
+    "monthly"
+  ],
+  "requirements": [],
+  "hidden": false,
+  "disabled": false,
+  "min_bot_version": "3.5.0"
+}
