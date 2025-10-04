@@ -1,5 +1,7 @@
-# MemberSync Cog
 from __future__ import annotations
+import pathlib
+# MemberSync Cog
+import aiosqlite
 
 import asyncio
 import logging
@@ -47,6 +49,7 @@ class MemberSync(commands.Cog):
         self.config = Config.get_conf(self, identifier=0xFA11A9E5, force_registration=True)
         self.config.register_global(**DEFAULTS)
         self.data_path = cog_data_path(self)
+        self.db_path = self.data_path / "membersync.db"
         self.links_db = self.data_path / "membersync.db"
         self._bg_task: Optional[asyncio.Task] = None
 
@@ -70,26 +73,27 @@ class MemberSync(commands.Cog):
     # ------------------------- DB helpers ------------------------
 
     async def _init_db(self) -> None:
+        """Initialize MemberSync local DB (async, no executor)."""
         self.data_path.mkdir(parents=True, exist_ok=True)
-        async def _run():
-            con = sqlite3.connect(self.links_db)
-            try:
-                con.execute("""
-                CREATE TABLE IF NOT EXISTS links(
-                    discord_id TEXT PRIMARY KEY,
-                    mc_user_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    created_at TEXT,
-                    approved_by TEXT,
-                    updated_at TEXT
-                )""")
-                con.execute("CREATE INDEX IF NOT EXISTS ix_links_mc ON links(mc_user_id)")
-                con.commit()
-            finally:
-                con.close()
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _run)
-
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS links (
+                discord_id     INTEGER NOT NULL,
+                mc_user_id     TEXT    NOT NULL,
+                status         TEXT    NOT NULL DEFAULT 'pending',
+                created_at     TEXT    NOT NULL,
+                updated_at     TEXT    NOT NULL,
+                reviewer_id    INTEGER
+            )""")
+            await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_links_discord ON links(discord_id)")
+            await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_links_mc ON links(mc_user_id)")
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS queue (
+                discord_id   INTEGER PRIMARY KEY,
+                requested_at TEXT    NOT NULL,
+                attempts     INTEGER NOT NULL DEFAULT 0
+            )""")
+            await db.commit()
     def _guess_alliance_db(self) -> Optional[pathlib.Path]:
         base = pathlib.Path.home() / ".local" / "share" / "Red-DiscordBot" / "data"
         # try to find instance folder and AllianceScraper/alliance.db
