@@ -6,16 +6,13 @@ from dataclasses import dataclass
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import List, Optional, Tuple
+from calendar import monthrange
 
 import aiosqlite
 import discord
 from redbot.core import Config, checks, commands
 from zoneinfo import ZoneInfo
 
-
-# =========================
-# Config & defaults
-# =========================
 
 DEFAULT_DB = str(
     Path.home() / ".local/share/Red-DiscordBot/data/frab/cogs/AllianceScraper/alliance.db"
@@ -29,14 +26,18 @@ GLOBAL_DEFAULTS = {
     "monthly_channel_id": 0,
     "daily_enabled": False,
     "monthly_enabled": False,
-    "daily_post_h": 23,     # 23:50 NY-time
+    # Daily: 23:50 NY
+    "daily_post_h": 23,
     "daily_post_m": 50,
-    "monthly_post_dom": 1,  # dag van maand
-    "monthly_post_h": 0,    # 00:10 NY-time
-    "monthly_post_m": 10,
+    # Monthly: laatste dag 23:50 NY (we berekenen de dag dynamisch)
+    "monthly_post_h": 23,
+    "monthly_post_m": 50,
     "last_daily_ymd": "",
     "last_monthly_ym": "",
 }
+
+NY = ZoneInfo("America/New_York")
+UTC = ZoneInfo("UTC")
 
 
 @dataclass
@@ -46,12 +47,8 @@ class TopRow:
     delta: int
 
 
-# =========================
-# Cog
-# =========================
-
 class TopPlayers(commands.Cog):
-    """Daily/Monthly Top Players uit members_history (NY-tijd, geen UTC-conversie)."""
+    """Daily/Monthly Top Players uit members_history. Correcte tijdvensters via NY→UTC conversie."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -60,7 +57,7 @@ class TopPlayers(commands.Cog):
         self._bg_task: Optional[asyncio.Task] = None
         self._stop = asyncio.Event()
 
-    # ---------- lifecycle ----------
+    # ---------------- lifecycle ----------------
 
     async def cog_load(self):
         self._stop.clear()
@@ -75,33 +72,32 @@ class TopPlayers(commands.Cog):
                 pass
             self._bg_task = None
 
-    # ---------- helpers: ranges (NY, géén UTC conversie) ----------
+    # ---------------- helpers: NY→UTC ranges ----------------
 
-    def _ny_day_range(self, d: date) -> Tuple[str, str]:
-        ny = ZoneInfo("America/New_York")
-        s = datetime.combine(d, time(0, 0), ny)
-        e = datetime.combine(d, time(23, 50), ny)
-        return s.strftime("%Y-%m-%d %H:%M:%S"), e.strftime("%Y-%m-%d %H:%M:%S")
+    def _ny_day_range_utc(self, d: date) -> Tuple[str, str]:
+        # members_history.snapshot_utc is UTC; dus vergelijk in UTC.
+        s_ny = datetime.combine(d, time(0, 0), NY)
+        e_ny = datetime.combine(d, time(23, 50), NY)
+        s_utc = s_ny.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        e_utc = e_ny.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        return s_utc, e_utc
 
-    def _ny_month_range(self, year: int, month: int) -> Tuple[str, str]:
-        from calendar import monthrange
-
-        ny = ZoneInfo("America/New_York")
-        start = datetime(year, month, 1, 0, 0, tzinfo=ny)
+    def _ny_month_range_utc(self, year: int, month: int) -> Tuple[str, str]:
+        s_ny = datetime(year, month, 1, 0, 0, tzinfo=NY)
         last_day = monthrange(year, month)[1]
-        end = datetime(year, month, last_day, 23, 50, tzinfo=ny)
-        return start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")
+        e_ny = datetime(year, month, last_day, 23, 50, tzinfo=NY)
+        s_utc = s_ny.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        e_utc = e_ny.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        return s_utc, e_utc
 
     async def _get_db_path(self) -> Path:
-        raw = await self.config.db_path()
-        return Path(raw).expanduser()
+        return Path((await self.config.db_path()) or DEFAULT_DB).expanduser()
 
-    # ---------- core SQL ----------
+    # ---------------- core SQL ----------------
 
-    async def _compute_top(self, db_path: Path, start_str: str, end_str: str, topn: int) -> List[TopRow]:
+    async def _compute_top(self, db_path: Path, start_utc: str, end_utc: str, topn: int) -> List[TopRow]:
         """
-        Berekent top op basis van members_history tussen start_str en end_str,
-        waarbij start_str en end_str NY-lokale tekst zijn ('YYYY-MM-DD HH:MM:SS').
+        Delta per member: (latest ec <= end_utc) - (latest ec < start_utc), beide UTC strings.
         """
         sql = """
 WITH members AS (SELECT DISTINCT member_id FROM members_history),
@@ -141,14 +137,14 @@ WHERE COALESCE(endv.endc,0) > COALESCE(startv.startc,0)
 ORDER BY delta DESC, name ASC
 LIMIT ?
 """
-        rows_out: List[TopRow] = []
+        out: List[TopRow] = []
         async with aiosqlite.connect(str(db_path)) as db:
-            async with db.execute(sql, (end_str, start_str, int(topn))) as cur:
+            async with db.execute(sql, (end_utc, start_utc, int(topn))) as cur:
                 async for mid, name, delta in cur:
-                    rows_out.append(TopRow(str(mid), name or str(mid), int(delta or 0)))
-        return rows_out
+                    out.append(TopRow(str(mid), name or str(mid), int(delta or 0)))
+        return out
 
-    # ---------- embed ----------
+    # ---------------- embed ----------------
 
     def _embed(self, title: str, subtitle: str, rows: List[TopRow]) -> discord.Embed:
         e = discord.Embed(title=title, description=subtitle)
@@ -160,13 +156,11 @@ LIMIT ?
         for i, r in enumerate(rows, 1):
             lines.append(f"**#{i}**  {r.name} — +{r.delta:,}".replace(",", "."))
 
-        # veiligheid voor Discord limieten (1024 chars per field)
         value = "\n".join(lines)
         if len(value) <= 1024:
             e.add_field(name="Top", value=value, inline=False)
         else:
-            chunk = []
-            size = 0
+            chunk, size = [], 0
             for ln in lines:
                 if size + len(ln) + 1 > 1024:
                     e.add_field(name="Top", value="\n".join(chunk), inline=False)
@@ -177,7 +171,7 @@ LIMIT ?
                 e.add_field(name="Top (vervolg)", value="\n".join(chunk), inline=False)
         return e
 
-    # ---------- posting helpers ----------
+    # ---------------- posting helpers ----------------
 
     async def _post_daily(self, when_ny: datetime):
         ch_id = await self.config.daily_channel_id()
@@ -188,12 +182,12 @@ LIMIT ?
             return
 
         d = when_ny.date()
-        start_str, end_str = self._ny_day_range(d)
+        start_utc, end_utc = self._ny_day_range_utc(d)
         db = await self._get_db_path()
         topn = await self.config.topn_daily()
-        rows = await self._compute_top(db, start_str, end_str, topn)
-        emb = self._embed("Daily Top Players", f"{d.isoformat()} (America/New_York) — Top {topn}", rows)
-        await ch.send(embed=emb)
+        rows = await self._compute_top(db, start_utc, end_utc, topn)
+        subtitle = f"{d.isoformat()} (America/New_York) — Top {topn}"
+        await ch.send(embed=self._embed("Daily Top Players", subtitle, rows))
         await self.config.last_daily_ymd.set(d.isoformat())
 
     async def _post_monthly(self, when_ny: datetime):
@@ -205,49 +199,44 @@ LIMIT ?
             return
 
         y, m = when_ny.year, when_ny.month
-        start_str, end_str = self._ny_month_range(y, m)
+        start_utc, end_utc = self._ny_month_range_utc(y, m)
         db = await self._get_db_path()
         topn = await self.config.topn_monthly()
-        rows = await self._compute_top(db, start_str, end_str, topn)
-        emb = self._embed("Monthly Top Players", f"{y}-{m:02d} (America/New_York) — Top {topn}", rows)
-        await ch.send(embed=emb)
+        rows = await self._compute_top(db, start_utc, end_utc, topn)
+        subtitle = f"{y}-{m:02d} (America/New_York) — Top {topn}"
+        await ch.send(embed=self._embed("Monthly Top Players", subtitle, rows))
         await self.config.last_monthly_ym.set(f"{y}-{m:02d}")
 
-    # ---------- scheduler ----------
+    # ---------------- scheduler ----------------
 
     async def _scheduler_loop(self):
         await self.bot.wait_until_red_ready()
-        ny = ZoneInfo("America/New_York")
         while not self._stop.is_set():
             try:
-                now_ny = datetime.now(ny)
+                now_ny = datetime.now(NY)
 
-                # daily
+                # Daily om 23:50 NY
                 if await self.config.daily_enabled():
-                    hh = await self.config.daily_post_h()
-                    mm = await self.config.daily_post_m()
-                    target = now_ny.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                    dh, dm = await self.config.daily_post_h(), await self.config.daily_post_m()
+                    daily_target = now_ny.replace(hour=dh, minute=dm, second=0, microsecond=0)
                     last = await self.config.last_daily_ymd()
-                    if now_ny >= target and (last != now_ny.date().isoformat()):
+                    if now_ny >= daily_target and last != now_ny.date().isoformat():
                         await self._post_daily(now_ny)
 
-                # monthly
+                # Monthly op LAATSTE dag 23:50 NY
                 if await self.config.monthly_enabled():
-                    dom = await self.config.monthly_post_dom()
-                    hh = await self.config.monthly_post_h()
-                    mm = await self.config.monthly_post_m()
+                    mh, mm = await self.config.monthly_post_h(), await self.config.monthly_post_m()
+                    last_day = monthrange(now_ny.year, now_ny.month)[1]
                     try:
-                        target = now_ny.replace(day=dom, hour=hh, minute=mm, second=0, microsecond=0)
+                        monthly_target = now_ny.replace(day=last_day, hour=mh, minute=mm, second=0, microsecond=0)
                     except ValueError:
-                        # indien dom ongeldige dag (bv 31 in korte maand) -> fix naar 1
-                        target = now_ny.replace(day=1, hour=hh, minute=mm, second=0, microsecond=0)
-                    lastm = await self.config.last_monthly_ym()
+                        monthly_target = now_ny.replace(day=last_day, hour=mh, minute=mm, second=0, microsecond=0)
                     ym = f"{now_ny.year}-{now_ny.month:02d}"
-                    if now_ny >= target and (lastm != ym):
+                    lastm = await self.config.last_monthly_ym()
+                    if now_ny >= monthly_target and lastm != ym:
                         await self._post_monthly(now_ny)
 
             except Exception:
-                # stil falen; we willen geen spam in logs
                 pass
 
             try:
@@ -255,9 +244,7 @@ LIMIT ?
             except asyncio.TimeoutError:
                 pass
 
-    # =========================
-    # Commands
-    # =========================
+    # ---------------- commands ----------------
 
     @commands.group(name="tplayers")
     @checks.is_owner()
@@ -274,10 +261,9 @@ LIMIT ?
         de  = await self.config.daily_enabled()
         me  = await self.config.monthly_enabled()
         dh, dm = await self.config.daily_post_h(), await self.config.daily_post_m()
-        md, mh, mm = await self.config.monthly_post_dom(), await self.config.monthly_post_h(), await self.config.monthly_post_m()
+        mh, mm = await self.config.monthly_post_h(), await self.config.monthly_post_m()
         lastd = await self.config.last_daily_ymd()
         lastm = await self.config.last_monthly_ym()
-
         await ctx.send(
             "```\n"
             f"DB path        : {db}\n"
@@ -285,7 +271,7 @@ LIMIT ?
             f"Daily channel  : {chd}\n"
             f"Monthly channel: {chm}\n"
             f"Daily enabled  : {de} (at {dh:02d}:{dm:02d} NY)\n"
-            f"Monthly enabled: {me} (dom={md}, {mh:02d}:{mm:02d} NY)\n"
+            f"Monthly enabled: {me} (last day {mh:02d}:{mm:02d} NY)\n"
             f"Last daily     : {lastd}\n"
             f"Last monthly   : {lastm}\n"
             "```"
@@ -340,63 +326,57 @@ LIMIT ?
         await self.config.monthly_enabled.set(v)
         await ctx.send(f"Monthly auto-post: {v}")
 
-    # ---------- preview/run/debug ----------
-
     @tplayers.group(name="preview")
     async def tp_preview(self, ctx: commands.Context):
         """Voorbeeld / test-run zonder te posten in kanaal."""
 
     @tp_preview.command(name="daily")
     async def preview_daily(self, ctx: commands.Context, ymd: Optional[str] = None, topn: Optional[int] = None):
-        ny = ZoneInfo("America/New_York")
-        d = datetime.now(ny).date() if not ymd else date(*map(int, ymd.split("-")))
-        start_str, end_str = self._ny_day_range(d)
+        d = datetime.now(NY).date() if not ymd else date(*map(int, ymd.split("-")))
+        s_utc, e_utc = self._ny_day_range_utc(d)
         db = await self._get_db_path()
         if topn is None:
             topn = await self.config.topn_daily()
         msg = await ctx.send(f"⏳ Berekenen daily top voor **{d.isoformat()}** …")
-        rows = await self._compute_top(db, start_str, end_str, topn)
-        emb = self._embed("Daily Top Players", f"{d.isoformat()} (America/New_York) — Top {topn}", rows)
-        await msg.edit(content="Klaar.", embed=emb)
+        rows = await self._compute_top(db, s_utc, e_utc, topn)
+        subtitle = f"{d.isoformat()} (America/New_York) — Top {topn}"
+        await msg.edit(content="Klaar.", embed=self._embed("Daily Top Players", subtitle, rows))
 
     @tp_preview.command(name="monthly")
     async def preview_monthly(self, ctx: commands.Context, ym: Optional[str] = None, topn: Optional[int] = None):
-        ny = ZoneInfo("America/New_York")
-        now_ny = datetime.now(ny)
-        if ym:
-            y, m = map(int, ym.split("-"))
-        else:
-            y, m = now_ny.year, now_ny.month
-        start_str, end_str = self._ny_month_range(y, m)
+        now_ny = datetime.now(NY)
+        y, m = (now_ny.year, now_ny.month) if not ym else tuple(map(int, ym.split("-")))
+        s_utc, e_utc = self._ny_month_range_utc(y, m)
         db = await self._get_db_path()
         if topn is None:
             topn = await self.config.topn_monthly()
         msg = await ctx.send(f"⏳ Berekenen monthly top voor **{y}-{m:02d}** …")
-        rows = await self._compute_top(db, start_str, end_str, topn)
-        emb = self._embed("Monthly Top Players", f"{y}-{m:02d} (America/New_York) — Top {topn}", rows)
-        await msg.edit(content="Klaar.", embed=emb)
+        rows = await self._compute_top(db, s_utc, e_utc, topn)
+        subtitle = f"{y}-{m:02d} (America/New_York) — Top {topn}"
+        await msg.edit(content="Klaar.", embed=self._embed("Monthly Top Players", subtitle, rows))
 
     @tplayers.group(name="run")
     async def tp_run(self, ctx: commands.Context):
-        """Post direct in het ingestelde kanaal."""
+        """Post direct in kanaal (zonder te wachten op scheduler)."""
 
     @tp_run.command(name="daily")
     async def run_daily(self, ctx: commands.Context, ymd: Optional[str] = None):
-        ny = ZoneInfo("America/New_York")
-        d = datetime.now(ny).date() if not ymd else date(*map(int, ymd.split("-")))
-        when = datetime(d.year, d.month, d.day, 23, 50, tzinfo=ny)  # label
+        d = datetime.now(NY).date() if not ymd else date(*map(int, ymd.split("-")))
+        when = datetime(d.year, d.month, d.day, 23, 50, tzinfo=NY)
         await self._post_daily(when)
         await ctx.tick()
 
     @tp_run.command(name="monthly")
     async def run_monthly(self, ctx: commands.Context, ym: Optional[str] = None):
-        ny = ZoneInfo("America/New_York")
-        now_ny = datetime.now(ny)
+        now_ny = datetime.now(NY)
         if ym:
             y, m = map(int, ym.split("-"))
-            when = datetime(y, m, 1, 0, 10, tzinfo=ny)
+            last_day = monthrange(y, m)[1]
+            when = datetime(y, m, last_day, 23, 50, tzinfo=NY)
         else:
-            when = now_ny
+            y, m = now_ny.year, now_ny.month
+            last_day = monthrange(y, m)[1]
+            when = datetime(y, m, last_day, 23, 50, tzinfo=NY)
         await self._post_monthly(when)
         await ctx.tick()
 
@@ -406,11 +386,10 @@ LIMIT ?
 
     @tp_debug.command(name="daily")
     async def debug_daily(self, ctx: commands.Context, ymd: Optional[str] = None):
-        ny = ZoneInfo("America/New_York")
-        d = datetime.now(ny).date() if not ymd else date(*map(int, ymd.split("-")))
-        s, e = self._ny_day_range(d)
+        d = datetime.now(NY).date() if not ymd else date(*map(int, ymd.split("-")))
+        s_utc, e_utc = self._ny_day_range_utc(d)
         db = await self._get_db_path()
-
+        # Tel snapshots (UTC vergelijkingen)
         sql_counts = """
 WITH hist AS (
   SELECT substr(replace(COALESCE(snapshot_utc, scraped_at),'T',' '),1,19) AS ts,
@@ -423,28 +402,24 @@ SELECT
   (SELECT COUNT(*) FROM hist WHERE ts >= ? AND ts <= ?)     AS rows_in_window
 """
         async with aiosqlite.connect(str(db)) as adb:
-            async with adb.execute(sql_counts, (e, s, s, e)) as cur:
+            async with adb.execute(sql_counts, (e_utc, s_utc, s_utc, e_utc)) as cur:
                 le_end, lt_start, rows_in_window = await cur.fetchone()
 
+        # NY-labels + UTC-vensters tonen
         await ctx.send(
             "```\n"
             f"NY dag: {d.isoformat()} (America/New_York)\n"
-            f"START={s}  END={e}\n"
+            f"UTC START={s_utc}  UTC END={e_utc}\n"
             f"snapshots ≤END: {le_end}   snapshots <START: {lt_start}   rows_in_window: {rows_in_window}\n"
             "```"
         )
 
     @tp_debug.command(name="monthly")
     async def debug_monthly(self, ctx: commands.Context, ym: Optional[str] = None):
-        ny = ZoneInfo("America/New_York")
-        now_ny = datetime.now(ny)
-        if ym:
-            y, m = map(int, ym.split("-"))
-        else:
-            y, m = now_ny.year, now_ny.month
-        s, e = self._ny_month_range(y, m)
+        now_ny = datetime.now(NY)
+        y, m = (now_ny.year, now_ny.month) if not ym else tuple(map(int, ym.split("-")))
+        s_utc, e_utc = self._ny_month_range_utc(y, m)
         db = await self._get_db_path()
-
         sql_counts = """
 WITH hist AS (
   SELECT substr(replace(COALESCE(snapshot_utc, scraped_at),'T',' '),1,19) AS ts,
@@ -457,13 +432,13 @@ SELECT
   (SELECT COUNT(*) FROM hist WHERE ts >= ? AND ts <= ?)     AS rows_in_window
 """
         async with aiosqlite.connect(str(db)) as adb:
-            async with adb.execute(sql_counts, (e, s, s, e)) as cur:
+            async with adb.execute(sql_counts, (e_utc, s_utc, s_utc, e_utc)) as cur:
                 le_end, lt_start, rows_in_window = await cur.fetchone()
 
         await ctx.send(
             "```\n"
             f"NY maand: {y}-{m:02d} (America/New_York)\n"
-            f"START={s}  END={e}\n"
+            f"UTC START={s_utc}  UTC END={e_utc}\n"
             f"snapshots ≤END: {le_end}   snapshots <START: {lt_start}   rows_in_window: {rows_in_window}\n"
             "```"
         )
