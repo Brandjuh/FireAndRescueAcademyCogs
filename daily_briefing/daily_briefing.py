@@ -325,35 +325,54 @@ class DailyBriefing(commands.Cog):
         summary_text = f"**Total Completed:** {completed_today} ({diff})"
         
         embed.add_field(
-            name="📚 Training Summary",
+            name="Training Summary",
             value=summary_text,
             inline=False
         )
         
-        # Add breakdown by course
-        by_course = training_stats["by_course"]
-        if by_course:
+        # Add breakdown by completed courses
+        by_course_completed = training_stats["by_course_completed"]
+        if by_course_completed:
             # Sort by count and take top 10
-            sorted_courses = sorted(by_course.items(), key=lambda x: x[1], reverse=True)[:10]
+            sorted_courses = sorted(by_course_completed.items(), key=lambda x: x[1], reverse=True)[:10]
             
             course_text = ""
             for course, count in sorted_courses:
                 # Truncate long course names
-                display_name = course[:40] + "..." if len(course) > 40 else course
+                display_name = course[:45] + "..." if len(course) > 45 else course
                 course_text += f"**{count}x** {display_name}\n"
             
             if course_text:
                 embed.add_field(
-                    name="📖 Courses Completed Today",
+                    name="Courses Completed Today",
                     value=course_text,
                     inline=False
                 )
         else:
             embed.add_field(
-                name="📖 Courses Completed Today",
+                name="Courses Completed Today",
                 value="No courses completed",
                 inline=False
             )
+        
+        # Add breakdown by created courses
+        by_course_created = training_stats["by_course_created"]
+        if by_course_created:
+            # Sort by count and take top 10
+            sorted_created = sorted(by_course_created.items(), key=lambda x: x[1], reverse=True)[:10]
+            
+            created_text = ""
+            for course, count in sorted_created:
+                # Truncate long course names
+                display_name = course[:45] + "..." if len(course) > 45 else course
+                created_text += f"**{count}x** {display_name}\n"
+            
+            if created_text:
+                embed.add_field(
+                    name="Courses Started Today",
+                    value=created_text,
+                    inline=False
+                )
         
         embed.set_footer(text="FARA Alliance Statistics")
         
@@ -522,19 +541,31 @@ class DailyBriefing(commands.Cog):
             building_stats = await self._get_building_stats()
             training_stats = await self._get_training_stats()
             
-            await ctx.send(f"**Stats:**\n"
+            await ctx.send(f"**Stats fetched:**\n"
                           f"New members: {member_stats['new']}, Left: {member_stats['left']}\n"
                           f"Buildings built: {building_stats['built_today']}\n"
-                          f"Trainings: {training_stats['completed_today']}")
+                          f"Trainings completed: {training_stats['completed_today']}\n"
+                          f"Trainings started: {len(training_stats['by_course_created'])}")
             
-            await ctx.send(f"Posting briefing to {channel.mention}...")
-            await self._post_daily_briefing()
-            await ctx.send("✅ Daily briefing posted!")
+            await ctx.send(f"Creating embeds and posting to {channel.mention}...")
+            
+            # Create embeds
+            members_buildings_embed = await self._create_members_buildings_embed(
+                member_stats, building_stats
+            )
+            training_embed = await self._create_training_embed(training_stats)
+            
+            # Post embeds
+            msg1 = await channel.send(embed=members_buildings_embed)
+            msg2 = await channel.send(embed=training_embed)
+            
+            await ctx.send(f"✅ Daily briefing posted! Message IDs: {msg1.id}, {msg2.id}")
             
         except Exception as e:
             await ctx.send(f"❌ Error: {e}")
             import traceback
-            await ctx.send(f"```\n{traceback.format_exc()[:1900]}\n```")
+            tb = traceback.format_exc()
+            await ctx.send(f"```\n{tb[:1900]}\n```")
 
     @briefing_group.command(name="restart")
     async def restart_scheduler(self, ctx: commands.Context):
