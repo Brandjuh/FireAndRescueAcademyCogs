@@ -59,7 +59,7 @@ class TopPlayers(commands.Cog):
             return None
 
     async def _fetch_daily_top10(self) -> List[Dict[str, Any]]:
-        """Fetch top 10 contributors from today's data with comparison."""
+        """Fetch top 10 daily contributors based on credits gained today."""
         db_path = await self._get_db_path()
         if not db_path:
             return []
@@ -70,54 +70,85 @@ class TopPlayers(commands.Cog):
             # Get today's and yesterday's date ranges (in EDT/New York time)
             now = datetime.now(ZoneInfo("America/New_York"))
             today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            yesterday_start = today_start.replace(day=today_start.day - 1) if today_start.day > 1 else today_start.replace(month=today_start.month - 1 if today_start.month > 1 else 12, day=1)
             
-            # Get today's data
+            # Calculate yesterday properly
+            from datetime import timedelta
+            yesterday_start = today_start - timedelta(days=1)
+            day_before_yesterday = yesterday_start - timedelta(days=1)
+            
+            # Get latest snapshot from today for each user
             cur = await db.execute("""
                 SELECT 
                     user_id,
                     name,
-                    earned_credits,
-                    MAX(scraped_at) as latest_scrape
+                    earned_credits as today_credits
                 FROM members_history
                 WHERE scraped_at >= ?
                 GROUP BY user_id
-                ORDER BY earned_credits DESC
-                LIMIT 10
+                HAVING MAX(scraped_at)
             """, (today_start.isoformat(),))
             
-            today_rows = await cur.fetchall()
+            today_data = {row['user_id']: dict(row) for row in await cur.fetchall()}
             
-            # Get yesterday's data for comparison
+            # Get latest snapshot from yesterday for each user
             cur = await db.execute("""
                 SELECT 
                     user_id,
-                    earned_credits
+                    earned_credits as yesterday_credits
                 FROM members_history
                 WHERE scraped_at >= ? AND scraped_at < ?
                 GROUP BY user_id
                 HAVING MAX(scraped_at)
             """, (yesterday_start.isoformat(), today_start.isoformat()))
             
-            yesterday_data = {row[0]: row[1] for row in await cur.fetchall()}
+            yesterday_data = {row['user_id']: row['yesterday_credits'] for row in await cur.fetchall()}
             
-            # Calculate changes
+            # Get day before yesterday for comparison
+            cur = await db.execute("""
+                SELECT 
+                    user_id,
+                    earned_credits as dby_credits
+                FROM members_history
+                WHERE scraped_at >= ? AND scraped_at < ?
+                GROUP BY user_id
+                HAVING MAX(scraped_at)
+            """, (day_before_yesterday.isoformat(), yesterday_start.isoformat()))
+            
+            dby_data = {row['user_id']: row['dby_credits'] for row in await cur.fetchall()}
+            
+            # Calculate daily gains and changes
             result = []
-            for row in today_rows:
-                data = dict(row)
-                today_credits = data['earned_credits']
-                yesterday_credits = yesterday_data.get(data['user_id'], today_credits)
+            for user_id, data in today_data.items():
+                today_credits = data['today_credits']
+                yesterday_credits = yesterday_data.get(user_id, today_credits)
+                dby_credits = dby_data.get(user_id, yesterday_credits)
                 
-                if yesterday_credits > 0:
-                    change_pct = ((today_credits - yesterday_credits) / yesterday_credits) * 100
+                # Today's gain
+                daily_gain = today_credits - yesterday_credits
+                
+                # Yesterday's gain (for percentage comparison)
+                yesterday_gain = yesterday_credits - dby_credits
+                
+                # Calculate percentage change in daily gain
+                if yesterday_gain > 0:
+                    change_pct = ((daily_gain - yesterday_gain) / yesterday_gain) * 100
+                elif daily_gain > 0:
+                    change_pct = 100.0  # New contribution
                 else:
                     change_pct = 0.0
                 
-                data['change_percentage'] = change_pct
-                data['credits_gained'] = today_credits - yesterday_credits
-                result.append(data)
+                result.append({
+                    'user_id': user_id,
+                    'name': data['name'],
+                    'earned_credits': today_credits,
+                    'credits_gained': daily_gain,
+                    'change_percentage': change_pct
+                })
             
-            return result
+            # Sort by daily gain (not total credits)
+            result.sort(key=lambda x: x['credits_gained'], reverse=True)
+            
+            return result[:10]
 
     async def _fetch_monthly_top10(self) -> List[Dict[str, Any]]:
         """Fetch top 10 contributors from this month's data with comparison."""
