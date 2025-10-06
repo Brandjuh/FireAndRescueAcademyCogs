@@ -648,108 +648,116 @@ class AllianceScraper(commands.Cog):
         """Parse /verband/kasse page. Returns (total_funds, income_rows, expense_rows)"""
         soup = BeautifulSoup(html, "html.parser")
         
-        # Extract total funds
+        # Extract total funds - look in all text content
         total_funds = 0
-        for strong in soup.find_all("strong"):
-            text = strong.get_text(strip=True)
-            if "coins" in text.lower() or "$" in text:
-                total_funds = parse_int64_from_text(text)
-                break
+        # Check all elements for balance indicator
+        for elem in soup.find_all(["div", "span", "strong", "p", "h1", "h2", "h3"]):
+            text = elem.get_text(strip=True)
+            # Look for patterns like "Alliance Funds: 60,635,222" or just large numbers
+            if any(word in text.lower() for word in ["fund", "balance", "coin", "treasury"]):
+                val = parse_int64_from_text(text)
+                if val > 1000000:  # Must be at least 1M to be the alliance balance
+                    total_funds = val
+                    break
         
-        # Parse income table (contributions)
+        # If still not found, just look for the largest number in the page
+        if total_funds == 0:
+            for elem in soup.find_all(text=True):
+                text = elem.strip()
+                if text and any(c.isdigit() for c in text):
+                    val = parse_int64_from_text(text)
+                    if val > total_funds:
+                        total_funds = val
+        
+        # Parse tables
         income_rows = []
         tables = soup.find_all("table")
         
-        for table in tables:
-            # Check if this is the income table by looking for headers
-            headers = [th.get_text(strip=True).lower() for th in table.find_all("th")]
-            if not any("name" in h or "credits" in h for h in headers):
-                continue
+        # Table 0 should be Income (Name, Credits)
+        if len(tables) >= 1:
+            income_table = tables[0]
+            headers = [th.get_text(strip=True).lower() for th in income_table.find_all("th")]
             
-            # Determine period from table context (look for "Daily" or "Monthly" nearby)
-            period = "unknown"
-            prev_sibling = table.find_previous_sibling()
-            if prev_sibling:
-                text = prev_sibling.get_text(strip=True).lower()
-                if "daily" in text or "today" in text:
-                    period = "daily"
-                elif "monthly" in text or "month" in text:
-                    period = "monthly"
-            
-            for tr in table.find_all("tr"):
-                tds = tr.find_all("td")
-                if len(tds) < 2:
-                    continue
+            # Verify it's the income table (has "name" and "credits" headers)
+            if "name" in headers and "credits" in headers:
+                # Determine period - check heading before table
+                period = "daily"  # Default to daily
+                prev = income_table.find_previous(["h1", "h2", "h3", "h4", "strong"])
+                if prev:
+                    heading = prev.get_text(strip=True).lower()
+                    if "month" in heading:
+                        period = "monthly"
+                    elif "daily" in heading or "today" in heading or any(str(d) in heading for d in range(1, 32)):
+                        period = "daily"
                 
-                # Get name and link
-                a = tds[0].find("a", href=True)
-                if not a:
-                    continue
+                # Parse rows
+                for tr in income_table.find_all("tr"):
+                    tds = tr.find_all("td")
+                    if len(tds) < 2:
+                        continue
                     
-                name = a.get_text(strip=True)
-                href = a["href"]
-                user_id = _extract_id_from_href(href) or ""
-                
-                # Get credits (second column)
-                credits = 0
-                if len(tds) >= 2:
+                    # Column 0: Name (with link)
+                    a = tds[0].find("a", href=True)
+                    if not a:
+                        continue
+                    
+                    name = a.get_text(strip=True)
+                    href = a["href"]
+                    user_id = _extract_id_from_href(href) or ""
+                    
+                    # Column 1: Credits
                     credits = parse_int64_from_text(tds[1].get_text(strip=True))
-                
-                # Skip if contribution rate < 10% (check if there's a percentage column)
-                skip = False
-                for td in tds:
-                    text = td.get_text(strip=True)
-                    if "%" in text:
-                        rate = parse_percent(text)
-                        if 0 < rate <= 10.0:
-                            skip = True
-                            break
-                
-                if not skip and credits > 0:
-                    income_rows.append({
-                        "period": period,
-                        "user_name": name,
-                        "user_id": user_id,
-                        "credits": credits,
-                    })
+                    
+                    if credits > 0:
+                        income_rows.append({
+                            "period": period,
+                            "user_name": name,
+                            "user_id": user_id,
+                            "credits": credits,
+                        })
         
         return total_funds, income_rows, []
     
     def _parse_treasury_expenses_page(self, html: str) -> List[Dict[str, Any]]:
-        """Parse /verband/kasse expenses page"""
+        """Parse /verband/kasse expenses from table 1 (Credits, Name, Description, Date)"""
         soup = BeautifulSoup(html, "html.parser")
         expenses = []
         
-        # Find expense table
-        for table in soup.find_all("table"):
-            for tr in table.find_all("tr"):
-                tds = tr.find_all("td")
-                if len(tds) < 3:
-                    continue
-                
-                # Column 0: Date
-                date_text = tds[0].get_text(" ", strip=True)
-                
-                # Column 1: Credits (negative values)
-                credits = parse_int64_from_text(tds[1].get_text(strip=True))
-                
-                # Column 2: Name
-                name = tds[2].get_text(" ", strip=True)
-                
-                # Column 3: Description (if exists)
-                description = ""
-                if len(tds) >= 4:
-                    description = tds[3].get_text(" ", strip=True)
-                
-                if date_text and credits != 0:
-                    h = _hash_expense(date_text, str(credits), name, description)
-                    expenses.append({
-                        "hash": h,
-                        "expense_date": date_text,
-                        "credits": abs(credits),  # Store as positive
-                        "name": name,
-                        "description": description,
-                    })
+        # Find tables - Table 1 should be expenses
+        tables = soup.find_all("table")
+        
+        if len(tables) >= 2:
+            expense_table = tables[1]  # Second table
+            headers = [th.get_text(strip=True).lower() for th in expense_table.find_all("th")]
+            
+            # Verify it's the expense table (Credits, Name, Description, Date)
+            if "credits" in headers and "date" in headers:
+                for tr in expense_table.find_all("tr"):
+                    tds = tr.find_all("td")
+                    if len(tds) < 4:
+                        continue
+                    
+                    # Column 0: Credits
+                    credits = parse_int64_from_text(tds[0].get_text(strip=True))
+                    
+                    # Column 1: Name
+                    name = tds[1].get_text(strip=True)
+                    
+                    # Column 2: Description
+                    description = tds[2].get_text(strip=True)
+                    
+                    # Column 3: Date
+                    date_text = tds[3].get_text(strip=True)
+                    
+                    if credits > 0 and date_text:
+                        h = _hash_expense(date_text, str(credits), name, description)
+                        expenses.append({
+                            "hash": h,
+                            "expense_date": date_text,
+                            "credits": credits,
+                            "name": name,
+                            "description": description,
+                        })
         
         return expenses
 
