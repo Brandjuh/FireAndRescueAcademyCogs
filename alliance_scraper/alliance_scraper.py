@@ -811,6 +811,9 @@ class AllianceScraper(commands.Cog):
     async def _insert_treasury_expenses(self, rows: List[Dict[str, Any]]) -> int:
         """Insert new expense entries (skip duplicates)"""
         inserted = 0
+        duplicates = 0
+        errors = 0
+        
         async with aiosqlite.connect(self.db_path) as db:
             for row in rows:
                 try:
@@ -821,8 +824,20 @@ class AllianceScraper(commands.Cog):
                           row["name"], row["description"], now_utc()))
                     inserted += 1
                 except aiosqlite.IntegrityError:
+                    # Hash collision - duplicate entry
+                    duplicates += 1
+                    continue
+                except Exception as e:
+                    errors += 1
+                    log.error("Failed to insert expense: %s | Error: %s", row, e)
                     continue
             await db.commit()
+        
+        if duplicates > 0:
+            log.info("Skipped %d duplicate expenses", duplicates)
+        if errors > 0:
+            log.warning("Failed to insert %d expenses due to errors", errors)
+        
         return inserted
 
     async def _scrape_treasury_once(self, backfill_expenses: bool = False) -> Tuple[int, int, int]:
