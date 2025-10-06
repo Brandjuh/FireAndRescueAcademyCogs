@@ -818,23 +818,25 @@ class AllianceScraper(commands.Cog):
         session, own = await self._get_auth_session()
         
         try:
-            # Scrape main treasury page
+            # Scrape main treasury page (page 1)
             url = f"{base}/verband/kasse"
             html, _ = await self._fetch(session, url)
             total_funds, income_rows, _ = self._parse_treasury_page(html)
+            
+            # Parse expenses from same page
+            expenses_page1 = self._parse_treasury_expenses_page(html)
+            expenses_inserted = await self._insert_treasury_expenses(expenses_page1)
             
             # Save balance and income
             await self._save_treasury_balance(total_funds)
             await self._save_treasury_income(income_rows)
             
-            # Scrape expenses
-            expenses_inserted = 0
+            # Backfill additional expense pages if requested
             if backfill_expenses:
-                # Initial backfill: scrape all expense pages
                 expenses_per_minute = int(await self.config.treasury_expenses_per_minute())
                 delay = max(0.0, 60.0 / max(1, expenses_per_minute))
                 
-                page = 1
+                page = 2  # Start from page 2 (we already did page 1)
                 failed_requests = 0
                 
                 while True:
@@ -844,6 +846,7 @@ class AllianceScraper(commands.Cog):
                         expenses = self._parse_treasury_expenses_page(html)
                         
                         if not expenses:
+                            log.info("No expenses found on page %d, stopping backfill", page)
                             break
                         
                         ins = await self._insert_treasury_expenses(expenses)
@@ -867,16 +870,6 @@ class AllianceScraper(commands.Cog):
                     
                     actual_delay = delay * (1.5 ** failed_requests) if failed_requests > 0 else delay
                     await asyncio.sleep(actual_delay)
-                    
-            else:
-                # Incremental: only scrape first page (most recent)
-                exp_url = f"{base}/verband/kasse?page=1"
-                try:
-                    html, _ = await self._fetch(session, exp_url)
-                    expenses = self._parse_treasury_expenses_page(html)
-                    expenses_inserted = await self._insert_treasury_expenses(expenses)
-                except Exception as e:
-                    log.warning("Failed to fetch treasury expenses: %s", e)
             
             return total_funds, len(income_rows), expenses_inserted
             
