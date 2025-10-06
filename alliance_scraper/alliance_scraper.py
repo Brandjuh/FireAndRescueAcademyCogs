@@ -947,6 +947,113 @@ class AllianceScraper(commands.Cog):
                     await session.close()
                 except Exception:
                     pass
+        """
+        Scrape /verband/kasse page.
+        Returns (balance, income_rows, expense_rows_inserted)
+        """
+        base = await self.config.base_url()
+        session, own = await self._get_auth_session()
+        
+        try:
+            # Scrape main treasury page (daily data)
+            url = f"{base}/verband/kasse"
+            html, _ = await self._fetch(session, url)
+            total_funds, income_rows_daily, _ = self._parse_treasury_page(html)
+            
+            # Parse expenses from same page
+            expenses_page1 = self._parse_treasury_expenses_page(html)
+            expenses_inserted = await self._insert_treasury_expenses(expenses_page1)
+            
+            # Save balance
+            await self._save_treasury_balance(total_funds)
+            
+            # Save daily income with explicit period
+            for row in income_rows_daily:
+                row['period'] = 'daily'
+            await self._save_treasury_income(income_rows_daily)
+            
+            # Scrape monthly data from separate URL
+            url_monthly = f"{base}/verband/kasse?type=monthly"
+            html_monthly, _ = await self._fetch(session, url_monthly)
+            _, income_rows_monthly, _ = self._parse_treasury_page(html_monthly)
+            
+            # Save monthly income with explicit period
+            for row in income_rows_monthly:
+                row['period'] = 'monthly'
+            await self._save_treasury_income(income_rows_monthly)
+            
+            total_income_rows = len(income_rows_daily) + len(income_rows_monthly)
+            log.info("Scraped treasury: balance=%d, daily_income=%d, monthly_income=%d, expenses_page1=%d",
+                    total_funds, len(income_rows_daily), len(income_rows_monthly), len(expenses_page1))
+            
+            
+            # Backfill additional expense pages if requested
+            if backfill_expenses:
+                expenses_per_minute = int(await self.config.treasury_expenses_per_minute())
+                delay = max(0.0, 60.0 / max(1, expenses_per_minute))
+                
+                page = 2  # Start from page 2 (we already did page 1)
+                failed_requests = 0
+                consecutive_empty = 0
+                consecutive_duplicates = 0
+                
+                while True:
+                    exp_url = f"{base}/verband/kasse?page={page}"
+                    try:
+                        html, _ = await self._fetch(session, exp_url)
+                        expenses = self._parse_treasury_expenses_page(html)
+                        
+                        # No expenses found on this page
+                        if not expenses:
+                            consecutive_empty += 1
+                            log.info("No expenses found on page %d (empty count: %d)", page, consecutive_empty)
+                            # Stop after 3 consecutive empty pages
+                            if consecutive_empty >= 3:
+                                log.info("3 consecutive empty pages, stopping backfill")
+                                break
+                            page += 1
+                            await asyncio.sleep(delay)
+                            continue
+                        
+                        consecutive_empty = 0  # Reset empty counter
+                        
+                        ins = await self._insert_treasury_expenses(expenses)
+                        expenses_inserted += ins
+                        failed_requests = 0
+                        
+                        # Track consecutive pages with all duplicates
+                        if ins == 0:
+                            consecutive_duplicates += 1
+                            log.info("No new expenses on page %d (all duplicates), count: %d", page, consecutive_duplicates)
+                            # Continue for up to 10 consecutive duplicate pages before stopping
+                            if consecutive_duplicates >= 10:
+                                log.info("10 consecutive pages with only duplicates, stopping backfill")
+                                break
+                        else:
+                            consecutive_duplicates = 0  # Reset if we found new entries
+                            log.info("Inserted %d new expenses from page %d", ins, page)
+                        
+                        page += 1
+                        
+                    except Exception as e:
+                        failed_requests += 1
+                        log.warning("Failed to fetch treasury expenses page %s (failure #%d): %s", 
+                                   page, failed_requests, e)
+                        if failed_requests >= 3:
+                            log.error("Too many consecutive failures, stopping treasury expenses scrape")
+                            break
+                    
+                    actual_delay = delay * (1.5 ** failed_requests) if failed_requests > 0 else delay
+                    await asyncio.sleep(actual_delay)
+            
+            return total_funds, total_income_rows, expenses_inserted
+            
+        finally:
+            if own:
+                try:
+                    await session.close()
+                except Exception:
+                    pass
             
             # Backfill additional expense pages if requested
             if backfill_expenses:
