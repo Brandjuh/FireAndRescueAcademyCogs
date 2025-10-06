@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 
 from bs4 import BeautifulSoup
+import discord
 
 from redbot.core import commands, checks, Config
 from redbot.core.data_manager import cog_data_path
