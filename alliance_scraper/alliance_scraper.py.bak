@@ -1,4 +1,4 @@
-# alliance_scraper.py (v0.7.0) - members + logs
+# alliance_scraper.py (v0.8.0) - improved with better error handling, indices, and contribution parsing
 from __future__ import annotations
 
 import asyncio
@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 
 from bs4 import BeautifulSoup
+import discord
 
 from redbot.core import commands, checks, Config
 from redbot.core.data_manager import cog_data_path
@@ -141,6 +142,7 @@ ACTION_MAP = [
     ("removed_event_manager", [r"removed as event manager"]),
     ("removed_custom_large_mission", [r"removed custom large scale mission"]),
     ("promoted_event_manager", [r"promoted to event manager"]),
+    ("contributed_to_alliance", [r"contributed .* coins to the alliance"]),
 ]
 
 def _norm_action(text: str) -> Tuple[str, str]:
@@ -167,6 +169,13 @@ class AllianceScraper(commands.Cog):
     async def cog_load(self):
         await self._init_db()
         await self._maybe_start_background()
+
+    async def cog_unload(self):
+        """Cancel background tasks on unload."""
+        if self._bg_members:
+            self._bg_members.cancel()
+        if self._bg_logs:
+            self._bg_logs.cancel()
 
     # ---------------- DB init & migrations ----------------
     async def _init_db(self):
@@ -196,7 +205,7 @@ class AllianceScraper(commands.Cog):
                 scraped_at TEXT
             )
             """)
-            # logs table
+            # logs table with contribution_amount
             await db.execute("""
             CREATE TABLE IF NOT EXISTS logs(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -212,11 +221,19 @@ class AllianceScraper(commands.Cog):
                 affected_mc_id TEXT,
                 affected_url TEXT,
                 description TEXT,
+                contribution_amount INTEGER DEFAULT 0,
                 scraped_at TEXT
             )
             """)
+            
+            # Indices for better performance
             await db.execute("CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_logs_hash ON logs(hash)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_logs_action_key ON logs(action_key)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_logs_executed_mc_id ON logs(executed_mc_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_members_history_scraped ON members_history(scraped_at)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_members_history_user_id ON members_history(user_id)")
+            
             await db.commit()
         await self._migrate_db()
 
@@ -241,7 +258,10 @@ class AllianceScraper(commands.Cog):
                 ("profile_href", "TEXT", "''"),
                 ("scraped_at", "TEXT", "''"),
             ])
-            # logs columns as above by creation
+            # ensure contribution_amount exists in logs
+            await self._ensure_columns(db, "logs", [
+                ("contribution_amount", "INTEGER", "0"),
+            ])
             await db.commit()
 
     async def _ensure_columns(self, db: aiosqlite.Connection, table: str, cols: List[Tuple[str, str, str]]):
@@ -251,29 +271,32 @@ class AllianceScraper(commands.Cog):
             if name not in existing:
                 try:
                     await db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {coltype} DEFAULT {default}")
+                    log.info("Added column %s to %s", name, table)
                 except Exception as e:
                     log.warning("Failed to add column %s to %s: %s", name, table, e)
 
     # ---------------- Session helpers ----------------
     async def _get_auth_session(self) -> Tuple[aiohttp.ClientSession, bool]:
+        """Get authenticated session. Returns (session, should_close_after_use)."""
         headers = {"User-Agent": (await self.config.user_agent())}
         timeout = aiohttp.ClientTimeout(total=30)
         cm = self.bot.get_cog("CookieManager")
         if cm:
-            for attr in ("get_session", "get_aiohttp_session", "session"):
+            try:
+                # Get shared session from CookieManager - DO NOT CLOSE after use
+                sess = await cm.get_session()
+                # Try to update headers (may not work on shared session)
                 try:
-                    maybe = getattr(cm, attr, None)
-                    if maybe:
-                        sess = await maybe() if asyncio.iscoroutinefunction(maybe) else maybe()
-                        try:
-                            sess.headers.update(headers)
-                        except Exception:
-                            pass
-                        return sess, False
+                    sess.headers.update(headers)
                 except Exception:
-                    continue
+                    pass
+                return sess, False  # False = don't close, it's shared
+            except Exception as e:
+                log.warning("Failed to get CookieManager session: %s", e)
+        
+        # Fallback: create our own session - MUST CLOSE after use
         sess = aiohttp.ClientSession(headers=headers, timeout=timeout)
-        return sess, True
+        return sess, True  # True = we own it, must close
 
     async def _fetch(self, session: aiohttp.ClientSession, url: str) -> Tuple[str, str]:
         async with session.get(url, allow_redirects=True) as resp:
@@ -428,14 +451,24 @@ class AllianceScraper(commands.Cog):
                         pass
 
             all_rows: List[Dict[str, Any]] = []
+            failed_requests = 0
+            
             for p in range(1, last_page + 1):
                 url = f"{base}{tpl.format(alliance_id=alliance_id, page=p)}"
                 try:
                     html, _ = await self._fetch(session, url)
                     all_rows.extend(self._extract_member_rows(html))
+                    failed_requests = 0  # Reset on success
                 except Exception as e:
-                    log.warning("Failed to fetch members page %s: %s", p, e)
-                await asyncio.sleep(delay)
+                    failed_requests += 1
+                    log.warning("Failed to fetch members page %s (failure #%d): %s", p, failed_requests, e)
+                    if failed_requests >= 3:
+                        log.error("Too many consecutive failures, stopping scrape")
+                        break
+                
+                # Increase delay after failures
+                actual_delay = delay * (1.5 ** failed_requests) if failed_requests > 0 else delay
+                await asyncio.sleep(actual_delay)
 
             await self._save_members(all_rows)
             if await self.config.backfill_auto():
@@ -443,7 +476,7 @@ class AllianceScraper(commands.Cog):
                 log.info("Backfill updated %s member IDs", updated)
             return len(all_rows)
         finally:
-            if own:
+            if own:  # Only close if we own the session
                 try:
                     await session.close()
                 except Exception:
@@ -466,6 +499,14 @@ class AllianceScraper(commands.Cog):
             executed_mc_id = _extract_any_id(executed_url) or ""
             desc_text = tds[2].get_text(" ", strip=True)
             action_key, action_text = _norm_action(desc_text)
+            
+            # Extract contribution amount if present
+            contribution_amount = 0
+            if "contributed" in desc_text.lower() and "coins" in desc_text.lower():
+                match = re.search(r'contributed\s+([\d,.]+)\s+coins', desc_text, re.I)
+                if match:
+                    contribution_amount = parse_int64_from_text(match.group(1))
+            
             affected_name, affected_url, affected_type, affected_mc_id = "", "", "", ""
             if len(tds) >= 4:
                 aff_a = tds[3].find("a", href=True)
@@ -478,6 +519,7 @@ class AllianceScraper(commands.Cog):
                 elif "/users/" in affected_url or "/profile/" in affected_url:
                     affected_type = "user"
                 affected_mc_id = _extract_any_id(affected_url) or ""
+            
             h = _hash_key(dt_text, executed_name, action_text, affected_name, desc_text)
             results.append({
                 "hash": h,
@@ -492,6 +534,7 @@ class AllianceScraper(commands.Cog):
                 "affected_mc_id": affected_mc_id,
                 "affected_url": affected_url,
                 "description": desc_text,
+                "contribution_amount": contribution_amount,
             })
         return results
 
@@ -502,12 +545,13 @@ class AllianceScraper(commands.Cog):
                 try:
                     await db.execute("""
                     INSERT INTO logs(hash, ts, action_key, action_text, executed_name, executed_mc_id, executed_url,
-                                     affected_name, affected_type, affected_mc_id, affected_url, description, scraped_at)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                     affected_name, affected_type, affected_mc_id, affected_url, description, 
+                                     contribution_amount, scraped_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """, (row["hash"], row["ts"], row["action_key"], row["action_text"],
                           row["executed_name"], row["executed_mc_id"], row["executed_url"],
                           row["affected_name"], row["affected_type"], row["affected_mc_id"], row["affected_url"],
-                          row["description"], now_utc()))
+                          row["description"], row["contribution_amount"], now_utc()))
                     inserted += 1
                 except aiosqlite.IntegrityError:
                     # duplicate
@@ -521,24 +565,39 @@ class AllianceScraper(commands.Cog):
         try:
             page = 1
             total_seen = 0
+            failed_requests = 0
+            
             while True:
                 url = f"{base}/alliance_logfiles?page={page}"
-                html, _ = await self._fetch(session, url)
-                rows = self._parse_logs_page(html, base)
-                if not rows:
-                    break
-                ins = await self._insert_logs(rows)
-                total_seen += len(rows)
-                if backfill_pages is not None and page >= backfill_pages:
-                    break
-                # stop early: if no new inserts this page, next pages likely old too
-                if ins == 0:
-                    break
-                page += 1
-                await asyncio.sleep(0.8)
+                try:
+                    html, _ = await self._fetch(session, url)
+                    rows = self._parse_logs_page(html, base)
+                    if not rows:
+                        break
+                    ins = await self._insert_logs(rows)
+                    total_seen += len(rows)
+                    failed_requests = 0  # Reset on success
+                    
+                    if backfill_pages is not None and page >= backfill_pages:
+                        break
+                    # stop early: if no new inserts this page, next pages likely old too
+                    if ins == 0:
+                        break
+                    page += 1
+                except Exception as e:
+                    failed_requests += 1
+                    log.warning("Failed to fetch logs page %s (failure #%d): %s", page, failed_requests, e)
+                    if failed_requests >= 3:
+                        log.error("Too many consecutive failures, stopping logs scrape")
+                        break
+                
+                # Increase delay after failures
+                actual_delay = 0.8 * (1.5 ** failed_requests) if failed_requests > 0 else 0.8
+                await asyncio.sleep(actual_delay)
+                
             return total_seen
         finally:
-            if own:
+            if own:  # Only close if we own the session
                 try:
                     await session.close()
                 except Exception:
@@ -550,7 +609,7 @@ class AllianceScraper(commands.Cog):
             db.row_factory = aiosqlite.Row
             cur = await db.execute("""
                 SELECT id, ts, action_key, action_text, executed_name, executed_mc_id, executed_url,
-                       affected_name, affected_type, affected_mc_id, affected_url, description
+                       affected_name, affected_type, affected_mc_id, affected_url, description, contribution_amount
                 FROM logs
                 WHERE id > ?
                 ORDER BY id ASC
@@ -568,33 +627,264 @@ class AllianceScraper(commands.Cog):
 
     async def _members_loop(self):
         await self.bot.wait_until_red_ready()
+        failures = 0
         while True:
             try:
                 mins = int(await self.config.members_refresh_minutes())
                 await self._scrape_members()
+                failures = 0  # Reset on success
+            except asyncio.CancelledError:
+                log.info("Members loop cancelled")
+                raise
             except Exception as e:
-                log.warning("Background members scrape error: %s", e)
-            await asyncio.sleep(max(60, mins * 60))
+                failures += 1
+                log.warning("Background members scrape error (failure #%d): %s", failures, e)
+            
+            # Exponential backoff on failures, max 1 hour
+            wait_time = max(60, mins * 60) if failures == 0 else min(3600, 60 * (2 ** failures))
+            await asyncio.sleep(wait_time)
 
     async def _logs_loop(self):
         await self.bot.wait_until_red_ready()
+        failures = 0
         while True:
             try:
                 mins = int(await self.config.logs_refresh_minutes())
                 await self._scrape_logs_once(backfill_pages=1)
+                failures = 0  # Reset on success
+            except asyncio.CancelledError:
+                log.info("Logs loop cancelled")
+                raise
             except Exception as e:
-                log.warning("Background logs scrape error: %s", e)
-            await asyncio.sleep(max(60, mins * 60))
+                failures += 1
+                log.warning("Background logs scrape error (failure #%d): %s", failures, e)
+            
+            # Exponential backoff on failures, max 1 hour
+            wait_time = max(60, mins * 60) if failures == 0 else min(3600, 60 * (2 ** failures))
+            await asyncio.sleep(wait_time)
 
     # ---------------- Commands ----------------
     @commands.group(name="scraper")
     @checks.is_owner()
     async def scraper_group(self, ctx: commands.Context):
         """AllianceScraper controls."""
+        pass
+
+    @scraper_group.command(name="dbinfo")
+    async def db_info(self, ctx: commands.Context):
+        """Show database statistics and health check."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            # Get table counts
+            cur = await db.execute("SELECT COUNT(*) FROM members_current")
+            members_current = (await cur.fetchone())[0]
+            
+            cur = await db.execute("SELECT COUNT(*) FROM members_history")
+            members_history = (await cur.fetchone())[0]
+            
+            cur = await db.execute("SELECT COUNT(*) FROM logs")
+            logs_total = (await cur.fetchone())[0]
+            
+            # Get missing IDs
+            cur = await db.execute("SELECT COUNT(*) FROM members_current WHERE user_id IS NULL OR user_id = ''")
+            missing_ids = (await cur.fetchone())[0]
+            
+            # Get recent scrape times
+            cur = await db.execute("SELECT MAX(scraped_at) FROM members_current")
+            last_member_scrape = (await cur.fetchone())[0] or "Never"
+            
+            cur = await db.execute("SELECT MAX(scraped_at) FROM logs")
+            last_log_scrape = (await cur.fetchone())[0] or "Never"
+            
+            # Get action type breakdown
+            cur = await db.execute("""
+                SELECT action_key, COUNT(*) as cnt 
+                FROM logs 
+                GROUP BY action_key 
+                ORDER BY cnt DESC 
+                LIMIT 10
+            """)
+            top_actions = await cur.fetchall()
+            
+            # Get contribution stats
+            cur = await db.execute("""
+                SELECT COUNT(*), SUM(contribution_amount) 
+                FROM logs 
+                WHERE contribution_amount > 0
+            """)
+            contrib_row = await cur.fetchone()
+            contrib_count = contrib_row[0] or 0
+            contrib_total = contrib_row[1] or 0
+            
+            # Check indices
+            cur = await db.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='index' AND sql IS NOT NULL
+                ORDER BY name
+            """)
+            indices = [row[0] for row in await cur.fetchall()]
+            
+        # Format output
+        embed = discord.Embed(title="Database Statistics", color=discord.Color.blue())
+        
+        embed.add_field(
+            name="Members Tables",
+            value=f"Current: {members_current:,}\n"
+                  f"History: {members_history:,}\n"
+                  f"Missing IDs: {missing_ids}",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="Logs Table",
+            value=f"Total: {logs_total:,}\n"
+                  f"Contributions: {contrib_count:,}\n"
+                  f"Total Coins: {contrib_total:,}",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="Last Scrapes",
+            value=f"Members: {last_member_scrape[:19] if len(last_member_scrape) > 19 else last_member_scrape}\n"
+                  f"Logs: {last_log_scrape[:19] if len(last_log_scrape) > 19 else last_log_scrape}",
+            inline=False
+        )
+        
+        if top_actions:
+            actions_text = "\n".join([f"{row['action_key']}: {row['cnt']:,}" for row in top_actions[:5]])
+            embed.add_field(
+                name="Top 5 Action Types",
+                value=actions_text,
+                inline=False
+            )
+        
+        embed.add_field(
+            name="Indices",
+            value=f"{len(indices)} indices created",
+            inline=False
+        )
+        
+        embed.set_footer(text=f"Database: {self.db_path.name}")
+        
+        await ctx.send(embed=embed)
+    
+    @scraper_group.command(name="dbdump")
+    async def db_dump(self, ctx: commands.Context, table: str = "logs", limit: int = 5):
+        """Dump sample data from a table (logs, members_current, members_history)."""
+        if table not in ["logs", "members_current", "members_history"]:
+            await ctx.send("Invalid table. Choose: logs, members_current, members_history")
+            return
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            if table == "logs":
+                cur = await db.execute(f"""
+                    SELECT id, ts, action_key, executed_name, affected_name, 
+                           contribution_amount, description 
+                    FROM {table} 
+                    ORDER BY id DESC 
+                    LIMIT ?
+                """, (limit,))
+            else:
+                cur = await db.execute(f"""
+                    SELECT user_id, name, role, earned_credits, 
+                           contribution_rate, scraped_at 
+                    FROM {table} 
+                    ORDER BY scraped_at DESC 
+                    LIMIT ?
+                """, (limit,))
+            
+            rows = await cur.fetchall()
+        
+        if not rows:
+            await ctx.send(f"No data in {table}")
+            return
+        
+        # Format as text
+        output = f"**{table} - Last {len(rows)} rows:**\n```\n"
+        
+        for row in rows:
+            row_dict = dict(row)
+            if table == "logs":
+                output += f"ID: {row_dict['id']}\n"
+                output += f"  Time: {row_dict['ts']}\n"
+                output += f"  Action: {row_dict['action_key']}\n"
+                output += f"  By: {row_dict['executed_name']}\n"
+                output += f"  Affected: {row_dict['affected_name']}\n"
+                if row_dict['contribution_amount'] > 0:
+                    output += f"  Contribution: {row_dict['contribution_amount']:,}\n"
+                output += f"  Description: {row_dict['description'][:60]}\n"
+            else:
+                output += f"User: {row_dict['name']} (ID: {row_dict['user_id']})\n"
+                output += f"  Role: {row_dict['role']}\n"
+                output += f"  Credits: {row_dict['earned_credits']:,}\n"
+                output += f"  Rate: {row_dict['contribution_rate']:.1f}%\n"
+                output += f"  Scraped: {row_dict['scraped_at'][:19]}\n"
+            output += "\n"
+        
+        output += "```"
+        
+        # Split if too long
+        if len(output) > 1900:
+            output = output[:1900] + "\n... (truncated)\n```"
+        
+        await ctx.send(output)
+
+    @scraper_group.command(name="dbquery")
+    async def db_query(self, ctx: commands.Context, *, query: str):
+        """Execute a read-only SQL query (SELECT only)."""
+        query = query.strip()
+        
+        # Safety check - only allow SELECT
+        if not query.upper().startswith("SELECT"):
+            await ctx.send("Only SELECT queries are allowed for safety")
+            return
+        
+        # Block dangerous keywords
+        dangerous = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE"]
+        if any(word in query.upper() for word in dangerous):
+            await ctx.send("Query contains forbidden keywords")
+            return
+        
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cur = await db.execute(query)
+                rows = await cur.fetchall()
+            
+            if not rows:
+                await ctx.send("Query returned no results")
+                return
+            
+            # Format results
+            output = f"**Query Results ({len(rows)} rows):**\n```\n"
+            
+            # Get column names
+            if rows:
+                cols = list(rows[0].keys())
+                output += " | ".join(cols) + "\n"
+                output += "-" * 60 + "\n"
+                
+                for row in rows[:20]:  # Limit to 20 rows
+                    values = [str(row[col]) for col in cols]
+                    output += " | ".join(values[:5]) + "\n"  # Limit columns too
+            
+            output += "```"
+            
+            if len(output) > 1900:
+                output = output[:1900] + "\n... (truncated)\n```"
+            
+            await ctx.send(output)
+            
+        except Exception as e:
+            await ctx.send(f"Query error: {e}")
 
     @scraper_group.group(name="members")
     async def members_group(self, ctx: commands.Context):
         """Members scraping controls."""
+        pass
 
     @members_group.command(name="full")
     async def members_full(self, ctx: commands.Context):
@@ -605,6 +895,7 @@ class AllianceScraper(commands.Cog):
     @members_group.group(name="backfill")
     async def backfill_group(self, ctx: commands.Context):
         """Manage missing-ID backfill."""
+        pass
 
     @backfill_group.command(name="now")
     async def backfill_now(self, ctx: commands.Context, limit: Optional[int] = None):
@@ -635,6 +926,7 @@ class AllianceScraper(commands.Cog):
     @scraper_group.group(name="logs")
     async def logs_group(self, ctx: commands.Context):
         """Alliance logs scraping controls."""
+        pass
 
     @logs_group.command(name="run")
     async def logs_run(self, ctx: commands.Context, pages: Optional[int] = None):
