@@ -21,7 +21,7 @@ DEFAULTS = {
 }
 
 
-class Leaderboard(commands.Cog):
+class TopPlayers(commands.Cog):
     """Posts daily and monthly top 10 contribution leaderboards."""
 
     def __init__(self, bot: Red):
@@ -97,8 +97,8 @@ class Leaderboard(commands.Cog):
         async with aiosqlite.connect(db_path) as db:
             db.row_factory = aiosqlite.Row
             
-            # Get this month's date range
-            now = datetime.now(ZoneInfo("Europe/Amsterdam"))
+            # Get this month's date range (in EDT/New York time)
+            now = datetime.now(ZoneInfo("America/New_York"))
             month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
             
             cur = await db.execute("""
@@ -128,7 +128,7 @@ class Leaderboard(commands.Cog):
         embed = discord.Embed(
             title=title,
             color=color,
-            timestamp=datetime.now(ZoneInfo("Europe/Amsterdam"))
+            timestamp=datetime.now(ZoneInfo("America/New_York"))
         )
         
         if not data:
@@ -173,7 +173,7 @@ class Leaderboard(commands.Cog):
 
         data = await self._fetch_daily_top10()
         
-        now = datetime.now(ZoneInfo("Europe/Amsterdam"))
+        now = datetime.now(ZoneInfo("America/New_York"))
         title = f"📊 Dagelijkse Top 10 - {now.strftime('%d-%m-%Y')}"
         embed = self._format_leaderboard_embed(data, title, discord.Color.blue())
         
@@ -201,7 +201,7 @@ class Leaderboard(commands.Cog):
 
         data = await self._fetch_monthly_top10()
         
-        now = datetime.now(ZoneInfo("Europe/Amsterdam"))
+        now = datetime.now(ZoneInfo("America/New_York"))
         title = f"🏆 Maandelijkse Top 10 - {now.strftime('%B %Y')}"
         embed = self._format_leaderboard_embed(data, title, discord.Color.gold())
         
@@ -226,8 +226,8 @@ class Leaderboard(commands.Cog):
         """Main scheduler loop."""
         await self.bot.wait_until_red_ready()
         
-        tz = ZoneInfo("Europe/Amsterdam")
-        target_time = time(23, 50, 0)  # 23:50 EDT/Amsterdam time
+        tz = ZoneInfo("America/New_York")
+        target_time = time(23, 50, 0)  # 23:50 EDT/EST (New York time)
         
         log.info("Leaderboard scheduler started")
         
@@ -336,7 +336,7 @@ class Leaderboard(commands.Cog):
         embed.add_field(name="Maandelijks", value="✅ Aan" if monthly else "❌ Uit", inline=True)
         embed.add_field(
             name="Tijdstip", 
-            value="23:50 (Europe/Amsterdam)", 
+            value="23:50 EDT/EST (America/New_York)", 
             inline=False
         )
         
