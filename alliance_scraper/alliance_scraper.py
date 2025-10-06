@@ -723,41 +723,57 @@ class AllianceScraper(commands.Cog):
         soup = BeautifulSoup(html, "html.parser")
         expenses = []
         
-        # Find tables - Table 1 should be expenses
+        # Find all tables
         tables = soup.find_all("table")
         
+        # Try to find the expenses table
+        expense_table = None
+        
         if len(tables) >= 2:
-            expense_table = tables[1]  # Second table
-            headers = [th.get_text(strip=True).lower() for th in expense_table.find_all("th")]
+            # Try table 1 first (should be expenses based on HTML structure)
+            expense_table = tables[1]
+        elif len(tables) == 1:
+            # If only one table, check if it's expenses
+            headers = [th.get_text(strip=True).lower() for th in tables[0].find_all("th")]
+            if "credits" in headers and "date" in headers and "description" in headers:
+                expense_table = tables[0]
+        
+        if not expense_table:
+            return expenses
+        
+        # Verify headers (should have Credits, Name, Description, Date)
+        headers = [th.get_text(strip=True).lower() for th in expense_table.find_all("th")]
+        
+        # Parse rows
+        for tr in expense_table.find_all("tr"):
+            tds = tr.find_all("td")
+            if len(tds) < 4:
+                continue
             
-            # Verify it's the expense table (Credits, Name, Description, Date)
-            if "credits" in headers and "date" in headers:
-                for tr in expense_table.find_all("tr"):
-                    tds = tr.find_all("td")
-                    if len(tds) < 4:
-                        continue
-                    
-                    # Column 0: Credits
-                    credits = parse_int64_from_text(tds[0].get_text(strip=True))
-                    
-                    # Column 1: Name
-                    name = tds[1].get_text(strip=True)
-                    
-                    # Column 2: Description
-                    description = tds[2].get_text(strip=True)
-                    
-                    # Column 3: Date
-                    date_text = tds[3].get_text(strip=True)
-                    
-                    if credits > 0 and date_text:
-                        h = _hash_expense(date_text, str(credits), name, description)
-                        expenses.append({
-                            "hash": h,
-                            "expense_date": date_text,
-                            "credits": credits,
-                            "name": name,
-                            "description": description,
-                        })
+            # Column 0: Credits
+            credits_text = tds[0].get_text(strip=True)
+            credits = parse_int64_from_text(credits_text)
+            
+            # Column 1: Name (may contain link)
+            name_cell = tds[1]
+            a = name_cell.find("a", href=True)
+            name = a.get_text(strip=True) if a else name_cell.get_text(strip=True)
+            
+            # Column 2: Description
+            description = tds[2].get_text(strip=True)
+            
+            # Column 3: Date
+            date_text = tds[3].get_text(strip=True)
+            
+            if credits > 0 and date_text:
+                h = _hash_expense(date_text, str(credits), name, description)
+                expenses.append({
+                    "hash": h,
+                    "expense_date": date_text,
+                    "credits": credits,
+                    "name": name,
+                    "description": description,
+                })
         
         return expenses
 
@@ -1402,9 +1418,9 @@ class AllianceScraper(commands.Cog):
             
             # Look for balance indicators
             balance_candidates = []
-            for strong in soup.find_all("strong"):
-                text = strong.get_text(strip=True)
-                if any(word in text.lower() for word in ["coin", "$", "credit", "balance", "fund"]):
+            for elem in soup.find_all(["h1", "h2", "h3", "strong"]):
+                text = elem.get_text(strip=True)
+                if any(c.isdigit() for c in text):
                     balance_candidates.append(text)
             
             if balance_candidates:
@@ -1422,6 +1438,13 @@ class AllianceScraper(commands.Cog):
                     tds = [td.get_text(strip=True)[:30] for td in tr.find_all("td")]
                     if tds:
                         await ctx.send(f"Table {i} row {j}: {' | '.join(tds)}")
+            
+            # Test expense parsing
+            expenses = self._parse_treasury_expenses_page(html)
+            await ctx.send(f"Parsed {len(expenses)} expenses from page 1")
+            if expenses:
+                exp = expenses[0]
+                await ctx.send(f"First expense: {exp['credits']:,} | {exp['name']} | {exp['description'][:30]} | {exp['expense_date']}")
             
             await ctx.send(f"HTML saved to: {debug_file}")
             
