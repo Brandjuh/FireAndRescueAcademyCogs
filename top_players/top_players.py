@@ -579,6 +579,31 @@ class TopPlayers(commands.Cog):
             if rows:
                 sample = "\n".join([f"  {r[1]}: {r[2]:,} credits @ {r[3][:16]}" for r in rows])
                 await ctx.send(f"**Sample data:**\n{sample}")
+        
+        # Test fetch daily data
+        await ctx.send("\n**Testing daily fetch...**")
+        try:
+            data = await self._fetch_daily_top10()
+            await ctx.send(f"Found {len(data)} players")
+            
+            if data:
+                top3 = "\n".join([
+                    f"  {i+1}. {p['name']}: gained {p['credits_gained']:,} ({p['change_percentage']:+.1f}%)"
+                    for i, p in enumerate(data[:3])
+                ])
+                await ctx.send(f"**Top 3 daily:**\n{top3}")
+                
+                # Check embed size
+                now = datetime.now(ZoneInfo("America/New_York"))
+                title = f"Daily Top 10 - {now.strftime('%d-%m-%Y')}"
+                embed = self._format_leaderboard_embed(data, title, discord.Color.blue())
+                
+                desc_len = len(embed.description) if embed.description else 0
+                await ctx.send(f"**Embed info:**\nDescription length: {desc_len} chars\nTitle: {embed.title}")
+        except Exception as e:
+            await ctx.send(f"❌ Error fetching daily data: {e}")
+            import traceback
+            await ctx.send(f"```\n{traceback.format_exc()[:1900]}\n```")
 
     @leaderboard_group.command(name="restart")
     async def restart_scheduler(self, ctx: commands.Context):
