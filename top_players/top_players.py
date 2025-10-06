@@ -1,448 +1,371 @@
-# top_players.py
+# leaderboard.py
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from datetime import date, datetime, time
-from pathlib import Path
-from typing import List, Optional, Tuple
-from calendar import monthrange
-
 import aiosqlite
-import discord
-from redbot.core import Config, checks, commands
+import logging
+from typing import Optional, List, Dict, Any
+from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
+import discord
+from redbot.core import commands, checks, Config
+from redbot.core.bot import Red
 
-DEFAULT_DB = str(
-    Path.home() / ".local/share/Red-DiscordBot/data/frab/cogs/AllianceScraper/alliance.db"
-)
+log = logging.getLogger("red.FARA.Leaderboard")
 
-GLOBAL_DEFAULTS = {
-    "db_path": DEFAULT_DB,
-    "topn_daily": 10,
-    "topn_monthly": 10,
-    "daily_channel_id": 0,
-    "monthly_channel_id": 0,
-    "daily_enabled": False,
-    "monthly_enabled": False,
-    # Daily: 23:50 NY
-    "daily_post_h": 23,
-    "daily_post_m": 50,
-    # Monthly: laatste dag 23:50 NY (we berekenen de dag dynamisch)
-    "monthly_post_h": 23,
-    "monthly_post_m": 50,
-    "last_daily_ymd": "",
-    "last_monthly_ym": "",
+DEFAULTS = {
+    "leaderboard_channel_id": None,
+    "daily_enabled": True,
+    "monthly_enabled": True,
 }
 
-NY = ZoneInfo("America/New_York")
-UTC = ZoneInfo("UTC")
 
+class Leaderboard(commands.Cog):
+    """Posts daily and monthly top 10 contribution leaderboards."""
 
-@dataclass
-class TopRow:
-    member_id: str
-    name: str
-    delta: int
-
-
-class TopPlayers(commands.Cog):
-    """Daily/Monthly Top Players uit members_history. Correcte tijdvensters via NY→UTC conversie."""
-
-    def __init__(self, bot):
+    def __init__(self, bot: Red):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0x70F10AD1, force_registration=True)
-        self.config.register_global(**GLOBAL_DEFAULTS)
-        self._bg_task: Optional[asyncio.Task] = None
-        self._stop = asyncio.Event()
-
-    # ---------------- lifecycle ----------------
+        self.config = Config.get_conf(self, identifier=0xFA11B0A8D, force_registration=True)
+        self.config.register_global(**DEFAULTS)
+        self._task: Optional[asyncio.Task] = None
+        self._scraper_cog = None
 
     async def cog_load(self):
-        self._stop.clear()
-        self._bg_task = asyncio.create_task(self._scheduler_loop())
+        """Start background task when cog loads."""
+        await self._start_task()
 
     async def cog_unload(self):
-        if self._bg_task:
-            self._stop.set()
-            try:
-                await asyncio.wait_for(self._bg_task, timeout=3)
-            except Exception:
-                pass
-            self._bg_task = None
+        """Cancel background task when cog unloads."""
+        if self._task:
+            self._task.cancel()
 
-    # ---------------- helpers: NY→UTC ranges ----------------
+    def _get_scraper(self):
+        """Get AllianceScraper cog instance."""
+        if self._scraper_cog is None:
+            self._scraper_cog = self.bot.get_cog("AllianceScraper")
+        return self._scraper_cog
 
-    def _ny_day_range_utc(self, d: date) -> Tuple[str, str]:
-        # members_history.snapshot_utc is UTC; dus vergelijk in UTC.
-        s_ny = datetime.combine(d, time(0, 0), NY)
-        e_ny = datetime.combine(d, time(23, 50), NY)
-        s_utc = s_ny.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
-        e_utc = e_ny.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
-        return s_utc, e_utc
+    async def _get_db_path(self) -> Optional[str]:
+        """Get database path from AllianceScraper cog."""
+        scraper = self._get_scraper()
+        if not scraper:
+            log.error("AllianceScraper cog not found")
+            return None
+        try:
+            return str(scraper.db_path)
+        except AttributeError:
+            log.error("AllianceScraper has no db_path attribute")
+            return None
 
-    def _ny_month_range_utc(self, year: int, month: int) -> Tuple[str, str]:
-        s_ny = datetime(year, month, 1, 0, 0, tzinfo=NY)
-        last_day = monthrange(year, month)[1]
-        e_ny = datetime(year, month, last_day, 23, 50, tzinfo=NY)
-        s_utc = s_ny.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
-        e_utc = e_ny.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
-        return s_utc, e_utc
+    async def _fetch_daily_top10(self) -> List[Dict[str, Any]]:
+        """Fetch top 10 contributors from today's data."""
+        db_path = await self._get_db_path()
+        if not db_path:
+            return []
 
-    async def _get_db_path(self) -> Path:
-        return Path((await self.config.db_path()) or DEFAULT_DB).expanduser()
+        async with aiosqlite.connect(db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            # Get today's date range (in EDT/New York time)
+            now = datetime.now(ZoneInfo("America/New_York"))
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+            
+            cur = await db.execute("""
+                SELECT 
+                    user_id,
+                    name,
+                    earned_credits,
+                    contribution_rate,
+                    MAX(scraped_at) as latest_scrape
+                FROM members_history
+                WHERE scraped_at >= ?
+                GROUP BY user_id
+                ORDER BY earned_credits DESC
+                LIMIT 10
+            """, (today_start,))
+            
+            rows = await cur.fetchall()
+            return [dict(row) for row in rows]
 
-    # ---------------- core SQL ----------------
+    async def _fetch_monthly_top10(self) -> List[Dict[str, Any]]:
+        """Fetch top 10 contributors from this month's data."""
+        db_path = await self._get_db_path()
+        if not db_path:
+            return []
 
-    async def _compute_top(self, db_path: Path, start_utc: str, end_utc: str, topn: int) -> List[TopRow]:
-        """
-        Delta per member: (latest ec <= end_utc) - (latest ec < start_utc), beide UTC strings.
-        """
-        sql = """
-WITH members AS (SELECT DISTINCT member_id FROM members_history),
-hist AS (
-  SELECT member_id,
-         COALESCE(earned_credits,0) AS ec,
-         substr(replace(COALESCE(snapshot_utc, scraped_at),'T',' '),1,19) AS ts,
-         name
-  FROM members_history
-),
-endv AS (
-  SELECT m.member_id,
-         (SELECT ec FROM hist h WHERE h.member_id=m.member_id AND h.ts <= ? ORDER BY h.ts DESC LIMIT 1) AS endc
-  FROM members m
-),
-startv AS (
-  SELECT m.member_id,
-         (SELECT ec FROM hist h WHERE h.member_id=m.member_id AND h.ts <  ? ORDER BY h.ts DESC LIMIT 1) AS startc
-  FROM members m
-),
-names AS (
-  SELECT member_id, MAX(name) AS name
-  FROM hist
-  WHERE name <> ''
-  GROUP BY member_id
-)
-SELECT
-  m.member_id,
-  COALESCE(mc.name, names.name, m.member_id) AS name,
-  COALESCE(endv.endc,0)-COALESCE(startv.startc,0) AS delta
-FROM members m
-LEFT JOIN endv  USING(member_id)
-LEFT JOIN startv USING(member_id)
-LEFT JOIN members_current mc USING(member_id)
-LEFT JOIN names USING(member_id)
-WHERE COALESCE(endv.endc,0) > COALESCE(startv.startc,0)
-ORDER BY delta DESC, name ASC
-LIMIT ?
-"""
-        out: List[TopRow] = []
-        async with aiosqlite.connect(str(db_path)) as db:
-            async with db.execute(sql, (end_utc, start_utc, int(topn))) as cur:
-                async for mid, name, delta in cur:
-                    out.append(TopRow(str(mid), name or str(mid), int(delta or 0)))
-        return out
+        async with aiosqlite.connect(db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            # Get this month's date range
+            now = datetime.now(ZoneInfo("Europe/Amsterdam"))
+            month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+            
+            cur = await db.execute("""
+                SELECT 
+                    user_id,
+                    name,
+                    earned_credits,
+                    contribution_rate,
+                    MAX(scraped_at) as latest_scrape
+                FROM members_history
+                WHERE scraped_at >= ?
+                GROUP BY user_id
+                ORDER BY earned_credits DESC
+                LIMIT 10
+            """, (month_start,))
+            
+            rows = await cur.fetchall()
+            return [dict(row) for row in rows]
 
-    # ---------------- embed ----------------
+    def _format_leaderboard_embed(
+        self, 
+        data: List[Dict[str, Any]], 
+        title: str,
+        color: discord.Color
+    ) -> discord.Embed:
+        """Create an embed for the leaderboard."""
+        embed = discord.Embed(
+            title=title,
+            color=color,
+            timestamp=datetime.now(ZoneInfo("Europe/Amsterdam"))
+        )
+        
+        if not data:
+            embed.description = "Geen data beschikbaar."
+            return embed
 
-    def _embed(self, title: str, subtitle: str, rows: List[TopRow]) -> discord.Embed:
-        e = discord.Embed(title=title, description=subtitle)
-        if not rows:
-            e.add_field(name="Top", value="(geen data gevonden in dit venster)")
-            return e
+        medals = ["🥇", "🥈", "🥉"]
+        
+        leaderboard_text = ""
+        for idx, member in enumerate(data, start=1):
+            medal = medals[idx - 1] if idx <= 3 else f"**{idx}.**"
+            name = member.get("name", "Unknown")
+            credits = member.get("earned_credits", 0)
+            rate = member.get("contribution_rate", 0.0)
+            
+            # Format credits with thousand separators
+            credits_fmt = f"{credits:,}".replace(",", ".")
+            
+            leaderboard_text += f"{medal} **{name}**\n"
+            leaderboard_text += f"    💰 {credits_fmt} credits | 📈 {rate:.1f}%\n\n"
+        
+        embed.description = leaderboard_text
+        embed.set_footer(text="FARA Alliance Stats")
+        
+        return embed
 
-        lines = []
-        for i, r in enumerate(rows, 1):
-            lines.append(f"**#{i}**  {r.name} — +{r.delta:,}".replace(",", "."))
-
-        value = "\n".join(lines)
-        if len(value) <= 1024:
-            e.add_field(name="Top", value=value, inline=False)
-        else:
-            chunk, size = [], 0
-            for ln in lines:
-                if size + len(ln) + 1 > 1024:
-                    e.add_field(name="Top", value="\n".join(chunk), inline=False)
-                    chunk, size = [], 0
-                chunk.append(ln)
-                size += len(ln) + 1
-            if chunk:
-                e.add_field(name="Top (vervolg)", value="\n".join(chunk), inline=False)
-        return e
-
-    # ---------------- posting helpers ----------------
-
-    async def _post_daily(self, when_ny: datetime):
-        ch_id = await self.config.daily_channel_id()
-        if not ch_id:
-            return
-        ch = self.bot.get_channel(ch_id)
-        if not isinstance(ch, (discord.TextChannel, discord.Thread, discord.ForumChannel)):
-            return
-
-        d = when_ny.date()
-        start_utc, end_utc = self._ny_day_range_utc(d)
-        db = await self._get_db_path()
-        topn = await self.config.topn_daily()
-        rows = await self._compute_top(db, start_utc, end_utc, topn)
-        subtitle = f"{d.isoformat()} (America/New_York) — Top {topn}"
-        await ch.send(embed=self._embed("Daily Top Players", subtitle, rows))
-        await self.config.last_daily_ymd.set(d.isoformat())
-
-    async def _post_monthly(self, when_ny: datetime):
-        ch_id = await self.config.monthly_channel_id()
-        if not ch_id:
-            return
-        ch = self.bot.get_channel(ch_id)
-        if not isinstance(ch, (discord.TextChannel, discord.Thread, discord.ForumChannel)):
+    async def _post_daily_leaderboard(self):
+        """Post daily top 10 leaderboard."""
+        channel_id = await self.config.leaderboard_channel_id()
+        if not channel_id:
+            log.warning("No leaderboard channel configured")
             return
 
-        y, m = when_ny.year, when_ny.month
-        start_utc, end_utc = self._ny_month_range_utc(y, m)
-        db = await self._get_db_path()
-        topn = await self.config.topn_monthly()
-        rows = await self._compute_top(db, start_utc, end_utc, topn)
-        subtitle = f"{y}-{m:02d} (America/New_York) — Top {topn}"
-        await ch.send(embed=self._embed("Monthly Top Players", subtitle, rows))
-        await self.config.last_monthly_ym.set(f"{y}-{m:02d}")
+        if not await self.config.daily_enabled():
+            log.debug("Daily leaderboard disabled")
+            return
 
-    # ---------------- scheduler ----------------
+        channel = self.bot.get_channel(channel_id)
+        if not channel:
+            log.error(f"Channel {channel_id} not found")
+            return
+
+        data = await self._fetch_daily_top10()
+        
+        now = datetime.now(ZoneInfo("Europe/Amsterdam"))
+        title = f"📊 Dagelijkse Top 10 - {now.strftime('%d-%m-%Y')}"
+        embed = self._format_leaderboard_embed(data, title, discord.Color.blue())
+        
+        try:
+            await channel.send(embed=embed)
+            log.info("Posted daily leaderboard")
+        except discord.HTTPException as e:
+            log.error(f"Failed to post daily leaderboard: {e}")
+
+    async def _post_monthly_leaderboard(self):
+        """Post monthly top 10 leaderboard."""
+        channel_id = await self.config.leaderboard_channel_id()
+        if not channel_id:
+            log.warning("No leaderboard channel configured")
+            return
+
+        if not await self.config.monthly_enabled():
+            log.debug("Monthly leaderboard disabled")
+            return
+
+        channel = self.bot.get_channel(channel_id)
+        if not channel:
+            log.error(f"Channel {channel_id} not found")
+            return
+
+        data = await self._fetch_monthly_top10()
+        
+        now = datetime.now(ZoneInfo("Europe/Amsterdam"))
+        title = f"🏆 Maandelijkse Top 10 - {now.strftime('%B %Y')}"
+        embed = self._format_leaderboard_embed(data, title, discord.Color.gold())
+        
+        try:
+            await channel.send(embed=embed)
+            log.info("Posted monthly leaderboard")
+        except discord.HTTPException as e:
+            log.error(f"Failed to post monthly leaderboard: {e}")
+
+    def _is_last_day_of_month(self, dt: datetime) -> bool:
+        """Check if given datetime is the last day of the month."""
+        # Check if tomorrow would be day 1
+        next_day = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        try:
+            next_day = next_day.replace(day=dt.day + 1)
+        except ValueError:
+            # Day doesn't exist, so today is last day of month
+            return True
+        return next_day.day == 1
 
     async def _scheduler_loop(self):
+        """Main scheduler loop."""
         await self.bot.wait_until_red_ready()
-        while not self._stop.is_set():
+        
+        tz = ZoneInfo("Europe/Amsterdam")
+        target_time = time(23, 50, 0)  # 23:50 EDT/Amsterdam time
+        
+        log.info("Leaderboard scheduler started")
+        
+        while True:
             try:
-                now_ny = datetime.now(NY)
-
-                # Daily om 23:50 NY
-                if await self.config.daily_enabled():
-                    dh, dm = await self.config.daily_post_h(), await self.config.daily_post_m()
-                    daily_target = now_ny.replace(hour=dh, minute=dm, second=0, microsecond=0)
-                    last = await self.config.last_daily_ymd()
-                    if now_ny >= daily_target and last != now_ny.date().isoformat():
-                        await self._post_daily(now_ny)
-
-                # Monthly op LAATSTE dag 23:50 NY
-                if await self.config.monthly_enabled():
-                    mh, mm = await self.config.monthly_post_h(), await self.config.monthly_post_m()
-                    last_day = monthrange(now_ny.year, now_ny.month)[1]
+                now = datetime.now(tz)
+                
+                # Calculate next run time (today or tomorrow at 23:50)
+                next_run = now.replace(
+                    hour=target_time.hour,
+                    minute=target_time.minute,
+                    second=target_time.second,
+                    microsecond=0
+                )
+                
+                # If we've passed today's time, schedule for tomorrow
+                if now >= next_run:
+                    # Move to tomorrow
+                    next_day = now.day + 1
                     try:
-                        monthly_target = now_ny.replace(day=last_day, hour=mh, minute=mm, second=0, microsecond=0)
+                        next_run = next_run.replace(day=next_day)
                     except ValueError:
-                        monthly_target = now_ny.replace(day=last_day, hour=mh, minute=mm, second=0, microsecond=0)
-                    ym = f"{now_ny.year}-{now_ny.month:02d}"
-                    lastm = await self.config.last_monthly_ym()
-                    if now_ny >= monthly_target and lastm != ym:
-                        await self._post_monthly(now_ny)
+                        # End of month, go to next month
+                        if now.month == 12:
+                            next_run = next_run.replace(year=now.year + 1, month=1, day=1)
+                        else:
+                            next_run = next_run.replace(month=now.month + 1, day=1)
+                
+                wait_seconds = (next_run - now).total_seconds()
+                log.debug(f"Next leaderboard post at {next_run}, waiting {wait_seconds:.0f}s")
+                
+                await asyncio.sleep(wait_seconds)
+                
+                # Check again to ensure we're at the right time
+                now = datetime.now(tz)
+                
+                # Post daily leaderboard
+                await self._post_daily_leaderboard()
+                
+                # Check if it's last day of month for monthly leaderboard
+                if self._is_last_day_of_month(now):
+                    log.info("Last day of month detected, posting monthly leaderboard")
+                    await self._post_monthly_leaderboard()
+                
+                # Sleep a bit to avoid double-posting
+                await asyncio.sleep(120)
+                
+            except asyncio.CancelledError:
+                log.info("Scheduler loop cancelled")
+                raise
+            except Exception as e:
+                log.exception(f"Error in scheduler loop: {e}")
+                await asyncio.sleep(60)
 
-            except Exception:
-                pass
+    async def _start_task(self):
+        """Start the scheduler task."""
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._scheduler_loop())
+            log.info("Leaderboard task started")
 
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=30)
-            except asyncio.TimeoutError:
-                pass
+    # ============ Commands ============
 
-    # ---------------- commands ----------------
-
-    @commands.group(name="tplayers")
+    @commands.group(name="leaderboard", aliases=["lb"])
     @checks.is_owner()
-    async def tplayers(self, ctx: commands.Context):
-        """Top players instellingen en acties."""
+    async def leaderboard_group(self, ctx: commands.Context):
+        """Leaderboard configuration and controls."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help()
 
-    @tplayers.command(name="config")
-    async def tp_config(self, ctx: commands.Context):
-        db = await self.config.db_path()
-        topd = await self.config.topn_daily()
-        topm = await self.config.topn_monthly()
-        chd = await self.config.daily_channel_id()
-        chm = await self.config.monthly_channel_id()
-        de  = await self.config.daily_enabled()
-        me  = await self.config.monthly_enabled()
-        dh, dm = await self.config.daily_post_h(), await self.config.daily_post_m()
-        mh, mm = await self.config.monthly_post_h(), await self.config.monthly_post_m()
-        lastd = await self.config.last_daily_ymd()
-        lastm = await self.config.last_monthly_ym()
-        await ctx.send(
-            "```\n"
-            f"DB path        : {db}\n"
-            f"TopN Daily/Mon : {topd} / {topm}\n"
-            f"Daily channel  : {chd}\n"
-            f"Monthly channel: {chm}\n"
-            f"Daily enabled  : {de} (at {dh:02d}:{dm:02d} NY)\n"
-            f"Monthly enabled: {me} (last day {mh:02d}:{mm:02d} NY)\n"
-            f"Last daily     : {lastd}\n"
-            f"Last monthly   : {lastm}\n"
-            "```"
+    @leaderboard_group.command(name="channel")
+    async def set_channel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Set the channel for leaderboard posts."""
+        await self.config.leaderboard_channel_id.set(channel.id)
+        await ctx.send(f"✅ Leaderboard kanaal ingesteld op {channel.mention}")
+
+    @leaderboard_group.command(name="daily")
+    async def toggle_daily(self, ctx: commands.Context, enabled: bool):
+        """Enable or disable daily leaderboards."""
+        await self.config.daily_enabled.set(enabled)
+        status = "ingeschakeld" if enabled else "uitgeschakeld"
+        await ctx.send(f"✅ Dagelijkse leaderboards {status}")
+
+    @leaderboard_group.command(name="monthly")
+    async def toggle_monthly(self, ctx: commands.Context, enabled: bool):
+        """Enable or disable monthly leaderboards."""
+        await self.config.monthly_enabled.set(enabled)
+        status = "ingeschakeld" if enabled else "uitgeschakeld"
+        await ctx.send(f"✅ Maandelijkse leaderboards {status}")
+
+    @leaderboard_group.command(name="status")
+    async def show_status(self, ctx: commands.Context):
+        """Show current leaderboard configuration."""
+        channel_id = await self.config.leaderboard_channel_id()
+        daily = await self.config.daily_enabled()
+        monthly = await self.config.monthly_enabled()
+        
+        channel = self.bot.get_channel(channel_id) if channel_id else None
+        channel_text = channel.mention if channel else "Niet ingesteld"
+        
+        embed = discord.Embed(
+            title="⚙️ Leaderboard Configuratie",
+            color=discord.Color.blue()
         )
-
-    @tplayers.command(name="setdb")
-    async def tp_setdb(self, ctx: commands.Context, path: str):
-        await self.config.db_path.set(path)
-        await ctx.send(f"DB-pad ingesteld op:\n`{path}`")
-
-    @tplayers.group(name="setchannel")
-    async def tp_setchannel(self, ctx: commands.Context):
-        """Kanaal instellen voor auto-posts."""
-
-    @tp_setchannel.command(name="daily")
-    async def tp_setchannel_daily(self, ctx: commands.Context, channel: discord.TextChannel):
-        await self.config.daily_channel_id.set(channel.id)
-        await ctx.send(f"Daily kanaal ingesteld op {channel.mention}")
-
-    @tp_setchannel.command(name="monthly")
-    async def tp_setchannel_monthly(self, ctx: commands.Context, channel: discord.TextChannel):
-        await self.config.monthly_channel_id.set(channel.id)
-        await ctx.send(f"Monthly kanaal ingesteld op {channel.mention}")
-
-    @tplayers.group(name="settopn")
-    async def tp_settopn(self, ctx: commands.Context):
-        """TopN instellen."""
-
-    @tp_settopn.command(name="daily")
-    async def tp_settopn_daily(self, ctx: commands.Context, n: int):
-        await self.config.topn_daily.set(max(1, min(50, int(n))))
-        await ctx.send(f"TopN daily = {await self.config.topn_daily()}")
-
-    @tp_settopn.command(name="monthly")
-    async def tp_settopn_monthly(self, ctx: commands.Context, n: int):
-        await self.config.topn_monthly.set(max(1, min(50, int(n))))
-        await ctx.send(f"TopN monthly = {await self.config.topn_monthly()}")
-
-    @tplayers.group(name="enable")
-    async def tp_enable(self, ctx: commands.Context):
-        """Auto-posts aan/uit."""
-
-    @tp_enable.command(name="daily")
-    async def tp_enable_daily(self, ctx: commands.Context, value: str):
-        v = value.lower() in ("on", "true", "1", "yes", "y")
-        await self.config.daily_enabled.set(v)
-        await ctx.send(f"Daily auto-post: {v}")
-
-    @tp_enable.command(name="monthly")
-    async def tp_enable_monthly(self, ctx: commands.Context, value: str):
-        v = value.lower() in ("on", "true", "1", "yes", "y")
-        await self.config.monthly_enabled.set(v)
-        await ctx.send(f"Monthly auto-post: {v}")
-
-    @tplayers.group(name="preview")
-    async def tp_preview(self, ctx: commands.Context):
-        """Voorbeeld / test-run zonder te posten in kanaal."""
-
-    @tp_preview.command(name="daily")
-    async def preview_daily(self, ctx: commands.Context, ymd: Optional[str] = None, topn: Optional[int] = None):
-        d = datetime.now(NY).date() if not ymd else date(*map(int, ymd.split("-")))
-        s_utc, e_utc = self._ny_day_range_utc(d)
-        db = await self._get_db_path()
-        if topn is None:
-            topn = await self.config.topn_daily()
-        msg = await ctx.send(f"⏳ Berekenen daily top voor **{d.isoformat()}** …")
-        rows = await self._compute_top(db, s_utc, e_utc, topn)
-        subtitle = f"{d.isoformat()} (America/New_York) — Top {topn}"
-        await msg.edit(content="Klaar.", embed=self._embed("Daily Top Players", subtitle, rows))
-
-    @tp_preview.command(name="monthly")
-    async def preview_monthly(self, ctx: commands.Context, ym: Optional[str] = None, topn: Optional[int] = None):
-        now_ny = datetime.now(NY)
-        y, m = (now_ny.year, now_ny.month) if not ym else tuple(map(int, ym.split("-")))
-        s_utc, e_utc = self._ny_month_range_utc(y, m)
-        db = await self._get_db_path()
-        if topn is None:
-            topn = await self.config.topn_monthly()
-        msg = await ctx.send(f"⏳ Berekenen monthly top voor **{y}-{m:02d}** …")
-        rows = await self._compute_top(db, s_utc, e_utc, topn)
-        subtitle = f"{y}-{m:02d} (America/New_York) — Top {topn}"
-        await msg.edit(content="Klaar.", embed=self._embed("Monthly Top Players", subtitle, rows))
-
-    @tplayers.group(name="run")
-    async def tp_run(self, ctx: commands.Context):
-        """Post direct in kanaal (zonder te wachten op scheduler)."""
-
-    @tp_run.command(name="daily")
-    async def run_daily(self, ctx: commands.Context, ymd: Optional[str] = None):
-        d = datetime.now(NY).date() if not ymd else date(*map(int, ymd.split("-")))
-        when = datetime(d.year, d.month, d.day, 23, 50, tzinfo=NY)
-        await self._post_daily(when)
-        await ctx.tick()
-
-    @tp_run.command(name="monthly")
-    async def run_monthly(self, ctx: commands.Context, ym: Optional[str] = None):
-        now_ny = datetime.now(NY)
-        if ym:
-            y, m = map(int, ym.split("-"))
-            last_day = monthrange(y, m)[1]
-            when = datetime(y, m, last_day, 23, 50, tzinfo=NY)
-        else:
-            y, m = now_ny.year, now_ny.month
-            last_day = monthrange(y, m)[1]
-            when = datetime(y, m, last_day, 23, 50, tzinfo=NY)
-        await self._post_monthly(when)
-        await ctx.tick()
-
-    @tplayers.group(name="debug")
-    async def tp_debug(self, ctx: commands.Context):
-        """Debuginfo over vensters en tellingen."""
-
-    @tp_debug.command(name="daily")
-    async def debug_daily(self, ctx: commands.Context, ymd: Optional[str] = None):
-        d = datetime.now(NY).date() if not ymd else date(*map(int, ymd.split("-")))
-        s_utc, e_utc = self._ny_day_range_utc(d)
-        db = await self._get_db_path()
-        # Tel snapshots (UTC vergelijkingen)
-        sql_counts = """
-WITH hist AS (
-  SELECT substr(replace(COALESCE(snapshot_utc, scraped_at),'T',' '),1,19) AS ts,
-         member_id
-  FROM members_history
-)
-SELECT
-  (SELECT COUNT(DISTINCT member_id) FROM hist WHERE ts <= ?) AS le_end,
-  (SELECT COUNT(DISTINCT member_id) FROM hist WHERE ts <  ?) AS lt_start,
-  (SELECT COUNT(*) FROM hist WHERE ts >= ? AND ts <= ?)     AS rows_in_window
-"""
-        async with aiosqlite.connect(str(db)) as adb:
-            async with adb.execute(sql_counts, (e_utc, s_utc, s_utc, e_utc)) as cur:
-                le_end, lt_start, rows_in_window = await cur.fetchone()
-
-        # NY-labels + UTC-vensters tonen
-        await ctx.send(
-            "```\n"
-            f"NY dag: {d.isoformat()} (America/New_York)\n"
-            f"UTC START={s_utc}  UTC END={e_utc}\n"
-            f"snapshots ≤END: {le_end}   snapshots <START: {lt_start}   rows_in_window: {rows_in_window}\n"
-            "```"
+        embed.add_field(name="Kanaal", value=channel_text, inline=False)
+        embed.add_field(name="Dagelijks", value="✅ Aan" if daily else "❌ Uit", inline=True)
+        embed.add_field(name="Maandelijks", value="✅ Aan" if monthly else "❌ Uit", inline=True)
+        embed.add_field(
+            name="Tijdstip", 
+            value="23:50 (Europe/Amsterdam)", 
+            inline=False
         )
+        
+        await ctx.send(embed=embed)
 
-    @tp_debug.command(name="monthly")
-    async def debug_monthly(self, ctx: commands.Context, ym: Optional[str] = None):
-        now_ny = datetime.now(NY)
-        y, m = (now_ny.year, now_ny.month) if not ym else tuple(map(int, ym.split("-")))
-        s_utc, e_utc = self._ny_month_range_utc(y, m)
-        db = await self._get_db_path()
-        sql_counts = """
-WITH hist AS (
-  SELECT substr(replace(COALESCE(snapshot_utc, scraped_at),'T',' '),1,19) AS ts,
-         member_id
-  FROM members_history
-)
-SELECT
-  (SELECT COUNT(DISTINCT member_id) FROM hist WHERE ts <= ?) AS le_end,
-  (SELECT COUNT(DISTINCT member_id) FROM hist WHERE ts <  ?) AS lt_start,
-  (SELECT COUNT(*) FROM hist WHERE ts >= ? AND ts <= ?)     AS rows_in_window
-"""
-        async with aiosqlite.connect(str(db)) as adb:
-            async with adb.execute(sql_counts, (e_utc, s_utc, s_utc, e_utc)) as cur:
-                le_end, lt_start, rows_in_window = await cur.fetchone()
+    @leaderboard_group.command(name="testdaily")
+    async def test_daily(self, ctx: commands.Context):
+        """Test the daily leaderboard (posts immediately)."""
+        await ctx.send("📊 Dagelijkse leaderboard wordt gepost...")
+        await self._post_daily_leaderboard()
+        await ctx.send("✅ Dagelijkse leaderboard gepost!")
 
-        await ctx.send(
-            "```\n"
-            f"NY maand: {y}-{m:02d} (America/New_York)\n"
-            f"UTC START={s_utc}  UTC END={e_utc}\n"
-            f"snapshots ≤END: {le_end}   snapshots <START: {lt_start}   rows_in_window: {rows_in_window}\n"
-            "```"
-        )
+    @leaderboard_group.command(name="testmonthly")
+    async def test_monthly(self, ctx: commands.Context):
+        """Test the monthly leaderboard (posts immediately)."""
+        await ctx.send("🏆 Maandelijkse leaderboard wordt gepost...")
+        await self._post_monthly_leaderboard()
+        await ctx.send("✅ Maandelijkse leaderboard gepost!")
+
+    @leaderboard_group.command(name="restart")
+    async def restart_scheduler(self, ctx: commands.Context):
+        """Restart the scheduler task."""
+        if self._task:
+            self._task.cancel()
+        await self._start_task()
+        await ctx.send("✅ Scheduler herstart!")
 
 
-async def setup(bot):
-    await bot.add_cog(TopPlayers(bot))
+async def setup(bot: Red):
+    """Load the Leaderboard cog."""
+    cog = Leaderboard(bot)
+    await bot.add_cog(cog)
