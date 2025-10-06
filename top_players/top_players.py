@@ -151,7 +151,7 @@ class TopPlayers(commands.Cog):
             return result[:10]
 
     async def _fetch_monthly_top10(self) -> List[Dict[str, Any]]:
-        """Fetch top 10 contributors from this month's data with comparison."""
+        """Fetch top 10 monthly contributors based on credits gained this month."""
         db_path = await self._get_db_path()
         if not db_path:
             return []
@@ -166,55 +166,87 @@ class TopPlayers(commands.Cog):
             # Calculate last month start
             if month_start.month == 1:
                 last_month_start = month_start.replace(year=month_start.year - 1, month=12)
+                two_months_ago = last_month_start.replace(month=11)
             else:
                 last_month_start = month_start.replace(month=month_start.month - 1)
+                if last_month_start.month == 1:
+                    two_months_ago = last_month_start.replace(year=last_month_start.year - 1, month=12)
+                else:
+                    two_months_ago = last_month_start.replace(month=last_month_start.month - 1)
             
-            # Get this month's data
+            # Get latest snapshot from this month for each user
             cur = await db.execute("""
                 SELECT 
                     user_id,
                     name,
-                    earned_credits,
-                    MAX(scraped_at) as latest_scrape
+                    earned_credits as month_credits
                 FROM members_history
                 WHERE scraped_at >= ?
                 GROUP BY user_id
-                ORDER BY earned_credits DESC
-                LIMIT 10
+                HAVING MAX(scraped_at)
             """, (month_start.isoformat(),))
             
-            month_rows = await cur.fetchall()
+            month_data = {row['user_id']: dict(row) for row in await cur.fetchall()}
             
-            # Get last month's data for comparison
+            # Get latest snapshot from end of last month
             cur = await db.execute("""
                 SELECT 
                     user_id,
-                    earned_credits
+                    earned_credits as last_month_credits
                 FROM members_history
                 WHERE scraped_at >= ? AND scraped_at < ?
                 GROUP BY user_id
                 HAVING MAX(scraped_at)
             """, (last_month_start.isoformat(), month_start.isoformat()))
             
-            last_month_data = {row[0]: row[1] for row in await cur.fetchall()}
+            last_month_data = {row['user_id']: row['last_month_credits'] for row in await cur.fetchall()}
             
-            # Calculate changes
+            # Get two months ago for comparison
+            cur = await db.execute("""
+                SELECT 
+                    user_id,
+                    earned_credits as two_months_credits
+                FROM members_history
+                WHERE scraped_at >= ? AND scraped_at < ?
+                GROUP BY user_id
+                HAVING MAX(scraped_at)
+            """, (two_months_ago.isoformat(), last_month_start.isoformat()))
+            
+            two_months_data = {row['user_id']: row['two_months_credits'] for row in await cur.fetchall()}
+            
+            # Calculate monthly gains and changes
             result = []
-            for row in month_rows:
-                data = dict(row)
-                month_credits = data['earned_credits']
-                last_month_credits = last_month_data.get(data['user_id'], month_credits)
+            for user_id, data in month_data.items():
+                month_credits = data['month_credits']
+                last_month_credits = last_month_data.get(user_id, month_credits)
+                two_months_credits = two_months_data.get(user_id, last_month_credits)
                 
-                if last_month_credits > 0:
-                    change_pct = ((month_credits - last_month_credits) / last_month_credits) * 100
+                # This month's gain
+                monthly_gain = month_credits - last_month_credits
+                
+                # Last month's gain (for percentage comparison)
+                last_month_gain = last_month_credits - two_months_credits
+                
+                # Calculate percentage change in monthly gain
+                if last_month_gain > 0:
+                    change_pct = ((monthly_gain - last_month_gain) / last_month_gain) * 100
+                elif monthly_gain > 0:
+                    change_pct = 100.0  # New contribution
                 else:
                     change_pct = 0.0
                 
-                data['change_percentage'] = change_pct
-                data['credits_gained'] = month_credits - last_month_credits
-                result.append(data)
+                result.append({
+                    'user_id': user_id,
+                    'name': data['name'],
+                    'earned_credits': month_credits,
+                    'credits_gained': monthly_gain,
+                    'change_percentage': change_pct
+                })
             
-            return result
+            # Sort by monthly gain (not total credits)
+            result.sort(key=lambda x: x['credits_gained'], reverse=True)
+            
+            return result[:10]
 
     def _format_leaderboard_embed(
         self, 
@@ -450,16 +482,103 @@ class TopPlayers(commands.Cog):
     @leaderboard_group.command(name="testdaily")
     async def test_daily(self, ctx: commands.Context):
         """Test the daily leaderboard (posts immediately)."""
-        await ctx.send("Posting daily leaderboard...")
+        channel_id = await self.config.leaderboard_channel_id()
+        if not channel_id:
+            await ctx.send("❌ No leaderboard channel configured. Use `[p]leaderboard channel #channel` first.")
+            return
+        
+        channel = self.bot.get_channel(channel_id)
+        if not channel:
+            await ctx.send(f"❌ Channel with ID {channel_id} not found.")
+            return
+        
+        await ctx.send(f"Fetching daily data from database...")
+        data = await self._fetch_daily_top10()
+        await ctx.send(f"Found {len(data)} players with daily contributions.")
+        
+        if not data:
+            await ctx.send("⚠️ No data found. Check if AllianceScraper has data in members_history table.")
+            return
+        
+        await ctx.send(f"Posting daily leaderboard to {channel.mention}...")
         await self._post_daily_leaderboard()
-        await ctx.send("Daily leaderboard posted!")
+        await ctx.send("✅ Daily leaderboard posted!")
 
     @leaderboard_group.command(name="testmonthly")
     async def test_monthly(self, ctx: commands.Context):
         """Test the monthly leaderboard (posts immediately)."""
-        await ctx.send("Posting monthly leaderboard...")
+        channel_id = await self.config.leaderboard_channel_id()
+        if not channel_id:
+            await ctx.send("❌ No leaderboard channel configured. Use `[p]leaderboard channel #channel` first.")
+            return
+        
+        channel = self.bot.get_channel(channel_id)
+        if not channel:
+            await ctx.send(f"❌ Channel with ID {channel_id} not found.")
+            return
+        
+        await ctx.send(f"Fetching monthly data from database...")
+        data = await self._fetch_monthly_top10()
+        await ctx.send(f"Found {len(data)} players with monthly contributions.")
+        
+        if not data:
+            await ctx.send("⚠️ No data found. Check if AllianceScraper has data in members_history table.")
+            return
+        
+        await ctx.send(f"Posting monthly leaderboard to {channel.mention}...")
         await self._post_monthly_leaderboard()
-        await ctx.send("Monthly leaderboard posted!")
+        await ctx.send("✅ Monthly leaderboard posted!")
+
+    @leaderboard_group.command(name="debug")
+    async def debug_data(self, ctx: commands.Context):
+        """Debug: Show database contents and configuration."""
+        # Check config
+        channel_id = await self.config.leaderboard_channel_id()
+        channel = self.bot.get_channel(channel_id) if channel_id else None
+        
+        await ctx.send(f"**Configuration:**\nChannel ID: {channel_id}\nChannel: {channel.mention if channel else 'Not found'}")
+        
+        # Check database
+        db_path = await self._get_db_path()
+        if not db_path:
+            await ctx.send("❌ Cannot get database path. Is AllianceScraper loaded?")
+            return
+        
+        await ctx.send(f"**Database:** {db_path}")
+        
+        # Check members_history table
+        async with aiosqlite.connect(db_path) as db:
+            # Total rows
+            cur = await db.execute("SELECT COUNT(*) FROM members_history")
+            total = (await cur.fetchone())[0]
+            await ctx.send(f"**Total history rows:** {total}")
+            
+            # Recent rows
+            cur = await db.execute("""
+                SELECT scraped_at, COUNT(*) as cnt 
+                FROM members_history 
+                GROUP BY DATE(scraped_at) 
+                ORDER BY scraped_at DESC 
+                LIMIT 5
+            """)
+            rows = await cur.fetchall()
+            
+            if rows:
+                dates_info = "\n".join([f"  {row[0][:10]}: {row[1]} entries" for row in rows])
+                await ctx.send(f"**Recent scrapes:**\n{dates_info}")
+            
+            # Sample data
+            cur = await db.execute("""
+                SELECT user_id, name, earned_credits, scraped_at 
+                FROM members_history 
+                ORDER BY scraped_at DESC 
+                LIMIT 3
+            """)
+            rows = await cur.fetchall()
+            
+            if rows:
+                sample = "\n".join([f"  {r[1]}: {r[2]:,} credits @ {r[3][:16]}" for r in rows])
+                await ctx.send(f"**Sample data:**\n{sample}")
 
     @leaderboard_group.command(name="restart")
     async def restart_scheduler(self, ctx: commands.Context):
