@@ -1377,6 +1377,60 @@ class AllianceScraper(commands.Cog):
         await self.config.treasury_initial_backfill.set(True)
         await ctx.send("Treasury initial backfill flag reset. Restart the cog to trigger full expense scrape.")
 
+    @treasury_group.command(name="debug")
+    async def treasury_debug(self, ctx: commands.Context):
+        """Debug treasury HTML parsing."""
+        base = await self.config.base_url()
+        session, own = await self._get_auth_session()
+        
+        try:
+            url = f"{base}/verband/kasse"
+            html, _ = await self._fetch(session, url)
+            
+            # Save to file for inspection
+            debug_file = self.data_path / "treasury_debug.html"
+            with open(debug_file, "w", encoding="utf-8") as f:
+                f.write(html)
+            
+            # Parse and show what we found
+            soup = BeautifulSoup(html, "html.parser")
+            
+            # Find all tables
+            tables = soup.find_all("table")
+            await ctx.send(f"Found {len(tables)} tables in the page")
+            
+            # Look for balance indicators
+            balance_candidates = []
+            for strong in soup.find_all("strong"):
+                text = strong.get_text(strip=True)
+                if any(word in text.lower() for word in ["coin", "$", "credit", "balance", "fund"]):
+                    balance_candidates.append(text)
+            
+            if balance_candidates:
+                await ctx.send(f"Balance candidates: {', '.join(balance_candidates[:5])}")
+            
+            # Look for table headers
+            for i, table in enumerate(tables[:3]):
+                headers = [th.get_text(strip=True) for th in table.find_all("th")]
+                if headers:
+                    await ctx.send(f"Table {i} headers: {', '.join(headers)}")
+                
+                # Show first 2 rows
+                rows = table.find_all("tr")[:3]
+                for j, tr in enumerate(rows):
+                    tds = [td.get_text(strip=True)[:30] for td in tr.find_all("td")]
+                    if tds:
+                        await ctx.send(f"Table {i} row {j}: {' | '.join(tds)}")
+            
+            await ctx.send(f"HTML saved to: {debug_file}")
+            
+        finally:
+            if own:
+                try:
+                    await session.close()
+                except Exception:
+                    pass
+
 async def setup(bot):
     cog = AllianceScraper(bot)
     await bot.add_cog(cog)
