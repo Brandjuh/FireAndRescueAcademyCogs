@@ -319,7 +319,8 @@ class TopPlayers(commands.Cog):
         self, 
         data: List[Dict[str, Any]], 
         title: str,
-        color: discord.Color
+        color: discord.Color,
+        by_contribution: bool = False
     ) -> discord.Embed:
         """Create an embed for the leaderboard."""
         embed = discord.Embed(
@@ -333,26 +334,40 @@ class TopPlayers(commands.Cog):
             return embed
         
         leaderboard_text = ""
-        for idx, member in enumerate(data, start=1):
-            name = member.get("name", "Unknown")
-            credits = member.get("earned_credits", 0)
-            change_pct = member.get("change_percentage", 0.0)
-            credits_gained = member.get("credits_gained", 0)
-            
-            # Format credits with thousand separators
-            credits_fmt = f"{credits:,}".replace(",", ".")
-            gained_fmt = f"{credits_gained:,}".replace(",", ".")
-            
-            # Format change indicator
-            if change_pct > 0:
-                change_indicator = f"+{change_pct:.1f}%"
-            elif change_pct < 0:
-                change_indicator = f"{change_pct:.1f}%"
-            else:
-                change_indicator = "0.0%"
-            
-            leaderboard_text += f"**{idx}.** {name}\n"
-            leaderboard_text += f"     Credits: {credits_fmt} | Gained: {gained_fmt} ({change_indicator})\n\n"
+        
+        if by_contribution:
+            # Format for contribution-based leaderboard
+            for idx, member in enumerate(data, start=1):
+                name = member.get("name", "Unknown")
+                contribution = member.get("contribution", 0)
+                
+                # Format contribution with thousand separators
+                contrib_fmt = f"{contribution:,}".replace(",", ".")
+                
+                leaderboard_text += f"**{idx}.** {name}\n"
+                leaderboard_text += f"     Contribution: {contrib_fmt}\n\n"
+        else:
+            # Format for earned credits leaderboard
+            for idx, member in enumerate(data, start=1):
+                name = member.get("name", "Unknown")
+                credits = member.get("earned_credits", 0)
+                change_pct = member.get("change_percentage", 0.0)
+                credits_gained = member.get("credits_gained", 0)
+                
+                # Format credits with thousand separators
+                credits_fmt = f"{credits:,}".replace(",", ".")
+                gained_fmt = f"{credits_gained:,}".replace(",", ".")
+                
+                # Format change indicator
+                if change_pct > 0:
+                    change_indicator = f"+{change_pct:.1f}%"
+                elif change_pct < 0:
+                    change_indicator = f"{change_pct:.1f}%"
+                else:
+                    change_indicator = "0.0%"
+                
+                leaderboard_text += f"**{idx}.** {name}\n"
+                leaderboard_text += f"     Credits: {credits_fmt} | Gained: {gained_fmt} ({change_indicator})\n\n"
         
         embed.description = leaderboard_text
         embed.set_footer(text="FARA Alliance Statistics")
@@ -360,7 +375,7 @@ class TopPlayers(commands.Cog):
         return embed
 
     async def _post_daily_leaderboard(self):
-        """Post daily top 10 leaderboard."""
+        """Post daily top 10 leaderboards (by credits and by contribution)."""
         channel_id = await self.config.leaderboard_channel_id()
         if not channel_id:
             log.warning("No leaderboard channel configured")
@@ -376,14 +391,29 @@ class TopPlayers(commands.Cog):
             return
 
         try:
-            data = await self._fetch_daily_top10()
+            # Get data for both leaderboards
+            data_credits = await self._fetch_daily_top10()
+            data_contribution = await self._fetch_daily_top10_by_contribution()
             
             now = datetime.now(ZoneInfo("America/New_York"))
-            title = f"Daily Top 10 - {now.strftime('%d-%m-%Y')}"
-            embed = self._format_leaderboard_embed(data, title, discord.Color.blue())
             
-            await channel.send(embed=embed)
-            log.info("Posted daily leaderboard")
+            # Credits leaderboard
+            title_credits = f"Daily Top 10 - {now.strftime('%d-%m-%Y')}\nBy Earned Credits"
+            embed_credits = self._format_leaderboard_embed(
+                data_credits, title_credits, discord.Color.blue(), by_contribution=False
+            )
+            
+            # Contribution leaderboard
+            title_contribution = f"Daily Top 10 - {now.strftime('%d-%m-%Y')}\nBy Alliance Contribution"
+            embed_contribution = self._format_leaderboard_embed(
+                data_contribution, title_contribution, discord.Color.green(), by_contribution=True
+            )
+            
+            # Post both embeds
+            await channel.send(embed=embed_credits)
+            await channel.send(embed=embed_contribution)
+            
+            log.info("Posted daily leaderboards")
         except discord.Forbidden as e:
             log.error(f"No permission to post in channel {channel_id}: {e}")
         except discord.HTTPException as e:
@@ -392,7 +422,7 @@ class TopPlayers(commands.Cog):
             log.exception(f"Unexpected error posting daily leaderboard: {e}")
 
     async def _post_monthly_leaderboard(self):
-        """Post monthly top 10 leaderboard."""
+        """Post monthly top 10 leaderboards (by credits and by contribution)."""
         channel_id = await self.config.leaderboard_channel_id()
         if not channel_id:
             log.warning("No leaderboard channel configured")
@@ -408,14 +438,29 @@ class TopPlayers(commands.Cog):
             return
 
         try:
-            data = await self._fetch_monthly_top10()
+            # Get data for both leaderboards
+            data_credits = await self._fetch_monthly_top10()
+            data_contribution = await self._fetch_monthly_top10_by_contribution()
             
             now = datetime.now(ZoneInfo("America/New_York"))
-            title = f"Monthly Top 10 - {now.strftime('%B %Y')}"
-            embed = self._format_leaderboard_embed(data, title, discord.Color.gold())
             
-            await channel.send(embed=embed)
-            log.info("Posted monthly leaderboard")
+            # Credits leaderboard
+            title_credits = f"Monthly Top 10 - {now.strftime('%B %Y')}\nBy Earned Credits"
+            embed_credits = self._format_leaderboard_embed(
+                data_credits, title_credits, discord.Color.gold(), by_contribution=False
+            )
+            
+            # Contribution leaderboard
+            title_contribution = f"Monthly Top 10 - {now.strftime('%B %Y')}\nBy Alliance Contribution"
+            embed_contribution = self._format_leaderboard_embed(
+                data_contribution, title_contribution, discord.Color.orange(), by_contribution=True
+            )
+            
+            # Post both embeds
+            await channel.send(embed=embed_credits)
+            await channel.send(embed=embed_contribution)
+            
+            log.info("Posted monthly leaderboards")
         except discord.Forbidden as e:
             log.error(f"No permission to post in channel {channel_id}: {e}")
         except discord.HTTPException as e:
@@ -577,22 +622,33 @@ class TopPlayers(commands.Cog):
             return
         
         await ctx.send(f"Fetching daily data from database...")
-        data = await self._fetch_daily_top10()
-        await ctx.send(f"Found {len(data)} players with daily contributions.")
-        
-        if not data:
-            await ctx.send("⚠️ No data found. Check if AllianceScraper has data in members_history table.")
-            return
-        
-        await ctx.send(f"Creating embed and posting to {channel.mention}...")
         
         try:
-            now = datetime.now(ZoneInfo("America/New_York"))
-            title = f"Daily Top 10 - {now.strftime('%d-%m-%Y')}"
-            embed = self._format_leaderboard_embed(data, title, discord.Color.blue())
+            data_credits = await self._fetch_daily_top10()
+            data_contribution = await self._fetch_daily_top10_by_contribution()
             
-            msg = await channel.send(embed=embed)
-            await ctx.send(f"✅ Daily leaderboard posted! Message ID: {msg.id}")
+            await ctx.send(f"Found {len(data_credits)} players by credits, {len(data_contribution)} by contribution")
+            
+            await ctx.send(f"Creating embeds and posting to {channel.mention}...")
+            
+            now = datetime.now(ZoneInfo("America/New_York"))
+            
+            # Credits leaderboard
+            title_credits = f"Daily Top 10 - {now.strftime('%d-%m-%Y')}\nBy Earned Credits"
+            embed_credits = self._format_leaderboard_embed(
+                data_credits, title_credits, discord.Color.blue(), by_contribution=False
+            )
+            
+            # Contribution leaderboard
+            title_contribution = f"Daily Top 10 - {now.strftime('%d-%m-%Y')}\nBy Alliance Contribution"
+            embed_contribution = self._format_leaderboard_embed(
+                data_contribution, title_contribution, discord.Color.green(), by_contribution=True
+            )
+            
+            msg1 = await channel.send(embed=embed_credits)
+            msg2 = await channel.send(embed=embed_contribution)
+            
+            await ctx.send(f"✅ Daily leaderboards posted! Message IDs: {msg1.id}, {msg2.id}")
         except discord.Forbidden as e:
             await ctx.send(f"❌ Permission error: {e}")
         except discord.HTTPException as e:
