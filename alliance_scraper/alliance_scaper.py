@@ -668,6 +668,7 @@ class AllianceScraper(commands.Cog):
     @checks.is_owner()
     async def scraper_group(self, ctx: commands.Context):
         """AllianceScraper controls."""
+        pass
 
     @scraper_group.command(name="dbinfo")
     async def db_info(self, ctx: commands.Context):
@@ -883,6 +884,7 @@ class AllianceScraper(commands.Cog):
     @scraper_group.group(name="members")
     async def members_group(self, ctx: commands.Context):
         """Members scraping controls."""
+        pass
 
     @members_group.command(name="full")
     async def members_full(self, ctx: commands.Context):
@@ -893,6 +895,7 @@ class AllianceScraper(commands.Cog):
     @members_group.group(name="backfill")
     async def backfill_group(self, ctx: commands.Context):
         """Manage missing-ID backfill."""
+        pass
 
     @backfill_group.command(name="now")
     async def backfill_now(self, ctx: commands.Context, limit: Optional[int] = None):
@@ -923,6 +926,7 @@ class AllianceScraper(commands.Cog):
     @scraper_group.group(name="logs")
     async def logs_group(self, ctx: commands.Context):
         """Alliance logs scraping controls."""
+        pass
 
     @logs_group.command(name="run")
     async def logs_run(self, ctx: commands.Context, pages: Optional[int] = None):
