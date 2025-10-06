@@ -308,17 +308,21 @@ class TopPlayers(commands.Cog):
             log.error(f"Channel {channel_id} not found")
             return
 
-        data = await self._fetch_daily_top10()
-        
-        now = datetime.now(ZoneInfo("America/New_York"))
-        title = f"Daily Top 10 - {now.strftime('%d-%m-%Y')}"
-        embed = self._format_leaderboard_embed(data, title, discord.Color.blue())
-        
         try:
+            data = await self._fetch_daily_top10()
+            
+            now = datetime.now(ZoneInfo("America/New_York"))
+            title = f"Daily Top 10 - {now.strftime('%d-%m-%Y')}"
+            embed = self._format_leaderboard_embed(data, title, discord.Color.blue())
+            
             await channel.send(embed=embed)
             log.info("Posted daily leaderboard")
+        except discord.Forbidden as e:
+            log.error(f"No permission to post in channel {channel_id}: {e}")
         except discord.HTTPException as e:
             log.error(f"Failed to post daily leaderboard: {e}")
+        except Exception as e:
+            log.exception(f"Unexpected error posting daily leaderboard: {e}")
 
     async def _post_monthly_leaderboard(self):
         """Post monthly top 10 leaderboard."""
@@ -336,17 +340,21 @@ class TopPlayers(commands.Cog):
             log.error(f"Channel {channel_id} not found")
             return
 
-        data = await self._fetch_monthly_top10()
-        
-        now = datetime.now(ZoneInfo("America/New_York"))
-        title = f"Monthly Top 10 - {now.strftime('%B %Y')}"
-        embed = self._format_leaderboard_embed(data, title, discord.Color.gold())
-        
         try:
+            data = await self._fetch_monthly_top10()
+            
+            now = datetime.now(ZoneInfo("America/New_York"))
+            title = f"Monthly Top 10 - {now.strftime('%B %Y')}"
+            embed = self._format_leaderboard_embed(data, title, discord.Color.gold())
+            
             await channel.send(embed=embed)
             log.info("Posted monthly leaderboard")
+        except discord.Forbidden as e:
+            log.error(f"No permission to post in channel {channel_id}: {e}")
         except discord.HTTPException as e:
             log.error(f"Failed to post monthly leaderboard: {e}")
+        except Exception as e:
+            log.exception(f"Unexpected error posting monthly leaderboard: {e}")
 
     def _is_last_day_of_month(self, dt: datetime) -> bool:
         """Check if given datetime is the last day of the month."""
@@ -492,6 +500,15 @@ class TopPlayers(commands.Cog):
             await ctx.send(f"❌ Channel with ID {channel_id} not found.")
             return
         
+        # Check permissions
+        perms = channel.permissions_for(channel.guild.me)
+        if not perms.send_messages:
+            await ctx.send(f"❌ Bot doesn't have permission to send messages in {channel.mention}")
+            return
+        if not perms.embed_links:
+            await ctx.send(f"❌ Bot doesn't have permission to embed links in {channel.mention}")
+            return
+        
         await ctx.send(f"Fetching daily data from database...")
         data = await self._fetch_daily_top10()
         await ctx.send(f"Found {len(data)} players with daily contributions.")
@@ -500,9 +517,23 @@ class TopPlayers(commands.Cog):
             await ctx.send("⚠️ No data found. Check if AllianceScraper has data in members_history table.")
             return
         
-        await ctx.send(f"Posting daily leaderboard to {channel.mention}...")
-        await self._post_daily_leaderboard()
-        await ctx.send("✅ Daily leaderboard posted!")
+        await ctx.send(f"Creating embed and posting to {channel.mention}...")
+        
+        try:
+            now = datetime.now(ZoneInfo("America/New_York"))
+            title = f"Daily Top 10 - {now.strftime('%d-%m-%Y')}"
+            embed = self._format_leaderboard_embed(data, title, discord.Color.blue())
+            
+            msg = await channel.send(embed=embed)
+            await ctx.send(f"✅ Daily leaderboard posted! Message ID: {msg.id}")
+        except discord.Forbidden as e:
+            await ctx.send(f"❌ Permission error: {e}")
+        except discord.HTTPException as e:
+            await ctx.send(f"❌ Discord API error: {e}")
+        except Exception as e:
+            await ctx.send(f"❌ Unexpected error: {e}")
+            import traceback
+            await ctx.send(f"```\n{traceback.format_exc()[:1900]}\n```")
 
     @leaderboard_group.command(name="testmonthly")
     async def test_monthly(self, ctx: commands.Context):
@@ -517,6 +548,15 @@ class TopPlayers(commands.Cog):
             await ctx.send(f"❌ Channel with ID {channel_id} not found.")
             return
         
+        # Check permissions
+        perms = channel.permissions_for(channel.guild.me)
+        if not perms.send_messages:
+            await ctx.send(f"❌ Bot doesn't have permission to send messages in {channel.mention}")
+            return
+        if not perms.embed_links:
+            await ctx.send(f"❌ Bot doesn't have permission to embed links in {channel.mention}")
+            return
+        
         await ctx.send(f"Fetching monthly data from database...")
         data = await self._fetch_monthly_top10()
         await ctx.send(f"Found {len(data)} players with monthly contributions.")
@@ -525,9 +565,23 @@ class TopPlayers(commands.Cog):
             await ctx.send("⚠️ No data found. Check if AllianceScraper has data in members_history table.")
             return
         
-        await ctx.send(f"Posting monthly leaderboard to {channel.mention}...")
-        await self._post_monthly_leaderboard()
-        await ctx.send("✅ Monthly leaderboard posted!")
+        await ctx.send(f"Creating embed and posting to {channel.mention}...")
+        
+        try:
+            now = datetime.now(ZoneInfo("America/New_York"))
+            title = f"Monthly Top 10 - {now.strftime('%B %Y')}"
+            embed = self._format_leaderboard_embed(data, title, discord.Color.gold())
+            
+            msg = await channel.send(embed=embed)
+            await ctx.send(f"✅ Monthly leaderboard posted! Message ID: {msg.id}")
+        except discord.Forbidden as e:
+            await ctx.send(f"❌ Permission error: {e}")
+        except discord.HTTPException as e:
+            await ctx.send(f"❌ Discord API error: {e}")
+        except Exception as e:
+            await ctx.send(f"❌ Unexpected error: {e}")
+            import traceback
+            await ctx.send(f"```\n{traceback.format_exc()[:1900]}\n```")
 
     @leaderboard_group.command(name="debug")
     async def debug_data(self, ctx: commands.Context):
