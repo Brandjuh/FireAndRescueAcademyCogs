@@ -59,7 +59,7 @@ class TopPlayers(commands.Cog):
             return None
 
     async def _fetch_daily_top10(self) -> List[Dict[str, Any]]:
-        """Fetch top 10 contributors from today's data."""
+        """Fetch top 10 contributors from today's data with comparison."""
         db_path = await self._get_db_path()
         if not db_path:
             return []
@@ -67,29 +67,60 @@ class TopPlayers(commands.Cog):
         async with aiosqlite.connect(db_path) as db:
             db.row_factory = aiosqlite.Row
             
-            # Get today's date range (in EDT/New York time)
+            # Get today's and yesterday's date ranges (in EDT/New York time)
             now = datetime.now(ZoneInfo("America/New_York"))
-            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            yesterday_start = today_start.replace(day=today_start.day - 1) if today_start.day > 1 else today_start.replace(month=today_start.month - 1 if today_start.month > 1 else 12, day=1)
             
+            # Get today's data
             cur = await db.execute("""
                 SELECT 
                     user_id,
                     name,
                     earned_credits,
-                    contribution_rate,
                     MAX(scraped_at) as latest_scrape
                 FROM members_history
                 WHERE scraped_at >= ?
                 GROUP BY user_id
                 ORDER BY earned_credits DESC
                 LIMIT 10
-            """, (today_start,))
+            """, (today_start.isoformat(),))
             
-            rows = await cur.fetchall()
-            return [dict(row) for row in rows]
+            today_rows = await cur.fetchall()
+            
+            # Get yesterday's data for comparison
+            cur = await db.execute("""
+                SELECT 
+                    user_id,
+                    earned_credits
+                FROM members_history
+                WHERE scraped_at >= ? AND scraped_at < ?
+                GROUP BY user_id
+                HAVING MAX(scraped_at)
+            """, (yesterday_start.isoformat(), today_start.isoformat()))
+            
+            yesterday_data = {row[0]: row[1] for row in await cur.fetchall()}
+            
+            # Calculate changes
+            result = []
+            for row in today_rows:
+                data = dict(row)
+                today_credits = data['earned_credits']
+                yesterday_credits = yesterday_data.get(data['user_id'], today_credits)
+                
+                if yesterday_credits > 0:
+                    change_pct = ((today_credits - yesterday_credits) / yesterday_credits) * 100
+                else:
+                    change_pct = 0.0
+                
+                data['change_percentage'] = change_pct
+                data['credits_gained'] = today_credits - yesterday_credits
+                result.append(data)
+            
+            return result
 
     async def _fetch_monthly_top10(self) -> List[Dict[str, Any]]:
-        """Fetch top 10 contributors from this month's data."""
+        """Fetch top 10 contributors from this month's data with comparison."""
         db_path = await self._get_db_path()
         if not db_path:
             return []
@@ -97,26 +128,62 @@ class TopPlayers(commands.Cog):
         async with aiosqlite.connect(db_path) as db:
             db.row_factory = aiosqlite.Row
             
-            # Get this month's date range (in EDT/New York time)
+            # Get this month's and last month's date ranges (in EDT/New York time)
             now = datetime.now(ZoneInfo("America/New_York"))
-            month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+            month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             
+            # Calculate last month start
+            if month_start.month == 1:
+                last_month_start = month_start.replace(year=month_start.year - 1, month=12)
+            else:
+                last_month_start = month_start.replace(month=month_start.month - 1)
+            
+            # Get this month's data
             cur = await db.execute("""
                 SELECT 
                     user_id,
                     name,
                     earned_credits,
-                    contribution_rate,
                     MAX(scraped_at) as latest_scrape
                 FROM members_history
                 WHERE scraped_at >= ?
                 GROUP BY user_id
                 ORDER BY earned_credits DESC
                 LIMIT 10
-            """, (month_start,))
+            """, (month_start.isoformat(),))
             
-            rows = await cur.fetchall()
-            return [dict(row) for row in rows]
+            month_rows = await cur.fetchall()
+            
+            # Get last month's data for comparison
+            cur = await db.execute("""
+                SELECT 
+                    user_id,
+                    earned_credits
+                FROM members_history
+                WHERE scraped_at >= ? AND scraped_at < ?
+                GROUP BY user_id
+                HAVING MAX(scraped_at)
+            """, (last_month_start.isoformat(), month_start.isoformat()))
+            
+            last_month_data = {row[0]: row[1] for row in await cur.fetchall()}
+            
+            # Calculate changes
+            result = []
+            for row in month_rows:
+                data = dict(row)
+                month_credits = data['earned_credits']
+                last_month_credits = last_month_data.get(data['user_id'], month_credits)
+                
+                if last_month_credits > 0:
+                    change_pct = ((month_credits - last_month_credits) / last_month_credits) * 100
+                else:
+                    change_pct = 0.0
+                
+                data['change_percentage'] = change_pct
+                data['credits_gained'] = month_credits - last_month_credits
+                result.append(data)
+            
+            return result
 
     def _format_leaderboard_embed(
         self, 
@@ -132,26 +199,33 @@ class TopPlayers(commands.Cog):
         )
         
         if not data:
-            embed.description = "Geen data beschikbaar."
+            embed.description = "No data available."
             return embed
-
-        medals = ["🥇", "🥈", "🥉"]
         
         leaderboard_text = ""
         for idx, member in enumerate(data, start=1):
-            medal = medals[idx - 1] if idx <= 3 else f"**{idx}.**"
             name = member.get("name", "Unknown")
             credits = member.get("earned_credits", 0)
-            rate = member.get("contribution_rate", 0.0)
+            change_pct = member.get("change_percentage", 0.0)
+            credits_gained = member.get("credits_gained", 0)
             
             # Format credits with thousand separators
             credits_fmt = f"{credits:,}".replace(",", ".")
+            gained_fmt = f"{credits_gained:,}".replace(",", ".")
             
-            leaderboard_text += f"{medal} **{name}**\n"
-            leaderboard_text += f"    💰 {credits_fmt} credits | 📈 {rate:.1f}%\n\n"
+            # Format change indicator
+            if change_pct > 0:
+                change_indicator = f"+{change_pct:.1f}%"
+            elif change_pct < 0:
+                change_indicator = f"{change_pct:.1f}%"
+            else:
+                change_indicator = "0.0%"
+            
+            leaderboard_text += f"**{idx}.** {name}\n"
+            leaderboard_text += f"     Credits: {credits_fmt} | Gained: {gained_fmt} ({change_indicator})\n\n"
         
         embed.description = leaderboard_text
-        embed.set_footer(text="FARA Alliance Stats")
+        embed.set_footer(text="FARA Alliance Statistics")
         
         return embed
 
@@ -174,7 +248,7 @@ class TopPlayers(commands.Cog):
         data = await self._fetch_daily_top10()
         
         now = datetime.now(ZoneInfo("America/New_York"))
-        title = f"📊 Dagelijkse Top 10 - {now.strftime('%d-%m-%Y')}"
+        title = f"Daily Top 10 - {now.strftime('%d-%m-%Y')}"
         embed = self._format_leaderboard_embed(data, title, discord.Color.blue())
         
         try:
@@ -202,7 +276,7 @@ class TopPlayers(commands.Cog):
         data = await self._fetch_monthly_top10()
         
         now = datetime.now(ZoneInfo("America/New_York"))
-        title = f"🏆 Maandelijkse Top 10 - {now.strftime('%B %Y')}"
+        title = f"Monthly Top 10 - {now.strftime('%B %Y')}"
         embed = self._format_leaderboard_embed(data, title, discord.Color.gold())
         
         try:
@@ -301,21 +375,21 @@ class TopPlayers(commands.Cog):
     async def set_channel(self, ctx: commands.Context, channel: discord.TextChannel):
         """Set the channel for leaderboard posts."""
         await self.config.leaderboard_channel_id.set(channel.id)
-        await ctx.send(f"✅ Leaderboard kanaal ingesteld op {channel.mention}")
+        await ctx.send(f"Leaderboard channel set to {channel.mention}")
 
     @leaderboard_group.command(name="daily")
     async def toggle_daily(self, ctx: commands.Context, enabled: bool):
         """Enable or disable daily leaderboards."""
         await self.config.daily_enabled.set(enabled)
-        status = "ingeschakeld" if enabled else "uitgeschakeld"
-        await ctx.send(f"✅ Dagelijkse leaderboards {status}")
+        status = "enabled" if enabled else "disabled"
+        await ctx.send(f"Daily leaderboards {status}")
 
     @leaderboard_group.command(name="monthly")
     async def toggle_monthly(self, ctx: commands.Context, enabled: bool):
         """Enable or disable monthly leaderboards."""
         await self.config.monthly_enabled.set(enabled)
-        status = "ingeschakeld" if enabled else "uitgeschakeld"
-        await ctx.send(f"✅ Maandelijkse leaderboards {status}")
+        status = "enabled" if enabled else "disabled"
+        await ctx.send(f"Monthly leaderboards {status}")
 
     @leaderboard_group.command(name="status")
     async def show_status(self, ctx: commands.Context):
@@ -325,17 +399,17 @@ class TopPlayers(commands.Cog):
         monthly = await self.config.monthly_enabled()
         
         channel = self.bot.get_channel(channel_id) if channel_id else None
-        channel_text = channel.mention if channel else "Niet ingesteld"
+        channel_text = channel.mention if channel else "Not configured"
         
         embed = discord.Embed(
-            title="⚙️ Leaderboard Configuratie",
+            title="Leaderboard Configuration",
             color=discord.Color.blue()
         )
-        embed.add_field(name="Kanaal", value=channel_text, inline=False)
-        embed.add_field(name="Dagelijks", value="✅ Aan" if daily else "❌ Uit", inline=True)
-        embed.add_field(name="Maandelijks", value="✅ Aan" if monthly else "❌ Uit", inline=True)
+        embed.add_field(name="Channel", value=channel_text, inline=False)
+        embed.add_field(name="Daily", value="Enabled" if daily else "Disabled", inline=True)
+        embed.add_field(name="Monthly", value="Enabled" if monthly else "Disabled", inline=True)
         embed.add_field(
-            name="Tijdstip", 
+            name="Schedule", 
             value="23:50 EDT/EST (America/New_York)", 
             inline=False
         )
@@ -345,16 +419,16 @@ class TopPlayers(commands.Cog):
     @leaderboard_group.command(name="testdaily")
     async def test_daily(self, ctx: commands.Context):
         """Test the daily leaderboard (posts immediately)."""
-        await ctx.send("📊 Dagelijkse leaderboard wordt gepost...")
+        await ctx.send("Posting daily leaderboard...")
         await self._post_daily_leaderboard()
-        await ctx.send("✅ Dagelijkse leaderboard gepost!")
+        await ctx.send("Daily leaderboard posted!")
 
     @leaderboard_group.command(name="testmonthly")
     async def test_monthly(self, ctx: commands.Context):
         """Test the monthly leaderboard (posts immediately)."""
-        await ctx.send("🏆 Maandelijkse leaderboard wordt gepost...")
+        await ctx.send("Posting monthly leaderboard...")
         await self._post_monthly_leaderboard()
-        await ctx.send("✅ Maandelijkse leaderboard gepost!")
+        await ctx.send("Monthly leaderboard posted!")
 
     @leaderboard_group.command(name="restart")
     async def restart_scheduler(self, ctx: commands.Context):
@@ -362,10 +436,10 @@ class TopPlayers(commands.Cog):
         if self._task:
             self._task.cancel()
         await self._start_task()
-        await ctx.send("✅ Scheduler herstart!")
+        await ctx.send("Scheduler restarted!")
 
 
 async def setup(bot: Red):
-    """Load the Leaderboard cog."""
-    cog = Leaderboard(bot)
+    """Load the TopPlayers cog."""
+    cog = TopPlayers(bot)
     await bot.add_cog(cog)
