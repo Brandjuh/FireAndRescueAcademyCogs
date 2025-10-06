@@ -869,6 +869,8 @@ class AllianceScraper(commands.Cog):
                 
                 page = 2  # Start from page 2 (we already did page 1)
                 failed_requests = 0
+                consecutive_empty = 0
+                consecutive_duplicates = 0
                 
                 while True:
                     exp_url = f"{base}/verband/kasse?page={page}"
@@ -876,18 +878,35 @@ class AllianceScraper(commands.Cog):
                         html, _ = await self._fetch(session, exp_url)
                         expenses = self._parse_treasury_expenses_page(html)
                         
+                        # No expenses found on this page
                         if not expenses:
-                            log.info("No expenses found on page %d, stopping backfill", page)
-                            break
+                            consecutive_empty += 1
+                            log.info("No expenses found on page %d (empty count: %d)", page, consecutive_empty)
+                            # Stop after 3 consecutive empty pages
+                            if consecutive_empty >= 3:
+                                log.info("3 consecutive empty pages, stopping backfill")
+                                break
+                            page += 1
+                            await asyncio.sleep(delay)
+                            continue
+                        
+                        consecutive_empty = 0  # Reset empty counter
                         
                         ins = await self._insert_treasury_expenses(expenses)
                         expenses_inserted += ins
                         failed_requests = 0
                         
-                        # Stop if no new inserts (all duplicates)
+                        # Track consecutive pages with all duplicates
                         if ins == 0:
-                            log.info("No new expenses on page %d, stopping backfill", page)
-                            break
+                            consecutive_duplicates += 1
+                            log.info("No new expenses on page %d (all duplicates), count: %d", page, consecutive_duplicates)
+                            # Continue for up to 10 consecutive duplicate pages before stopping
+                            if consecutive_duplicates >= 10:
+                                log.info("10 consecutive pages with only duplicates, stopping backfill")
+                                break
+                        else:
+                            consecutive_duplicates = 0  # Reset if we found new entries
+                            log.info("Inserted %d new expenses from page %d", ins, page)
                         
                         page += 1
                         
