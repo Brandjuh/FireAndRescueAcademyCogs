@@ -1428,6 +1428,44 @@ class AllianceScraper(commands.Cog):
         await self.config.treasury_initial_backfill.set(True)
         await ctx.send("Treasury initial backfill flag reset. Restart the cog to trigger full expense scrape.")
 
+    @treasury_group.command(name="clearexpenses")
+    async def treasury_clear_expenses(self, ctx: commands.Context):
+        """Clear all expense entries from database (for testing/reset)."""
+        await ctx.send("⚠️ This will delete ALL expense entries. Type 'yes' to confirm.")
+        
+        def check(m):
+            return m.author == ctx.author and m.channel == ctx.channel
+        
+        try:
+            msg = await self.bot.wait_for('message', check=check, timeout=30.0)
+            if msg.content.lower() != 'yes':
+                await ctx.send("Cancelled.")
+                return
+        except:
+            await ctx.send("Timeout. Cancelled.")
+            return
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM treasury_expenses")
+            await db.commit()
+        
+        await ctx.send("✅ All expense entries deleted. Run `[p]scraper treasury run True` to backfill.")
+
+    @treasury_group.command(name="setrate")
+    async def treasury_set_rate(self, ctx: commands.Context, pages_per_minute: int):
+        """Set expense scraping rate (pages per minute). Default: 20"""
+        if pages_per_minute < 1 or pages_per_minute > 120:
+            await ctx.send("Rate must be between 1 and 120 pages/minute")
+            return
+        
+        await self.config.treasury_expenses_per_minute.set(pages_per_minute)
+        await ctx.send(f"Expense scraping rate set to {pages_per_minute} pages/minute")
+        
+        # Calculate estimated time for full backfill
+        total_pages = 2023
+        minutes = total_pages / pages_per_minute
+        await ctx.send(f"Estimated time for full backfill: ~{minutes:.1f} minutes ({minutes/60:.1f} hours)")
+
     @treasury_group.command(name="debug")
     async def treasury_debug(self, ctx: commands.Context):
         """Debug treasury HTML parsing."""
