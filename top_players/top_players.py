@@ -150,7 +150,74 @@ class TopPlayers(commands.Cog):
             
             return result[:10]
 
-    async def _fetch_monthly_top10(self) -> List[Dict[str, Any]]:
+    async def _fetch_daily_top10_by_contribution(self) -> List[Dict[str, Any]]:
+        """Fetch top 10 daily contributors based on alliance contribution."""
+        db_path = await self._get_db_path()
+        if not db_path:
+            return []
+
+        async with aiosqlite.connect(db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            now = datetime.now(ZoneInfo("America/New_York"))
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            
+            # Get latest snapshot from today for each user
+            cur = await db.execute("""
+                SELECT 
+                    user_id,
+                    name,
+                    earned_credits
+                FROM members_history
+                WHERE scraped_at >= ?
+                GROUP BY user_id
+                HAVING MAX(scraped_at)
+            """, (today_start.isoformat(),))
+            
+            today_data = {row['user_id']: {'name': row['name'], 'credits': row['earned_credits']} 
+                         for row in await cur.fetchall()}
+            
+            # Get contribution data from logs (alliance contributions)
+            cur = await db.execute("""
+                SELECT 
+                    executed_mc_id,
+                    executed_name,
+                    SUM(CAST(
+                        CASE 
+                            WHEN description LIKE '%contributed%' THEN
+                                REPLACE(REPLACE(REPLACE(SUBSTR(description, 
+                                    INSTR(description, 'contributed') + 12), ',', ''), '.', ''), ' coins', '')
+                            ELSE '0'
+                        END AS INTEGER
+                    )) as total_contribution
+                FROM logs
+                WHERE ts >= ?
+                AND description LIKE '%contributed%'
+                GROUP BY executed_mc_id
+                HAVING total_contribution > 0
+                ORDER BY total_contribution DESC
+                LIMIT 10
+            """, (today_start.isoformat(),))
+            
+            result = []
+            for row in await cur.fetchall():
+                user_id = row['executed_mc_id']
+                contribution = row['total_contribution']
+                name = row['executed_name']
+                
+                # Get total credits from today's snapshot
+                user_data = today_data.get(user_id, {'name': name, 'credits': 0})
+                
+                result.append({
+                    'user_id': user_id,
+                    'name': user_data['name'] or name,
+                    'earned_credits': user_data['credits'],
+                    'contribution': contribution,
+                    'credits_gained': 0,
+                    'change_percentage': 0.0
+                })
+            
+            return result
         """Fetch top 10 monthly contributors based on credits gained this month."""
         db_path = await self._get_db_path()
         if not db_path:
