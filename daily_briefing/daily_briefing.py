@@ -177,7 +177,8 @@ class DailyBriefing(commands.Cog):
             return {
                 "completed_today": 0,
                 "completed_yesterday": 0,
-                "by_course": {}
+                "by_course_completed": {},
+                "by_course_created": {}
             }
 
         async with aiosqlite.connect(db_path) as db:
@@ -205,7 +206,7 @@ class DailyBriefing(commands.Cog):
             """, (yesterday_start.isoformat(), today_start.isoformat()))
             completed_yesterday = (await cur.fetchone())[0]
             
-            # Breakdown by course (today)
+            # Breakdown by course completed (today)
             cur = await db.execute("""
                 SELECT description, COUNT(*) as cnt
                 FROM logs
@@ -215,19 +216,37 @@ class DailyBriefing(commands.Cog):
                 ORDER BY cnt DESC
             """, (today_start.isoformat(),))
             
-            by_course = {}
+            by_course_completed = {}
             for row in await cur.fetchall():
-                # Extract course name from description
                 desc = row['description']
-                # Description format is usually: "course completed: CourseName"
+                # Extract course name - remove "course completed:" prefix
                 course_name = desc.replace("course completed:", "").replace("course completed", "").strip()
-                if course_name:
-                    by_course[course_name] = row['cnt']
+                if course_name and course_name.lower() != "course completed":
+                    by_course_completed[course_name] = row['cnt']
+            
+            # Breakdown by course created (today)
+            cur = await db.execute("""
+                SELECT description, COUNT(*) as cnt
+                FROM logs
+                WHERE action_key = 'created_course'
+                AND ts >= ?
+                GROUP BY description
+                ORDER BY cnt DESC
+            """, (today_start.isoformat(),))
+            
+            by_course_created = {}
+            for row in await cur.fetchall():
+                desc = row['description']
+                # Extract course name - remove "created a course:" or similar prefix
+                course_name = desc.replace("created a course:", "").replace("created course:", "").replace("created a course", "").strip()
+                if course_name and course_name.lower() not in ["created a course", "created course"]:
+                    by_course_created[course_name] = row['cnt']
             
             return {
                 "completed_today": completed_today,
                 "completed_yesterday": completed_yesterday,
-                "by_course": by_course
+                "by_course_completed": by_course_completed,
+                "by_course_created": by_course_created
             }
 
     def _format_diff(self, today: int, yesterday: int) -> str:
