@@ -1,4 +1,4 @@
-# top_players.py
+# top_players.py - Fixed to use treasury_income for alliance contributions
 from __future__ import annotations
 
 import asyncio
@@ -130,7 +130,7 @@ class TopPlayers(commands.Cog):
             return result[:10]
 
     async def _fetch_daily_top10_by_contribution(self) -> List[Dict[str, Any]]:
-        """Fetch top 10 daily contributors based on alliance contribution using contribution_amount."""
+        """Fetch top 10 daily contributors based on alliance contribution from treasury_income."""
         db_path = await self._get_db_path()
         if not db_path:
             return []
@@ -138,30 +138,24 @@ class TopPlayers(commands.Cog):
         async with aiosqlite.connect(db_path) as db:
             db.row_factory = aiosqlite.Row
             
-            now = datetime.now(ZoneInfo("America/New_York"))
-            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            
-            # Get contribution data from logs using the contribution_amount column
+            # Get latest daily contribution data from treasury_income
             cur = await db.execute("""
                 SELECT 
-                    executed_mc_id,
-                    executed_name,
-                    SUM(contribution_amount) as total_contribution
-                FROM logs
-                WHERE scraped_at >= ?
-                AND contribution_amount > 0
-                GROUP BY executed_mc_id
-                HAVING total_contribution > 0
-                ORDER BY total_contribution DESC
+                    user_id,
+                    user_name,
+                    credits
+                FROM treasury_income
+                WHERE period = 'daily'
+                ORDER BY credits DESC
                 LIMIT 10
-            """, (today_start.isoformat(),))
+            """)
             
             result = []
             for row in await cur.fetchall():
                 result.append({
-                    'user_id': row['executed_mc_id'],
-                    'name': row['executed_name'],
-                    'contribution': row['total_contribution'],
+                    'user_id': row['user_id'],
+                    'name': row['user_name'],
+                    'contribution': row['credits'],
                 })
             
             return result
@@ -247,7 +241,7 @@ class TopPlayers(commands.Cog):
             return result[:10]
 
     async def _fetch_monthly_top10_by_contribution(self) -> List[Dict[str, Any]]:
-        """Fetch top 10 monthly contributors based on alliance contribution using contribution_amount."""
+        """Fetch top 10 monthly contributors based on alliance contribution from treasury_income."""
         db_path = await self._get_db_path()
         if not db_path:
             return []
@@ -255,30 +249,24 @@ class TopPlayers(commands.Cog):
         async with aiosqlite.connect(db_path) as db:
             db.row_factory = aiosqlite.Row
             
-            now = datetime.now(ZoneInfo("America/New_York"))
-            month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-            
-            # Get contribution data from logs using the contribution_amount column
+            # Get latest monthly contribution data from treasury_income
             cur = await db.execute("""
                 SELECT 
-                    executed_mc_id,
-                    executed_name,
-                    SUM(contribution_amount) as total_contribution
-                FROM logs
-                WHERE scraped_at >= ?
-                AND contribution_amount > 0
-                GROUP BY executed_mc_id
-                HAVING total_contribution > 0
-                ORDER BY total_contribution DESC
+                    user_id,
+                    user_name,
+                    credits
+                FROM treasury_income
+                WHERE period = 'monthly'
+                ORDER BY credits DESC
                 LIMIT 10
-            """, (month_start.isoformat(),))
+            """)
             
             result = []
             for row in await cur.fetchall():
                 result.append({
-                    'user_id': row['executed_mc_id'],
-                    'name': row['executed_name'],
-                    'contribution': row['total_contribution'],
+                    'user_id': row['user_id'],
+                    'name': row['user_name'],
+                    'contribution': row['credits'],
                 })
             
             return result
@@ -479,7 +467,6 @@ class TopPlayers(commands.Cog):
             self._task = asyncio.create_task(self._scheduler_loop())
             log.info("Leaderboard task started")
 
-    # Commands omitted for brevity - same as before
     @commands.group(name="leaderboard", aliases=["lb"])
     @checks.is_owner()
     async def leaderboard_group(self, ctx: commands.Context):
@@ -488,18 +475,66 @@ class TopPlayers(commands.Cog):
 
     @leaderboard_group.command(name="channel")
     async def set_channel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Set the channel where leaderboards will be posted."""
         await self.config.leaderboard_channel_id.set(channel.id)
         await ctx.send(f"Leaderboard channel set to {channel.mention}")
 
     @leaderboard_group.command(name="testdaily")
     async def test_daily(self, ctx: commands.Context):
+        """Test posting daily leaderboard."""
         channel_id = await self.config.leaderboard_channel_id()
         if not channel_id:
-            await ctx.send("No channel configured")
+            await ctx.send("No channel configured. Use `[p]leaderboard channel #channel-name` first.")
             return
         await ctx.send("Posting daily leaderboard...")
         await self._post_daily_leaderboard()
         await ctx.send("Done!")
+
+    @leaderboard_group.command(name="testmonthly")
+    async def test_monthly(self, ctx: commands.Context):
+        """Test posting monthly leaderboard."""
+        channel_id = await self.config.leaderboard_channel_id()
+        if not channel_id:
+            await ctx.send("No channel configured. Use `[p]leaderboard channel #channel-name` first.")
+            return
+        await ctx.send("Posting monthly leaderboard...")
+        await self._post_monthly_leaderboard()
+        await ctx.send("Done!")
+
+    @leaderboard_group.command(name="toggle")
+    async def toggle_leaderboard(self, ctx: commands.Context, board_type: str, enabled: bool):
+        """Enable/disable daily or monthly leaderboards.
+        
+        Usage: [p]leaderboard toggle daily True/False
+               [p]leaderboard toggle monthly True/False
+        """
+        board_type = board_type.lower()
+        if board_type == "daily":
+            await self.config.daily_enabled.set(enabled)
+            await ctx.send(f"Daily leaderboard {'enabled' if enabled else 'disabled'}")
+        elif board_type == "monthly":
+            await self.config.monthly_enabled.set(enabled)
+            await ctx.send(f"Monthly leaderboard {'enabled' if enabled else 'disabled'}")
+        else:
+            await ctx.send("Invalid type. Use 'daily' or 'monthly'")
+
+    @leaderboard_group.command(name="status")
+    async def leaderboard_status(self, ctx: commands.Context):
+        """Show leaderboard configuration status."""
+        channel_id = await self.config.leaderboard_channel_id()
+        daily_enabled = await self.config.daily_enabled()
+        monthly_enabled = await self.config.monthly_enabled()
+        
+        channel = self.bot.get_channel(channel_id) if channel_id else None
+        channel_str = channel.mention if channel else "Not configured"
+        
+        embed = discord.Embed(title="Leaderboard Status", color=discord.Color.blue())
+        embed.add_field(name="Channel", value=channel_str, inline=False)
+        embed.add_field(name="Daily Enabled", value="✅" if daily_enabled else "❌", inline=True)
+        embed.add_field(name="Monthly Enabled", value="✅" if monthly_enabled else "❌", inline=True)
+        embed.add_field(name="Post Time", value="23:50 EST daily", inline=False)
+        
+        await ctx.send(embed=embed)
 
 
 async def setup(bot: Red):
