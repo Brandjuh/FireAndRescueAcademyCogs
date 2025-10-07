@@ -11,8 +11,9 @@ import secrets
 
 from .roulette import (
     CallPool, CallSpec, generate_run, score_run, is_perfect_run,
-    RouletteView, now_utc_ts, format_time_elapsed
+    RouletteView, now_utc_ts
 )
+
 from .economy import EconomyBridge
 
 class IncidentRoulette(commands.Cog):
