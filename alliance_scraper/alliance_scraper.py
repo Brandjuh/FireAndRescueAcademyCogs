@@ -22,7 +22,7 @@ DEFAULTS = {
     "base_url": "https://www.missionchief.com",
     "alliance_id": 1621,
     "pages_per_minute": 10,
-    "members_refresh_minutes": 60,
+    "members_refresh_minutes": 15,
     "backfill_auto": True,
     "backfill_concurrency": 5,
     "backfill_retry": 3,
