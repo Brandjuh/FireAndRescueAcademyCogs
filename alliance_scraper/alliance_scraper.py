@@ -1102,3 +1102,8 @@ class AllianceScraper(commands.Cog):
             except Exception:
                 log.exception("Error fetching stats")
                 await ctx.send("\u274c Error fetching statistics")
+
+
+async def setup(bot):
+    """Load the AllianceScraper cog."""
+    await bot.add_cog(AllianceScraper(bot))
