@@ -182,9 +182,17 @@ class EconomyBridge:
         return f"{amount} {currency_name}"
 
     def _get_currency_name(self, guild) -> str:
-        """Get currency name for guild"""
+        """Get currency name for guild - SYNC wrapper"""
         try:
-            return bank.get_currency_name(guild)
+            # bank.get_currency_name is SYNC in older Red versions
+            # but ASYNC in newer versions - handle both
+            result = bank.get_currency_name(guild)
+            # Check if it's a coroutine
+            import inspect
+            if inspect.iscoroutine(result):
+                # This shouldn't happen in sync context, return default
+                return "credits"
+            return result
         except Exception:
             return "credits"
 
