@@ -1,4 +1,4 @@
-# top_players.py - Fixed to use treasury_income for alliance contributions
+# top_players.py - Renamed commands from leaderboard to topplayers
 from __future__ import annotations
 
 import asyncio
@@ -425,7 +425,7 @@ class TopPlayers(commands.Cog):
         tz = ZoneInfo("America/New_York")
         target_time = time(23, 50, 0)
         
-        log.info("Leaderboard scheduler started")
+        log.info("Top players scheduler started")
         
         while True:
             try:
@@ -441,7 +441,7 @@ class TopPlayers(commands.Cog):
                     next_run = next_run + timedelta(days=1)
                 
                 wait_seconds = (next_run - now).total_seconds()
-                log.debug(f"Next leaderboard post at {next_run}, waiting {wait_seconds:.0f}s")
+                log.debug(f"Next top players post at {next_run}, waiting {wait_seconds:.0f}s")
                 
                 await asyncio.sleep(wait_seconds)
                 
@@ -449,7 +449,7 @@ class TopPlayers(commands.Cog):
                 await self._post_daily_leaderboard()
                 
                 if self._is_last_day_of_month(now):
-                    log.info("Last day of month detected, posting monthly leaderboard")
+                    log.info("Last day of month detected, posting monthly top players")
                     await self._post_monthly_leaderboard()
                 
                 await asyncio.sleep(120)
@@ -465,62 +465,67 @@ class TopPlayers(commands.Cog):
         """Start the scheduler task."""
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._scheduler_loop())
-            log.info("Leaderboard task started")
+            log.info("Top players task started")
 
-    @commands.group(name="leaderboard", aliases=["lb"])
+    # ===== COMMANDS =====
+    
+    @commands.group(name="topplayers", aliases=["tp"])
     @checks.is_owner()
-    async def leaderboard_group(self, ctx: commands.Context):
-        """Leaderboard configuration and controls."""
+    async def topplayers_group(self, ctx: commands.Context):
+        """Top players leaderboard configuration and controls."""
         pass
 
-    @leaderboard_group.command(name="channel")
+    @topplayers_group.command(name="channel")
     async def set_channel(self, ctx: commands.Context, channel: discord.TextChannel):
-        """Set the channel where leaderboards will be posted."""
+        """Set the channel where top players leaderboards will be posted."""
         await self.config.leaderboard_channel_id.set(channel.id)
-        await ctx.send(f"Leaderboard channel set to {channel.mention}")
+        await ctx.send(f"\u2705 Top players channel set to {channel.mention}")
 
-    @leaderboard_group.command(name="testdaily")
+    @topplayers_group.command(name="daily")
     async def test_daily(self, ctx: commands.Context):
-        """Test posting daily leaderboard."""
+        """Manually post the daily top 10 leaderboard."""
         channel_id = await self.config.leaderboard_channel_id()
         if not channel_id:
-            await ctx.send("No channel configured. Use `[p]leaderboard channel #channel-name` first.")
+            await ctx.send("\u274c No channel configured. Use `[p]tp channel #channel-name` first.")
             return
-        await ctx.send("Posting daily leaderboard...")
+        await ctx.send("Posting daily top 10...")
         await self._post_daily_leaderboard()
-        await ctx.send("Done!")
+        await ctx.send("\u2705 Done!")
 
-    @leaderboard_group.command(name="testmonthly")
+    @topplayers_group.command(name="monthly")
     async def test_monthly(self, ctx: commands.Context):
-        """Test posting monthly leaderboard."""
+        """Manually post the monthly top 10 leaderboard."""
         channel_id = await self.config.leaderboard_channel_id()
         if not channel_id:
-            await ctx.send("No channel configured. Use `[p]leaderboard channel #channel-name` first.")
+            await ctx.send("\u274c No channel configured. Use `[p]tp channel #channel-name` first.")
             return
-        await ctx.send("Posting monthly leaderboard...")
+        await ctx.send("Posting monthly top 10...")
         await self._post_monthly_leaderboard()
-        await ctx.send("Done!")
+        await ctx.send("\u2705 Done!")
 
-    @leaderboard_group.command(name="toggle")
+    @topplayers_group.command(name="toggle")
     async def toggle_leaderboard(self, ctx: commands.Context, board_type: str, enabled: bool):
-        """Enable/disable daily or monthly leaderboards.
+        """Enable/disable daily or monthly top player posts.
         
-        Usage: [p]leaderboard toggle daily True/False
-               [p]leaderboard toggle monthly True/False
+        Usage: 
+          [p]tp toggle daily True/False
+          [p]tp toggle monthly True/False
         """
         board_type = board_type.lower()
         if board_type == "daily":
             await self.config.daily_enabled.set(enabled)
-            await ctx.send(f"Daily leaderboard {'enabled' if enabled else 'disabled'}")
+            status = "\u2705 enabled" if enabled else "\u274c disabled"
+            await ctx.send(f"Daily top players {status}")
         elif board_type == "monthly":
             await self.config.monthly_enabled.set(enabled)
-            await ctx.send(f"Monthly leaderboard {'enabled' if enabled else 'disabled'}")
+            status = "\u2705 enabled" if enabled else "\u274c disabled"
+            await ctx.send(f"Monthly top players {status}")
         else:
-            await ctx.send("Invalid type. Use 'daily' or 'monthly'")
+            await ctx.send("\u274c Invalid type. Use 'daily' or 'monthly'")
 
-    @leaderboard_group.command(name="status")
-    async def leaderboard_status(self, ctx: commands.Context):
-        """Show leaderboard configuration status."""
+    @topplayers_group.command(name="status")
+    async def topplayers_status(self, ctx: commands.Context):
+        """Show top players configuration status."""
         channel_id = await self.config.leaderboard_channel_id()
         daily_enabled = await self.config.daily_enabled()
         monthly_enabled = await self.config.monthly_enabled()
@@ -528,15 +533,18 @@ class TopPlayers(commands.Cog):
         channel = self.bot.get_channel(channel_id) if channel_id else None
         channel_str = channel.mention if channel else "Not configured"
         
-        embed = discord.Embed(title="Leaderboard Status", color=discord.Color.blue())
+        embed = discord.Embed(title="Top Players Status", color=discord.Color.blue())
         embed.add_field(name="Channel", value=channel_str, inline=False)
-        embed.add_field(name="Daily Enabled", value="✅" if daily_enabled else "❌", inline=True)
-        embed.add_field(name="Monthly Enabled", value="✅" if monthly_enabled else "❌", inline=True)
+        embed.add_field(name="Daily Posts", value="\u2705 Enabled" if daily_enabled else "\u274c Disabled", inline=True)
+        embed.add_field(name="Monthly Posts", value="\u2705 Enabled" if monthly_enabled else "\u274c Disabled", inline=True)
         embed.add_field(name="Post Time", value="23:50 EST daily", inline=False)
+        embed.add_field(name="Monthly Post", value="Last day of month at 23:50 EST", inline=False)
+        embed.set_footer(text="Use [p]tp daily or [p]tp monthly to test posting")
         
         await ctx.send(embed=embed)
 
 
 async def setup(bot: Red):
+    """Load the TopPlayers cog."""
     cog = TopPlayers(bot)
     await bot.add_cog(cog)
