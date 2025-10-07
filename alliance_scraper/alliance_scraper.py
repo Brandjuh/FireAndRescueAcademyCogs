@@ -954,7 +954,7 @@ class AllianceScraper(commands.Cog):
         await ctx.send(f"```\nBalance: {balance:,}\nIncome: {income_count:,}\nExpenses: {expenses_count:,}\nRefresh: {mins}min\n```")
 
 async def setup(bot):
-    await bot.add_cog(AllianceScraper(bot))1:
+    await bot.add_cog(AllianceScraper(bot))
             income_table = tables[0]
             headers = [th.get_text(strip=True).lower() for th in income_table.find_all("th")]
             
