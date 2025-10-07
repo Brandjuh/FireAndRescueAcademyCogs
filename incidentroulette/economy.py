@@ -197,9 +197,9 @@ class EconomyBridge:
         
         try:
             await bank.deposit_credits(ctx.author, amount)
+            currency_name = self._get_currency_name(ctx.guild)
             await ctx.send(
-                f"💰 Refund: {self.format_amount(ctx.guild, amount)} (reden: {reason})",
-                ephemeral=True
+                f"💰 Refund: {amount} {currency_name} (reden: {reason})"
             )
         except Exception:
             pass  # Best effort
