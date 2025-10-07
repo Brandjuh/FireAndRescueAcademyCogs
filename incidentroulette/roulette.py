@@ -1,6 +1,3 @@
-"""
-DEBUG VERSION - Clean, no circular imports
-"""
 from __future__ import annotations
 import time, random, dataclasses
 import discord
@@ -232,8 +229,6 @@ class RouletteView(View):
         return True
 
     def _build_for_current(self):
-        """DEBUG: Build UI with explicit row assignments"""
-        # Clear all
         for child in list(self.children):
             self.remove_item(child)
 
@@ -242,63 +237,33 @@ class RouletteView(View):
             calls = [CallSpec.from_json(d) for d in self.state["calls"]]
             call = calls[idx]
             alloc = self.state["allocs"].get(str(idx), {}) or {}
-        except (ValueError, KeyError, IndexError) as e:
-            print(f"DEBUG: Error in _build_for_current: {e}")
+        except (ValueError, KeyError, IndexError):
             return
         
-        debug_info = []
-        debug_info.append(f"Building UI for call {idx}")
-        debug_info.append(f"Total ROLES: {len(ROLES)}")
-        
-        # Add role selects with EXPLICIT row assignment
+        # Add 7 role selects with explicit row assignment
+        # Row 0: E, L, HR (3 items)
+        # Row 1: BC, EMS, USAR (3 items)
+        # Row 2: ARFF (1 item)
         for i, role in enumerate(ROLES):
             current = int(alloc.get(role, 0))
             sel = RoleSelect(role, current)
             sel.callback = self._on_select
-            
-            # EXPLICIT row assignment
-            if i == 0:  # E
-                sel.row = 0
-            elif i == 1:  # L
-                sel.row = 0
-            elif i == 2:  # HR
-                sel.row = 0
-            elif i == 3:  # BC
-                sel.row = 1
-            elif i == 4:  # EMS
-                sel.row = 1
-            elif i == 5:  # USAR
-                sel.row = 1
-            elif i == 6:  # ARFF
-                sel.row = 2
-            
-            debug_info.append(f"Adding {role} select to row {sel.row}")
+            # Explicit row assignment - this is the FIX
+            sel.row = 0 if i < 3 else (1 if i < 6 else 2)
             self.add_item(sel)
         
-        # Confirm button
+        # Row 3: Confirm button
         is_last = idx >= len(calls) - 1
         confirm = ConfirmButton(is_last=is_last)
         confirm.callback = self._on_confirm
         confirm.row = 3
-        debug_info.append(f"Adding Confirm button to row 3")
         self.add_item(confirm)
         
-        # Cancel button
+        # Row 4: Cancel button
         cancel = CancelButton()
         cancel.callback = self._on_cancel
         cancel.row = 4
-        debug_info.append(f"Adding Cancel button to row 4")
         self.add_item(cancel)
-        
-        debug_info.append(f"Total items added: {len(self.children)}")
-        debug_info.append("Items per row:")
-        for row in range(5):
-            items_in_row = [c for c in self.children if getattr(c, 'row', 0) == row]
-            debug_info.append(f"  Row {row}: {len(items_in_row)} items")
-        
-        # Store debug info in state to send later
-        self.state['_debug_info'] = "\n".join(debug_info)
-        print("\n".join(debug_info))
 
     async def _on_select(self, interaction: discord.Interaction):
         idx = str(int(self.state.get("current_idx", 0)))
@@ -347,9 +312,4 @@ class RouletteView(View):
         self.stop()
 
     async def on_timeout(self) -> None:
-        try:
-            channel = self.ctx.channel
-            if channel:
-                await channel.send(f"{self.ctx.author.mention} TTL expired")
-        except Exception:
-            pass
+        pass
