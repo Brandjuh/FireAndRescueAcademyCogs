@@ -14,10 +14,9 @@ __red_end_user_data_statement__ = (
 )
 
 __version__ = "2.0.0"
-__author__ = "Your Name"
+__author__ = "Brandjuh"
 
 
 async def setup(bot):
     """Load the IncidentRoulette cog"""
-    cog = IncidentRoulette(bot)
-    await bot.add_cog(cog)
+    await bot.add_cog(IncidentRoulette(bot))
