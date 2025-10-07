@@ -1,6 +1,6 @@
 {
     "author": [
-        "YourName"
+        "DutchFireFighter"
     ],
     "description": "Incident Roulette - Emergency response allocation game with economy integration. Test your resource allocation skills with randomized incident calls!",
     "install_msg": "Thanks for installing Incident Roulette! Use `/roulette start` to begin playing. Admins can configure settings with `/roulette_config`. See the README for full documentation.",
