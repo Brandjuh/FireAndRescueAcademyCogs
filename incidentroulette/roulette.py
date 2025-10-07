@@ -224,7 +224,7 @@ class ConfirmButton(Button):
 
 class CancelButton(Button):
     def __init__(self):
-        super().__init__(style=discord.ButtonStyle.danger, label="❌ Cancel Run", row=4)
+        super().__init__(style=discord.ButtonStyle.danger, label="❌ Cancel Run")
 
 class RouletteView(View):
     def __init__(self, cog, ctx, state: dict, only_user_id: int, timeout: float = 15*60):
@@ -285,17 +285,18 @@ class RouletteView(View):
         except (ValueError, KeyError, IndexError):
             return
         
-        # Role selects: 7 roles split across rows
+        # Role selects: 7 roles distributed across rows
+        # Discord limit: 5 items per row
         # Row 0: E, L, HR (3 items)
         # Row 1: BC, EMS, USAR (3 items)  
         # Row 2: ARFF (1 item)
-        # Row 3: Confirm button
-        # Row 4: Cancel button
+        # Row 3: Confirm button (1 item)
+        # Row 4: Cancel button (1 item)
         for i, r in enumerate(ROLES):
             current = int(alloc.get(r, 0))
             sel = RoleSelect(r, current)
             sel.callback = self._on_select
-            # Distribute: 3 per row for first 6, then 1 in row 2
+            # Distribute across rows: 3, 3, 1 pattern
             if i < 3:
                 sel.row = 0
             elif i < 6:
