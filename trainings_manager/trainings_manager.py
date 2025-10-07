@@ -1,4 +1,3 @@
-
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
@@ -512,6 +511,8 @@ class AdminDecisionView(discord.ui.View):
                 emb.add_field(name="Reference", value=self.req.reference, inline=False)
             emb.add_field(name="Reminder", value="Yes" if self.req.want_reminder else "No", inline=True)
             emb.add_field(name="End time", value=fmt_dt(end_at), inline=False)
+            # NIEUW: Toon welke admin approved heeft
+            emb.add_field(name="Approved by", value=f"{interaction.user.mention} ({interaction.user.id})", inline=False)
             await log_channel.send(embed=emb)
 
         try:
@@ -526,7 +527,7 @@ class AdminDecisionView(discord.ui.View):
         if not await self._is_admin(interaction):
             await interaction.response.send_message("You don't have permission to do this.", ephemeral=True)
             return
-        await interaction.response.send_modal(RejectModal(self.cog, self.requester_id, self.req, admin_msg=interaction.message))
+        await interaction.response.send_modal(RejectModal(self.cog, self.requester_id, self.req, admin_msg=interaction.message, admin_user=interaction.user))
 
 class RejectModal(discord.ui.Modal, title="Rejection reason"):
     reason = discord.ui.TextInput(
@@ -537,12 +538,13 @@ class RejectModal(discord.ui.Modal, title="Rejection reason"):
         placeholder="Briefly explain why this request is rejected.",
     )
 
-    def __init__(self, cog: "TrainingManager", requester_id: int, req: TrainingRequest, admin_msg: discord.Message):
+    def __init__(self, cog: "TrainingManager", requester_id: int, req: TrainingRequest, admin_msg: discord.Message, admin_user: discord.User):
         super().__init__()
         self.cog = cog
         self.requester_id = requester_id
         self.req = req
         self.admin_msg = admin_msg
+        self.admin_user = admin_user
 
     async def on_submit(self, interaction: discord.Interaction):
         guild = interaction.guild
@@ -575,6 +577,8 @@ class RejectModal(discord.ui.Modal, title="Rejection reason"):
             emb.add_field(name="Requester", value=requester, inline=False)
             emb.add_field(name="Training", value=f"{self.req.discipline} → {self.req.training}", inline=False)
             emb.add_field(name="Reason", value=str(self.reason), inline=False)
+            # NIEUW: Toon welke admin rejected heeft
+            emb.add_field(name="Rejected by", value=f"{self.admin_user.mention} ({self.admin_user.id})", inline=False)
             await log_channel.send(embed=emb)
 
         try:
