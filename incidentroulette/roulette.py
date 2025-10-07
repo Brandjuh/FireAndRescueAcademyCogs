@@ -285,24 +285,36 @@ class RouletteView(View):
         except (ValueError, KeyError, IndexError):
             return
         
-        # Role selects (rows 0-3)
+        # Role selects: 7 roles split across rows
+        # Row 0: E, L, HR (3 items)
+        # Row 1: BC, EMS, USAR (3 items)  
+        # Row 2: ARFF (1 item)
+        # Row 3: Confirm button
+        # Row 4: Cancel button
         for i, r in enumerate(ROLES):
             current = int(alloc.get(r, 0))
             sel = RoleSelect(r, current)
             sel.callback = self._on_select
-            sel.row = i % 4
+            # Distribute: 3 per row for first 6, then 1 in row 2
+            if i < 3:
+                sel.row = 0
+            elif i < 6:
+                sel.row = 1
+            else:
+                sel.row = 2
             self.add_item(sel)
         
-        # Confirm button
+        # Confirm button on row 3
         is_last = idx >= len(calls) - 1
         confirm = ConfirmButton(is_last=is_last)
         confirm.callback = self._on_confirm
-        confirm.row = 4
+        confirm.row = 3
         self.add_item(confirm)
         
-        # Cancel button (always available)
+        # Cancel button on row 4
         cancel = CancelButton()
         cancel.callback = self._on_cancel
+        cancel.row = 4
         self.add_item(cancel)
 
     async def _on_select(self, interaction: discord.Interaction):
