@@ -1,4 +1,4 @@
-# alliance_scraper.py (v0.8.0) - improved with better error handling, indices, and contribution parsing
+# alliance_scraper.py (v0.9.0 FINAL) - Complete with treasury scraping
 from __future__ import annotations
 
 import asyncio
@@ -30,6 +30,10 @@ DEFAULTS = {
     "backfill_jitter_ms": 250,
     # logs
     "logs_refresh_minutes": 5,
+    # treasury
+    "treasury_refresh_minutes": 15,
+    "treasury_initial_backfill": True,
+    "treasury_expenses_per_minute": 20,
     "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
     "members_path_template": "/verband/mitglieder/{alliance_id}?page={page}",
 }
@@ -108,6 +112,11 @@ def _hash_key(ts: str, exec_name: str, action_text: str, affected_name: str, des
     raw = f"{ts}|{exec_name}|{action_text}|{affected_name}|{desc}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
+def _hash_expense(date: str, credits: str, name: str, desc: str) -> str:
+    import hashlib
+    raw = f"{date}|{credits}|{name}|{desc}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
 ACTION_MAP = [
     ("added_to_alliance", [r"added to the alliance", r"added to alliance"]),
     ("application_denied", [r"application denied"]),
@@ -155,7 +164,7 @@ def _norm_action(text: str) -> Tuple[str, str]:
     return key, text
 
 class AllianceScraper(commands.Cog):
-    """Scrape alliance data with robust member ID extraction; store alliance logs; provide APIs for other cogs."""
+    """Scrape alliance data; store logs and treasury; provide APIs for other cogs."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -165,103 +174,88 @@ class AllianceScraper(commands.Cog):
         self.db_path = self.data_path / "alliance.db"
         self._bg_members: Optional[asyncio.Task] = None
         self._bg_logs: Optional[asyncio.Task] = None
+        self._bg_treasury: Optional[asyncio.Task] = None
 
     async def cog_load(self):
         await self._init_db()
         await self._maybe_start_background()
 
     async def cog_unload(self):
-        """Cancel background tasks on unload."""
         if self._bg_members:
             self._bg_members.cancel()
         if self._bg_logs:
             self._bg_logs.cancel()
+        if self._bg_treasury:
+            self._bg_treasury.cancel()
 
-    # ---------------- DB init & migrations ----------------
     async def _init_db(self):
         self.data_path.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.db_path) as db:
-            # members tables
             await db.execute("""
             CREATE TABLE IF NOT EXISTS members_current(
-                user_id TEXT,
-                name TEXT,
-                role TEXT,
-                earned_credits INTEGER,
-                contribution_rate REAL,
-                profile_href TEXT,
-                scraped_at TEXT
+                user_id TEXT, name TEXT, role TEXT, earned_credits INTEGER,
+                contribution_rate REAL, profile_href TEXT, scraped_at TEXT
             )
             """)
             await db.execute("""
             CREATE TABLE IF NOT EXISTS members_history(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT,
-                name TEXT,
-                role TEXT,
-                earned_credits INTEGER,
-                contribution_rate REAL,
-                profile_href TEXT,
-                scraped_at TEXT
+                id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, name TEXT, role TEXT,
+                earned_credits INTEGER, contribution_rate REAL, profile_href TEXT, scraped_at TEXT
             )
             """)
-            # logs table with contribution_amount
             await db.execute("""
             CREATE TABLE IF NOT EXISTS logs(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                hash TEXT UNIQUE,
-                ts TEXT,
-                action_key TEXT,
-                action_text TEXT,
-                executed_name TEXT,
-                executed_mc_id TEXT,
-                executed_url TEXT,
-                affected_name TEXT,
-                affected_type TEXT,
-                affected_mc_id TEXT,
-                affected_url TEXT,
-                description TEXT,
-                contribution_amount INTEGER DEFAULT 0,
-                scraped_at TEXT
+                id INTEGER PRIMARY KEY AUTOINCREMENT, hash TEXT UNIQUE, ts TEXT,
+                action_key TEXT, action_text TEXT, executed_name TEXT, executed_mc_id TEXT,
+                executed_url TEXT, affected_name TEXT, affected_type TEXT, affected_mc_id TEXT,
+                affected_url TEXT, description TEXT, contribution_amount INTEGER DEFAULT 0, scraped_at TEXT
+            )
+            """)
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS treasury_income(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, period TEXT, user_name TEXT,
+                user_id TEXT, credits INTEGER, scraped_at TEXT
+            )
+            """)
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS treasury_balance(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, total_funds INTEGER, scraped_at TEXT
+            )
+            """)
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS treasury_expenses(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, hash TEXT UNIQUE, expense_date TEXT,
+                credits INTEGER, name TEXT, description TEXT, scraped_at TEXT
             )
             """)
             
-            # Indices for better performance
             await db.execute("CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_logs_hash ON logs(hash)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_logs_action_key ON logs(action_key)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_logs_executed_mc_id ON logs(executed_mc_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_members_history_scraped ON members_history(scraped_at)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_members_history_user_id ON members_history(user_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_treasury_income_period ON treasury_income(period)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_treasury_income_user_id ON treasury_income(user_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_treasury_expenses_hash ON treasury_expenses(hash)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_treasury_expenses_date ON treasury_expenses(expense_date)")
             
             await db.commit()
         await self._migrate_db()
 
     async def _migrate_db(self):
         async with aiosqlite.connect(self.db_path) as db:
-            # ensure member columns exist
             await self._ensure_columns(db, "members_current", [
-                ("user_id", "TEXT", "''"),
-                ("name", "TEXT", "''"),
-                ("role", "TEXT", "''"),
-                ("earned_credits", "INTEGER", "0"),
-                ("contribution_rate", "REAL", "0.0"),
-                ("profile_href", "TEXT", "''"),
-                ("scraped_at", "TEXT", "''"),
+                ("user_id", "TEXT", "''"), ("name", "TEXT", "''"), ("role", "TEXT", "''"),
+                ("earned_credits", "INTEGER", "0"), ("contribution_rate", "REAL", "0.0"),
+                ("profile_href", "TEXT", "''"), ("scraped_at", "TEXT", "''"),
             ])
             await self._ensure_columns(db, "members_history", [
-                ("user_id", "TEXT", "''"),
-                ("name", "TEXT", "''"),
-                ("role", "TEXT", "''"),
-                ("earned_credits", "INTEGER", "0"),
-                ("contribution_rate", "REAL", "0.0"),
-                ("profile_href", "TEXT", "''"),
-                ("scraped_at", "TEXT", "''"),
+                ("user_id", "TEXT", "''"), ("name", "TEXT", "''"), ("role", "TEXT", "''"),
+                ("earned_credits", "INTEGER", "0"), ("contribution_rate", "REAL", "0.0"),
+                ("profile_href", "TEXT", "''"), ("scraped_at", "TEXT", "''"),
             ])
-            # ensure contribution_amount exists in logs
-            await self._ensure_columns(db, "logs", [
-                ("contribution_amount", "INTEGER", "0"),
-            ])
+            await self._ensure_columns(db, "logs", [("contribution_amount", "INTEGER", "0")])
             await db.commit()
 
     async def _ensure_columns(self, db: aiosqlite.Connection, table: str, cols: List[Tuple[str, str, str]]):
@@ -275,35 +269,28 @@ class AllianceScraper(commands.Cog):
                 except Exception as e:
                     log.warning("Failed to add column %s to %s: %s", name, table, e)
 
-    # ---------------- Session helpers ----------------
     async def _get_auth_session(self) -> Tuple[aiohttp.ClientSession, bool]:
-        """Get authenticated session. Returns (session, should_close_after_use)."""
         headers = {"User-Agent": (await self.config.user_agent())}
         timeout = aiohttp.ClientTimeout(total=30)
         cm = self.bot.get_cog("CookieManager")
         if cm:
             try:
-                # Get shared session from CookieManager - DO NOT CLOSE after use
                 sess = await cm.get_session()
-                # Try to update headers (may not work on shared session)
                 try:
                     sess.headers.update(headers)
                 except Exception:
                     pass
-                return sess, False  # False = don't close, it's shared
+                return sess, False
             except Exception as e:
                 log.warning("Failed to get CookieManager session: %s", e)
-        
-        # Fallback: create our own session - MUST CLOSE after use
         sess = aiohttp.ClientSession(headers=headers, timeout=timeout)
-        return sess, True  # True = we own it, must close
+        return sess, True
 
     async def _fetch(self, session: aiohttp.ClientSession, url: str) -> Tuple[str, str]:
         async with session.get(url, allow_redirects=True) as resp:
             text = await resp.text()
             return text, str(resp.url)
 
-    # ---------------- Members parsing/saving ----------------
     def _extract_member_rows(self, html: str) -> List[Dict[str, Any]]:
         soup = BeautifulSoup(html, "html.parser")
         rows: List[Dict[str, Any]] = []
@@ -331,12 +318,8 @@ class AllianceScraper(commands.Cog):
                 if "%" in txt and rate == 0.0:
                     rate = parse_percent(txt)
             rows.append({
-                "user_id": user_id,
-                "name": name,
-                "role": role,
-                "earned_credits": credits,
-                "contribution_rate": rate,
-                "profile_href": href,
+                "user_id": user_id, "name": name, "role": role,
+                "earned_credits": credits, "contribution_rate": rate, "profile_href": href,
             })
         return rows
 
@@ -352,11 +335,13 @@ class AllianceScraper(commands.Cog):
                 await db.execute("""
                 INSERT INTO members_current(user_id, name, role, earned_credits, contribution_rate, profile_href, scraped_at)
                 VALUES(?,?,?,?,?,?,?)
-                """, (r.get("user_id") or "", r.get("name") or "", r.get("role") or "", int(credits), float(r.get("contribution_rate") or 0.0), r.get("profile_href") or "", now_utc()))
+                """, (r.get("user_id") or "", r.get("name") or "", r.get("role") or "", int(credits),
+                      float(r.get("contribution_rate") or 0.0), r.get("profile_href") or "", now_utc()))
                 await db.execute("""
                 INSERT INTO members_history(user_id, name, role, earned_credits, contribution_rate, profile_href, scraped_at)
                 VALUES(?,?,?,?,?,?,?)
-                """, (r.get("user_id") or "", r.get("name") or "", r.get("role") or "", int(credits), float(r.get("contribution_rate") or 0.0), r.get("profile_href") or "", now_utc()))
+                """, (r.get("user_id") or "", r.get("name") or "", r.get("role") or "", int(credits),
+                      float(r.get("contribution_rate") or 0.0), r.get("profile_href") or "", now_utc()))
             await db.commit()
 
     async def get_members(self) -> List[Dict[str, Any]]:
@@ -401,7 +386,6 @@ class AllianceScraper(commands.Cog):
         sem = asyncio.Semaphore(int(await self.config.backfill_concurrency()))
         retry = int(await self.config.backfill_retry())
         jitter = int(await self.config.backfill_jitter_ms())
-
         updated = 0
 
         async def worker(row):
@@ -458,7 +442,7 @@ class AllianceScraper(commands.Cog):
                 try:
                     html, _ = await self._fetch(session, url)
                     all_rows.extend(self._extract_member_rows(html))
-                    failed_requests = 0  # Reset on success
+                    failed_requests = 0
                 except Exception as e:
                     failed_requests += 1
                     log.warning("Failed to fetch members page %s (failure #%d): %s", p, failed_requests, e)
@@ -466,7 +450,6 @@ class AllianceScraper(commands.Cog):
                         log.error("Too many consecutive failures, stopping scrape")
                         break
                 
-                # Increase delay after failures
                 actual_delay = delay * (1.5 ** failed_requests) if failed_requests > 0 else delay
                 await asyncio.sleep(actual_delay)
 
@@ -476,13 +459,12 @@ class AllianceScraper(commands.Cog):
                 log.info("Backfill updated %s member IDs", updated)
             return len(all_rows)
         finally:
-            if own:  # Only close if we own the session
+            if own:
                 try:
                     await session.close()
                 except Exception:
                     pass
 
-    # ---------------- Logs parsing/saving ----------------
     def _parse_logs_page(self, html: str, base: str) -> List[Dict[str, Any]]:
         soup = BeautifulSoup(html, "html.parser")
         results: List[Dict[str, Any]] = []
@@ -500,7 +482,6 @@ class AllianceScraper(commands.Cog):
             desc_text = tds[2].get_text(" ", strip=True)
             action_key, action_text = _norm_action(desc_text)
             
-            # Extract contribution amount if present
             contribution_amount = 0
             if "contributed" in desc_text.lower() and "coins" in desc_text.lower():
                 match = re.search(r'contributed\s+([\d,.]+)\s+coins', desc_text, re.I)
@@ -522,19 +503,10 @@ class AllianceScraper(commands.Cog):
             
             h = _hash_key(dt_text, executed_name, action_text, affected_name, desc_text)
             results.append({
-                "hash": h,
-                "ts": dt_text,
-                "action_key": action_key,
-                "action_text": action_text,
-                "executed_name": executed_name,
-                "executed_mc_id": executed_mc_id,
-                "executed_url": executed_url,
-                "affected_name": affected_name,
-                "affected_type": affected_type,
-                "affected_mc_id": affected_mc_id,
-                "affected_url": affected_url,
-                "description": desc_text,
-                "contribution_amount": contribution_amount,
+                "hash": h, "ts": dt_text, "action_key": action_key, "action_text": action_text,
+                "executed_name": executed_name, "executed_mc_id": executed_mc_id, "executed_url": executed_url,
+                "affected_name": affected_name, "affected_type": affected_type, "affected_mc_id": affected_mc_id,
+                "affected_url": affected_url, "description": desc_text, "contribution_amount": contribution_amount,
             })
         return results
 
@@ -554,7 +526,6 @@ class AllianceScraper(commands.Cog):
                           row["description"], row["contribution_amount"], now_utc()))
                     inserted += 1
                 except aiosqlite.IntegrityError:
-                    # duplicate
                     continue
             await db.commit()
         return inserted
@@ -576,11 +547,10 @@ class AllianceScraper(commands.Cog):
                         break
                     ins = await self._insert_logs(rows)
                     total_seen += len(rows)
-                    failed_requests = 0  # Reset on success
+                    failed_requests = 0
                     
                     if backfill_pages is not None and page >= backfill_pages:
                         break
-                    # stop early: if no new inserts this page, next pages likely old too
                     if ins == 0:
                         break
                     page += 1
@@ -591,39 +561,240 @@ class AllianceScraper(commands.Cog):
                         log.error("Too many consecutive failures, stopping logs scrape")
                         break
                 
-                # Increase delay after failures
                 actual_delay = 0.8 * (1.5 ** failed_requests) if failed_requests > 0 else 0.8
                 await asyncio.sleep(actual_delay)
                 
             return total_seen
         finally:
-            if own:  # Only close if we own the session
+            if own:
                 try:
                     await session.close()
                 except Exception:
                     pass
 
-    # ---------------- Public API for consumers ----------------
+    def _parse_treasury_page(self, html: str) -> Tuple[int, List[Dict[str, Any]], List[Dict[str, Any]]]:
+        soup = BeautifulSoup(html, "html.parser")
+        
+        total_funds = 0
+        for elem in soup.find_all(["div", "span", "strong", "p", "h1", "h2", "h3"]):
+            text = elem.get_text(strip=True)
+            if any(word in text.lower() for word in ["fund", "balance", "coin", "treasury"]):
+                val = parse_int64_from_text(text)
+                if val > 1000000:
+                    total_funds = val
+                    break
+        
+        if total_funds == 0:
+            for elem in soup.find_all(text=True):
+                text = elem.strip()
+                if text and any(c.isdigit() for c in text):
+                    val = parse_int64_from_text(text)
+                    if val > total_funds:
+                        total_funds = val
+        
+        income_rows = []
+        tables = soup.find_all("table")
+        
+        if len(tables) >= 2:
+            expense_table = tables[1]
+        elif len(tables) == 1:
+            headers = [th.get_text(strip=True).lower() for th in tables[0].find_all("th")]
+            if "credits" in headers and "date" in headers and "description" in headers:
+                expense_table = tables[0]
+        
+        if not expense_table:
+            return expenses
+        
+        for tr in expense_table.find_all("tr"):
+            tds = tr.find_all("td")
+            if len(tds) < 4:
+                continue
+            
+            credits = parse_int64_from_text(tds[0].get_text(strip=True))
+            name_cell = tds[1]
+            a = name_cell.find("a", href=True)
+            name = a.get_text(strip=True) if a else name_cell.get_text(strip=True)
+            description = tds[2].get_text(strip=True)
+            date_text = tds[3].get_text(strip=True)
+            
+            if credits > 0 and date_text:
+                h = _hash_expense(date_text, str(credits), name, description)
+                expenses.append({
+                    "hash": h, "expense_date": date_text, "credits": credits,
+                    "name": name, "description": description,
+                })
+        
+        return expenses
+
+    async def _save_treasury_balance(self, total_funds: int):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("INSERT INTO treasury_balance(total_funds, scraped_at) VALUES(?, ?)",
+                           (total_funds, now_utc()))
+            await db.commit()
+
+    async def _save_treasury_income(self, rows: List[Dict[str, Any]]):
+        if not rows:
+            return
+        async with aiosqlite.connect(self.db_path) as db:
+            periods = set(r["period"] for r in rows)
+            for period in periods:
+                await db.execute("DELETE FROM treasury_income WHERE period = ?", (period,))
+            for r in rows:
+                await db.execute("""
+                INSERT INTO treasury_income(period, user_name, user_id, credits, scraped_at)
+                VALUES(?, ?, ?, ?, ?)
+                """, (r["period"], r["user_name"], r["user_id"], r["credits"], now_utc()))
+            await db.commit()
+
+    async def _insert_treasury_expenses(self, rows: List[Dict[str, Any]]) -> int:
+        inserted = 0
+        async with aiosqlite.connect(self.db_path) as db:
+            for row in rows:
+                try:
+                    await db.execute("""
+                    INSERT INTO treasury_expenses(hash, expense_date, credits, name, description, scraped_at)
+                    VALUES(?, ?, ?, ?, ?, ?)
+                    """, (row["hash"], row["expense_date"], row["credits"], 
+                          row["name"], row["description"], now_utc()))
+                    inserted += 1
+                except aiosqlite.IntegrityError:
+                    continue
+            await db.commit()
+        return inserted
+
+    async def _scrape_treasury_once(self, backfill_expenses: bool = False) -> Tuple[int, int, int]:
+        base = await self.config.base_url()
+        session, own = await self._get_auth_session()
+        
+        try:
+            url = f"{base}/verband/kasse"
+            html, _ = await self._fetch(session, url)
+            total_funds, income_rows_daily, _ = self._parse_treasury_page(html)
+            
+            expenses_page1 = self._parse_treasury_expenses_page(html)
+            expenses_inserted = await self._insert_treasury_expenses(expenses_page1)
+            
+            await self._save_treasury_balance(total_funds)
+            
+            for row in income_rows_daily:
+                row['period'] = 'daily'
+            await self._save_treasury_income(income_rows_daily)
+            
+            url_monthly = f"{base}/verband/kasse?type=monthly"
+            html_monthly, _ = await self._fetch(session, url_monthly)
+            _, income_rows_monthly, _ = self._parse_treasury_page(html_monthly)
+            
+            for row in income_rows_monthly:
+                row['period'] = 'monthly'
+            await self._save_treasury_income(income_rows_monthly)
+            
+            total_income_rows = len(income_rows_daily) + len(income_rows_monthly)
+            log.info("Scraped treasury: balance=%d, daily_income=%d, monthly_income=%d, expenses_page1=%d",
+                    total_funds, len(income_rows_daily), len(income_rows_monthly), len(expenses_page1))
+            
+            if backfill_expenses:
+                expenses_per_minute = int(await self.config.treasury_expenses_per_minute())
+                delay = max(0.0, 60.0 / max(1, expenses_per_minute))
+                
+                page = 2
+                failed_requests = 0
+                consecutive_empty = 0
+                consecutive_duplicates = 0
+                
+                while True:
+                    exp_url = f"{base}/verband/kasse?page={page}"
+                    try:
+                        html, _ = await self._fetch(session, exp_url)
+                        expenses = self._parse_treasury_expenses_page(html)
+                        
+                        if not expenses:
+                            consecutive_empty += 1
+                            log.info("No expenses found on page %d (empty count: %d)", page, consecutive_empty)
+                            if consecutive_empty >= 3:
+                                log.info("3 consecutive empty pages, stopping backfill")
+                                break
+                            page += 1
+                            await asyncio.sleep(delay)
+                            continue
+                        
+                        consecutive_empty = 0
+                        ins = await self._insert_treasury_expenses(expenses)
+                        expenses_inserted += ins
+                        failed_requests = 0
+                        
+                        if ins == 0:
+                            consecutive_duplicates += 1
+                            log.info("No new expenses on page %d (all duplicates), count: %d", page, consecutive_duplicates)
+                            if consecutive_duplicates >= 10:
+                                log.info("10 consecutive pages with only duplicates, stopping backfill")
+                                break
+                        else:
+                            consecutive_duplicates = 0
+                            log.info("Inserted %d new expenses from page %d", ins, page)
+                        
+                        page += 1
+                        
+                    except Exception as e:
+                        failed_requests += 1
+                        log.warning("Failed to fetch treasury expenses page %s (failure #%d): %s", 
+                                   page, failed_requests, e)
+                        if failed_requests >= 3:
+                            log.error("Too many consecutive failures, stopping treasury expenses scrape")
+                            break
+                    
+                    actual_delay = delay * (1.5 ** failed_requests) if failed_requests > 0 else delay
+                    await asyncio.sleep(actual_delay)
+            
+            return total_funds, total_income_rows, expenses_inserted
+            
+        finally:
+            if own:
+                try:
+                    await session.close()
+                except Exception:
+                    pass
+
     async def get_logs_after(self, last_id: int, limit: int = 500) -> List[Dict[str, Any]]:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute("""
                 SELECT id, ts, action_key, action_text, executed_name, executed_mc_id, executed_url,
                        affected_name, affected_type, affected_mc_id, affected_url, description, contribution_amount
-                FROM logs
-                WHERE id > ?
-                ORDER BY id ASC
-                LIMIT ?
+                FROM logs WHERE id > ? ORDER BY id ASC LIMIT ?
             """, (int(last_id), int(limit)))
-            rows = await cur.fetchall()
-            return [dict(r) for r in rows]
+            return [dict(r) for r in await cur.fetchall()]
 
-    # ---------------- Background ----------------
+    async def get_treasury_income(self, period: str = "daily") -> List[Dict[str, Any]]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("""
+                SELECT user_name, user_id, credits FROM treasury_income
+                WHERE period = ? ORDER BY credits DESC
+            """, (period,))
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def get_treasury_balance(self) -> Optional[int]:
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute("SELECT total_funds FROM treasury_balance ORDER BY id DESC LIMIT 1")
+            row = await cur.fetchone()
+            return row[0] if row else None
+
+    async def get_treasury_expenses(self, limit: int = 100) -> List[Dict[str, Any]]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("""
+                SELECT expense_date, credits, name, description FROM treasury_expenses
+                ORDER BY id DESC LIMIT ?
+            """, (limit,))
+            return [dict(r) for r in await cur.fetchall()]
+
     async def _maybe_start_background(self):
         if self._bg_members is None:
             self._bg_members = asyncio.create_task(self._members_loop())
         if self._bg_logs is None:
             self._bg_logs = asyncio.create_task(self._logs_loop())
+        if self._bg_treasury is None:
+            self._bg_treasury = asyncio.create_task(self._treasury_loop())
 
     async def _members_loop(self):
         await self.bot.wait_until_red_ready()
@@ -632,15 +803,13 @@ class AllianceScraper(commands.Cog):
             try:
                 mins = int(await self.config.members_refresh_minutes())
                 await self._scrape_members()
-                failures = 0  # Reset on success
+                failures = 0
             except asyncio.CancelledError:
                 log.info("Members loop cancelled")
                 raise
             except Exception as e:
                 failures += 1
                 log.warning("Background members scrape error (failure #%d): %s", failures, e)
-            
-            # Exponential backoff on failures, max 1 hour
             wait_time = max(60, mins * 60) if failures == 0 else min(3600, 60 * (2 ** failures))
             await asyncio.sleep(wait_time)
 
@@ -651,302 +820,181 @@ class AllianceScraper(commands.Cog):
             try:
                 mins = int(await self.config.logs_refresh_minutes())
                 await self._scrape_logs_once(backfill_pages=1)
-                failures = 0  # Reset on success
+                failures = 0
             except asyncio.CancelledError:
                 log.info("Logs loop cancelled")
                 raise
             except Exception as e:
                 failures += 1
                 log.warning("Background logs scrape error (failure #%d): %s", failures, e)
-            
-            # Exponential backoff on failures, max 1 hour
             wait_time = max(60, mins * 60) if failures == 0 else min(3600, 60 * (2 ** failures))
             await asyncio.sleep(wait_time)
 
-    # ---------------- Commands ----------------
+    async def _treasury_loop(self):
+        await self.bot.wait_until_red_ready()
+        if await self.config.treasury_initial_backfill():
+            try:
+                log.info("Starting initial treasury expenses backfill...")
+                balance, income, expenses = await self._scrape_treasury_once(backfill_expenses=True)
+                log.info("Initial backfill complete: balance=%d, income=%d, expenses=%d", 
+                        balance, income, expenses)
+                await self.config.treasury_initial_backfill.set(False)
+            except Exception as e:
+                log.error("Initial treasury backfill failed: %s", e)
+        failures = 0
+        while True:
+            try:
+                mins = int(await self.config.treasury_refresh_minutes())
+                await self._scrape_treasury_once(backfill_expenses=False)
+                failures = 0
+            except asyncio.CancelledError:
+                log.info("Treasury loop cancelled")
+                raise
+            except Exception as e:
+                failures += 1
+                log.warning("Background treasury scrape error (failure #%d): %s", failures, e)
+            wait_time = max(60, mins * 60) if failures == 0 else min(3600, 60 * (2 ** failures))
+            await asyncio.sleep(wait_time)
+
     @commands.group(name="scraper")
     @checks.is_owner()
     async def scraper_group(self, ctx: commands.Context):
-        """AllianceScraper controls."""
         pass
 
     @scraper_group.command(name="dbinfo")
     async def db_info(self, ctx: commands.Context):
-        """Show database statistics and health check."""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            
-            # Get table counts
             cur = await db.execute("SELECT COUNT(*) FROM members_current")
             members_current = (await cur.fetchone())[0]
-            
-            cur = await db.execute("SELECT COUNT(*) FROM members_history")
-            members_history = (await cur.fetchone())[0]
-            
             cur = await db.execute("SELECT COUNT(*) FROM logs")
             logs_total = (await cur.fetchone())[0]
-            
-            # Get missing IDs
-            cur = await db.execute("SELECT COUNT(*) FROM members_current WHERE user_id IS NULL OR user_id = ''")
-            missing_ids = (await cur.fetchone())[0]
-            
-            # Get recent scrape times
-            cur = await db.execute("SELECT MAX(scraped_at) FROM members_current")
-            last_member_scrape = (await cur.fetchone())[0] or "Never"
-            
-            cur = await db.execute("SELECT MAX(scraped_at) FROM logs")
-            last_log_scrape = (await cur.fetchone())[0] or "Never"
-            
-            # Get action type breakdown
-            cur = await db.execute("""
-                SELECT action_key, COUNT(*) as cnt 
-                FROM logs 
-                GROUP BY action_key 
-                ORDER BY cnt DESC 
-                LIMIT 10
-            """)
-            top_actions = await cur.fetchall()
-            
-            # Get contribution stats
-            cur = await db.execute("""
-                SELECT COUNT(*), SUM(contribution_amount) 
-                FROM logs 
-                WHERE contribution_amount > 0
-            """)
-            contrib_row = await cur.fetchone()
-            contrib_count = contrib_row[0] or 0
-            contrib_total = contrib_row[1] or 0
-            
-            # Check indices
-            cur = await db.execute("""
-                SELECT name FROM sqlite_master 
-                WHERE type='index' AND sql IS NOT NULL
-                ORDER BY name
-            """)
-            indices = [row[0] for row in await cur.fetchall()]
-            
-        # Format output
+            cur = await db.execute("SELECT COUNT(*) FROM treasury_income")
+            treasury_income_count = (await cur.fetchone())[0]
+            cur = await db.execute("SELECT COUNT(*) FROM treasury_expenses")
+            treasury_expenses_count = (await cur.fetchone())[0]
+            cur = await db.execute("SELECT total_funds FROM treasury_balance ORDER BY id DESC LIMIT 1")
+            treasury_balance_row = await cur.fetchone()
+            treasury_balance = treasury_balance_row[0] if treasury_balance_row else 0
+        
         embed = discord.Embed(title="Database Statistics", color=discord.Color.blue())
-        
-        embed.add_field(
-            name="Members Tables",
-            value=f"Current: {members_current:,}\n"
-                  f"History: {members_history:,}\n"
-                  f"Missing IDs: {missing_ids}",
-            inline=True
-        )
-        
-        embed.add_field(
-            name="Logs Table",
-            value=f"Total: {logs_total:,}\n"
-                  f"Contributions: {contrib_count:,}\n"
-                  f"Total Coins: {contrib_total:,}",
-            inline=True
-        )
-        
-        embed.add_field(
-            name="Last Scrapes",
-            value=f"Members: {last_member_scrape[:19] if len(last_member_scrape) > 19 else last_member_scrape}\n"
-                  f"Logs: {last_log_scrape[:19] if len(last_log_scrape) > 19 else last_log_scrape}",
-            inline=False
-        )
-        
-        if top_actions:
-            actions_text = "\n".join([f"{row['action_key']}: {row['cnt']:,}" for row in top_actions[:5]])
-            embed.add_field(
-                name="Top 5 Action Types",
-                value=actions_text,
-                inline=False
-            )
-        
-        embed.add_field(
-            name="Indices",
-            value=f"{len(indices)} indices created",
-            inline=False
-        )
-        
-        embed.set_footer(text=f"Database: {self.db_path.name}")
-        
+        embed.add_field(name="Members", value=f"{members_current:,}", inline=True)
+        embed.add_field(name="Logs", value=f"{logs_total:,}", inline=True)
+        embed.add_field(name="Treasury", value=f"Balance: {treasury_balance:,}\nIncome: {treasury_income_count:,}\nExpenses: {treasury_expenses_count:,}", inline=False)
         await ctx.send(embed=embed)
-    
-    @scraper_group.command(name="dbdump")
-    async def db_dump(self, ctx: commands.Context, table: str = "logs", limit: int = 5):
-        """Dump sample data from a table (logs, members_current, members_history)."""
-        if table not in ["logs", "members_current", "members_history"]:
-            await ctx.send("Invalid table. Choose: logs, members_current, members_history")
-            return
-        
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            
-            if table == "logs":
-                cur = await db.execute(f"""
-                    SELECT id, ts, action_key, executed_name, affected_name, 
-                           contribution_amount, description 
-                    FROM {table} 
-                    ORDER BY id DESC 
-                    LIMIT ?
-                """, (limit,))
-            else:
-                cur = await db.execute(f"""
-                    SELECT user_id, name, role, earned_credits, 
-                           contribution_rate, scraped_at 
-                    FROM {table} 
-                    ORDER BY scraped_at DESC 
-                    LIMIT ?
-                """, (limit,))
-            
-            rows = await cur.fetchall()
-        
-        if not rows:
-            await ctx.send(f"No data in {table}")
-            return
-        
-        # Format as text
-        output = f"**{table} - Last {len(rows)} rows:**\n```\n"
-        
-        for row in rows:
-            row_dict = dict(row)
-            if table == "logs":
-                output += f"ID: {row_dict['id']}\n"
-                output += f"  Time: {row_dict['ts']}\n"
-                output += f"  Action: {row_dict['action_key']}\n"
-                output += f"  By: {row_dict['executed_name']}\n"
-                output += f"  Affected: {row_dict['affected_name']}\n"
-                if row_dict['contribution_amount'] > 0:
-                    output += f"  Contribution: {row_dict['contribution_amount']:,}\n"
-                output += f"  Description: {row_dict['description'][:60]}\n"
-            else:
-                output += f"User: {row_dict['name']} (ID: {row_dict['user_id']})\n"
-                output += f"  Role: {row_dict['role']}\n"
-                output += f"  Credits: {row_dict['earned_credits']:,}\n"
-                output += f"  Rate: {row_dict['contribution_rate']:.1f}%\n"
-                output += f"  Scraped: {row_dict['scraped_at'][:19]}\n"
-            output += "\n"
-        
-        output += "```"
-        
-        # Split if too long
-        if len(output) > 1900:
-            output = output[:1900] + "\n... (truncated)\n```"
-        
-        await ctx.send(output)
 
     @scraper_group.command(name="dbquery")
     async def db_query(self, ctx: commands.Context, *, query: str):
-        """Execute a read-only SQL query (SELECT only)."""
-        query = query.strip()
-        
-        # Safety check - only allow SELECT
         if not query.upper().startswith("SELECT"):
-            await ctx.send("Only SELECT queries are allowed for safety")
+            await ctx.send("Only SELECT queries allowed")
             return
-        
-        # Block dangerous keywords
-        dangerous = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE"]
-        if any(word in query.upper() for word in dangerous):
-            await ctx.send("Query contains forbidden keywords")
-            return
-        
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 cur = await db.execute(query)
                 rows = await cur.fetchall()
-            
             if not rows:
-                await ctx.send("Query returned no results")
+                await ctx.send("No results")
                 return
-            
-            # Format results
-            output = f"**Query Results ({len(rows)} rows):**\n```\n"
-            
-            # Get column names
+            output = f"**Results ({len(rows)} rows):**\n```\n"
             if rows:
                 cols = list(rows[0].keys())
-                output += " | ".join(cols) + "\n"
-                output += "-" * 60 + "\n"
-                
-                for row in rows[:20]:  # Limit to 20 rows
+                output += " | ".join(cols) + "\n" + "-" * 60 + "\n"
+                for row in rows[:20]:
                     values = [str(row[col]) for col in cols]
-                    output += " | ".join(values[:5]) + "\n"  # Limit columns too
-            
+                    output += " | ".join(values[:5]) + "\n"
             output += "```"
-            
             if len(output) > 1900:
-                output = output[:1900] + "\n... (truncated)\n```"
-            
+                output = output[:1900] + "\n...\n```"
             await ctx.send(output)
-            
         except Exception as e:
-            await ctx.send(f"Query error: {e}")
+            await ctx.send(f"Error: {e}")
 
     @scraper_group.group(name="members")
     async def members_group(self, ctx: commands.Context):
-        """Members scraping controls."""
         pass
 
     @members_group.command(name="full")
     async def members_full(self, ctx: commands.Context):
-        await ctx.send("Scraping all roster pages, then backfilling missing IDs...")
+        await ctx.send("Scraping...")
         n = await self._scrape_members()
         await ctx.send(f"Done. Parsed {n} rows.")
 
-    @members_group.group(name="backfill")
-    async def backfill_group(self, ctx: commands.Context):
-        """Manage missing-ID backfill."""
-        pass
-
-    @backfill_group.command(name="now")
-    async def backfill_now(self, ctx: commands.Context, limit: Optional[int] = None):
-        base = await self.config.base_url()
-        session, own = await self._get_auth_session()
-        try:
-            updated = await self._backfill_missing_ids(session, base, limit=limit)
-        finally:
-            if own:
-                try:
-                    await session.close()
-                except Exception:
-                    pass
-        await ctx.send(f"Backfill updated {updated} members.")
-    
-    @backfill_group.command(name="auto")
-    async def backfill_auto(self, ctx: commands.Context, value: bool):
-        await self.config.backfill_auto.set(bool(value))
-        await ctx.send(f"Backfill auto set to {bool(value)}")
-
-    @backfill_group.command(name="status")
-    async def backfill_status(self, ctx: commands.Context):
-        async with aiosqlite.connect(self.db_path) as db:
-            cur = await db.execute("SELECT COUNT(*) FROM members_current WHERE user_id IS NULL OR user_id=''")
-            missing = (await cur.fetchone())[0]
-        await ctx.send(f"Members missing ID: {missing}")
-
     @scraper_group.group(name="logs")
     async def logs_group(self, ctx: commands.Context):
-        """Alliance logs scraping controls."""
         pass
 
     @logs_group.command(name="run")
     async def logs_run(self, ctx: commands.Context, pages: Optional[int] = None):
-        await ctx.send("Scraping alliance logs...")
+        await ctx.send("Scraping logs...")
         n = await self._scrape_logs_once(backfill_pages=pages)
-        await ctx.send(f"Done. Parsed about {n} rows (including known).")
+        await ctx.send(f"Done. Parsed {n} rows.")
 
-    @logs_group.command(name="status")
-    async def logs_status(self, ctx: commands.Context):
+    @scraper_group.group(name="treasury")
+    async def treasury_group(self, ctx: commands.Context):
+        pass
+
+    @treasury_group.command(name="run")
+    async def treasury_run(self, ctx: commands.Context, backfill: bool = False):
+        await ctx.send("Scraping treasury...")
+        balance, income, expenses = await self._scrape_treasury_once(backfill_expenses=backfill)
+        await ctx.send(f"Done. Balance: {balance:,}, Income: {income}, Expenses: {expenses}")
+
+    @treasury_group.command(name="status")
+    async def treasury_status(self, ctx: commands.Context):
         async with aiosqlite.connect(self.db_path) as db:
-            cur = await db.execute("SELECT COUNT(*), MAX(id) FROM logs")
-            total, maxid = await cur.fetchone()
-        mins = int(await self.config.logs_refresh_minutes())
-        await ctx.send(f"```\nLogs total: {total or 0}\nNewest id: {maxid or 0}\nRefresh minutes: {mins}\n```")
-
-    @logs_group.command(name="setinterval")
-    async def logs_setinterval(self, ctx: commands.Context, minutes: int):
-        await self.config.logs_refresh_minutes.set(max(1, int(minutes)))
-        await ctx.send(f"Logs refresh interval set to {minutes} minute(s)")
+            cur = await db.execute("SELECT COUNT(*) FROM treasury_income")
+            income_count = (await cur.fetchone())[0]
+            cur = await db.execute("SELECT COUNT(*) FROM treasury_expenses")
+            expenses_count = (await cur.fetchone())[0]
+            cur = await db.execute("SELECT total_funds FROM treasury_balance ORDER BY id DESC LIMIT 1")
+            balance_row = await cur.fetchone()
+            balance = balance_row[0] if balance_row else 0
+        mins = int(await self.config.treasury_refresh_minutes())
+        await ctx.send(f"```\nBalance: {balance:,}\nIncome: {income_count:,}\nExpenses: {expenses_count:,}\nRefresh: {mins}min\n```")
 
 async def setup(bot):
-    cog = AllianceScraper(bot)
-    await bot.add_cog(cog)
+    await bot.add_cog(AllianceScraper(bot))1:
+            income_table = tables[0]
+            headers = [th.get_text(strip=True).lower() for th in income_table.find_all("th")]
+            
+            if "name" in headers and "credits" in headers:
+                period = "daily"
+                prev = income_table.find_previous(["h1", "h2", "h3", "h4", "strong"])
+                if prev:
+                    heading = prev.get_text(strip=True).lower()
+                    if "month" in heading:
+                        period = "monthly"
+                
+                for tr in income_table.find_all("tr"):
+                    tds = tr.find_all("td")
+                    if len(tds) < 2:
+                        continue
+                    
+                    a = tds[0].find("a", href=True)
+                    if not a:
+                        continue
+                    
+                    name = a.get_text(strip=True)
+                    href = a["href"]
+                    user_id = _extract_id_from_href(href) or ""
+                    credits = parse_int64_from_text(tds[1].get_text(strip=True))
+                    
+                    if credits > 0:
+                        income_rows.append({
+                            "period": period,
+                            "user_name": name,
+                            "user_id": user_id,
+                            "credits": credits,
+                        })
+        
+        return total_funds, income_rows, []
+    
+    def _parse_treasury_expenses_page(self, html: str) -> List[Dict[str, Any]]:
+        soup = BeautifulSoup(html, "html.parser")
+        expenses = []
+        
+        tables = soup.find_all("table")
+        expense_table = None
+        
+        if len(tables) >= 
