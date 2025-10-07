@@ -1,315 +1,449 @@
+"""
+Incident Roulette - Complete Red-Discord Bot Cog
+Full implementation with all features from specification
+"""
 from __future__ import annotations
-import time, random, dataclasses
 import discord
-from discord.ui import View, Select, Button
-from typing import List, Dict, Tuple, Optional
+from discord import app_commands
+from redbot.core import commands, Config
+from typing import Optional
+import secrets
 
-ROLES = ["E", "L", "HR", "BC", "EMS", "USAR", "ARFF"]
+from .roulette import (
+    CallPool, CallSpec, generate_run, score_run, is_perfect_run,
+    RouletteView, now_utc_ts
+)
+from .economy import EconomyBridge
 
-def now_utc_ts() -> int:
-    return int(time.time())
-
-@dataclasses.dataclass
-class CallSpec:
-    id: str
-    name: str
-    tier: int
-    requirements: Dict[str, int]
-    oversupply_penalty: bool = True
-
-    def requirements_str(self) -> str:
-        parts = []
-        for r in ROLES:
-            if self.requirements.get(r, 0):
-                parts.append(f"{self.requirements[r]}{r}")
-        return ", ".join(parts) if parts else "None"
-
-    def to_json(self) -> dict:
-        return {
-            "id": self.id,
-            "name": self.name,
-            "tier": self.tier,
-            "requirements": self.requirements,
-            "oversupply_penalty": self.oversupply_penalty,
+class IncidentRoulette(commands.Cog):
+    """
+    Incident Roulette - Emergency Response Allocation Game
+    
+    Test your resource allocation skills with randomized incident calls.
+    Match requirements, avoid oversupply, and beat the clock for bonus points!
+    """
+    
+    def __init__(self, bot):
+        self.bot = bot
+        self.config = Config.get_conf(self, identifier=1234567890, force_registration=True)
+        
+        # Guild settings
+        default_guild = {
+            "ir_cost_per_play": 50,
+            "ir_reward_per_point": 2,
+            "ir_bonus_perfect": 10,
+            "ir_daily_limit": 1,
+            "ir_weekly_payout_cap": 10000,
+            "allow_dupes": False,
+            "hard_mode": False,
         }
-
-    @classmethod
-    def from_json(cls, d: dict) -> "CallSpec":
-        return cls(
-            id=d["id"], name=d["name"], tier=int(d["tier"]),
-            requirements={k:int(v) for k,v in d["requirements"].items()},
-            oversupply_penalty=bool(d.get("oversupply_penalty", True))
-        )
-
-class CallPool:
-    def __init__(self, items: List[CallSpec]) -> None:
-        self.items = items
-
-    @classmethod
-    def default_pool(cls) -> "CallPool":
-        data = [
-            ("HIGHRISE_SMOKE","High-Rise Smoke Investigation",2,{"E":2,"L":1,"BC":1}),
-            ("MCI_BUS","Mass-Casualty Bus",3,{"EMS":2,"BC":1}),
-            ("HAZMAT_SMALL","HazMat Small Leak",2,{"E":1,"HR":1,"BC":1}),
-            ("ARFF_HOTBRAKES","ARFF Hot Brakes",2,{"ARFF":1,"BC":1}),
-            ("WILDLAND_SPOT","Wildland Spot Fire",1,{"E":1}),
-            ("STRUCTURE_WORKING","Working Structure Fire",3,{"E":3,"L":1,"HR":1,"BC":1}),
-            ("TRAFFIC_PI","Traffic Crash with Injuries",1,{"E":1,"EMS":1}),
-            ("TECH_TRENCH","Trench Rescue",3,{"HR":1,"USAR":1,"BC":1}),
-            ("AIRCRAFT_GEAR","Aircraft Gear Issue",3,{"ARFF":2,"BC":1}),
-            ("HAZMAT_TANKER","HazMat Tanker Spill",4,{"E":2,"HR":1,"BC":1}),
-            ("HIGHRISE_ALARM","High-Rise Alarm",1,{"E":1,"L":1,"BC":1}),
-            ("WATER_SWEEP","Water Rescue Sweep",2,{"HR":1,"EMS":1,"BC":1}),
-            ("INDUSTRIAL_FIRE","Industrial Fire",4,{"E":3,"L":1,"HR":1,"BC":1}),
-            ("WAREHOUSE_ALARM","Warehouse Alarm",2,{"E":2,"BC":1}),
-            ("BRUSH_WINDY","Brush Fire Windy",2,{"E":2,"BC":1}),
-            ("SCHOOL_MCI","School MCI",4,{"EMS":2,"E":1,"BC":1}),
-            ("FREEWAY_PILEUP","Freeway Pile-Up",3,{"E":2,"EMS":1,"HR":1,"BC":1}),
-            ("FUEL_DUMP_RTF","Fuel Dump RTF",3,{"ARFF":2,"BC":1}),
-            ("ELEVATOR_STUCK","Elevator Entrapment",1,{"E":1,"HR":1}),
-            ("GAS_LEAK_ODOR","Gas Odor Inside",1,{"E":1,"BC":1}),
-        ]
-        return cls([CallSpec(i,n,t,req) for (i,n,t,req) in data])
-
-    def weighted_sample(self, k: int, allow_dupes: bool, rng: random.Random) -> List[CallSpec]:
-        weights = {1:0.35, 2:0.50, 3:0.12, 4:0.03}
-        items = self.items[:]
-        if allow_dupes:
-            pool = []
-            for c in items:
-                pool.extend([c] * max(1, int(weights.get(c.tier,0.1)*100)))
-            return [rng.choice(pool) for _ in range(k)]
-        picked = []
-        candidates = items[:]
-        for _ in range(k):
-            if not candidates:
-                break
-            total = sum(weights.get(c.tier,0.1) for c in candidates)
-            r = rng.random() * total
-            acc = 0.0
-            choice = candidates[0]
-            for c in candidates:
-                acc += weights.get(c.tier,0.1)
-                if r <= acc:
-                    choice = c
-                    break
-            picked.append(choice)
-            candidates.remove(choice)
-        return picked
-
-def generate_run(seed_hex: str, pool: CallPool, allow_dupes: bool, hard_mode: bool) -> List[CallSpec]:
-    rng = random.Random(int(seed_hex, 16))
-    calls = pool.weighted_sample(3, allow_dupes, rng)
-    if hard_mode:
-        upgraded = []
-        for c in calls:
-            if c.tier < 4:
-                upgraded.append(CallSpec(c.id, c.name + "*", min(4, c.tier + 1), c.requirements, c.oversupply_penalty))
-            else:
-                upgraded.append(c)
-        calls = upgraded
-    return calls
-
-def score_run(calls: List[CallSpec], state: dict, hard_mode: bool = False) -> Tuple[int, List[Tuple[int,str]], bool]:
-    total = 0
-    breakdown: List[Tuple[int,str]] = []
-    speed_threshold = 30
-    per_call_times = state.get("per_call_time_s") or [None]*len(calls)
-    allocs = state.get("allocs", {})
-    all_perfect = True
-    
-    for idx, call in enumerate(calls):
-        req = call.requirements
-        alloc = allocs.get(str(idx), {}) or {}
-        points = 0
-        detail_parts = []
         
-        for role, need in req.items():
-            got = int(alloc.get(role, 0))
-            matched = min(got, need)
-            points += matched * 3
+        # Member data
+        default_member = {
+            "active_run": {},
+            "daily_plays": {"last_reset": 0, "count": 0},
+            "weekly_payouts": {"last_reset": 0, "total": 0},
+            "score_history": [],
+            "total_runs": 0,
+            "best_score": 0,
+        }
         
-        if call.oversupply_penalty:
-            oversupply_penalty_multiplier = 3 if hard_mode else 2
-            for role in ROLES:
-                got = int(alloc.get(role, 0))
-                need = req.get(role, 0)
-                if got > need:
-                    penalty = (got - need) * oversupply_penalty_multiplier
-                    points -= penalty
-                    if penalty > 0:
-                        detail_parts.append(f"{role} oversupply -{penalty}")
+        self.config.register_guild(**default_guild)
+        self.config.register_member(**default_member)
         
-        t = per_call_times[idx]
-        if not hard_mode and isinstance(t, (int, float)) and t is not None and t < speed_threshold:
-            points += 1
-            detail_parts.append(f"speed +1 ({int(t)}s)")
+        self.economy = EconomyBridge()
+        self.pool = CallPool.default_pool()
+
+    @app_commands.command(name="roulette")
+    @app_commands.describe(action="start/claim/cancel/stats/config")
+    async def roulette(self, interaction: discord.Interaction, action: str = "start"):
+        """Incident Roulette - Emergency response allocation game"""
+        await interaction.response.defer(ephemeral=False)
         
-        is_perfect = _is_perfect_call(req, alloc)
-        if is_perfect:
-            points += 4
-            detail_parts.append("perfect +4")
+        # Route to appropriate handler
+        action = action.lower()
+        if action == "start":
+            await self._handle_start(interaction)
+        elif action == "claim":
+            await self._handle_claim(interaction)
+        elif action == "cancel":
+            await self._handle_cancel(interaction)
+        elif action == "stats":
+            await self._handle_stats(interaction)
+        elif action == "config":
+            await self._handle_config(interaction)
         else:
-            all_perfect = False
+            await interaction.followup.send(
+                "❌ Onbekende actie. Gebruik: start/claim/cancel/stats/config",
+                ephemeral=True
+            )
+
+    async def _handle_start(self, interaction: discord.Interaction):
+        """Start a new roulette run"""
+        ctx = await self.bot.get_context(interaction)
+        member_data = self.config.member(interaction.user)
+        guild_config = await self.config.guild(interaction.guild).all()
         
-        detail_parts.insert(0, f"match {_match_summary(req, alloc)}")
-        breakdown.append((max(0, points), "; ".join(detail_parts)))
-        total += max(0, points)
-    
-    return total, breakdown, all_perfect
-
-def is_perfect_run(calls: List[CallSpec], state: dict) -> bool:
-    allocs = state.get("allocs", {})
-    for idx, call in enumerate(calls):
-        if not _is_perfect_call(call.requirements, allocs.get(str(idx), {}) or {}):
-            return False
-    return True
-
-def _is_perfect_call(req: dict, alloc: dict) -> bool:
-    for r, need in req.items():
-        if int(alloc.get(r, 0)) != int(need):
-            return False
-    for r, got in alloc.items():
-        if int(got) > 0 and r not in req:
-            return False
-    return True
-
-def _match_summary(req: dict, alloc: dict) -> str:
-    parts = []
-    for r in ROLES:
-        need = req.get(r, 0)
-        got = int(alloc.get(r, 0))
-        if need or got:
-            parts.append(f"{r}:{got}/{need}")
-    return ", ".join(parts) if parts else "none"
-
-class RoleSelect(Select):
-    def __init__(self, role_code: str, current_qty: int):
-        opts = [discord.SelectOption(label=str(i), value=str(i), default=(i==current_qty)) for i in range(0,5)]
-        super().__init__(placeholder=f"{role_code} (0-4)", min_values=1, max_values=1, options=opts)
-        self.role_code = role_code
-
-class ConfirmButton(Button):
-    def __init__(self, is_last: bool = False):
-        label = "✓ Bevestig" if is_last else "✓ Volgende"
-        super().__init__(style=discord.ButtonStyle.success, label=label)
-
-class CancelButton(Button):
-    def __init__(self):
-        super().__init__(style=discord.ButtonStyle.danger, label="❌ Cancel")
-
-class RouletteView(View):
-    def __init__(self, cog, ctx, state: dict, only_user_id: int, timeout: float = 15*60):
-        super().__init__(timeout=timeout)
-        self.cog = cog
-        self.ctx = ctx
-        self.state = state
-        self.only_user_id = only_user_id
-        self.started_call_ts = now_utc_ts()
-        self.last_interaction_ts = now_utc_ts()
-        self._build_for_current()
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.only_user_id:
-            await interaction.response.send_message("❌ Niet jouw run.", ephemeral=True)
-            return False
-        now = now_utc_ts()
-        if now - self.last_interaction_ts < 1.5:
-            await interaction.response.send_message("⏳ Te snel!", ephemeral=True)
-            return False
-        self.last_interaction_ts = now
-        try:
-            expires_at = int(self.state.get("expires_at", 0))
-        except (ValueError, TypeError):
-            await interaction.response.send_message("❌ State corrupted.", ephemeral=True)
-            return False
-        if now_utc_ts() > expires_at:
-            await interaction.response.send_message("⏱️ TTL verlopen.", ephemeral=True)
-            return False
-        return True
-
-    def _build_for_current(self):
-        for child in list(self.children):
-            self.remove_item(child)
-
-        try:
-            idx = int(self.state.get("current_idx", 0))
-            calls = [CallSpec.from_json(d) for d in self.state["calls"]]
-            call = calls[idx]
-            alloc = self.state["allocs"].get(str(idx), {}) or {}
-        except (ValueError, KeyError, IndexError):
+        # Check if already has active run
+        active_run = await member_data.active_run()
+        if active_run and active_run.get("seed"):
+            await interaction.followup.send(
+                "⚠️ Je hebt al een actieve run! Gebruik `/roulette claim` of `/roulette cancel` eerst.",
+                ephemeral=True
+            )
             return
         
-        # Add 7 role selects with explicit row assignment
-        # Row 0: E, L, HR (3 items)
-        # Row 1: BC, EMS, USAR (3 items)
-        # Row 2: ARFF (1 item)
-        for i, role in enumerate(ROLES):
-            current = int(alloc.get(role, 0))
-            sel = RoleSelect(role, current)
-            sel.callback = self._on_select
-            # Explicit row assignment - this is the FIX
-            sel.row = 0 if i < 3 else (1 if i < 6 else 2)
-            self.add_item(sel)
+        # Check daily limit
+        can_play, limit_msg, remaining = await self.economy.check_daily_limit(
+            self.config, interaction.user, guild_config
+        )
+        if not can_play:
+            await interaction.followup.send(limit_msg, ephemeral=True)
+            return
         
-        # Row 3: Confirm button
-        is_last = idx >= len(calls) - 1
-        confirm = ConfirmButton(is_last=is_last)
-        confirm.callback = self._on_confirm
-        confirm.row = 3
-        self.add_item(confirm)
+        # Withdraw cost
+        cost = guild_config.get("ir_cost_per_play", 50)
+        success, msg = await self.economy.withdraw(ctx, cost)
+        if not success:
+            await interaction.followup.send(msg, ephemeral=True)
+            return
         
-        # Row 4: Cancel button
-        cancel = CancelButton()
-        cancel.callback = self._on_cancel
-        cancel.row = 4
-        self.add_item(cancel)
-
-    async def _on_select(self, interaction: discord.Interaction):
-        idx = str(int(self.state.get("current_idx", 0)))
-        comp = interaction.component
-        role_code = getattr(comp, "role_code", "E")
-        qty = int(comp.values[0])
-        alloc = self.state["allocs"].get(idx, {}) or {}
-        alloc[role_code] = qty
-        self.state["allocs"][idx] = alloc
-        await self.cog.config.member(self.ctx.author).active_run.set(self.state)
-        await interaction.response.defer()
-
-    async def _on_confirm(self, interaction: discord.Interaction):
-        idx = int(self.state.get("current_idx", 0))
-        calls = [CallSpec.from_json(d) for d in self.state["calls"]]
-        elapsed = now_utc_ts() - self.started_call_ts
-        times = self.state.get("per_call_time_s") or [None]*len(self.state["calls"])
-        times[idx] = int(elapsed)
-        self.state["per_call_time_s"] = times
-        is_last = idx >= len(calls) - 1
-        
-        if not is_last:
-            self.state["current_idx"] = idx + 1
-            self.started_call_ts = now_utc_ts()
-            await self.cog.config.member(self.ctx.author).active_run.set(self.state)
-            self._build_for_current()
-            next_call = calls[idx + 1]
-            await interaction.response.edit_message(
-                content=f"✅ Call {idx+1}/{len(calls)} done ({elapsed}s)\n\n**Call {idx+2}/{len(calls)}: {next_call.name}**\nVereist: {next_call.requirements_str()}",
-                view=self
+        try:
+            # Generate run
+            seed = secrets.token_hex(2).upper()
+            hard_mode = guild_config.get("hard_mode", False)
+            allow_dupes = guild_config.get("allow_dupes", False)
+            
+            calls = generate_run(seed, self.pool, allow_dupes, hard_mode)
+            
+            # Create state
+            state = {
+                "seed": seed,
+                "calls": [c.to_json() for c in calls],
+                "allocs": {},
+                "per_call_time_s": [None] * len(calls),
+                "current_idx": 0,
+                "started_at": now_utc_ts(),
+                "expires_at": now_utc_ts() + (15 * 60),  # 15 min TTL
+                "hard_mode": hard_mode,
+            }
+            
+            # Save state
+            await member_data.active_run.set(state)
+            
+            # Increment daily counter
+            await self.economy.increment_daily_plays(self.config, interaction.user)
+            
+            # Create embed
+            embed = discord.Embed(
+                title="🚨 Incident Roulette - Run Started",
+                description=(
+                    f"**3 calls gegenereerd**\n"
+                    f"Seed: `{seed}`{' 🔥 HARD MODE' if hard_mode else ''}\n"
+                    f"Kosten: {cost} credits\n"
+                    f"Dagelijkse runs: {remaining} remaining"
+                ),
+                color=discord.Color.orange()
             )
+            
+            # Show first call
+            first_call = calls[0]
+            embed.add_field(
+                name=f"📞 Call 1/3: {first_call.name}",
+                value=(
+                    f"**Tier:** {first_call.tier}\n"
+                    f"**Vereist:** {first_call.requirements_str()}\n"
+                    f"⏱️ Timer gestart..."
+                ),
+                inline=False
+            )
+            
+            embed.set_footer(text=f"TTL: 15 min | Seed: {seed}")
+            
+            # Create view
+            view = RouletteView(self, ctx, state, interaction.user.id, timeout=15*60)
+            
+            # Send debug info if available
+            debug_info = state.get('_debug_info', '')
+            if debug_info:
+                await interaction.followup.send(f"```\nDEBUG INFO:\n{debug_info}\n```", ephemeral=True)
+            
+            await interaction.followup.send(embed=embed, view=view)
+            
+        except Exception as e:
+            # Refund on error
+            await self.economy.refund_on_error(ctx, cost, f"start error: {e}")
+            await interaction.followup.send(f"❌ Error bij start: {e}", ephemeral=True)
+
+    async def _handle_claim(self, interaction: discord.Interaction):
+        """Claim score for current run"""
+        ctx = await self.bot.get_context(interaction)
+        member_data = self.config.member(interaction.user)
+        guild_config = await self.config.guild(interaction.guild).all()
+        
+        # Get active run
+        state = await member_data.active_run()
+        if not state or not state.get("seed"):
+            await interaction.followup.send(
+                "❌ Geen actieve run. Start eerst met `/roulette start`.",
+                ephemeral=True
+            )
+            return
+        
+        try:
+            # Parse calls
+            calls = [CallSpec.from_json(d) for d in state["calls"]]
+            hard_mode = state.get("hard_mode", False)
+            
+            # Calculate score
+            score, breakdown, is_perfect = score_run(calls, state, hard_mode)
+            
+            # Calculate payout
+            payout = self.economy.calculate_payout(score, is_perfect, guild_config)
+            
+            # Check weekly cap
+            can_payout, cap_msg = await self.economy.check_weekly_payout_cap(
+                self.config, interaction.user, guild_config, payout
+            )
+            
+            if not can_payout:
+                await interaction.followup.send(cap_msg, ephemeral=True)
+                # Still clear the run but no payout
+                await member_data.active_run.clear()
+                return
+            
+            # Deposit credits
+            success, msg = await self.economy.deposit(ctx, payout)
+            if not success:
+                await interaction.followup.send(f"❌ Payout error: {msg}", ephemeral=True)
+                return
+            
+            # Update weekly total
+            await self.economy.add_weekly_payout(self.config, interaction.user, payout)
+            
+            # Update stats
+            async with member_data.score_history() as history:
+                history.append({
+                    "timestamp": now_utc_ts(),
+                    "score": score,
+                    "payout": payout,
+                    "perfect": is_perfect,
+                    "seed": state.get("seed", ""),
+                    "hard_mode": hard_mode,
+                })
+                if len(history) > 50:
+                    history[:] = history[-50:]
+            
+            best_score = await member_data.best_score()
+            if score > best_score:
+                await member_data.best_score.set(score)
+            
+            await member_data.total_runs.set(await member_data.total_runs() + 1)
+            
+            # Clear active run
+            await member_data.active_run.clear()
+            
+            # Create result embed
+            embed = discord.Embed(
+                title="📊 Incident Roulette - Score Claimed!",
+                description=f"Seed: `{state.get('seed', 'N/A')}`{' 🔥 HARD MODE' if hard_mode else ''}",
+                color=discord.Color.green() if is_perfect else discord.Color.blue()
+            )
+            
+            # Add breakdown
+            for i, (pts, details) in enumerate(breakdown):
+                call = calls[i]
+                embed.add_field(
+                    name=f"Call {i+1}: {call.name} - {pts} pts",
+                    value=details,
+                    inline=False
+                )
+            
+            # Total
+            embed.add_field(
+                name="💰 Totaal",
+                value=(
+                    f"**Score:** {score} punten\n"
+                    f"**Payout:** {self.economy.format_amount(interaction.guild, payout)}\n"
+                    f"{'🌟 **PERFECT RUN BONUS!**' if is_perfect else ''}"
+                ),
+                inline=False
+            )
+            
+            if score > best_score:
+                embed.add_field(
+                    name="🏆 NEW PERSONAL BEST!",
+                    value=f"Previous: {best_score}",
+                    inline=False
+                )
+            
+            embed.set_footer(text=f"Run completed | Seed: {state.get('seed', 'N/A')}")
+            
+            await interaction.followup.send(embed=embed)
+            
+        except Exception as e:
+            await interaction.followup.send(f"❌ Claim error: {e}", ephemeral=True)
+
+    async def _handle_cancel(self, interaction: discord.Interaction):
+        """Cancel active run (no refund)"""
+        member_data = self.config.member(interaction.user)
+        
+        state = await member_data.active_run()
+        if not state or not state.get("seed"):
+            await interaction.followup.send(
+                "❌ Geen actieve run om te annuleren.",
+                ephemeral=True
+            )
+            return
+        
+        # Clear run
+        await member_data.active_run.clear()
+        
+        await interaction.followup.send(
+            "❌ Run geannuleerd. Geen refund (per policy).",
+            ephemeral=True
+        )
+
+    async def _handle_stats(self, interaction: discord.Interaction):
+        """Show player statistics"""
+        stats = await self.economy.get_economy_stats(
+            self.config, interaction.user, interaction.guild
+        )
+        
+        embed = discord.Embed(
+            title=f"📊 Incident Roulette Stats - {interaction.user.display_name}",
+            color=discord.Color.blue()
+        )
+        
+        embed.add_field(
+            name="🎮 Gameplay",
+            value=(
+                f"**Runs vandaag:** {stats['plays_today']}\n"
+                f"**Totaal runs:** {stats['total_runs']}\n"
+                f"**Perfect runs:** {stats['perfect_runs']}"
+            ),
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🏆 Scores",
+            value=(
+                f"**Best score:** {stats['best_score']}\n"
+                f"**Gem. score:** {stats['avg_score']}\n"
+                f"**Totaal punten:** {stats['total_score']}"
+            ),
+            inline=True
+        )
+        
+        embed.add_field(
+            name="💰 Economy",
+            value=(
+                f"**Deze week:** {stats['earned_this_week']} {stats['currency']}\n"
+                f"**Totaal verdiend:** {stats['total_earned']} {stats['currency']}\n"
+                f"**Huidige saldo:** {stats['balance']} {stats['currency']}"
+            ),
+            inline=False
+        )
+        
+        await interaction.followup.send(embed=embed)
+
+    async def _handle_config(self, interaction: discord.Interaction):
+        """Show or modify config (admin only)"""
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.followup.send(
+                "❌ Alleen administrators kunnen config wijzigen.",
+                ephemeral=True
+            )
+            return
+        
+        guild_config = await self.config.guild(interaction.guild).all()
+        
+        embed = discord.Embed(
+            title="⚙️ Incident Roulette Config",
+            description="Huidige instellingen voor deze server",
+            color=discord.Color.purple()
+        )
+        
+        embed.add_field(
+            name="💰 Economy",
+            value=(
+                f"**Cost per play:** {guild_config['ir_cost_per_play']}\n"
+                f"**Reward per point:** {guild_config['ir_reward_per_point']}\n"
+                f"**Perfect bonus:** {guild_config['ir_bonus_perfect']}"
+            ),
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🎮 Limits",
+            value=(
+                f"**Daily limit:** {guild_config['ir_daily_limit']}\n"
+                f"**Weekly cap:** {guild_config['ir_weekly_payout_cap']}"
+            ),
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🎲 Gameplay",
+            value=(
+                f"**Allow dupes:** {guild_config['allow_dupes']}\n"
+                f"**Hard mode:** {guild_config['hard_mode']}"
+            ),
+            inline=True
+        )
+        
+        embed.set_footer(text="Use /roulette_config to modify settings")
+        
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="roulette_config")
+    @app_commands.describe(
+        setting="Setting to modify",
+        value="New value"
+    )
+    @app_commands.choices(setting=[
+        app_commands.Choice(name="cost_per_play", value="ir_cost_per_play"),
+        app_commands.Choice(name="reward_per_point", value="ir_reward_per_point"),
+        app_commands.Choice(name="perfect_bonus", value="ir_bonus_perfect"),
+        app_commands.Choice(name="daily_limit", value="ir_daily_limit"),
+        app_commands.Choice(name="weekly_cap", value="ir_weekly_payout_cap"),
+        app_commands.Choice(name="allow_dupes", value="allow_dupes"),
+        app_commands.Choice(name="hard_mode", value="hard_mode"),
+    ])
+    async def roulette_config(
+        self, 
+        interaction: discord.Interaction, 
+        setting: str, 
+        value: str
+    ):
+        """Modify roulette config (admin only)"""
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message(
+                "❌ Alleen administrators kunnen config wijzigen.",
+                ephemeral=True
+            )
+            return
+        
+        # Parse value
+        if setting in ["allow_dupes", "hard_mode"]:
+            new_value = value.lower() in ["true", "yes", "1", "on"]
         else:
-            await self.cog.config.member(self.ctx.author).active_run.set(self.state)
-            hard_mode = self.state.get("hard_mode", False)
-            score, breakdown, is_perfect = score_run(calls, self.state, hard_mode)
-            summary = [f"✅ Done! Score: {score} pts"]
-            if is_perfect:
-                summary.append("🌟 PERFECT!")
-            summary.append("\nUse `/roulette claim`")
-            await interaction.response.edit_message(content="\n".join(summary), view=None)
-            self.stop()
+            try:
+                new_value = int(value)
+            except ValueError:
+                await interaction.response.send_message(
+                    f"❌ Ongeldige waarde voor {setting}. Verwacht nummer.",
+                    ephemeral=True
+                )
+                return
+        
+        # Update config
+        await self.config.guild(interaction.guild).set_raw(setting, value=new_value)
+        
+        await interaction.response.send_message(
+            f"✅ Config updated: **{setting}** = `{new_value}`",
+            ephemeral=True
+        )
 
-    async def _on_cancel(self, interaction: discord.Interaction):
-        await self.cog.config.member(self.ctx.author).active_run.clear()
-        await interaction.response.edit_message(content="❌ Cancelled", view=None)
-        self.stop()
-
-    async def on_timeout(self) -> None:
-        pass
+async def setup(bot):
+    await bot.add_cog(IncidentRoulette(bot))
