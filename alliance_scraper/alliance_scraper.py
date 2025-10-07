@@ -22,7 +22,7 @@ DEFAULTS = {
     "base_url": "https://www.missionchief.com",
     "alliance_id": 1621,
     "pages_per_minute": 10,
-    "members_refresh_minutes": 15,
+    "members_refresh_minutes": 60,
     "backfill_auto": True,
     "backfill_concurrency": 5,
     "backfill_retry": 3,
@@ -922,9 +922,9 @@ class AllianceScraper(commands.Cog):
             
             if action_key:
                 sql = """
-                SELECT ts, action_key, action_text, executed_name, executed_mc_id,
+                SELECT id, ts, action_key, action_text, executed_name, executed_mc_id,
                        affected_name, affected_type, affected_mc_id, description, 
-                       contribution_amount
+                       contribution_amount, executed_url, affected_url
                 FROM logs 
                 WHERE action_key = ?
                 ORDER BY ts DESC 
@@ -933,15 +933,31 @@ class AllianceScraper(commands.Cog):
                 cur = await db.execute(sql, (action_key, limit))
             else:
                 sql = """
-                SELECT ts, action_key, action_text, executed_name, executed_mc_id,
+                SELECT id, ts, action_key, action_text, executed_name, executed_mc_id,
                        affected_name, affected_type, affected_mc_id, description,
-                       contribution_amount
+                       contribution_amount, executed_url, affected_url
                 FROM logs 
                 ORDER BY ts DESC 
                 LIMIT ?
                 """
                 cur = await db.execute(sql, (limit,))
             
+            return [dict(r) for r in await cur.fetchall()]
+    
+    async def get_logs_after(self, last_id: int, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get logs with ID greater than last_id, ordered by ID ascending (oldest first)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            sql = """
+            SELECT id, ts, action_key, action_text, executed_name, executed_mc_id,
+                   affected_name, affected_type, affected_mc_id, description,
+                   contribution_amount, executed_url, affected_url
+            FROM logs 
+            WHERE id > ?
+            ORDER BY id ASC
+            LIMIT ?
+            """
+            cur = await db.execute(sql, (int(last_id), int(limit)))
             return [dict(r) for r in await cur.fetchall()]
     
     async def get_treasury_balance(self) -> Optional[int]:
