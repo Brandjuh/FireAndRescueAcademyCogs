@@ -1,9 +1,28 @@
 {
-    "author": ["Brandjuh"],
+    "author": [
+        "Brandjuh"
+    ],
+    "description": "Incident Roulette - Emergency response allocation game with economy integration. Test your resource allocation skills with randomized incident calls!",
+    "install_msg": "Thanks for installing Incident Roulette! Use `/roulette start` to begin playing. Admins can configure settings with `/roulette_config`. See the README for full documentation.",
+    "short": "Emergency response allocation mini-game",
     "name": "IncidentRoulette",
-    "disabled": false,
-    "hidden": false,
+    "tags": [
+        "game",
+        "economy",
+        "emergency",
+        "skill",
+        "roulette"
+    ],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores user gameplay statistics, scores, and economy transactions per guild.",
+    "required_cogs": {},
+    "requirements": [],
     "min_bot_version": "3.5.0",
-    "min_python_version": [3, 8, 0],
-    "type": "COG"
+    "hidden": false,
+    "disabled": false,
+    "min_python_version": [
+        3,
+        8,
+        0
+    ]
 }
