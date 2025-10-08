@@ -223,9 +223,135 @@ class MemberSync(commands.Cog):
         view = discord.ui.View(timeout=3600)
         approve_btn = discord.ui.Button(style=discord.ButtonStyle.success, label="Approve", custom_id=f"ms.approve:{requester.id}:{mc_id}")
         deny_btn = discord.ui.Button(style=discord.ButtonStyle.danger, label="Deny", custom_id=f"ms.deny:{requester.id}:{mc_id}")
+
         view.add_item(approve_btn)
         view.add_item(deny_btn)
 
+
+
+        # --- injected: direct runtime callbacks to avoid decorator binding issues ---
+
+        async def __ms_approve_cb(interaction: discord.Interaction):
+
+            # Zorg dat de interactie direct geacknowledged is
+
+            try:
+
+                if interaction.response and not interaction.response.is_done():
+
+                    await interaction.response.defer(thinking=True, ephemeral=True)
+
+            except Exception:
+
+                pass
+
+        
+
+            data = getattr(interaction, "data", None) or {}
+
+            cid = (data.get("custom_id") or "")
+
+            parts = cid.split(":")
+
+            requester_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+
+            mc_id = parts[2] if len(parts) > 2 else None
+
+        
+
+            guild = interaction.guild
+
+            member = None
+
+            if guild and requester_id:
+
+                member = guild.get_member(requester_id)
+
+                if member is None:
+
+                    try:
+
+                        member = await guild.fetch_member(requester_id)
+
+                    except Exception:
+
+                        member = None
+
+        
+
+            ok, msg = await self._approve_link(
+
+                guild,
+
+                member,
+
+                str(mc_id) if mc_id else "",
+
+                approver=interaction.user if isinstance(interaction.user, discord.Member) else None,
+
+            )
+
+        
+
+            # Probeer het review-bericht weg te halen en antwoord te sturen
+
+            try:
+
+                if interaction.message:
+
+                    await interaction.message.delete()
+
+            except Exception:
+
+                pass
+
+        
+
+            try:
+
+                text = ("✅ " if ok else "⚠️ ") + (msg or "")
+
+                if interaction.response and interaction.response.is_done():
+
+                    await interaction.followup.send(text, ephemeral=True)
+
+                else:
+
+                    await interaction.response.send_message(text, ephemeral=True)
+
+            except Exception:
+
+                pass
+
+        
+
+        approve_btn.callback = __ms_approve_cb
+
+        
+
+        async def __ms_deny_cb(interaction: discord.Interaction):
+
+            # Minimale handler om timeouts te voorkomen; jouw modal/flow kan hier later aan gekoppeld worden.
+
+            try:
+
+                if interaction.response and not interaction.response.is_done():
+
+                    await interaction.response.send_message("Use the deny flow/command to provide a reason.", ephemeral=True)
+
+                else:
+
+                    await interaction.followup.send("Use the deny flow/command to provide a reason.", ephemeral=True)
+
+            except Exception:
+
+                pass
+
+        
+
+        deny_btn.callback = __ms_deny_cb
+
+        # --- end injected ---
         embed = discord.Embed(
             title="Verification request",
             description=f"Discord: {requester.mention} (`{requester.id}`)\nMC: [{mc_name}]({_mc_profile_url(mc_id)}) (`{mc_id}`)",
