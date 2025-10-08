@@ -229,6 +229,7 @@ class RouletteView(View):
         return True
 
     def _build_for_current(self):
+        """ULTRA SIMPLE: 2 selects per row"""
         for child in list(self.children):
             self.remove_item(child)
 
@@ -240,30 +241,25 @@ class RouletteView(View):
         except (ValueError, KeyError, IndexError):
             return
         
-        # Add 7 role selects with explicit row assignment
-        # Row 0: E, L, HR (3 items)
-        # Row 1: BC, EMS, USAR (3 items)
-        # Row 2: ARFF (1 item)
+        # 7 roles: 2 per row = rows 0,0,1,1,2,2,3
+        # Row 0: E, L
+        # Row 1: HR, BC
+        # Row 2: EMS, USAR
+        # Row 3: ARFF
+        # Row 4: Confirm button
         for i, role in enumerate(ROLES):
             current = int(alloc.get(role, 0))
             sel = RoleSelect(role, current)
             sel.callback = self._on_select
-            # Explicit row assignment - this is the FIX
-            sel.row = 0 if i < 3 else (1 if i < 6 else 2)
+            sel.row = i // 2  # Integer division: 0->0, 1->0, 2->1, 3->1, 4->2, 5->2, 6->3
             self.add_item(sel)
         
-        # Row 3: Confirm button
+        # Confirm button on row 4
         is_last = idx >= len(calls) - 1
         confirm = ConfirmButton(is_last=is_last)
         confirm.callback = self._on_confirm
-        confirm.row = 3
+        confirm.row = 4
         self.add_item(confirm)
-        
-        # Row 4: Cancel button
-        cancel = CancelButton()
-        cancel.callback = self._on_cancel
-        cancel.row = 4
-        self.add_item(cancel)
 
     async def _on_select(self, interaction: discord.Interaction):
         idx = str(int(self.state.get("current_idx", 0)))
