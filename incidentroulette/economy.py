@@ -177,21 +177,18 @@ class EconomyBridge:
         return max(0, payout)
 
     def format_amount(self, guild, amount: int) -> str:
-        """Format amount with currency name"""
+        """Format amount with currency name - SYNC version"""
         currency_name = self._get_currency_name(guild)
         return f"{amount} {currency_name}"
 
     def _get_currency_name(self, guild) -> str:
         """Get currency name for guild - SYNC wrapper"""
         try:
-            # bank.get_currency_name is SYNC in older Red versions
-            # but ASYNC in newer versions - handle both
             result = bank.get_currency_name(guild)
-            # Check if it's a coroutine
+            # Handle both sync and async versions
             import inspect
             if inspect.iscoroutine(result):
-                # This shouldn't happen in sync context, return default
-                return "credits"
+                return "credits"  # Fallback if async
             return result
         except Exception:
             return "credits"
