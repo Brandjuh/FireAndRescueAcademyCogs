@@ -545,8 +545,9 @@ class MemberSync(commands.Cog):
             f"Cooldown: {cfg['cooldown_seconds']} sec",
             f"Queue size: {len(cfg.get('queue', {}))}",
         ]
-        await ctx.send("\n".join(lines))
-        @membersync_group.group(name="config")
+    await ctx.send("\n".join(lines))
+
+    @membersync_group.group(name="config")
     async def config_group(self, ctx: commands.Context):
         """Configure channels, roles and DB path."""
         pass
@@ -611,7 +612,8 @@ class MemberSync(commands.Cog):
                     pass
             await ctx.send("You are already verified.")
             return
-            name = ctx.author.nick or ctx.author.name
+
+        name = ctx.author.nick or ctx.author.name
         await ctx.send("Looking you up in the roster... this may take a moment.")
 
         cand = await self._find_member_in_db(name, mc_id)
@@ -674,7 +676,8 @@ class MemberSync(commands.Cog):
             if hit:
                 todo += 1
         await ctx.send(f"Retro scan: {todo} member(s) can be auto-linked.")
-        @retro_group.command(name="apply")
+
+    @retro_group.command(name="apply")
     async def retro_apply(self, ctx: commands.Context):
         """Apply auto-link for existing Verified members with exact nickname matches."""
         role_id = await self.config.verified_role_id()
@@ -742,7 +745,8 @@ class MemberSync(commands.Cog):
                     mc = m.group(1)
             if mc:
                 current_ids.add(str(mc))
-                # fetch approved links
+
+        # fetch approved links
         def _run():
             con = sqlite3.connect(self.links_db); con.row_factory = sqlite3.Row
             try:
