@@ -351,6 +351,7 @@ class ReminderOnlySummaryView(discord.ui.View):
     ):
         super().__init__(timeout=600)
         self.cog = cog
+        self.user_id = user_id
         self.req = TrainingRequest(
             user_id=user_id,
             discipline=discipline,
@@ -362,6 +363,27 @@ class ReminderOnlySummaryView(discord.ui.View):
             request_channel_id=0,
             reminder_only=True,
         )
+        # Show summary immediately on init
+        self._first_interaction = True
+
+    async def send_summary(self, interaction: discord.Interaction):
+        """Display the summary embed with action buttons."""
+        user = interaction.user
+        end_at = datetime.now(AMS) + timedelta(days=self.req.days)
+        embed = discord.Embed(
+            title="Reminder - Summary",
+            color=discord.Color.blue(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="User", value=f"{user.mention} ({user.id})", inline=False)
+        embed.add_field(name="Discipline", value=self.req.discipline, inline=True)
+        embed.add_field(name="Training", value=self.req.training, inline=True)
+        embed.add_field(name="Duration", value=f"{self.req.days} days", inline=True)
+        embed.add_field(name="Expected end time", value=fmt_dt(end_at), inline=False)
+        embed.add_field(name="Reference", value=self.req.reference or "—", inline=False)
+        embed.set_footer(text="Click 'Start Reminder' to confirm or 'Cancel' to abort.")
+
+        await safe_update(interaction, content="Review your reminder:", embed=embed, view=self)
 
     @discord.ui.button(label="Start Reminder", style=discord.ButtonStyle.success, custom_id="tm:start_reminder")
     async def start_reminder(self, interaction: discord.Interaction, button: discord.ui.Button):
