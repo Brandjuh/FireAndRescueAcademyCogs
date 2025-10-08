@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List, Tuple
 
 import discord
+from discord import app_commands
 from redbot.core import commands, checks, Config
 from redbot.core.bot import Red
 from redbot.core.data_manager import cog_data_path
@@ -42,7 +43,7 @@ def _mc_profile_url(mc_id: str) -> str:
 class MemberSync(commands.Cog):
     """Synchronises Missionchief members with Discord and handles verification workflow."""
 
-    __version__ = "1.0.0"
+    __version__ = "1.0.1"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -118,7 +119,7 @@ class MemberSync(commands.Cog):
                 con.close()
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _run)
-
+    
     async def _latest_snapshot(self) -> Optional[str]:
         rows = await self._query_alliance("SELECT MAX(snapshot_utc) AS s FROM members_history")
         if rows and rows[0]["s"]:
@@ -189,7 +190,6 @@ class MemberSync(commands.Cog):
                 return r
 
         return None
-
     # ------------------------- UI helpers ------------------------
 
     def _is_reviewer(self, member: discord.Member) -> bool:
@@ -244,9 +244,6 @@ class MemberSync(commands.Cog):
             except Exception:
 
                 pass
-
-        
-
             data = getattr(interaction, "data", None) or {}
 
             cid = (data.get("custom_id") or "")
@@ -479,7 +476,6 @@ class MemberSync(commands.Cog):
             except Exception as e:
                 log.exception("Queue loop error: %s", e)
             await asyncio.sleep(120)  # every 2 minutes
-
     async def _process_queue_once(self):
         queue = await self.config.queue()
         if not queue:
@@ -550,8 +546,7 @@ class MemberSync(commands.Cog):
             f"Queue size: {len(cfg.get('queue', {}))}",
         ]
         await ctx.send("\n".join(lines))
-
-    @membersync_group.group(name="config")
+        @membersync_group.group(name="config")
     async def config_group(self, ctx: commands.Context):
         """Configure channels, roles and DB path."""
         pass
@@ -589,13 +584,16 @@ class MemberSync(commands.Cog):
         await self.config.alliance_db_path.set(path)
         await ctx.send(f"Alliance DB path set to `{path}`")
 
-    # user-facing
+    # user-facing - HYBRID COMMAND
 
+    @commands.hybrid_command(name="verify")
     @commands.cooldown(1, 30, commands.BucketType.user)
     @commands.guild_only()
-    @commands.command(name="verify")
+    @app_commands.describe(
+        mc_id="Your Missionchief User ID (optional, helps if your nickname doesn't match exactly)"
+    )
     async def verify(self, ctx: commands.Context, mc_id: Optional[str] = None):
-        """Verify yourself as a member of the alliance. Prefer matching your server nickname to your MC name. Optional: provide MC-ID as fallback."""
+        """Verify yourself as a member of the alliance. Match your server nickname to your MC name or provide your MC-ID."""
         if not isinstance(ctx.author, discord.Member) or not ctx.guild:
             await ctx.send("This can only be used in a server.")
             return
@@ -613,8 +611,7 @@ class MemberSync(commands.Cog):
                     pass
             await ctx.send("You are already verified.")
             return
-
-        name = ctx.author.nick or ctx.author.name
+            name = ctx.author.nick or ctx.author.name
         await ctx.send("Looking you up in the roster... this may take a moment.")
 
         cand = await self._find_member_in_db(name, mc_id)
@@ -677,8 +674,7 @@ class MemberSync(commands.Cog):
             if hit:
                 todo += 1
         await ctx.send(f"Retro scan: {todo} member(s) can be auto-linked.")
-
-    @retro_group.command(name="apply")
+        @retro_group.command(name="apply")
     async def retro_apply(self, ctx: commands.Context):
         """Apply auto-link for existing Verified members with exact nickname matches."""
         role_id = await self.config.verified_role_id()
@@ -746,8 +742,7 @@ class MemberSync(commands.Cog):
                     mc = m.group(1)
             if mc:
                 current_ids.add(str(mc))
-
-        # fetch approved links
+                # fetch approved links
         def _run():
             con = sqlite3.connect(self.links_db); con.row_factory = sqlite3.Row
             try:
