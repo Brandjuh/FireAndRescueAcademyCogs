@@ -1103,7 +1103,7 @@ class CustomDenialModal(discord.ui.Modal, title="Custom Denial Reason"):
 class BuildingManager(commands.Cog):
     """Building request system with location parsing and statistics."""
 
-def __init__(self, bot: Red):
+    def __init__(self, bot: Red):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=0xDEADBEEF, force_registration=True)
         default_guild = {
@@ -1119,14 +1119,14 @@ def __init__(self, bot: Red):
         self.config.register_guild(**default_guild)
         self.config.register_global(**default_global)
 
-        # Initialize database - FIXED
+        # Initialize database
         from redbot.core import data_manager
         db_path = str(data_manager.cog_data_path(self) / "building_manager.db")
         self.db = BuildingDatabase(db_path)
 
         self.bot.add_view(StartView(self))
 
-    def cog_unload(self):
+    def cog_unload(self):  # <-- Let op: 4 spaties inspringing, zelfde niveau als __init__
         pass
 
     @commands.group(name="buildset", invoke_without_command=True)
