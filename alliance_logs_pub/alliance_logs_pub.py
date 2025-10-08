@@ -11,7 +11,7 @@ import discord
 from redbot.core import commands, checks, Config
 from redbot.core.data_manager import cog_data_path
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 log = logging.getLogger("red.FARA.AllianceLogsPub")
 
@@ -302,6 +302,8 @@ class AllianceLogsPub(commands.Cog):
         style = (await self.config.style()).lower()
         emoji_titles = bool(await self.config.emoji_titles())
 
+        log.info("Publishing %d rows, IDs: %s", len(rows), [r.get("id") for r in rows[:10]])
+
         posted = 0
         for idx, row in enumerate(rows):
             title, color, emoji, key = self._title_from_row(row)
@@ -401,12 +403,32 @@ class AllianceLogsPub(commands.Cog):
         if not rows:
             return 0
         
-        posted = await self._publish_rows(rows)
+        # BELANGRIJK: Filter dubbele IDs voor de zekerheid
+        seen_ids = set()
+        unique_rows = []
+        for row in rows:
+            row_id = int(row["id"])
+            if row_id not in seen_ids:
+                seen_ids.add(row_id)
+                unique_rows.append(row)
+            else:
+                log.warning("Skipping duplicate row ID %d", row_id)
+        
+        if not unique_rows:
+            return 0
+        
+        posted = await self._publish_rows(unique_rows)
         
         if posted > 0:
             # Update last_id to the highest ID we successfully posted
-            newest = max((int(r["id"]) for r in rows[:posted]), default=last_id)
-            await self._set_last_id(newest)
+            newest = max((int(r["id"]) for r in unique_rows[:posted]), default=last_id)
+            
+            # EXTRA VEILIGHEID: Alleen updaten als newest echt hoger is
+            if newest > last_id:
+                await self._set_last_id(newest)
+                log.info("Updated last_id from %d to %d (posted %d logs)", last_id, newest, posted)
+            else:
+                log.warning("Newest ID %d not greater than last_id %d, not updating", newest, last_id)
         
         return posted
 
@@ -446,6 +468,50 @@ class AllianceLogsPub(commands.Cog):
             "```",
         ]
         await ctx.send(NL.join(lines))
+
+    @alog_group.command(name="status")
+    async def status(self, ctx: commands.Context):
+        """Show current status and last processed ID."""
+        last_id = await self._get_last_id()
+        
+        # Check if scraper is available
+        sc = self.bot.get_cog("AllianceScraper")
+        scraper_available = sc is not None and hasattr(sc, "get_logs_after")
+        
+        # Get total log count if scraper available
+        total_logs = "N/A"
+        if scraper_available:
+            try:
+                async with aiosqlite.connect(sc.db_path) as db:
+                    cur = await db.execute("SELECT COUNT(*), MAX(id) FROM logs")
+                    row = await cur.fetchone()
+                    if row:
+                        total_logs = f"{row[0]} (max ID: {row[1]})"
+            except Exception as e:
+                total_logs = f"Error: {e}"
+        
+        cfg = await self.config.all()
+        
+        lines = [
+            "```",
+            "=== AllianceLogsPub Status ===",
+            f"Last processed ID: {last_id}",
+            f"Total logs in DB: {total_logs}",
+            f"Scraper available: {scraper_available}",
+            f"Max posts per run: {cfg['max_posts_per_run']}",
+            f"Interval: {cfg['interval_minutes']} minutes",
+            f"Main channel: {cfg.get('main_channel_id')}",
+            "```",
+        ]
+        await ctx.send("\n".join(lines))
+
+    @alog_group.command(name="setlastid")
+    async def setlastid(self, ctx: commands.Context, new_id: int):
+        """Manually set the last processed ID (use with caution!)."""
+        old_id = await self._get_last_id()
+        await self._set_last_id(int(new_id))
+        await ctx.send(f"✅ Updated last_id from {old_id} to {new_id}")
+        log.info("Manual last_id update: %d -> %d (by %s)", old_id, new_id, ctx.author)
 
     @alog_group.command(name="listactions")
     async def listactions(self, ctx: commands.Context):
