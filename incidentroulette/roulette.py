@@ -69,7 +69,7 @@ class CallPool:
             ("ELEVATOR_STUCK","Elevator Entrapment",1,{"E":1,"HR":1}),
             ("GAS_LEAK_ODOR","Gas Odor Inside",1,{"E":1,"BC":1}),
         ]
-        return cls([CallSpec(i,n,t,req) for (i,n,t,req) in data])
+        return cls([CallSpec(i,n,t,{k:v for k,v in req.items()}) for (i,n,t,req) in data])
 
     def weighted_sample(self, k: int, allow_dupes: bool, rng: random.Random) -> List[CallSpec]:
         weights = {1:0.35, 2:0.50, 3:0.12, 4:0.03}
@@ -229,7 +229,7 @@ class RouletteView(View):
         return True
 
     def _build_for_current(self):
-        """ULTRA SIMPLE: 2 selects per row"""
+        """Build UI with max 5 selects per row"""
         for child in list(self.children):
             self.remove_item(child)
 
@@ -241,24 +241,28 @@ class RouletteView(View):
         except (ValueError, KeyError, IndexError):
             return
         
-        # 7 roles: 2 per row = rows 0,0,1,1,2,2,3
-        # Row 0: E, L
-        # Row 1: HR, BC
-        # Row 2: EMS, USAR
-        # Row 3: ARFF
-        # Row 4: Confirm button
+        # 7 roles distributed across rows (max 5 per row):
+        # Row 0: E, L, HR, BC, EMS (5 selects)
+        # Row 1: USAR, ARFF (2 selects)
+        # Row 2: Confirm button
         for i, role in enumerate(ROLES):
             current = int(alloc.get(role, 0))
             sel = RoleSelect(role, current)
             sel.callback = self._on_select
-            sel.row = i // 2  # Integer division: 0->0, 1->0, 2->1, 3->1, 4->2, 5->2, 6->3
+            
+            # First 5 roles on row 0, remaining on row 1
+            if i < 5:
+                sel.row = 0
+            else:
+                sel.row = 1
+                
             self.add_item(sel)
         
-        # Confirm button on row 4
+        # Confirm button on row 2
         is_last = idx >= len(calls) - 1
         confirm = ConfirmButton(is_last=is_last)
         confirm.callback = self._on_confirm
-        confirm.row = 4
+        confirm.row = 2
         self.add_item(confirm)
 
     async def _on_select(self, interaction: discord.Interaction):
