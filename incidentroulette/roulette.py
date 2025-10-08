@@ -184,17 +184,25 @@ def _match_summary(req: dict, alloc: dict) -> str:
     return ", ".join(parts) if parts else "none"
 
 class RoleButton(Button):
-    def __init__(self, role_code: str, action: str, row: int):
+    def __init__(self, role_code: str, action: str, row: int, view_ref):
         label = f"{action} {role_code}"
         style = discord.ButtonStyle.primary if action == "+" else discord.ButtonStyle.secondary
         super().__init__(style=style, label=label, row=row)
         self.role_code = role_code
         self.action = action
+        self.view_ref = view_ref
+    
+    async def callback(self, interaction: discord.Interaction):
+        await self.view_ref._on_button_click(interaction, self.role_code, self.action)
 
 class ConfirmButton(Button):
-    def __init__(self, is_last: bool = False):
+    def __init__(self, is_last: bool, view_ref):
         label = "✓ Bevestig" if is_last else "✓ Volgende"
         super().__init__(style=discord.ButtonStyle.success, label=label, row=4)
+        self.view_ref = view_ref
+    
+    async def callback(self, interaction: discord.Interaction):
+        await self.view_ref._on_confirm(interaction)
 
 class RouletteView(View):
     def __init__(self, cog, ctx, state: dict, only_user_id: int, timeout: float = 15*60):
@@ -239,26 +247,17 @@ class RouletteView(View):
             return
         
         # Create + and - buttons for each role
-        # Row 0: E+, E-, L+, L-
-        # Row 1: HR+, HR-, BC+, BC-
-        # Row 2: EMS+, EMS-, USAR+, USAR-
-        # Row 3: ARFF+, ARFF-
-        # Row 4: Confirm button
-        
         for i, role in enumerate(ROLES):
             row = i // 2
             
-            plus_btn = RoleButton(role, "+", row)
-            plus_btn.callback = self._on_button_click
+            plus_btn = RoleButton(role, "+", row, self)
             self.add_item(plus_btn)
             
-            minus_btn = RoleButton(role, "-", row)
-            minus_btn.callback = self._on_button_click
+            minus_btn = RoleButton(role, "-", row, self)
             self.add_item(minus_btn)
         
         is_last = idx >= len(calls) - 1
-        confirm = ConfirmButton(is_last=is_last)
-        confirm.callback = self._on_confirm
+        confirm = ConfirmButton(is_last, self)
         self.add_item(confirm)
 
     def _get_current_alloc_str(self, idx: str) -> str:
@@ -267,12 +266,9 @@ class RouletteView(View):
         parts = [f"{r}:{alloc.get(r, 0)}" for r in ROLES if alloc.get(r, 0) > 0]
         return ", ".join(parts) if parts else "None"
 
-    async def _on_button_click(self, interaction: discord.Interaction):
+    async def _on_button_click(self, interaction: discord.Interaction, role_code: str, action: str):
         try:
             idx = str(int(self.state.get("current_idx", 0)))
-            comp = interaction.component
-            role_code = getattr(comp, "role_code", "E")
-            action = getattr(comp, "action", "+")
             
             # Initialize allocs if needed
             if idx not in self.state["allocs"]:
