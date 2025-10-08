@@ -129,6 +129,7 @@ class TrainingRequest:
         want_reminder: bool,
         request_channel_id: int,
         summary_message_link: Optional[str] = None,
+        reminder_only: bool = False,
     ):
         self.user_id = user_id
         self.discipline = discipline
@@ -139,6 +140,7 @@ class TrainingRequest:
         self.want_reminder = want_reminder
         self.request_channel_id = request_channel_id
         self.summary_message_link = summary_message_link
+        self.reminder_only = reminder_only
 
     def to_dict(self):
         return {
@@ -151,6 +153,7 @@ class TrainingRequest:
             "want_reminder": self.want_reminder,
             "request_channel_id": self.request_channel_id,
             "summary_message_link": self.summary_message_link,
+            "reminder_only": self.reminder_only,
         }
 
     @classmethod
@@ -165,6 +168,7 @@ class TrainingRequest:
             want_reminder=bool(data.get("want_reminder", False)),
             request_channel_id=int(data["request_channel_id"]),
             summary_message_link=data.get("summary_message_link"),
+            reminder_only=bool(data.get("reminder_only", False)),
         )
 
 # ---------- Views ----------
@@ -174,23 +178,33 @@ class StartView(discord.ui.View):
         super().__init__(timeout=None)
         self.cog = cog
 
-    @discord.ui.button(label="Start training", style=discord.ButtonStyle.primary, custom_id="tm:start")
-    async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Start Request", style=discord.ButtonStyle.primary, custom_id="tm:start_request")
+    async def start_request(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
             "Let's set up your training request. First, pick a discipline.",
-            view=DisciplineView(self.cog),
+            view=DisciplineView(self.cog, reminder_only=False),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Reminder Only", style=discord.ButtonStyle.secondary, custom_id="tm:reminder_only")
+    async def reminder_only(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "Let's set up a reminder for your training. First, pick a discipline.",
+            view=DisciplineView(self.cog, reminder_only=True),
             ephemeral=True,
         )
 
 class DisciplineView(discord.ui.View):
-    def __init__(self, cog: "TrainingManager"):
+    def __init__(self, cog: "TrainingManager", reminder_only: bool = False):
         super().__init__(timeout=600)
         self.cog = cog
-        self.add_item(DisciplineSelect(self.cog))
+        self.reminder_only = reminder_only
+        self.add_item(DisciplineSelect(self.cog, reminder_only))
 
 class DisciplineSelect(discord.ui.Select):
-    def __init__(self, cog: "TrainingManager"):
+    def __init__(self, cog: "TrainingManager", reminder_only: bool = False):
         self.cog = cog
+        self.reminder_only = reminder_only
         options = [discord.SelectOption(label=k, description=f"{len(v)} trainings") for k, v in DISCIPLINES.items()]
         super().__init__(placeholder="Choose a discipline", min_values=1, max_values=1, options=options, custom_id="tm:discipline")
 
@@ -199,20 +213,22 @@ class DisciplineSelect(discord.ui.Select):
         await safe_update(
             interaction,
             content=f"Discipline selected: **{discipline}**. Now choose a training.",
-            view=TrainingView(self.cog, discipline),
+            view=TrainingView(self.cog, discipline, self.reminder_only),
         )
 
 class TrainingView(discord.ui.View):
-    def __init__(self, cog: "TrainingManager", discipline: str):
+    def __init__(self, cog: "TrainingManager", discipline: str, reminder_only: bool = False):
         super().__init__(timeout=600)
         self.cog = cog
         self.discipline = discipline
-        self.add_item(TrainingSelect(self.cog, discipline))
+        self.reminder_only = reminder_only
+        self.add_item(TrainingSelect(self.cog, discipline, reminder_only))
 
 class TrainingSelect(discord.ui.Select):
-    def __init__(self, cog: "TrainingManager", discipline: str):
+    def __init__(self, cog: "TrainingManager", discipline: str, reminder_only: bool = False):
         self.cog = cog
         self.discipline = discipline
+        self.reminder_only = reminder_only
         options = []
         for name, days in DISCIPLINES[discipline]:
             label = name
@@ -223,11 +239,20 @@ class TrainingSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         training = self.values[0]
         days = next(days for name, days in DISCIPLINES[self.discipline] if name == training)
-        await safe_update(
-            interaction,
-            content=f"Selected: **{self.discipline} → {training}**. Now pick the fee per day, per trainee.",
-            view=FeeView(self.cog, self.discipline, training, days),
-        )
+        
+        if self.reminder_only:
+            # Skip fee selection for reminder only
+            await safe_update(
+                interaction,
+                content=f"Selected: **{self.discipline} → {training}** ({days} days). Do you want to add a reference?",
+                view=ReferenceAskView(self.cog, self.discipline, training, days, 0, reminder_only=True),
+            )
+        else:
+            await safe_update(
+                interaction,
+                content=f"Selected: **{self.discipline} → {training}**. Now pick the fee per day, per trainee.",
+                view=FeeView(self.cog, self.discipline, training, days),
+            )
 
 class FeeView(discord.ui.View):
     def __init__(self, cog: "TrainingManager", discipline: str, training: str, days: int):
@@ -254,14 +279,14 @@ class FeeButton(discord.ui.Button):
                 f"**{'Free' if self.fee == 0 else str(self.fee) + ' credits/day'}**.\n"
                 "Do you want to add a reference?"
             ),
-            view=ReferenceAskView(view.cog, view.discipline, view.training, view.days, self.fee),
+            view=ReferenceAskView(view.cog, view.discipline, view.training, view.days, self.fee, reminder_only=False),
         )
 
 class ReferenceAskView(discord.ui.View):
-    def __init__(self, cog: "TrainingManager", discipline: str, training: str, days: int, fee: int):
+    def __init__(self, cog: "TrainingManager", discipline: str, training: str, days: int, fee: int, reminder_only: bool = False):
         super().__init__(timeout=600)
         self.cog = cog
-        self.state = (discipline, training, days, fee)
+        self.state = (discipline, training, days, fee, reminder_only)
 
     @discord.ui.button(label="Yes, add a reference", style=discord.ButtonStyle.primary, custom_id="tm:ref_yes")
     async def yes(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -269,12 +294,19 @@ class ReferenceAskView(discord.ui.View):
 
     @discord.ui.button(label="No, continue", style=discord.ButtonStyle.secondary, custom_id="tm:ref_no")
     async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
-        discipline, training, days, fee = self.state
-        await safe_update(
-            interaction,
-            content="Reference skipped.",
-            view=SummaryView(self.cog, interaction.user.id, discipline, training, days, fee, None),
-        )
+        discipline, training, days, fee, reminder_only = self.state
+        if reminder_only:
+            await safe_update(
+                interaction,
+                content="Reference skipped.",
+                view=ReminderOnlySummaryView(self.cog, interaction.user.id, discipline, training, days, None),
+            )
+        else:
+            await safe_update(
+                interaction,
+                content="Reference skipped.",
+                view=SummaryView(self.cog, interaction.user.id, discipline, training, days, fee, None),
+            )
 
 class ReferenceModal(discord.ui.Modal, title="Add reference"):
     ref = discord.ui.TextInput(
@@ -285,18 +317,133 @@ class ReferenceModal(discord.ui.Modal, title="Add reference"):
         placeholder="e.g., SWAT Team East, batch 3",
     )
 
-    def __init__(self, cog: "TrainingManager", discipline: str, training: str, days: int, fee: int):
+    def __init__(self, cog: "TrainingManager", discipline: str, training: str, days: int, fee: int, reminder_only: bool = False):
         super().__init__()
         self.cog = cog
-        self.state = (discipline, training, days, fee)
+        self.state = (discipline, training, days, fee, reminder_only)
 
     async def on_submit(self, interaction: discord.Interaction):
-        discipline, training, days, fee = self.state
+        discipline, training, days, fee, reminder_only = self.state
+        if reminder_only:
+            await safe_update(
+                interaction,
+                content="Reference added.",
+                view=ReminderOnlySummaryView(self.cog, interaction.user.id, discipline, training, days, str(self.ref)),
+            )
+        else:
+            await safe_update(
+                interaction,
+                content="Reference added.",
+                view=SummaryView(self.cog, interaction.user.id, discipline, training, days, fee, str(self.ref)),
+            )
+
+# ---------- Reminder Only Summary View ----------
+
+class ReminderOnlySummaryView(discord.ui.View):
+    def __init__(
+        self,
+        cog: "TrainingManager",
+        user_id: int,
+        discipline: str,
+        training: str,
+        days: int,
+        reference: Optional[str],
+    ):
+        super().__init__(timeout=600)
+        self.cog = cog
+        self.req = TrainingRequest(
+            user_id=user_id,
+            discipline=discipline,
+            training=training,
+            days=days,
+            fee_per_day=0,
+            reference=reference,
+            want_reminder=True,
+            request_channel_id=0,
+            reminder_only=True,
+        )
+
+    @discord.ui.button(label="Start Reminder", style=discord.ButtonStyle.success, custom_id="tm:start_reminder")
+    async def start_reminder(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("This only works inside a server.", ephemeral=True)
+            return
+
+        conf = await self.cog.config.guild(guild).all()
+        log_channel_id = conf.get("log_channel_id")
+        request_channel_id = conf.get("request_channel_id")
+
+        if not log_channel_id or not request_channel_id:
+            await interaction.response.send_message(
+                "Log/Request channels are not configured yet. Ask an admin to use [p]tmset.",
+                ephemeral=True,
+            )
+            return
+
+        log_channel = guild.get_channel(log_channel_id)
+        request_channel = guild.get_channel(request_channel_id)
+
+        if not log_channel or not request_channel:
+            await interaction.response.send_message("One or more configured channels could not be found.", ephemeral=True)
+            return
+
+        self.req.request_channel_id = request_channel.id
+        end_at = datetime.now(AMS) + timedelta(days=self.req.days)
+
+        # Add reminder
+        await self.cog._add_reminder(
+            guild_id=guild.id,
+            user_id=interaction.user.id,
+            text=f"Your **{self.req.training}** class has finished." + (f" Reference: {self.req.reference}" if self.req.reference else ""),
+            when=end_at.astimezone(timezone.utc),
+            fallback_channel_id=self.req.request_channel_id,
+        )
+
+        # Log to log channel
+        emb = discord.Embed(
+            title="Reminder created",
+            color=discord.Color.blue(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        user = interaction.user
+        emb.add_field(name="User", value=f"{user.mention} ({user.id})", inline=False)
+        emb.add_field(name="Training", value=f"{self.req.discipline} → {self.req.training} ({self.req.days}d)", inline=False)
+        if self.req.reference:
+            emb.add_field(name="Reference", value=self.req.reference, inline=False)
+        emb.add_field(name="End time", value=fmt_dt(end_at), inline=False)
+        await log_channel.send(embed=emb)
+
+        # Confirm to user
         await safe_update(
             interaction,
-            content="Reference added.",
-            view=SummaryView(self.cog, interaction.user.id, discipline, training, days, fee, str(self.ref)),
+            content=f"Reminder set! You'll be notified when your **{self.req.training}** class finishes on {fmt_dt(end_at)}.",
+            embed=None,
+            view=None
         )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, custom_id="tm:cancel_reminder")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await safe_update(interaction, content="Reminder cancelled.", embed=None, view=None)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        user = interaction.user
+        end_at = datetime.now(AMS) + timedelta(days=self.req.days)
+        embed = discord.Embed(
+            title="Reminder - Summary",
+            color=discord.Color.blue(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="User", value=f"{user.mention} ({user.id})", inline=False)
+        embed.add_field(name="Discipline", value=self.req.discipline, inline=True)
+        embed.add_field(name="Training", value=self.req.training, inline=True)
+        embed.add_field(name="Duration", value=f"{self.req.days} days", inline=True)
+        embed.add_field(name="Expected end time", value=fmt_dt(end_at), inline=False)
+        embed.add_field(name="Reference", value=self.req.reference or "—", inline=False)
+        embed.set_footer(text="Click 'Start Reminder' to confirm or 'Cancel' to abort.")
+
+        await safe_update(interaction, content="Review your reminder:", embed=embed, view=self)
+        return False  # Prevent default interaction handling
 
 # Reminder buttons
 class ReminderOn(discord.ui.Button):
@@ -511,7 +658,6 @@ class AdminDecisionView(discord.ui.View):
                 emb.add_field(name="Reference", value=self.req.reference, inline=False)
             emb.add_field(name="Reminder", value="Yes" if self.req.want_reminder else "No", inline=True)
             emb.add_field(name="End time", value=fmt_dt(end_at), inline=False)
-            # NIEUW: Toon welke admin approved heeft
             emb.add_field(name="Approved by", value=f"{interaction.user.mention} ({interaction.user.id})", inline=False)
             await log_channel.send(embed=emb)
 
@@ -577,7 +723,6 @@ class RejectModal(discord.ui.Modal, title="Rejection reason"):
             emb.add_field(name="Requester", value=requester, inline=False)
             emb.add_field(name="Training", value=f"{self.req.discipline} → {self.req.training}", inline=False)
             emb.add_field(name="Reason", value=str(self.reason), inline=False)
-            # NIEUW: Toon welke admin rejected heeft
             emb.add_field(name="Rejected by", value=f"{self.admin_user.mention} ({self.admin_user.id})", inline=False)
             await log_channel.send(embed=emb)
 
@@ -602,6 +747,7 @@ class TrainingManager(commands.Cog):
             "log_channel_id": None,
             "admin_role_id": None,
             "reminders": [],  # list of dicts: {user_id, text, when_ts, fallback_channel_id}
+            "button_message": None,  # Custom message for the start buttons
         }
         self.config.register_guild(**default_guild)
 
@@ -679,44 +825,66 @@ class TrainingManager(commands.Cog):
     @commands.group(name="tmset", invoke_without_command=True)
     @commands.admin()
     async def tmset(self, ctx: commands.Context):
-        """Configure Training Manager. Subcommands: requestchannel, adminchannel, logchannel, adminrole, post."""
+        """Configure Training Manager. Subcommands: requestchannel, adminchannel, logchannel, adminrole, buttonmessage, post."""
         conf = await self.config.guild(ctx.guild).all()
         txt = (
             f"Request channel: {ctx.guild.get_channel(conf['request_channel_id']).mention if conf.get('request_channel_id') else '—'}\n"
             f"Admin channel: {ctx.guild.get_channel(conf['admin_channel_id']).mention if conf.get('admin_channel_id') else '—'}\n"
             f"Log channel: {ctx.guild.get_channel(conf['log_channel_id']).mention if conf.get('log_channel_id') else '—'}\n"
             f"Admin role: {ctx.guild.get_role(conf['admin_role_id']).mention if conf.get('admin_role_id') else '—'}\n"
+            f"Custom button message: {'Set' if conf.get('button_message') else 'Not set (using default)'}\n"
         )
         await ctx.send(box(txt, lang="ini"))
 
     @tmset.command()
     @commands.admin()
     async def requestchannel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Set the channel where users can request trainings."""
         await self.config.guild(ctx.guild).request_channel_id.set(channel.id)
         await ctx.tick()
 
     @tmset.command()
     @commands.admin()
     async def adminchannel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Set the channel where admin approval requests are sent."""
         await self.config.guild(ctx.guild).admin_channel_id.set(channel.id)
         await ctx.tick()
 
     @tmset.command()
     @commands.admin()
     async def logchannel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Set the channel where all actions are logged."""
         await self.config.guild(ctx.guild).log_channel_id.set(channel.id)
         await ctx.tick()
 
     @tmset.command()
     @commands.admin()
     async def adminrole(self, ctx: commands.Context, role: discord.Role):
+        """Set the role that can approve/reject training requests."""
         await self.config.guild(ctx.guild).admin_role_id.set(role.id)
         await ctx.tick()
 
     @tmset.command()
     @commands.admin()
+    async def buttonmessage(self, ctx: commands.Context, *, message: str = None):
+        """Set a custom message above the Start Request and Reminder Only buttons.
+        
+        Use this to explain the difference between the two options.
+        Leave empty to reset to default message.
+        
+        Example: [p]tmset buttonmessage Use **Start Request** to submit a full training request that requires admin approval. Use **Reminder Only** to simply set a reminder for yourself without admin approval.
+        """
+        if message:
+            await self.config.guild(ctx.guild).button_message.set(message)
+            await ctx.send(f"Custom button message set. Use `{ctx.prefix}tmset post` to update the message in the request channel.")
+        else:
+            await self.config.guild(ctx.guild).button_message.set(None)
+            await ctx.send(f"Button message reset to default. Use `{ctx.prefix}tmset post` to update the message in the request channel.")
+
+    @tmset.command()
+    @commands.admin()
     async def post(self, ctx: commands.Context):
-        """Post the 'Start training' button in the request channel."""
+        """Post or update the 'Start Request' and 'Reminder Only' buttons in the request channel."""
         request_channel_id = await self.config.guild(ctx.guild).request_channel_id()
         if not request_channel_id:
             await ctx.send("Set the request channel first with `[p]tmset requestchannel #channel`.")
@@ -725,13 +893,21 @@ class TrainingManager(commands.Cog):
         if not ch:
             await ctx.send("The configured request channel was not found.")
             return
+        
+        # Get custom message or use default
+        custom_msg = await self.config.guild(ctx.guild).button_message()
+        if custom_msg:
+            description = custom_msg
+        else:
+            description = (
+                "**Start Request**: Submit a full training request with fee and admin approval required.\n"
+                "**Reminder Only**: Set a reminder for your training without needing admin approval.\n\n"
+                "Choose an option below to get started."
+            )
+        
         emb = discord.Embed(
-            title="Request a training",
-            description=(
-                "Click **Start training** to submit a request. "
-                "You'll choose a discipline, training (filtered), a per-day fee, an optional reference, "
-                "and whether to get a **notification when the class finishes**."
-            ),
+            title="Training Request System",
+            description=description,
             color=discord.Color.blurple(),
         )
         await ch.send(embed=emb, view=StartView(self))
