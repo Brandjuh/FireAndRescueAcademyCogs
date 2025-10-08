@@ -422,13 +422,30 @@ class ReminderOnlySummaryView(discord.ui.View):
             fallback_channel_id=self.req.request_channel_id,
         )
 
+        # Send DM to user
+        user = interaction.user
+        dm_text = (
+            f"✅ Your reminder has been **STARTED**.\n"
+            f"**{self.req.discipline} → {self.req.training}** ({self.req.days} days)\n"
+            f"End time: {fmt_dt(end_at)}"
+        )
+        if self.req.reference:
+            dm_text += f"\nReference: {self.req.reference}"
+        dm_text += f"\n\nYou will be notified when the training finishes."
+        
+        dm_sent = False
+        try:
+            await user.send(dm_text)
+            dm_sent = True
+        except discord.Forbidden:
+            pass
+
         # Log to log channel
         emb = discord.Embed(
             title="Reminder created",
             color=discord.Color.blue(),
             timestamp=datetime.now(timezone.utc),
         )
-        user = interaction.user
         emb.add_field(name="User", value=f"{user.mention} ({user.id})", inline=False)
         emb.add_field(name="Training", value=f"{self.req.discipline} → {self.req.training} ({self.req.days}d)", inline=False)
         if self.req.reference:
@@ -436,18 +453,28 @@ class ReminderOnlySummaryView(discord.ui.View):
         emb.add_field(name="End time", value=fmt_dt(end_at), inline=False)
         await log_channel.send(embed=emb)
 
-        # Confirm to user
-        confirm_text = f"✅ Reminder set! You'll be notified when your **{self.req.training}** class finishes on {fmt_dt(end_at)}."
+        # Disable all buttons
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+
+        # Update message with disabled buttons
+        confirm_msg = "✅ Reminder started!" + ("" if dm_sent else " (Check your DMs)")
         await safe_update(
             interaction,
-            content=confirm_text,
+            content=confirm_msg,
             embed=None,
-            view=None
+            view=self
         )
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, custom_id="tm:cancel_reminder")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await safe_update(interaction, content="Reminder cancelled.", embed=None, view=None)
+        # Disable all buttons
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        
+        await safe_update(interaction, content="❌ Reminder cancelled.", embed=None, view=self)
 
 # Reminder buttons
 class ReminderOn(discord.ui.Button):
