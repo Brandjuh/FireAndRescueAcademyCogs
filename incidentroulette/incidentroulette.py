@@ -141,7 +141,7 @@ class IncidentRoulette(commands.Cog):
                 description=(
                     f"**3 calls gegenereerd**\n"
                     f"Seed: `{seed}`{' 🔥 HARD MODE' if hard_mode else ''}\n"
-                    f"Kosten: {self.economy.format_amount(interaction.guild, cost)}\n"
+                    f"Kosten: {cost} credits\n"
                     f"Dagelijkse runs: {remaining} remaining"
                 ),
                 color=discord.Color.orange()
@@ -260,7 +260,7 @@ class IncidentRoulette(commands.Cog):
                 name="💰 Totaal",
                 value=(
                     f"**Score:** {score} punten\n"
-                    f"**Payout:** {self.economy.format_amount(interaction.guild, payout)}\n"
+                    f"**Payout:** {payout} credits\n"
                     f"{'🌟 **PERFECT RUN BONUS!**' if is_perfect else ''}"
                 ),
                 inline=False
