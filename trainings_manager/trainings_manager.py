@@ -31,20 +31,26 @@ async def safe_update(interaction: discord.Interaction, *, content=None, embed=N
         if not interaction.response.is_done():
             await interaction.response.edit_message(content=content, embed=embed, view=view)
             return
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("safe_update: response.edit_message failed: %r", e)
     # Try editing the message directly
     try:
         if getattr(interaction, "message", None) is not None:
             await interaction.message.edit(content=content, embed=embed, view=view)
             return
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("safe_update: message.edit failed: %r", e)
     # Fallback: followup ephemeral
     try:
         await interaction.followup.send(content or "Updated.", embed=embed, view=view, ephemeral=True)
     except Exception as e:
-        log.exception("safe_update failed: %r", e)
+        log.exception("safe_update completely failed: %r", e)
+        # Last resort: try to respond if we haven't yet
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(content or "Updated.", embed=embed, view=view, ephemeral=True)
+        except Exception:
+            pass
 
 # ---------- Static data ----------
 
@@ -296,11 +302,8 @@ class ReferenceAskView(discord.ui.View):
     async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
         discipline, training, days, fee, reminder_only = self.state
         if reminder_only:
-            await safe_update(
-                interaction,
-                content="Reference skipped.",
-                view=ReminderOnlySummaryView(self.cog, interaction.user.id, discipline, training, days, None),
-            )
+            view = ReminderOnlySummaryView(self.cog, interaction.user.id, discipline, training, days, None)
+            await view.send_summary(interaction)
         else:
             await safe_update(
                 interaction,
@@ -325,11 +328,8 @@ class ReferenceModal(discord.ui.Modal, title="Add reference"):
     async def on_submit(self, interaction: discord.Interaction):
         discipline, training, days, fee, reminder_only = self.state
         if reminder_only:
-            await safe_update(
-                interaction,
-                content="Reference added.",
-                view=ReminderOnlySummaryView(self.cog, interaction.user.id, discipline, training, days, str(self.ref)),
-            )
+            view = ReminderOnlySummaryView(self.cog, interaction.user.id, discipline, training, days, str(self.ref))
+            await view.send_summary(interaction)
         else:
             await safe_update(
                 interaction,
@@ -437,9 +437,10 @@ class ReminderOnlySummaryView(discord.ui.View):
         await log_channel.send(embed=emb)
 
         # Confirm to user
+        confirm_text = f"✅ Reminder set! You'll be notified when your **{self.req.training}** class finishes on {fmt_dt(end_at)}."
         await safe_update(
             interaction,
-            content=f"Reminder set! You'll be notified when your **{self.req.training}** class finishes on {fmt_dt(end_at)}.",
+            content=confirm_text,
             embed=None,
             view=None
         )
@@ -447,25 +448,6 @@ class ReminderOnlySummaryView(discord.ui.View):
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, custom_id="tm:cancel_reminder")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await safe_update(interaction, content="Reminder cancelled.", embed=None, view=None)
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        user = interaction.user
-        end_at = datetime.now(AMS) + timedelta(days=self.req.days)
-        embed = discord.Embed(
-            title="Reminder - Summary",
-            color=discord.Color.blue(),
-            timestamp=datetime.now(timezone.utc),
-        )
-        embed.add_field(name="User", value=f"{user.mention} ({user.id})", inline=False)
-        embed.add_field(name="Discipline", value=self.req.discipline, inline=True)
-        embed.add_field(name="Training", value=self.req.training, inline=True)
-        embed.add_field(name="Duration", value=f"{self.req.days} days", inline=True)
-        embed.add_field(name="Expected end time", value=fmt_dt(end_at), inline=False)
-        embed.add_field(name="Reference", value=self.req.reference or "—", inline=False)
-        embed.set_footer(text="Click 'Start Reminder' to confirm or 'Cancel' to abort.")
-
-        await safe_update(interaction, content="Review your reminder:", embed=embed, view=self)
-        return False  # Prevent default interaction handling
 
 # Reminder buttons
 class ReminderOn(discord.ui.Button):
