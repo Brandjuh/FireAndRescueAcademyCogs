@@ -1,7 +1,7 @@
 from __future__ import annotations
 import time, random, dataclasses
 import discord
-from discord.ui import View, Select, Button
+from discord.ui import View, Button
 from typing import List, Dict, Tuple, Optional
 
 ROLES = ["E", "L", "HR", "BC", "EMS", "USAR", "ARFF"]
@@ -183,20 +183,19 @@ def _match_summary(req: dict, alloc: dict) -> str:
             parts.append(f"{r}:{got}/{need}")
     return ", ".join(parts) if parts else "none"
 
-class RoleSelect(Select):
-    def __init__(self, role_code: str, current_qty: int):
-        opts = [discord.SelectOption(label=str(i), value=str(i), default=(i==current_qty)) for i in range(0,5)]
-        super().__init__(placeholder=f"{role_code} (0-4)", min_values=1, max_values=1, options=opts)
+class RoleButton(Button):
+    def __init__(self, role_code: str, action: str, row: int):
+        # action is either "+" or "-"
+        label = f"{action} {role_code}"
+        style = discord.ButtonStyle.primary if action == "+" else discord.ButtonStyle.secondary
+        super().__init__(style=style, label=label, row=row)
         self.role_code = role_code
+        self.action = action
 
 class ConfirmButton(Button):
     def __init__(self, is_last: bool = False):
         label = "✓ Bevestig" if is_last else "✓ Volgende"
-        super().__init__(style=discord.ButtonStyle.success, label=label)
-
-class CancelButton(Button):
-    def __init__(self):
-        super().__init__(style=discord.ButtonStyle.danger, label="❌ Cancel")
+        super().__init__(style=discord.ButtonStyle.success, label=label, row=4)
 
 class RouletteView(View):
     def __init__(self, cog, ctx, state: dict, only_user_id: int, timeout: float = 15*60):
@@ -214,7 +213,7 @@ class RouletteView(View):
             await interaction.response.send_message("❌ Niet jouw run.", ephemeral=True)
             return False
         now = now_utc_ts()
-        if now - self.last_interaction_ts < 1.5:
+        if now - self.last_interaction_ts < 0.8:
             await interaction.response.send_message("⏳ Te snel!", ephemeral=True)
             return False
         self.last_interaction_ts = now
@@ -229,7 +228,7 @@ class RouletteView(View):
         return True
 
     def _build_for_current(self):
-        """Build UI with max 5 selects per row"""
+        """Build button UI - 2 buttons per role (+ and -)"""
         for child in list(self.children):
             self.remove_item(child)
 
@@ -241,40 +240,62 @@ class RouletteView(View):
         except (ValueError, KeyError, IndexError):
             return
         
-        # 7 roles distributed across rows (max 5 per row):
-        # Row 0: E, L, HR, BC, EMS (5 selects)
-        # Row 1: USAR, ARFF (2 selects)
-        # Row 2: Confirm button
-        for i, role in enumerate(ROLES):
-            current = int(alloc.get(role, 0))
-            sel = RoleSelect(role, current)
-            sel.callback = self._on_select
-            
-            # First 5 roles on row 0, remaining on row 1
-            if i < 5:
-                sel.row = 0
-            else:
-                sel.row = 1
-                
-            self.add_item(sel)
+        # Create + and - buttons for each role
+        # Row 0: E+, E-, L+, L-
+        # Row 1: HR+, HR-, BC+, BC-
+        # Row 2: EMS+, EMS-, USAR+, USAR-
+        # Row 3: ARFF+, ARFF-
+        # Row 4: Confirm button
         
-        # Confirm button on row 2
+        for i, role in enumerate(ROLES):
+            row = i // 2  # 0,0,1,1,2,2,3
+            
+            # Plus button
+            plus_btn = RoleButton(role, "+", row)
+            plus_btn.callback = self._on_button_click
+            self.add_item(plus_btn)
+            
+            # Minus button
+            minus_btn = RoleButton(role, "-", row)
+            minus_btn.callback = self._on_button_click
+            self.add_item(minus_btn)
+        
+        # Confirm button on row 4
         is_last = idx >= len(calls) - 1
         confirm = ConfirmButton(is_last=is_last)
         confirm.callback = self._on_confirm
-        confirm.row = 2
         self.add_item(confirm)
 
-    async def _on_select(self, interaction: discord.Interaction):
+    async def _on_button_click(self, interaction: discord.Interaction):
         idx = str(int(self.state.get("current_idx", 0)))
         comp = interaction.component
         role_code = getattr(comp, "role_code", "E")
-        qty = int(comp.values[0])
+        action = getattr(comp, "action", "+")
+        
         alloc = self.state["allocs"].get(idx, {}) or {}
-        alloc[role_code] = qty
+        current = int(alloc.get(role_code, 0))
+        
+        if action == "+":
+            new_val = min(4, current + 1)
+        else:  # "-"
+            new_val = max(0, current - 1)
+        
+        alloc[role_code] = new_val
         self.state["allocs"][idx] = alloc
         await self.cog.config.member(self.ctx.author).active_run.set(self.state)
-        await interaction.response.defer()
+        
+        # Show current allocation
+        alloc_str = ", ".join([f"{r}:{alloc.get(r, 0)}" for r in ROLES if alloc.get(r, 0) > 0]) or "None"
+        
+        try:
+            calls = [CallSpec.from_json(d) for d in self.state["calls"]]
+            call = calls[int(idx)]
+            await interaction.response.edit_message(
+                content=f"**Call {int(idx)+1}/3: {call.name}**\nVereist: {call.requirements_str()}\n\n📝 Huidige allocatie: {alloc_str}",
+                view=self
+            )
+        except:
+            await interaction.response.defer()
 
     async def _on_confirm(self, interaction: discord.Interaction):
         idx = int(self.state.get("current_idx", 0))
@@ -305,11 +326,6 @@ class RouletteView(View):
             summary.append("\nUse `/roulette claim`")
             await interaction.response.edit_message(content="\n".join(summary), view=None)
             self.stop()
-
-    async def _on_cancel(self, interaction: discord.Interaction):
-        await self.cog.config.member(self.ctx.author).active_run.clear()
-        await interaction.response.edit_message(content="❌ Cancelled", view=None)
-        self.stop()
 
     async def on_timeout(self) -> None:
         pass
