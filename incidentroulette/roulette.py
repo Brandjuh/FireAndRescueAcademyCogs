@@ -185,7 +185,6 @@ def _match_summary(req: dict, alloc: dict) -> str:
 
 class RoleButton(Button):
     def __init__(self, role_code: str, action: str, row: int):
-        # action is either "+" or "-"
         label = f"{action} {role_code}"
         style = discord.ButtonStyle.primary if action == "+" else discord.ButtonStyle.secondary
         super().__init__(style=style, label=label, row=row)
@@ -213,8 +212,8 @@ class RouletteView(View):
             await interaction.response.send_message("❌ Niet jouw run.", ephemeral=True)
             return False
         now = now_utc_ts()
-        if now - self.last_interaction_ts < 0.8:
-            await interaction.response.send_message("⏳ Te snel!", ephemeral=True)
+        if now - self.last_interaction_ts < 0.5:
+            await interaction.response.defer()
             return False
         self.last_interaction_ts = now
         try:
@@ -236,7 +235,6 @@ class RouletteView(View):
             idx = int(self.state.get("current_idx", 0))
             calls = [CallSpec.from_json(d) for d in self.state["calls"]]
             call = calls[idx]
-            alloc = self.state["allocs"].get(str(idx), {}) or {}
         except (ValueError, KeyError, IndexError):
             return
         
@@ -248,84 +246,110 @@ class RouletteView(View):
         # Row 4: Confirm button
         
         for i, role in enumerate(ROLES):
-            row = i // 2  # 0,0,1,1,2,2,3
+            row = i // 2
             
-            # Plus button
             plus_btn = RoleButton(role, "+", row)
             plus_btn.callback = self._on_button_click
             self.add_item(plus_btn)
             
-            # Minus button
             minus_btn = RoleButton(role, "-", row)
             minus_btn.callback = self._on_button_click
             self.add_item(minus_btn)
         
-        # Confirm button on row 4
         is_last = idx >= len(calls) - 1
         confirm = ConfirmButton(is_last=is_last)
         confirm.callback = self._on_confirm
         self.add_item(confirm)
 
-    async def _on_button_click(self, interaction: discord.Interaction):
-        idx = str(int(self.state.get("current_idx", 0)))
-        comp = interaction.component
-        role_code = getattr(comp, "role_code", "E")
-        action = getattr(comp, "action", "+")
-        
+    def _get_current_alloc_str(self, idx: str) -> str:
+        """Get formatted string of current allocation"""
         alloc = self.state["allocs"].get(idx, {}) or {}
-        current = int(alloc.get(role_code, 0))
-        
-        if action == "+":
-            new_val = min(4, current + 1)
-        else:  # "-"
-            new_val = max(0, current - 1)
-        
-        alloc[role_code] = new_val
-        self.state["allocs"][idx] = alloc
-        await self.cog.config.member(self.ctx.author).active_run.set(self.state)
-        
-        # Show current allocation
-        alloc_str = ", ".join([f"{r}:{alloc.get(r, 0)}" for r in ROLES if alloc.get(r, 0) > 0]) or "None"
-        
+        parts = [f"{r}:{alloc.get(r, 0)}" for r in ROLES if alloc.get(r, 0) > 0]
+        return ", ".join(parts) if parts else "None"
+
+    async def _on_button_click(self, interaction: discord.Interaction):
         try:
+            idx = str(int(self.state.get("current_idx", 0)))
+            comp = interaction.component
+            role_code = getattr(comp, "role_code", "E")
+            action = getattr(comp, "action", "+")
+            
+            # Initialize allocs if needed
+            if idx not in self.state["allocs"]:
+                self.state["allocs"][idx] = {}
+            
+            alloc = self.state["allocs"][idx]
+            current = int(alloc.get(role_code, 0))
+            
+            if action == "+":
+                new_val = min(4, current + 1)
+            else:
+                new_val = max(0, current - 1)
+            
+            alloc[role_code] = new_val
+            self.state["allocs"][idx] = alloc
+            
+            # Save to config
+            await self.cog.config.member(self.ctx.author).active_run.set(self.state)
+            
+            # Get call info
             calls = [CallSpec.from_json(d) for d in self.state["calls"]]
             call = calls[int(idx)]
-            await interaction.response.edit_message(
-                content=f"**Call {int(idx)+1}/3: {call.name}**\nVereist: {call.requirements_str()}\n\n📝 Huidige allocatie: {alloc_str}",
-                view=self
+            
+            # Update message
+            alloc_str = self._get_current_alloc_str(idx)
+            content = (
+                f"**Call {int(idx)+1}/3: {call.name}**\n"
+                f"Vereist: {call.requirements_str()}\n\n"
+                f"📝 Huidige allocatie: {alloc_str}"
             )
-        except:
-            await interaction.response.defer()
+            
+            await interaction.response.edit_message(content=content, view=self)
+            
+        except Exception as e:
+            try:
+                await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+            except:
+                pass
 
     async def _on_confirm(self, interaction: discord.Interaction):
-        idx = int(self.state.get("current_idx", 0))
-        calls = [CallSpec.from_json(d) for d in self.state["calls"]]
-        elapsed = now_utc_ts() - self.started_call_ts
-        times = self.state.get("per_call_time_s") or [None]*len(self.state["calls"])
-        times[idx] = int(elapsed)
-        self.state["per_call_time_s"] = times
-        is_last = idx >= len(calls) - 1
-        
-        if not is_last:
-            self.state["current_idx"] = idx + 1
-            self.started_call_ts = now_utc_ts()
-            await self.cog.config.member(self.ctx.author).active_run.set(self.state)
-            self._build_for_current()
-            next_call = calls[idx + 1]
-            await interaction.response.edit_message(
-                content=f"✅ Call {idx+1}/{len(calls)} done ({elapsed}s)\n\n**Call {idx+2}/{len(calls)}: {next_call.name}**\nVereist: {next_call.requirements_str()}",
-                view=self
-            )
-        else:
-            await self.cog.config.member(self.ctx.author).active_run.set(self.state)
-            hard_mode = self.state.get("hard_mode", False)
-            score, breakdown, is_perfect = score_run(calls, self.state, hard_mode)
-            summary = [f"✅ Done! Score: {score} pts"]
-            if is_perfect:
-                summary.append("🌟 PERFECT!")
-            summary.append("\nUse `/roulette claim`")
-            await interaction.response.edit_message(content="\n".join(summary), view=None)
-            self.stop()
+        try:
+            idx = int(self.state.get("current_idx", 0))
+            calls = [CallSpec.from_json(d) for d in self.state["calls"]]
+            elapsed = now_utc_ts() - self.started_call_ts
+            times = self.state.get("per_call_time_s") or [None]*len(self.state["calls"])
+            times[idx] = int(elapsed)
+            self.state["per_call_time_s"] = times
+            is_last = idx >= len(calls) - 1
+            
+            if not is_last:
+                self.state["current_idx"] = idx + 1
+                self.started_call_ts = now_utc_ts()
+                await self.cog.config.member(self.ctx.author).active_run.set(self.state)
+                self._build_for_current()
+                next_call = calls[idx + 1]
+                content = (
+                    f"✅ Call {idx+1}/{len(calls)} done ({elapsed}s)\n\n"
+                    f"**Call {idx+2}/{len(calls)}: {next_call.name}**\n"
+                    f"Vereist: {next_call.requirements_str()}"
+                )
+                await interaction.response.edit_message(content=content, view=self)
+            else:
+                await self.cog.config.member(self.ctx.author).active_run.set(self.state)
+                hard_mode = self.state.get("hard_mode", False)
+                score, breakdown, is_perfect = score_run(calls, self.state, hard_mode)
+                summary = [f"✅ Done! Score: {score} pts"]
+                if is_perfect:
+                    summary.append("🌟 PERFECT!")
+                summary.append("\nUse `/roulette claim`")
+                await interaction.response.edit_message(content="\n".join(summary), view=None)
+                self.stop()
+                
+        except Exception as e:
+            try:
+                await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+            except:
+                pass
 
     async def on_timeout(self) -> None:
         pass
