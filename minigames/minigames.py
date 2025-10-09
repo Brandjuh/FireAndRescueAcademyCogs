@@ -307,15 +307,19 @@ class Minigames(BaseMinigameCog):
             if player.bot:
                 continue
             
-            async with self.config.member(player).all() as stats:
-                stats["total_games"] += 1
-                stats["last_game"] = datetime.now().isoformat()
-                
-                if is_tie:
-                    stats["total_ties"] += 1
-                elif player == winner:
-                    stats["total_wins"] += 1
-                    stats["total_earnings"] += game.win_amount - game.bet_amount
-                else:
-                    stats["total_losses"] += 1
-                    stats["total_earnings"] -= game.bet_amount
+            stats = await self.config.member(player).all()
+            
+            stats["total_games"] += 1
+            stats["last_game"] = datetime.now().isoformat()
+            
+            if is_tie:
+                stats["total_ties"] += 1
+            elif player == winner:
+                stats["total_wins"] += 1
+                stats["total_earnings"] += game.win_amount - game.bet_amount
+            else:
+                stats["total_losses"] += 1
+                stats["total_earnings"] -= game.bet_amount
+            
+            # Save the updated stats
+            await self.config.member(player).set(stats)
