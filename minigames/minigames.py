@@ -271,6 +271,12 @@ class Minigames(BaseMinigameCog):
                         self.games[ctx.channel.id] = game
                         message = await ctx.channel.send(content=game.get_content(), embed=game.get_embed(), view=game.get_view())
                         game.message = message
+                        
+                        # If bot starts, make first move AFTER message is sent
+                        if against_bot and game.member(game.current).bot:
+                            game.do_turn_ai()
+                            await game.message.edit(content=game.get_content(), embed=game.get_embed(), view=game.get_view())
+                        
                         if old_game.message:
                             try:
                                 await old_game.message.delete()
@@ -302,6 +308,11 @@ class Minigames(BaseMinigameCog):
         self.games[ctx.channel.id] = game
         message = await reply(content=game.get_content(), embed=game.get_embed(), view=game.get_view())
         game.message = message if isinstance(ctx, commands.Context) else await ctx.original_response()
+        
+        # If bot starts, make first move AFTER message is sent
+        if against_bot and game.member(game.current).bot:
+            game.do_turn_ai()
+            await game.message.edit(content=game.get_content(), embed=game.get_embed(), view=game.get_view())
 
     async def record_game_result(self, game: Minigame, winner: Optional[discord.Member]):
         """Record game statistics for all players"""
