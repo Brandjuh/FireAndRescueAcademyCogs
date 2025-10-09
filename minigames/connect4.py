@@ -43,7 +43,7 @@ class ConnectFourGame(Minigame):
             raise ValueError("Game must have 2 players")
         self.accepted = False
         self.board = Board(7, 6, Player.NONE)
-        self.current = Player.RED
+        self.current = random.choice([Player.RED, Player.BLUE])  # ← RANDOM STARTER
         self.winner = Player.NONE
         self.time = 0
         self.cancelled = False
