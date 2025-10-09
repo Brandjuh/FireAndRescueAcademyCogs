@@ -118,12 +118,10 @@ class ConnectFourGame(Minigame):
         success, error = await self.place_bets()
         
         # If bot starts, make first move immediately
-        if success and self.member(self.current).bot:
-            self.do_turn_ai()
+            if success and self.member(self.current).bot:
+                self.do_turn_ai()
         
         return success, error
-    
-    return success, error
     
     def member(self, player: Player) -> discord.Member:
         if player.value < 0:
