@@ -1,0 +1,12 @@
+{
+    "author": ["hollowstrawberry", "FireAndRescueAcademy"],
+    "min_bot_version": "3.5.0",
+    "description": "Play Connect 4 and Tic-Tac-Toe against your friends or the bot with economy integration.",
+    "hidden": false,
+    "install_msg": "🕹️ __**Minigames with Economy**__\nThe Minigames cog features **Connect 4** and **Tic-Tac-Toe**, which you can play against your friends or the bot itself.\n\n**Economy Integration:**\n- Play games with credits as stakes\n- Track your wins, losses, and earnings\n- Compete on server leaderboards\n- Configurable bet and win amounts\n\n**Features:**\n- Only one game may be active per channel\n- Works in threads\n- Inactive games may be ended by any user\n- Statistics tracking for all players\n- Multiple leaderboard sorting options\n\n```Cog installed. Instructions:\n1. Load it with [p]load minigames\n2. Configure economy settings with [p]minigameset\n3. Optionally, enable slash commands with [p]slash enablecog minigames\n  3.1. Then do [p]slash sync\n  3.2. Then restart Discord.\n4. Start playing with [p]c4 and [p]ttt commands (or /connect4 and /tictactoe)\n5. View stats with [p]gamestats and [p]gameleaderboard```",
+    "required_cogs": {},
+    "requirements": [],
+    "short": "Play Connect 4 and Tic-Tac-Toe with economy integration and statistics tracking.",
+    "end_user_data_statement": "This cog stores game statistics (wins, losses, earnings) per user per server.",
+    "tags": ["crab", "game", "pvp", "connect4", "tictactoe", "connect 4", "tic-tac-toe", "economy", "gambling", "stats", "leaderboard"]
+}
