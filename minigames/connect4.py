@@ -121,7 +121,7 @@ class ConnectFourGame(Minigame):
             if success and self.member(self.current).bot:
                 self.do_turn_ai()
         
-        return success, error
+            return success, error
     
     def member(self, player: Player) -> discord.Member:
         if player.value < 0:
