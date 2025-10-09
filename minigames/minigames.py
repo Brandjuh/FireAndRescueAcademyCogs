@@ -103,7 +103,16 @@ class Minigames(BaseMinigameCog):
         """
         assert ctx.guild and isinstance(ctx.author, discord.Member) and isinstance(ctx.channel, discord.TextChannel)
         opponent = opponent or ctx.guild.me
-        players = [ctx.author, opponent] if opponent.bot else [opponent, ctx.author]
+        
+        # Randomize player order only when playing against bot
+        if opponent.bot:
+            import random
+            players = [ctx.author, opponent]
+            random.shuffle(players)
+        else:
+            # PvP: opponent (invited player) is always RED, author is BLUE
+            players = [opponent, ctx.author]
+        
         await self.base_minigame_cmd(ConnectFourGame, ctx, players, opponent.bot)
 
     @commands.hybrid_command(name="gamestats", aliases=["gstats"])
