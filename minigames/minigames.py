@@ -256,8 +256,7 @@ class Minigames(BaseMinigameCog):
                         game = game_cls(self, players, ctx.channel, bet_amount)
                         game.win_amount = win_amount
                         if against_bot:
-                            game.accept(author)
-                            success, error = await game.place_bets()
+                            success, error = await game.accept(author)
                             if not success:
                                 return await ctx.channel.send(error)
                         self.games[ctx.channel.id] = game
@@ -287,8 +286,7 @@ class Minigames(BaseMinigameCog):
         game = game_cls(self, players, ctx.channel, bet_amount)
         game.win_amount = win_amount
         if against_bot:
-            game.accept(author)
-            success, error = await game.place_bets()
+            success, error = await game.accept(author)
             if not success:
                 return await reply(error, ephemeral=True)
         
