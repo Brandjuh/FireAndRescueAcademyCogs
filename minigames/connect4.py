@@ -174,6 +174,39 @@ class ConnectFourGame(Minigame):
                 count += cls.may_lose_count(temp_board, color, cls.opponent(current), time + 1, depth - 1)
         return count
 
+    def find_winning_line(self) -> List[tuple]:
+        """Find the positions of the winning 4-in-a-row"""
+        if self.winner.value < 0:
+            return []
+        
+        winning_positions = []
+        
+        # Check horizontal
+        for y in range(self.board.height):
+            for x in range(self.board.width - 3):
+                if all(self.board[x + i, y] == self.winner for i in range(4)):
+                    return [(x + i, y) for i in range(4)]
+        
+        # Check vertical
+        for x in range(self.board.width):
+            for y in range(self.board.height - 3):
+                if all(self.board[x, y + i] == self.winner for i in range(4)):
+                    return [(x, y + i) for i in range(4)]
+        
+        # Check diagonal (bottom-left to top-right)
+        for x in range(self.board.width - 3):
+            for y in range(3, self.board.height):
+                if all(self.board[x + i, y - i] == self.winner for i in range(4)):
+                    return [(x + i, y - i) for i in range(4)]
+        
+        # Check diagonal (top-left to bottom-right)
+        for x in range(self.board.width - 3):
+            for y in range(self.board.height - 3):
+                if all(self.board[x + i, y + i] == self.winner for i in range(4)):
+                    return [(x + i, y + i) for i in range(4)]
+        
+        return winning_positions
+
     async def handle_game_end(self):
         """Handle payouts and statistics when game ends"""
         if not self.is_finished() or not self.bets_placed:
@@ -218,13 +251,30 @@ class ConnectFourGame(Minigame):
             description += f"\n💰 **{self.member(self.winner).display_name} won {self.win_amount}!**\n"
         
         description += "\n"
+        
+        # Find winning line if game is won
+        winning_positions = []
+        if self.is_finished() and self.winner.value >= 0 and not self.cancelled:
+            winning_positions = self.find_winning_line()
+        
+        # Show column numbers
         if not self.is_finished():
             for i in range(self.board.width):
                 description += NUMBERS[i]
             description += "\n"
+        
+        # Draw board with highlighted winning line
         for y in range(self.board.height):
             for x in range(self.board.width):
-                description += EMOJIS[self.board[x, y]]
+                cell = self.board[x, y]
+                # Highlight winning positions
+                if (x, y) in winning_positions:
+                    if cell == Player.RED:
+                        description += "🟥"  # Bright red for winning red pieces
+                    elif cell == Player.BLUE:
+                        description += "🟦"  # Bright blue for winning blue pieces
+                else:
+                    description += EMOJIS[cell]
             description += "\n"
 
         color = COLORS[self.winner] if self.winner != Player.NONE else COLORS[self.current]
