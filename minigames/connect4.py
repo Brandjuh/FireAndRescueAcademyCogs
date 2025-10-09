@@ -43,7 +43,7 @@ class ConnectFourGame(Minigame):
             raise ValueError("Game must have 2 players")
         self.accepted = False
         self.board = Board(7, 6, Player.NONE)
-        self.current = random.choice([Player.RED, Player.BLUE])  # ← RANDOM STARTER
+        self.current = random.choice([Player.RED, Player.BLUE])
         self.winner = Player.NONE
         self.time = 0
         self.cancelled = False
@@ -118,10 +118,10 @@ class ConnectFourGame(Minigame):
         success, error = await self.place_bets()
         
         # If bot starts, make first move immediately
-            if success and self.member(self.current).bot:
-                self.do_turn_ai()
+        if success and self.member(self.current).bot:
+            self.do_turn_ai()
         
-            return success, error
+        return success, error
     
     def member(self, player: Player) -> discord.Member:
         if player.value < 0:
