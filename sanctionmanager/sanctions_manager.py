@@ -1,0 +1,1445 @@
+import asyncio
+import aiohttp
+import json
+import logging
+import sqlite3
+import time
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple, Any
+from urllib.parse import quote
+
+import discord
+from redbot.core import commands, Config
+from redbot.core.bot import Red
+from redbot.core.utils.chat_formatting import box, pagify
+
+log = logging.getLogger("red.cog.sanctions_manager")
+
+# ---------- Utilities ----------
+
+def ts() -> int:
+    """Get current unix timestamp."""
+    return int(datetime.now(timezone.utc).timestamp())
+
+def fmt_dt(timestamp: int) -> str:
+    """Format unix timestamp to Discord timestamp."""
+    return f"<t:{timestamp}:F>"
+
+def _mc_profile_url(mc_id: str) -> str:
+    """Generate Missionchief profile URL."""
+    return f"https://www.missionchief.com/users/{mc_id}"
+
+async def safe_update(interaction: discord.Interaction, *, content=None, embed=None, view=None):
+    """Robust message updater for component/modal callbacks."""
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.edit_message(content=content, embed=embed, view=view)
+            return
+    except Exception as e:
+        log.debug("safe_update: response.edit_message failed: %r", e)
+    try:
+        if getattr(interaction, "message", None) is not None:
+            await interaction.message.edit(content=content, embed=embed, view=view)
+            return
+    except Exception as e:
+        log.debug("safe_update: message.edit failed: %r", e)
+    try:
+        await interaction.followup.send(content or "Updated.", embed=embed, view=view, ephemeral=True)
+    except Exception as e:
+        log.exception("safe_update completely failed: %r", e)
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(content or "Updated.", embed=embed, view=view, ephemeral=True)
+        except Exception:
+            pass
+
+# ---------- Database ----------
+
+class SanctionsDatabase:
+    """SQLite database for sanctions."""
+    
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self._init_db()
+    
+    def _init_db(self):
+        """Initialize database tables."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Sanctions table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sanctions (
+                sanction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                discord_user_id INTEGER,
+                mc_user_id TEXT,
+                mc_username TEXT,
+                admin_user_id INTEGER NOT NULL,
+                admin_username TEXT NOT NULL,
+                sanction_type TEXT NOT NULL,
+                reason_category TEXT NOT NULL,
+                reason_detail TEXT,
+                additional_notes TEXT,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER,
+                status TEXT NOT NULL DEFAULT 'active',
+                edited_at INTEGER,
+                edited_by INTEGER
+            )
+        ''')
+        
+        # Sanction history table (for edits/removals)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sanction_history (
+                history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sanction_id INTEGER NOT NULL,
+                action_type TEXT NOT NULL,
+                action_by INTEGER NOT NULL,
+                action_at INTEGER NOT NULL,
+                old_values TEXT,
+                new_values TEXT,
+                notes TEXT,
+                FOREIGN KEY (sanction_id) REFERENCES sanctions(sanction_id)
+            )
+        ''')
+        
+        # Custom rules table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS custom_rules (
+                rule_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                rule_code TEXT NOT NULL,
+                rule_text TEXT NOT NULL,
+                enabled INTEGER DEFAULT 1,
+                created_at INTEGER NOT NULL,
+                UNIQUE(guild_id, category, rule_code)
+            )
+        ''')
+        
+        # Auto-action settings table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS auto_actions (
+                guild_id INTEGER PRIMARY KEY,
+                third_warning_action TEXT,
+                enabled INTEGER DEFAULT 0
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+    
+    def add_sanction(self, guild_id: int, discord_user_id: Optional[int], mc_user_id: Optional[str],
+                    mc_username: Optional[str], admin_user_id: int, admin_username: str,
+                    sanction_type: str, reason_category: str, reason_detail: Optional[str],
+                    additional_notes: Optional[str], expires_at: Optional[int] = None) -> int:
+        """Add a new sanction."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        now = ts()
+        cursor.execute('''
+            INSERT INTO sanctions 
+            (guild_id, discord_user_id, mc_user_id, mc_username, admin_user_id, admin_username,
+             sanction_type, reason_category, reason_detail, additional_notes, created_at, expires_at, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        ''', (guild_id, discord_user_id, mc_user_id, mc_username, admin_user_id, admin_username,
+              sanction_type, reason_category, reason_detail, additional_notes, now, expires_at))
+        
+        sanction_id = cursor.lastrowid
+        
+        # Log creation in history
+        cursor.execute('''
+            INSERT INTO sanction_history
+            (sanction_id, action_type, action_by, action_at, notes)
+            VALUES (?, 'created', ?, ?, 'Sanction created')
+        ''', (sanction_id, admin_user_id, now))
+        
+        conn.commit()
+        conn.close()
+        
+        return sanction_id
+    
+    def get_sanction(self, sanction_id: int) -> Optional[dict]:
+        """Get a sanction by ID."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT * FROM sanctions WHERE sanction_id = ?', (sanction_id,))
+        result = cursor.fetchone()
+        conn.close()
+        
+        return dict(result) if result else None
+    
+    def get_user_sanctions(self, guild_id: int, discord_user_id: Optional[int] = None, 
+                          mc_user_id: Optional[str] = None) -> List[dict]:
+        """Get all sanctions for a user."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        if discord_user_id:
+            cursor.execute('''
+                SELECT * FROM sanctions 
+                WHERE guild_id = ? AND discord_user_id = ?
+                ORDER BY created_at DESC
+            ''', (guild_id, discord_user_id))
+        elif mc_user_id:
+            cursor.execute('''
+                SELECT * FROM sanctions 
+                WHERE guild_id = ? AND mc_user_id = ?
+                ORDER BY created_at DESC
+            ''', (guild_id, mc_user_id))
+        else:
+            return []
+        
+        results = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        
+        return results
+    
+    def get_active_warnings(self, guild_id: int, discord_user_id: Optional[int] = None,
+                           mc_user_id: Optional[str] = None) -> List[dict]:
+        """Get active warnings for a user."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        query = '''
+            SELECT * FROM sanctions 
+            WHERE guild_id = ? AND status = 'active' 
+            AND sanction_type LIKE 'Warning - Official%'
+        '''
+        
+        if discord_user_id:
+            query += ' AND discord_user_id = ?'
+            params = (guild_id, discord_user_id)
+        elif mc_user_id:
+            query += ' AND mc_user_id = ?'
+            params = (guild_id, mc_user_id)
+        else:
+            conn.close()
+            return []
+        
+        query += ' ORDER BY created_at DESC'
+        cursor.execute(query, params)
+        results = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        
+        return results
+    
+    def update_sanction_status(self, sanction_id: int, status: str, admin_user_id: int, notes: Optional[str] = None):
+        """Update sanction status."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        now = ts()
+        cursor.execute('''
+            UPDATE sanctions 
+            SET status = ?, edited_at = ?, edited_by = ?
+            WHERE sanction_id = ?
+        ''', (status, now, admin_user_id, sanction_id))
+        
+        # Log in history
+        cursor.execute('''
+            INSERT INTO sanction_history
+            (sanction_id, action_type, action_by, action_at, notes)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (sanction_id, f'status_changed_to_{status}', admin_user_id, now, notes))
+        
+        conn.commit()
+        conn.close()
+    
+    def edit_sanction(self, sanction_id: int, admin_user_id: int, **updates):
+        """Edit sanction fields."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Get current values
+        cursor.execute('SELECT * FROM sanctions WHERE sanction_id = ?', (sanction_id,))
+        old_values = dict(cursor.fetchone())
+        
+        # Build update query
+        fields = []
+        values = []
+        for key, value in updates.items():
+            if key in ['sanction_type', 'reason_category', 'reason_detail', 'additional_notes']:
+                fields.append(f"{key} = ?")
+                values.append(value)
+        
+        if not fields:
+            conn.close()
+            return
+        
+        now = ts()
+        fields.append("edited_at = ?")
+        fields.append("edited_by = ?")
+        values.extend([now, admin_user_id, sanction_id])
+        
+        query = f"UPDATE sanctions SET {', '.join(fields)} WHERE sanction_id = ?"
+        cursor.execute(query, values)
+        
+        # Log in history
+        cursor.execute('''
+            INSERT INTO sanction_history
+            (sanction_id, action_type, action_by, action_at, old_values, new_values)
+            VALUES (?, 'edited', ?, ?, ?, ?)
+        ''', (sanction_id, admin_user_id, now, json.dumps(old_values), json.dumps(updates)))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_sanction_history(self, sanction_id: int) -> List[dict]:
+        """Get history for a sanction."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT * FROM sanction_history 
+            WHERE sanction_id = ?
+            ORDER BY action_at DESC
+        ''', (sanction_id,))
+        
+        results = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        
+        return results
+    
+    def get_stats_overall(self, guild_id: int) -> dict:
+        """Get overall statistics."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Total by type
+        cursor.execute('''
+            SELECT sanction_type, COUNT(*) 
+            FROM sanctions 
+            WHERE guild_id = ?
+            GROUP BY sanction_type
+        ''', (guild_id,))
+        type_counts = dict(cursor.fetchall())
+        
+        # Total by reason category
+        cursor.execute('''
+            SELECT reason_category, COUNT(*)
+            FROM sanctions
+            WHERE guild_id = ?
+            GROUP BY reason_category
+        ''', (guild_id,))
+        reason_counts = dict(cursor.fetchall())
+        
+        # Top admins
+        cursor.execute('''
+            SELECT admin_username, COUNT(*) as count
+            FROM sanctions
+            WHERE guild_id = ?
+            GROUP BY admin_user_id
+            ORDER BY count DESC
+            LIMIT 5
+        ''', (guild_id,))
+        top_admins = cursor.fetchall()
+        
+        # Most sanctioned users
+        cursor.execute('''
+            SELECT mc_username, COUNT(*) as count
+            FROM sanctions
+            WHERE guild_id = ? AND mc_username IS NOT NULL
+            GROUP BY mc_user_id
+            ORDER BY count DESC
+            LIMIT 5
+        ''', (guild_id,))
+        most_sanctioned = cursor.fetchall()
+        
+        conn.close()
+        
+        return {
+            "type_counts": type_counts,
+            "reason_counts": reason_counts,
+            "top_admins": top_admins,
+            "most_sanctioned": most_sanctioned
+        }
+    
+    def get_stats_admin(self, guild_id: int, admin_user_id: int) -> dict:
+        """Get admin statistics."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Total by type
+        cursor.execute('''
+            SELECT sanction_type, COUNT(*)
+            FROM sanctions
+            WHERE guild_id = ? AND admin_user_id = ?
+            GROUP BY sanction_type
+        ''', (guild_id, admin_user_id))
+        type_counts = dict(cursor.fetchall())
+        
+        # Total by reason
+        cursor.execute('''
+            SELECT reason_category, COUNT(*)
+            FROM sanctions
+            WHERE guild_id = ? AND admin_user_id = ?
+            GROUP BY reason_category
+        ''', (guild_id, admin_user_id))
+        reason_counts = dict(cursor.fetchall())
+        
+        # Recent sanctions
+        cursor.execute('''
+            SELECT sanction_type, mc_username, created_at
+            FROM sanctions
+            WHERE guild_id = ? AND admin_user_id = ?
+            ORDER BY created_at DESC
+            LIMIT 10
+        ''', (guild_id, admin_user_id))
+        recent = cursor.fetchall()
+        
+        conn.close()
+        
+        return {
+            "type_counts": type_counts,
+            "reason_counts": reason_counts,
+            "recent": recent
+        }
+    
+    def add_custom_rule(self, guild_id: int, category: str, rule_code: str, rule_text: str) -> bool:
+        """Add a custom rule."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                INSERT INTO custom_rules (guild_id, category, rule_code, rule_text, created_at)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (guild_id, category, rule_code, rule_text, ts()))
+            conn.commit()
+            success = True
+        except sqlite3.IntegrityError:
+            success = False
+        
+        conn.close()
+        return success
+    
+    def get_custom_rules(self, guild_id: int, category: Optional[str] = None) -> List[dict]:
+        """Get custom rules."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        if category:
+            cursor.execute('''
+                SELECT * FROM custom_rules 
+                WHERE guild_id = ? AND category = ? AND enabled = 1
+                ORDER BY rule_code
+            ''', (guild_id, category))
+        else:
+            cursor.execute('''
+                SELECT * FROM custom_rules 
+                WHERE guild_id = ? AND enabled = 1
+                ORDER BY category, rule_code
+            ''', (guild_id,))
+        
+        results = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        
+        return results
+    
+    def remove_custom_rule(self, guild_id: int, rule_id: int) -> bool:
+        """Remove a custom rule."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            DELETE FROM custom_rules 
+            WHERE guild_id = ? AND rule_id = ?
+        ''', (guild_id, rule_id))
+        
+        success = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        
+        return success
+
+# ---------- Default Rules ----------
+
+DEFAULT_RULES = {
+    "Member Conduct": {
+        "1.3": "No respect - The Alliance is barrier free which requires all members to be aware and respectful of our diversity.",
+        "1.4": "Drama - Don't cause it and don't make yourself the subject of it.",
+        "1.5": "Religion/Politics - We forbid discussions pertaining to politics and religion.",
+        "1.6": "Racism/Bullying - Derogatory racist remarks and any type of bullying will NOT be tolerated.",
+        "1.7": "Non-Active Community Members - Members will be removed after 60 days of inactivity.",
+        "1.8": "Offensive Nicknames - All the rules in the COC are also applied to nicknames.",
+        "1.9": "Advertisement - Advertising/alliance poaching is not allowed.",
+    },
+    "General Etiquette": {
+        "2.1": "Foul language - Gratuitous and excessive use of vulgar foul language is not acceptable.",
+        "2.2": "Personal Privacy - Zero tolerance for requests for personal financial information.",
+        "2.4": "Common sense - Use common sense, don't spam/flood or yell.",
+    },
+    "Buildings and Vehicles": {
+        "3.1": "Placement - Buildings should be placed at realistic locations. Buildings do not float on water.",
+        "3.2": "Naming - Name buildings and vehicles appropriately according to the Code of Conduct.",
+    },
+    "Other": {
+        "4.1": "5% donation to alliance - Minimum 5% donation required.",
+    }
+}
+
+SANCTION_TYPES = [
+    "Warning - Verbal warning",
+    "Warning - Official 1st warning",
+    "Warning - Official 2nd warning",
+    "Warning - Official 3rd and last warning",
+    "Kick",
+    "Ban",
+    "Mute 5m",
+    "Mute 15m",
+    "Mute 30m",
+    "Mute 1h",
+    "Mute 6h",
+    "Mute 12h",
+    "Mute 1d",
+    "Mute 7d",
+    "Mute 14d",
+]
+
+# ---------- Models ----------
+
+class SanctionRequest:
+    def __init__(
+        self,
+        admin_user_id: int,
+        admin_username: str,
+        target_discord_id: Optional[int],
+        target_mc_id: Optional[str],
+        target_mc_username: Optional[str],
+        target_discord_user: Optional[discord.Member],
+        sanction_type: str,
+        reason_category: str,
+        reason_detail: Optional[str] = None,
+        additional_notes: Optional[str] = None,
+    ):
+        self.admin_user_id = admin_user_id
+        self.admin_username = admin_username
+        self.target_discord_id = target_discord_id
+        self.target_mc_id = target_mc_id
+        self.target_mc_username = target_mc_username
+        self.target_discord_user = target_discord_user
+        self.sanction_type = sanction_type
+        self.reason_category = reason_category
+        self.reason_detail = reason_detail
+        self.additional_notes = additional_notes
+
+# ---------- Views ----------
+
+class StartView(discord.ui.View):
+    def __init__(self, cog: "SanctionsManager"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(label="Create Sanction", style=discord.ButtonStyle.danger, custom_id="sm:start")
+    async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Check admin permissions
+        if not await self.cog._is_admin(interaction):
+            await interaction.response.send_message("You don't have permission to create sanctions.", ephemeral=True)
+            return
+        
+        await interaction.response.send_message(
+            "Let's create a sanction. First, provide the member's information.",
+            view=MemberInputView(self.cog),
+            ephemeral=True,
+        )
+
+class MemberInputView(discord.ui.View):
+    def __init__(self, cog: "SanctionsManager"):
+        super().__init__(timeout=600)
+        self.cog = cog
+
+    @discord.ui.button(label="Discord Member", style=discord.ButtonStyle.primary, custom_id="sm:discord_member")
+    async def discord_member(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(DiscordMemberModal(self.cog))
+
+    @discord.ui.button(label="MC ID Only", style=discord.ButtonStyle.secondary, custom_id="sm:mc_only")
+    async def mc_only(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(MCOnlyModal(self.cog))
+
+class DiscordMemberModal(discord.ui.Modal, title="Discord Member Lookup"):
+    member_input = discord.ui.TextInput(
+        label="Discord Member (ID, mention, or username)",
+        style=discord.TextStyle.short,
+        max_length=100,
+        required=True,
+        placeholder="@username or 123456789",
+    )
+
+    def __init__(self, cog: "SanctionsManager"):
+        super().__init__()
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        
+        guild = interaction.guild
+        if not guild:
+            await interaction.followup.send("This command must be used in a server.", ephemeral=True)
+            return
+        
+        # Try to find member
+        member_str = str(self.member_input).strip()
+        member = None
+        
+        # Try mention
+        if member_str.startswith('<@') and member_str.endswith('>'):
+            member_id = member_str.strip('<@!>')
+            try:
+                member = guild.get_member(int(member_id))
+            except:
+                pass
+        
+        # Try ID
+        if not member and member_str.isdigit():
+            try:
+                member = guild.get_member(int(member_str))
+            except:
+                pass
+        
+        # Try username
+        if not member:
+            for m in guild.members:
+                if m.name.lower() == member_str.lower() or (m.nick and m.nick.lower() == member_str.lower()):
+                    member = m
+                    break
+        
+        if not member:
+            await interaction.followup.send("❌ Could not find that Discord member.", ephemeral=True)
+            return
+        
+        # Look up MC info via MemberSync
+        membersync = self.cog.bot.get_cog("MemberSync")
+        mc_data = None
+        if membersync:
+            mc_data = await membersync.get_link_for_discord(member.id)
+        
+        if mc_data:
+            mc_id = mc_data.get("mc_user_id")
+            mc_username = mc_data.get("mc_username") or member.display_name
+        else:
+            mc_id = None
+            mc_username = member.display_name
+        
+        # Move to sanction type selection
+        view = SanctionTypeView(
+            self.cog,
+            admin_user_id=interaction.user.id,
+            admin_username=str(interaction.user),
+            target_discord_id=member.id,
+            target_mc_id=mc_id,
+            target_mc_username=mc_username,
+            target_discord_user=member,
+        )
+        await view.send_selection(interaction)
+
+class MCOnlyModal(discord.ui.Modal, title="MC ID Only"):
+    mc_id = discord.ui.TextInput(
+        label="Missionchief User ID",
+        style=discord.TextStyle.short,
+        max_length=50,
+        required=True,
+        placeholder="12345",
+    )
+    
+    mc_username = discord.ui.TextInput(
+        label="Missionchief Username",
+        style=discord.TextStyle.short,
+        max_length=100,
+        required=True,
+        placeholder="PlayerName",
+    )
+
+    def __init__(self, cog: "SanctionsManager"):
+        super().__init__()
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        
+        # Move to sanction type selection
+        view = SanctionTypeView(
+            self.cog,
+            admin_user_id=interaction.user.id,
+            admin_username=str(interaction.user),
+            target_discord_id=None,
+            target_mc_id=str(self.mc_id),
+            target_mc_username=str(self.mc_username),
+            target_discord_user=None,
+        )
+        await view.send_selection(interaction)
+
+class SanctionTypeView(discord.ui.View):
+    def __init__(self, cog: "SanctionsManager", admin_user_id: int, admin_username: str,
+                 target_discord_id: Optional[int], target_mc_id: Optional[str],
+                 target_mc_username: Optional[str], target_discord_user: Optional[discord.Member]):
+        super().__init__(timeout=600)
+        self.cog = cog
+        self.admin_user_id = admin_user_id
+        self.admin_username = admin_username
+        self.target_discord_id = target_discord_id
+        self.target_mc_id = target_mc_id
+        self.target_mc_username = target_mc_username
+        self.target_discord_user = target_discord_user
+        self.add_item(SanctionTypeSelect(self))
+
+    async def send_selection(self, interaction: discord.Interaction):
+        target_info = f"**Target**: {self.target_mc_username}"
+        if self.target_discord_user:
+            target_info += f" ({self.target_discord_user.mention})"
+        elif not self.target_discord_id:
+            target_info += " (No Discord found)"
+        
+        await safe_update(
+            interaction,
+            content=f"{target_info}\n\nSelect the type of sanction:",
+            view=self
+        )
+
+class SanctionTypeSelect(discord.ui.Select):
+    def __init__(self, parent: SanctionTypeView):
+        self.parent = parent
+        options = [discord.SelectOption(label=t) for t in SANCTION_TYPES]
+        super().__init__(placeholder="Choose sanction type", min_values=1, max_values=1, options=options, custom_id="sm:type")
+
+    async def callback(self, interaction: discord.Interaction):
+        sanction_type = self.values[0]
+        
+        # Move to reason selection
+        view = ReasonCategoryView(
+            self.parent.cog,
+            self.parent.admin_user_id,
+            self.parent.admin_username,
+            self.parent.target_discord_id,
+            self.parent.target_mc_id,
+            self.parent.target_mc_username,
+            self.parent.target_discord_user,
+            sanction_type,
+        )
+        await view.send_selection(interaction)
+
+class ReasonCategoryView(discord.ui.View):
+    def __init__(self, cog: "SanctionsManager", admin_user_id: int, admin_username: str,
+                 target_discord_id: Optional[int], target_mc_id: Optional[str],
+                 target_mc_username: Optional[str], target_discord_user: Optional[discord.Member],
+                 sanction_type: str):
+        super().__init__(timeout=600)
+        self.cog = cog
+        self.admin_user_id = admin_user_id
+        self.admin_username = admin_username
+        self.target_discord_id = target_discord_id
+        self.target_mc_id = target_mc_id
+        self.target_mc_username = target_mc_username
+        self.target_discord_user = target_discord_user
+        self.sanction_type = sanction_type
+        self.add_item(ReasonCategorySelect(self))
+
+    async def send_selection(self, interaction: discord.Interaction):
+        await safe_update(
+            interaction,
+            content=f"Sanction type: **{self.sanction_type}**\n\nSelect the reason category:",
+            view=self
+        )
+
+class ReasonCategorySelect(discord.ui.Select):
+    def __init__(self, parent: ReasonCategoryView):
+        self.parent = parent
+        options = [discord.SelectOption(label=cat) for cat in DEFAULT_RULES.keys()]
+        options.append(discord.SelectOption(label="Other reason"))
+        super().__init__(placeholder="Choose reason category", min_values=1, max_values=1, options=options, custom_id="sm:category")
+
+    async def callback(self, interaction: discord.Interaction):
+        category = self.values[0]
+        
+        if category == "Other reason":
+            # Show modal for custom reason
+            modal = CustomReasonModal(
+                self.parent.cog,
+                self.parent.admin_user_id,
+                self.parent.admin_username,
+                self.parent.target_discord_id,
+                self.parent.target_mc_id,
+                self.parent.target_mc_username,
+                self.parent.target_discord_user,
+                self.parent.sanction_type,
+            )
+            await interaction.response.send_modal(modal)
+        else:
+            # Move to specific rule selection
+            view = ReasonDetailView(
+                self.parent.cog,
+                self.parent.admin_user_id,
+                self.parent.admin_username,
+                self.parent.target_discord_id,
+                self.parent.target_mc_id,
+                self.parent.target_mc_username,
+                self.parent.target_discord_user,
+                self.parent.sanction_type,
+                category,
+            )
+            await view.send_selection(interaction)
+
+class ReasonDetailView(discord.ui.View):
+    def __init__(self, cog: "SanctionsManager", admin_user_id: int, admin_username: str,
+                 target_discord_id: Optional[int], target_mc_id: Optional[str],
+                 target_mc_username: Optional[str], target_discord_user: Optional[discord.Member],
+                 sanction_type: str, reason_category: str):
+        super().__init__(timeout=600)
+        self.cog = cog
+        self.admin_user_id = admin_user_id
+        self.admin_username = admin_username
+        self.target_discord_id = target_discord_id
+        self.target_mc_id = target_mc_id
+        self.target_mc_username = target_mc_username
+        self.target_discord_user = target_discord_user
+        self.sanction_type = sanction_type
+        self.reason_category = reason_category
+        self.add_item(ReasonDetailSelect(self))
+
+    async def send_selection(self, interaction: discord.Interaction):
+        await safe_update(
+            interaction,
+            content=f"Category: **{self.reason_category}**\n\nSelect the specific rule:",
+            view=self
+        )
+
+class ReasonDetailSelect(discord.ui.Select):
+    def __init__(self, parent: ReasonDetailView):
+        self.parent = parent
+        rules = DEFAULT_RULES.get(parent.reason_category, {})
+        
+        # Get custom rules for this category
+        custom_rules = parent.cog.db.get_custom_rules(
+            parent.target_discord_user.guild.id if parent.target_discord_user else 0,
+            parent.reason_category
+        )
+        
+        options = []
+        for code, text in rules.items():
+            label = f"{code}. {text[:50]}"
+            options.append(discord.SelectOption(label=label, value=f"default:{code}", description=text[:100]))
+        
+        for rule in custom_rules:
+            label = f"{rule['rule_code']}. {rule['rule_text'][:50]}"
+            options.append(discord.SelectOption(label=label, value=f"custom:{rule['rule_id']}", description=rule['rule_text'][:100]))
+        
+        super().__init__(placeholder="Choose specific rule", min_values=1, max_values=1, options=options[:25], custom_id="sm:detail")
+
+    async def callback(self, interaction: discord.Interaction):
+        selection = self.values[0]
+        
+        if selection.startswith("default:"):
+            code = selection.split(":", 1)[1]
+            rules = DEFAULT_RULES.get(self.parent.reason_category, {})
+            reason_detail = f"{code}. {rules.get(code, '')}"
+        else:
+            rule_id = int(selection.split(":", 1)[1])
+            custom_rules = self.parent.cog.db.get_custom_rules(
+                self.parent.target_discord_user.guild.id if self.parent.target_discord_user else 0
+            )
+            rule = next((r for r in custom_rules if r['rule_id'] == rule_id), None)
+            reason_detail = f"{rule['rule_code']}. {rule['rule_text']}" if rule else ""
+        
+        # Move to summary
+        view = SummarySanctionView(
+            self.parent.cog,
+            self.parent.admin_user_id,
+            self.parent.admin_username,
+            self.parent.target_discord_id,
+            self.parent.target_mc_id,
+            self.parent.target_mc_username,
+            self.parent.target_discord_user,
+            self.parent.sanction_type,
+            self.parent.reason_category,
+            reason_detail,
+        )
+        await view.send_summary(interaction)
+
+class CustomReasonModal(discord.ui.Modal, title="Custom Reason"):
+    reason = discord.ui.TextInput(
+        label="Reason",
+        style=discord.TextStyle.paragraph,
+        max_length=500,
+        required=True,
+        placeholder="Explain the reason for this sanction...",
+    )
+
+    def __init__(self, cog: "SanctionsManager", admin_user_id: int, admin_username: str,
+                 target_discord_id: Optional[int], target_mc_id: Optional[str],
+                 target_mc_username: Optional[str], target_discord_user: Optional[discord.Member],
+                 sanction_type: str):
+        super().__init__()
+        self.cog = cog
+        self.admin_user_id = admin_user_id
+        self.admin_username = admin_username
+        self.target_discord_id = target_discord_id
+        self.target_mc_id = target_mc_id
+        self.target_mc_username = target_mc_username
+        self.target_discord_user = target_discord_user
+        self.sanction_type = sanction_type
+
+    async def on_submit(self, interaction: discord.Interaction):
+        view = SummarySanctionView(
+            self.cog,
+            self.admin_user_id,
+            self.admin_username,
+            self.target_discord_id,
+            self.target_mc_id,
+            self.target_mc_username,
+            self.target_discord_user,
+            self.sanction_type,
+            "Other reason",
+            str(self.reason),
+        )
+        await view.send_summary(interaction)
+
+class SummarySanctionView(discord.ui.View):
+    def __init__(self, cog: "SanctionsManager", admin_user_id: int, admin_username: str,
+                 target_discord_id: Optional[int], target_mc_id: Optional[str],
+                 target_mc_username: Optional[str], target_discord_user: Optional[discord.Member],
+                 sanction_type: str, reason_category: str, reason_detail: str,
+                 additional_notes: Optional[str] = None):
+        super().__init__(timeout=600)
+        self.cog = cog
+        self.admin_user_id = admin_user_id
+        self.admin_username = admin_username
+        self.target_discord_id = target_discord_id
+        self.target_mc_id = target_mc_id
+        self.target_mc_username = target_mc_username
+        self.target_discord_user = target_discord_user
+        self.sanction_type = sanction_type
+        self.reason_category = reason_category
+        self.reason_detail = reason_detail
+        self.additional_notes = additional_notes
+
+    async def send_summary(self, interaction: discord.Interaction):
+        embed = self._create_embed()
+        await safe_update(
+            interaction,
+            content="⚠️ Review the sanction before submitting:",
+            embed=embed,
+            view=self
+        )
+
+    def _create_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="🚨 Sanction Summary",
+            color=discord.Color.red(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        
+        # Member info
+        member_info = f"**MC Username**: {self.target_mc_username}\n"
+        if self.target_mc_id:
+            member_info += f"**MC Profile**: [Link]({_mc_profile_url(self.target_mc_id)})\n"
+        if self.target_discord_user:
+            member_info += f"**Discord**: {self.target_discord_user.mention}\n"
+        else:
+            member_info += f"**Discord**: No Discord found\n"
+        
+        embed.add_field(name="Member", value=member_info, inline=False)
+        embed.add_field(name="Admin", value=self.admin_username, inline=True)
+        embed.add_field(name="Sanction", value=self.sanction_type, inline=True)
+        embed.add_field(name="Reason Category", value=self.reason_category, inline=False)
+        embed.add_field(name="Reason", value=self.reason_detail[:1024], inline=False)
+        
+        if self.additional_notes:
+            embed.add_field(name="Additional Information", value=self.additional_notes[:1024], inline=False)
+        
+        return embed
+
+    @discord.ui.button(label="Add Admin Notes", style=discord.ButtonStyle.secondary, custom_id="sm:add_notes")
+    async def add_notes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = AdditionalNotesModal(self)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Submit Sanction", style=discord.ButtonStyle.danger, custom_id="sm:submit")
+    async def submit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        if not guild:
+            await interaction.response.send_message("This must be used in a server.", ephemeral=True)
+            return
+
+        conf = await self.cog.config.guild(guild).all()
+        sanction_channel_id = conf.get("sanction_channel_id")
+        log_channel_id = conf.get("log_channel_id")
+
+        if not sanction_channel_id or not log_channel_id:
+            await interaction.response.send_message(
+                "Sanction/Log channels are not configured. Ask an admin to use [p]sanctionset.",
+                ephemeral=True,
+            )
+            return
+
+        sanction_channel = guild.get_channel(sanction_channel_id)
+        log_channel = guild.get_channel(log_channel_id)
+
+        if not sanction_channel or not log_channel:
+            await interaction.response.send_message("Configured channels not found.", ephemeral=True)
+            return
+
+        # Check for auto-actions on 3rd warning
+        auto_action_enabled = await self.cog.config.guild(guild).auto_action_enabled()
+        if auto_action_enabled and self.sanction_type == "Warning - Official 3rd and last warning":
+            active_warnings = self.cog.db.get_active_warnings(
+                guild.id,
+                self.target_discord_id,
+                self.target_mc_id
+            )
+            
+            official_warnings = [w for w in active_warnings if "Official" in w['sanction_type']]
+            if len(official_warnings) >= 2:  # This will be the 3rd
+                auto_action = await self.cog.config.guild(guild).third_warning_action()
+                if auto_action:
+                    # Log that auto-action should be taken
+                    await log_channel.send(
+                        f"⚠️ **Auto-Action Triggered**: {self.target_mc_username} has received a 3rd official warning. "
+                        f"Recommended action: {auto_action}"
+                    )
+
+        # Save to database
+        sanction_id = self.cog.db.add_sanction(
+            guild_id=guild.id,
+            discord_user_id=self.target_discord_id,
+            mc_user_id=self.target_mc_id,
+            mc_username=self.target_mc_username,
+            admin_user_id=self.admin_user_id,
+            admin_username=self.admin_username,
+            sanction_type=self.sanction_type,
+            reason_category=self.reason_category,
+            reason_detail=self.reason_detail,
+            additional_notes=self.additional_notes
+        )
+
+        # Post to sanction channel (public)
+        public_embed = discord.Embed(
+            title="🚨 Sanction Issued",
+            color=discord.Color.red(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        
+        member_info = f"**MC Username**: {self.target_mc_username}\n"
+        if self.target_mc_id:
+            member_info += f"**MC Profile**: [Link]({_mc_profile_url(self.target_mc_id)})\n"
+        if self.target_discord_user:
+            member_info += f"**Discord**: {self.target_discord_user.mention}\n"
+        else:
+            member_info += f"**Discord**: No Discord found\n"
+        
+        public_embed.add_field(name="Member", value=member_info, inline=False)
+        public_embed.add_field(name="Admin", value=self.admin_username, inline=True)
+        public_embed.add_field(name="Sanction", value=self.sanction_type, inline=True)
+        public_embed.add_field(name="Reason", value=self.reason_detail[:1024], inline=False)
+        public_embed.set_footer(text=f"Sanction ID: {sanction_id}")
+        
+        await sanction_channel.send(embed=public_embed)
+
+        # Post to log channel (with admin notes)
+        log_embed = discord.Embed(
+            title="📋 Sanction Logged",
+            color=discord.Color.orange(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        
+        log_embed.add_field(name="Member", value=member_info, inline=False)
+        log_embed.add_field(name="Admin", value=f"{self.admin_username} ({self.admin_user_id})", inline=True)
+        log_embed.add_field(name="Sanction", value=self.sanction_type, inline=True)
+        log_embed.add_field(name="Reason Category", value=self.reason_category, inline=False)
+        log_embed.add_field(name="Reason", value=self.reason_detail[:1024], inline=False)
+        
+        if self.additional_notes:
+            log_embed.add_field(name="Admin Notes", value=self.additional_notes[:1024], inline=False)
+        
+        log_embed.set_footer(text=f"Sanction ID: {sanction_id}")
+        
+        await log_channel.send(embed=log_embed)
+
+        # Send DM to member if Discord user exists
+        if self.target_discord_user:
+            dm_text = (
+                f"🚨 **You have received a sanction from Fire & Rescue Academy**\n\n"
+                f"**Sanction Type**: {self.sanction_type}\n"
+                f"**Reason**: {self.reason_detail}\n\n"
+                f"If you have questions, please contact an administrator."
+            )
+            try:
+                await self.target_discord_user.send(dm_text)
+            except discord.Forbidden:
+                await log_channel.send(f"⚠️ Could not DM {self.target_discord_user.mention} about their sanction.")
+
+        # Disable all buttons
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+
+        await safe_update(
+            interaction,
+            content="✅ Sanction submitted and logged.",
+            embed=None,
+            view=self
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, custom_id="sm:cancel")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        
+        await safe_update(interaction, content="❌ Sanction cancelled.", embed=None, view=self)
+
+class AdditionalNotesModal(discord.ui.Modal, title="Additional Admin Notes"):
+    notes = discord.ui.TextInput(
+        label="Admin-only notes",
+        style=discord.TextStyle.paragraph,
+        max_length=1000,
+        required=True,
+        placeholder="These notes are only visible to other admins...",
+    )
+
+    def __init__(self, parent: SummarySanctionView):
+        super().__init__()
+        self.parent = parent
+        if parent.additional_notes:
+            self.notes.default = parent.additional_notes
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self.parent.additional_notes = str(self.notes)
+        embed = self.parent._create_embed()
+        await safe_update(
+            interaction,
+            content="⚠️ Review the sanction before submitting:",
+            embed=embed,
+            view=self.parent
+        )
+
+# ---------- Cog ----------
+
+class SanctionsManager(commands.Cog):
+    """Manage sanctions for alliance members with full tracking and statistics."""
+
+    def __init__(self, bot: Red):
+        self.bot = bot
+        self.config = Config.get_conf(self, identifier=0xDEADBEEF2, force_registration=True)
+        default_guild = {
+            "admin_channel_id": None,
+            "sanction_channel_id": None,
+            "log_channel_id": None,
+            "admin_role_id": None,
+            "auto_action_enabled": False,
+            "third_warning_action": "Kick",
+        }
+        self.config.register_guild(**default_guild)
+
+        # Initialize database
+        from redbot.core import data_manager
+        db_path = str(data_manager.cog_data_path(self) / "sanctions.db")
+        self.db = SanctionsDatabase(db_path)
+
+        self.bot.add_view(StartView(self))
+
+    def cog_unload(self):
+        pass
+
+    async def _is_admin(self, interaction: discord.Interaction) -> bool:
+        """Check if user has admin permissions."""
+        guild = interaction.guild
+        if guild is None or not isinstance(interaction.user, discord.Member):
+            return False
+        
+        if interaction.user.guild_permissions.administrator:
+            return True
+        
+        role_id = await self.config.guild(guild).admin_role_id()
+        if role_id is None:
+            return False
+        
+        role = guild.get_role(role_id)
+        return role in interaction.user.roles if role else False
+
+    @commands.group(name="sanctionset", invoke_without_command=True)
+    @commands.admin()
+    @commands.guild_only()
+    async def sanctionset(self, ctx: commands.Context):
+        """Configure Sanctions Manager."""
+        conf = await self.config.guild(ctx.guild).all()
+        
+        admin_ch = ctx.guild.get_channel(conf['admin_channel_id']) if conf.get('admin_channel_id') else None
+        sanction_ch = ctx.guild.get_channel(conf['sanction_channel_id']) if conf.get('sanction_channel_id') else None
+        log_ch = ctx.guild.get_channel(conf['log_channel_id']) if conf.get('log_channel_id') else None
+        admin_role = ctx.guild.get_role(conf['admin_role_id']) if conf.get('admin_role_id') else None
+        
+        txt = (
+            f"Admin channel: {admin_ch.mention if admin_ch else '—'}\n"
+            f"Sanction channel (public): {sanction_ch.mention if sanction_ch else '—'}\n"
+            f"Log channel: {log_ch.mention if log_ch else '—'}\n"
+            f"Admin role: {admin_role.mention if admin_role else '—'}\n"
+            f"Auto-action on 3rd warning: {'Enabled' if conf.get('auto_action_enabled') else 'Disabled'}\n"
+            f"3rd warning action: {conf.get('third_warning_action', 'Kick')}\n"
+        )
+        await ctx.send(box(txt, lang="ini"))
+
+    @sanctionset.command(name="adminchannel")
+    @commands.admin()
+    @commands.guild_only()
+    async def adminchannel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Set the channel where admins create sanctions."""
+        await self.config.guild(ctx.guild).admin_channel_id.set(channel.id)
+        await ctx.tick()
+
+    @sanctionset.command(name="sanctionchannel")
+    @commands.admin()
+    @commands.guild_only()
+    async def sanctionchannel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Set the public channel where sanctions are posted."""
+        await self.config.guild(ctx.guild).sanction_channel_id.set(channel.id)
+        await ctx.tick()
+
+    @sanctionset.command(name="logchannel")
+    @commands.admin()
+    @commands.guild_only()
+    async def logchannel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Set the channel where all sanctions are logged (with admin notes)."""
+        await self.config.guild(ctx.guild).log_channel_id.set(channel.id)
+        await ctx.tick()
+
+    @sanctionset.command(name="adminrole")
+    @commands.admin()
+    @commands.guild_only()
+    async def adminrole(self, ctx: commands.Context, role: discord.Role):
+        """Set the role that can create/manage sanctions."""
+        await self.config.guild(ctx.guild).admin_role_id.set(role.id)
+        await ctx.tick()
+
+    @sanctionset.command(name="autoaction")
+    @commands.admin()
+    @commands.guild_only()
+    async def autoaction(self, ctx: commands.Context, enabled: bool):
+        """Enable/disable automatic action recommendations on 3rd warning."""
+        await self.config.guild(ctx.guild).auto_action_enabled.set(enabled)
+        await ctx.send(f"Auto-action on 3rd warning: {'Enabled' if enabled else 'Disabled'}")
+
+    @sanctionset.command(name="thirdwarningaction")
+    @commands.admin()
+    @commands.guild_only()
+    async def thirdwarningaction(self, ctx: commands.Context, action: str):
+        """Set the recommended action for 3rd official warning (e.g., Kick, Ban)."""
+        await self.config.guild(ctx.guild).third_warning_action.set(action)
+        await ctx.send(f"3rd warning action set to: {action}")
+
+    @sanctionset.command(name="post")
+    @commands.admin()
+    @commands.guild_only()
+    async def post(self, ctx: commands.Context):
+        """Post the Create Sanction button in the admin channel."""
+        admin_channel_id = await self.config.guild(ctx.guild).admin_channel_id()
+        if not admin_channel_id:
+            await ctx.send("Set the admin channel first with `[p]sanctionset adminchannel #channel`.")
+            return
+        
+        ch = ctx.guild.get_channel(admin_channel_id)
+        if not ch:
+            await ctx.send("The configured admin channel was not found.")
+            return
+        
+        emb = discord.Embed(
+            title="🚨 Sanctions Manager",
+            description=(
+                "Use this system to issue sanctions to alliance members.\n\n"
+                "**Available Sanctions:**\n"
+                "• Verbal warnings\n"
+                "• Official warnings (1st, 2nd, 3rd)\n"
+                "• Kicks\n"
+                "• Bans\n"
+                "• Mutes (various durations)\n\n"
+                "Click the button below to start."
+            ),
+            color=discord.Color.red(),
+        )
+        await ch.send(embed=emb, view=StartView(self))
+        await ctx.tick()
+
+    @commands.hybrid_group(name="sanction", invoke_without_command=True)
+    @commands.guild_only()
+    async def sanction_group(self, ctx: commands.Context):
+        """Sanction management commands."""
+        await ctx.send_help(ctx.command)
+
+    @sanction_group.command(name="history")
+    @commands.guild_only()
+    async def history(self, ctx: commands.Context, member: discord.Member = None, mc_id: str = None):
+        """View sanction history for a member."""
+        if not member and not mc_id:
+            await ctx.send("Provide either a Discord member or MC ID.")
+            return
+        
+        sanctions = self.db.get_user_sanctions(
+            ctx.guild.id,
+            member.id if member else None,
+            mc_id
+        )
+        
+        if not sanctions:
+            await ctx.send("No sanctions found for this member.")
+            return
+        
+        embed = discord.Embed(
+            title=f"📋 Sanction History",
+            color=discord.Color.blue(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        
+        if member:
+            embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+        
+        for s in sanctions[:10]:  # Show last 10
+            status_emoji = "🔴" if s['status'] == 'active' else "⚫"
+            value = (
+                f"**Type**: {s['sanction_type']}\n"
+                f"**Reason**: {s['reason_detail'][:100]}\n"
+                f"**Admin**: {s['admin_username']}\n"
+                f"**Date**: {fmt_dt(s['created_at'])}"
+            )
+            embed.add_field(
+                name=f"{status_emoji} ID: {s['sanction_id']} ({s['status']})",
+                value=value,
+                inline=False
+            )
+        
+        if len(sanctions) > 10:
+            embed.set_footer(text=f"Showing 10 of {len(sanctions)} sanctions")
+        
+        await ctx.send(embed=embed)
+
+    @sanction_group.command(name="view")
+    @commands.guild_only()
+    async def view(self, ctx: commands.Context, sanction_id: int):
+        """View details of a specific sanction."""
+        sanction = self.db.get_sanction(sanction_id)
+        
+        if not sanction or sanction['guild_id'] != ctx.guild.id:
+            await ctx.send("Sanction not found.")
+            return
+        
+        embed = discord.Embed(
+            title=f"🚨 Sanction #{sanction_id}",
+            color=discord.Color.red() if sanction['status'] == 'active' else discord.Color.gray(),
+            timestamp=datetime.fromtimestamp(sanction['created_at'], tz=timezone.utc)
+        )
+        
+        member_info = f"**MC Username**: {sanction['mc_username']}\n"
+        if sanction['mc_user_id']:
+            member_info += f"**MC Profile**: [Link]({_mc_profile_url(sanction['mc_user_id'])})\n"
+        if sanction['discord_user_id']:
+            member_info += f"**Discord**: <@{sanction['discord_user_id']}>\n"
+        else:
+            member_info += "**Discord**: No Discord found\n"
+        
+        embed.add_field(name="Member", value=member_info, inline=False)
+        embed.add_field(name="Admin", value=sanction['admin_username'], inline=True)
+        embed.add_field(name="Status", value=sanction['status'], inline=True)
+        embed.add_field(name="Sanction Type", value=sanction['sanction_type'], inline=False)
+        embed.add_field(name="Reason Category", value=sanction['reason_category'], inline=False)
+        embed.add_field(name="Reason", value=sanction['reason_detail'][:1024], inline=False)
+        
+        if sanction['additional_notes']:
+            embed.add_field(name="Admin Notes", value=sanction['additional_notes'][:1024], inline=False)
+        
+        if sanction['edited_at']:
+            embed.add_field(name="Last Edited", value=fmt_dt(sanction['edited_at']), inline=True)
+        
+        await ctx.send(embed=embed)
+
+    @sanction_group.command(name="remove")
+    @commands.guild_only()
+    async def remove(self, ctx: commands.Context, sanction_id: int, *, reason: str):
+        """Remove/archive a sanction (admin only)."""
+        if not await self._is_admin(discord.Interaction(data={}, state=ctx.bot._connection)):
+            await ctx.send("You don't have permission to do this.")
+            return
+        
+        sanction = self.db.get_sanction(sanction_id)
+        
+        if not sanction or sanction['guild_id'] != ctx.guild.id:
+            await ctx.send("Sanction not found.")
+            return
+        
+        self.db.update_sanction_status(
+            sanction_id,
+            'removed',
+            ctx.author.id,
+            f"Removed by {ctx.author}: {reason}"
+        )
+        
+        await ctx.send(f"✅ Sanction #{sanction_id} has been removed.")
+
+    @sanction_group.command(name="edit")
+    @commands.guild_only()
+    async def edit(self, ctx: commands.Context, sanction_id: int):
+        """Edit a sanction (admin only)."""
+        if not isinstance(ctx.author, discord.Member):
+            return
+        
+        # This would open an interaction-based edit flow
+        # For now, simplified version
+        await ctx.send("Edit functionality: Use the admin panel for full editing capabilities.")
+
+    @commands.hybrid_group(name="sanctionstats", invoke_without_command=True)
+    @commands.guild_only()
+    async def sanctionstats(self, ctx: commands.Context):
+        """View sanction statistics."""
+        stats = self.db.get_stats_overall(ctx.guild.id)
+        
+        embed = discord.Embed(
+            title="📊 Sanction Statistics",
+            color=discord.Color.blue(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        
+        # By type
+        type_text = ""
+        for stype, count in stats['type_counts'].items():
+            type_text += f"• {stype}: {count}\n"
+        
+        if type_text:
+            embed.add_field(name="By Sanction Type", value=type_text, inline=False)
+        
+        # By reason
+        reason_text = ""
+        for reason, count in list(stats['reason_counts'].items())[:5]:
+            reason_text += f"• {reason}: {count}\n"
+        
+        if reason_text:
+            embed.add_field(name="Top Reasons", value=reason_text, inline=False)
+        
+        # Top admins
+        admin_text = ""
+        for admin, count in stats['top_admins']:
+            admin_text += f"• {admin}: {count}\n"
+        
+        if admin_text:
+            embed.add_field(name="Most Active Admins", value=admin_text, inline=True)
+        
+        # Most sanctioned
+        sanctioned_text = ""
+        for username, count in stats['most_sanctioned']:
+            sanctioned_text += f"• {username}: {count}\n"
+        
+        if sanctioned_text:
+            embed.add_field(name="Most Sanctioned Members", value=sanctioned_text, inline=True)
+        
+        await ctx.send(embed=embed)
+
+    @sanctionstats.command(name="admin")
+    @commands.guild_only()
+    async def sanctionstats_admin(self, ctx: commands.Context, admin: discord.Member = None):
+        """View statistics for a specific admin."""
+        if admin is None:
+            admin
