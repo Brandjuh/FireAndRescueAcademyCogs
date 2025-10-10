@@ -1442,4 +1442,214 @@ class SanctionsManager(commands.Cog):
     async def sanctionstats_admin(self, ctx: commands.Context, admin: discord.Member = None):
         """View statistics for a specific admin."""
         if admin is None:
-            admin
+            admin = ctx.author
+        
+        stats = self.db.get_stats_admin(ctx.guild.id, admin.id)
+        
+        if not stats['type_counts']:
+            await ctx.send(f"{admin.mention} has not issued any sanctions yet.")
+            return
+        
+        embed = discord.Embed(
+            title=f"📊 Admin Statistics for {admin.display_name}",
+            color=discord.Color.blue(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        embed.set_thumbnail(url=admin.display_avatar.url)
+        
+        # By type
+        type_text = ""
+        total = sum(stats['type_counts'].values())
+        for stype, count in stats['type_counts'].items():
+            percentage = (count * 100 // total) if total else 0
+            type_text += f"• {stype}: {count} ({percentage}%)\n"
+        
+        embed.add_field(name=f"Total Sanctions: {total}", value=type_text, inline=False)
+        
+        # By reason
+        reason_text = ""
+        for reason, count in list(stats['reason_counts'].items())[:5]:
+            reason_text += f"• {reason}: {count}\n"
+        
+        if reason_text:
+            embed.add_field(name="Top Reasons Used", value=reason_text, inline=False)
+        
+        # Recent
+        recent_text = ""
+        for stype, username, timestamp in stats['recent'][:5]:
+            recent_text += f"• {stype} to {username} ({fmt_dt(timestamp)})\n"
+        
+        if recent_text:
+            embed.add_field(name="Recent Sanctions (last 5)", value=recent_text, inline=False)
+        
+        await ctx.send(embed=embed)
+
+    @commands.group(name="sanctionrules", invoke_without_command=True)
+    @commands.admin()
+    @commands.guild_only()
+    async def sanctionrules(self, ctx: commands.Context):
+        """Manage custom sanction rules."""
+        await ctx.send_help(ctx.command)
+
+    @sanctionrules.command(name="add")
+    @commands.admin()
+    @commands.guild_only()
+    async def add_rule(self, ctx: commands.Context, category: str, rule_code: str, *, rule_text: str):
+        """Add a custom rule.
+        
+        Example: [p]sanctionrules add "Member Conduct" "1.10" "No excessive caps lock in chat"
+        """
+        success = self.db.add_custom_rule(ctx.guild.id, category, rule_code, rule_text)
+        
+        if success:
+            await ctx.send(f"✅ Added custom rule: {category} - {rule_code}")
+        else:
+            await ctx.send("❌ This rule already exists or there was an error.")
+
+    @sanctionrules.command(name="list")
+    @commands.admin()
+    @commands.guild_only()
+    async def list_rules(self, ctx: commands.Context, category: str = None):
+        """List custom rules."""
+        rules = self.db.get_custom_rules(ctx.guild.id, category)
+        
+        if not rules:
+            await ctx.send("No custom rules found.")
+            return
+        
+        embed = discord.Embed(
+            title=f"📜 Custom Rules" + (f" - {category}" if category else ""),
+            color=discord.Color.green(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        
+        current_category = None
+        rule_text = ""
+        
+        for rule in rules:
+            if rule['category'] != current_category:
+                if rule_text:
+                    embed.add_field(name=current_category, value=rule_text, inline=False)
+                current_category = rule['category']
+                rule_text = ""
+            
+            rule_text += f"**{rule['rule_code']}** (ID: {rule['rule_id']}): {rule['rule_text']}\n"
+        
+        if rule_text:
+            embed.add_field(name=current_category, value=rule_text, inline=False)
+        
+        await ctx.send(embed=embed)
+
+    @sanctionrules.command(name="remove")
+    @commands.admin()
+    @commands.guild_only()
+    async def remove_rule(self, ctx: commands.Context, rule_id: int):
+        """Remove a custom rule by ID."""
+        success = self.db.remove_custom_rule(ctx.guild.id, rule_id)
+        
+        if success:
+            await ctx.send(f"✅ Removed custom rule ID {rule_id}")
+        else:
+            await ctx.send("❌ Rule not found or could not be removed.")
+
+    @sanctionrules.command(name="default")
+    @commands.admin()
+    @commands.guild_only()
+    async def default_rules(self, ctx: commands.Context):
+        """Show all default rules."""
+        embed = discord.Embed(
+            title="📜 Default Sanction Rules",
+            description="These are the built-in rules available for sanctions.",
+            color=discord.Color.blue(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        
+        for category, rules in DEFAULT_RULES.items():
+            rule_text = ""
+            for code, text in rules.items():
+                rule_text += f"**{code}**: {text}\n"
+            embed.add_field(name=category, value=rule_text, inline=False)
+        
+        await ctx.send(embed=embed)
+
+    @commands.command(name="warnings")
+    @commands.guild_only()
+    async def warnings(self, ctx: commands.Context, member: discord.Member = None):
+        """Check active official warnings for a member."""
+        if member is None:
+            member = ctx.author
+        
+        warnings = self.db.get_active_warnings(ctx.guild.id, member.id)
+        
+        if not warnings:
+            await ctx.send(f"{member.mention} has no active official warnings.")
+            return
+        
+        embed = discord.Embed(
+            title=f"⚠️ Active Official Warnings for {member.display_name}",
+            color=discord.Color.orange(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        
+        for w in warnings:
+            value = (
+                f"**Type**: {w['sanction_type']}\n"
+                f"**Reason**: {w['reason_detail'][:100]}\n"
+                f"**Date**: {fmt_dt(w['created_at'])}\n"
+                f"**Admin**: {w['admin_username']}"
+            )
+            embed.add_field(
+                name=f"ID: {w['sanction_id']}",
+                value=value,
+                inline=False
+            )
+        
+        embed.set_footer(text=f"Total active warnings: {len(warnings)}")
+        
+        await ctx.send(embed=embed)
+
+    @commands.hybrid_command(name="mysanctions")
+    @commands.guild_only()
+    async def mysanctions(self, ctx: commands.Context):
+        """View your own sanction history."""
+        sanctions = self.db.get_user_sanctions(ctx.guild.id, ctx.author.id)
+        
+        if not sanctions:
+            await ctx.send("You have no sanctions on record. Keep up the good work! ✅")
+            return
+        
+        embed = discord.Embed(
+            title="📋 Your Sanction History",
+            color=discord.Color.blue(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        embed.set_author(name=ctx.author.display_name, icon_url=ctx.author.display_avatar.url)
+        
+        active_count = 0
+        for s in sanctions[:10]:
+            if s['status'] == 'active':
+                active_count += 1
+            
+            status_emoji = "🔴" if s['status'] == 'active' else "⚫"
+            value = (
+                f"**Type**: {s['sanction_type']}\n"
+                f"**Reason**: {s['reason_detail'][:100]}\n"
+                f"**Date**: {fmt_dt(s['created_at'])}"
+            )
+            embed.add_field(
+                name=f"{status_emoji} {s['sanction_type']}",
+                value=value,
+                inline=False
+            )
+        
+        if len(sanctions) > 10:
+            embed.set_footer(text=f"Showing 10 of {len(sanctions)} sanctions • {active_count} active")
+        else:
+            embed.set_footer(text=f"{active_count} active sanction(s)")
+        
+        await ctx.send(embed=embed, ephemeral=True)
+
+
+async def setup(bot: Red):
+    await bot.add_cog(SanctionsManager(bot))
