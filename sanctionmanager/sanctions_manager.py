@@ -725,38 +725,54 @@ class MCOnlyModal(discord.ui.Modal, title="MC Member Info"):
         self.cog = cog
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        
-        mc_id_val = str(self.mc_id.value).strip() if self.mc_id.value else None
-        mc_username_val = str(self.mc_username.value).strip() if self.mc_username.value else None
-        
-        # At least one must be provided
-        if not mc_id_val and not mc_username_val:
-            await interaction.followup.send("❌ You must provide at least MC ID or MC Username.", ephemeral=True)
-            return
-        
-        # Use username as fallback if no username provided
-        display_name = mc_username_val if mc_username_val else f"MC User {mc_id_val}"
-        
-        # Move to sanction type selection
-        view = SanctionTypeView(
-            self.cog,
-            admin_user_id=interaction.user.id,
-            admin_username=str(interaction.user),
-            target_discord_id=None,
-            target_mc_id=mc_id_val,
-            target_mc_username=display_name,
-            target_discord_user=None,
-        )
-        
-        # Send new message instead of trying to update
-        embed = view._create_target_embed()
-        await interaction.followup.send(
-            content="Select the type of sanction:",
-            embed=embed,
-            view=view,
-            ephemeral=True
-        )
+        try:
+            await interaction.response.defer(ephemeral=True)
+            
+            mc_id_val = str(self.mc_id.value).strip() if self.mc_id.value else None
+            mc_username_val = str(self.mc_username.value).strip() if self.mc_username.value else None
+            
+            log.info(f"MC Only Modal - ID: {mc_id_val}, Username: {mc_username_val}")
+            
+            # At least one must be provided
+            if not mc_id_val and not mc_username_val:
+                await interaction.followup.send("❌ You must provide at least MC ID or MC Username.", ephemeral=True)
+                return
+            
+            # Use username as fallback if no username provided
+            display_name = mc_username_val if mc_username_val else f"MC User {mc_id_val}"
+            
+            log.info(f"Creating SanctionTypeView for MC user: {display_name}")
+            
+            # Move to sanction type selection
+            view = SanctionTypeView(
+                self.cog,
+                admin_user_id=interaction.user.id,
+                admin_username=str(interaction.user),
+                target_discord_id=None,
+                target_mc_id=mc_id_val,
+                target_mc_username=display_name,
+                target_discord_user=None,
+            )
+            
+            # Send new message instead of trying to update
+            embed = view._create_target_embed()
+            await interaction.followup.send(
+                content="Select the type of sanction:",
+                embed=embed,
+                view=view,
+                ephemeral=True
+            )
+            log.info("Successfully sent sanction type selection")
+            
+        except Exception as e:
+            log.exception(f"Error in MCOnlyModal.on_submit: {e}")
+            try:
+                await interaction.followup.send(
+                    f"❌ An error occurred: {str(e)}\nPlease check the logs.",
+                    ephemeral=True
+                )
+            except:
+                pass
 
 class SanctionTypeView(discord.ui.View):
     def __init__(self, cog: "SanctionsManager", admin_user_id: int, admin_username: str,
@@ -802,8 +818,8 @@ class SanctionTypeView(discord.ui.View):
         )
 
 class SanctionTypeSelect(discord.ui.Select):
-    def __init__(self, parent: SanctionTypeView):
-        self.parent = parent
+    def __init__(self, parent_view: "SanctionTypeView"):
+        self.parent_view = parent_view
         options = [discord.SelectOption(label=t) for t in SANCTION_TYPES]
         super().__init__(placeholder="Choose sanction type", min_values=1, max_values=1, options=options, custom_id="sm:type")
 
@@ -812,16 +828,20 @@ class SanctionTypeSelect(discord.ui.Select):
         
         # Move to reason selection
         view = ReasonCategoryView(
-            self.parent.cog,
-            self.parent.admin_user_id,
-            self.parent.admin_username,
-            self.parent.target_discord_id,
-            self.parent.target_mc_id,
-            self.parent.target_mc_username,
-            self.parent.target_discord_user,
+            self.parent_view.cog,
+            self.parent_view.admin_user_id,
+            self.parent_view.admin_username,
+            self.parent_view.target_discord_id,
+            self.parent_view.target_mc_id,
+            self.parent_view.target_mc_username,
+            self.parent_view.target_discord_user,
             sanction_type,
         )
-        await view.send_selection(interaction)
+        await safe_update(
+            interaction,
+            content=f"Sanction type: **{sanction_type}**\n\nSelect the reason category:",
+            view=view
+        )
 
 class ReasonCategoryView(discord.ui.View):
     def __init__(self, cog: "SanctionsManager", admin_user_id: int, admin_username: str,
