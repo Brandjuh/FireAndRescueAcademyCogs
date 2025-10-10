@@ -641,20 +641,20 @@ class DiscordMemberModal(discord.ui.Modal, title="Discord Member Lookup"):
         )
         await view.send_selection(interaction)
 
-class MCOnlyModal(discord.ui.Modal, title="MC ID Only"):
+class MCOnlyModal(discord.ui.Modal, title="MC Member Info"):
     mc_id = discord.ui.TextInput(
-        label="Missionchief User ID",
+        label="Missionchief User ID (Optional)",
         style=discord.TextStyle.short,
         max_length=50,
-        required=True,
+        required=False,
         placeholder="12345",
     )
     
     mc_username = discord.ui.TextInput(
-        label="Missionchief Username",
+        label="Missionchief Username (Optional)",
         style=discord.TextStyle.short,
         max_length=100,
-        required=True,
+        required=False,
         placeholder="PlayerName",
     )
 
@@ -665,14 +665,25 @@ class MCOnlyModal(discord.ui.Modal, title="MC ID Only"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         
+        mc_id_val = str(self.mc_id).strip() if self.mc_id.value else None
+        mc_username_val = str(self.mc_username).strip() if self.mc_username.value else None
+        
+        # At least one must be provided
+        if not mc_id_val and not mc_username_val:
+            await interaction.followup.send("❌ You must provide at least MC ID or MC Username.", ephemeral=True)
+            return
+        
+        # Use username as fallback if no username provided
+        display_name = mc_username_val if mc_username_val else f"MC User {mc_id_val}"
+        
         # Move to sanction type selection
         view = SanctionTypeView(
             self.cog,
             admin_user_id=interaction.user.id,
             admin_username=str(interaction.user),
             target_discord_id=None,
-            target_mc_id=str(self.mc_id),
-            target_mc_username=str(self.mc_username),
+            target_mc_id=mc_id_val,
+            target_mc_username=display_name,
             target_discord_user=None,
         )
         await view.send_selection(interaction)
@@ -963,9 +974,11 @@ class SummarySanctionView(discord.ui.View):
 
     @discord.ui.button(label="Submit Sanction", style=discord.ButtonStyle.danger, custom_id="sm:submit")
     async def submit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        
         guild = interaction.guild
         if not guild:
-            await interaction.response.send_message("This must be used in a server.", ephemeral=True)
+            await interaction.followup.send("This must be used in a server.", ephemeral=True)
             return
 
         conf = await self.cog.config.guild(guild).all()
@@ -973,7 +986,7 @@ class SummarySanctionView(discord.ui.View):
         log_channel_id = conf.get("log_channel_id")
 
         if not sanction_channel_id or not log_channel_id:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Sanction/Log channels are not configured. Ask an admin to use [p]sanctionset.",
                 ephemeral=True,
             )
@@ -983,7 +996,7 @@ class SummarySanctionView(discord.ui.View):
         log_channel = guild.get_channel(log_channel_id)
 
         if not sanction_channel or not log_channel:
-            await interaction.response.send_message("Configured channels not found.", ephemeral=True)
+            await interaction.followup.send("Configured channels not found.", ephemeral=True)
             return
 
         # Check for auto-actions on 3rd warning
@@ -1387,9 +1400,207 @@ class SanctionsManager(commands.Cog):
         if not isinstance(ctx.author, discord.Member):
             return
         
-        # This would open an interaction-based edit flow
-        # For now, simplified version
-        await ctx.send("Edit functionality: Use the admin panel for full editing capabilities.")
+        # Check admin permission
+        if not ctx.author.guild_permissions.administrator:
+            role_id = await self.config.guild(ctx.guild).admin_role_id()
+            if not role_id:
+                await ctx.send("You don't have permission to edit sanctions.")
+                return
+            role = ctx.guild.get_role(role_id)
+            if not role or role not in ctx.author.roles:
+                await ctx.send("You don't have permission to edit sanctions.")
+                return
+        
+        sanction = self.db.get_sanction(sanction_id)
+        
+        if not sanction or sanction['guild_id'] != ctx.guild.id:
+            await ctx.send("Sanction not found.")
+            return
+        
+        # Send edit modal/view
+        await ctx.send(
+            f"Editing sanction #{sanction_id}. Use the buttons below:",
+            view=EditSanctionView(self, sanction, ctx.author),
+            ephemeral=True
+        )
+
+class EditSanctionView(discord.ui.View):
+    def __init__(self, cog: "SanctionsManager", sanction: dict, editor: discord.Member):
+        super().__init__(timeout=600)
+        self.cog = cog
+        self.sanction = sanction
+        self.editor = editor
+
+    @discord.ui.button(label="Edit MC Info", style=discord.ButtonStyle.primary)
+    async def edit_mc_info(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = EditMCInfoModal(self.cog, self.sanction, self.editor)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Edit Sanction Type", style=discord.ButtonStyle.primary)
+    async def edit_type(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "Select new sanction type:",
+            view=EditSanctionTypeView(self.cog, self.sanction, self.editor),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Edit Reason", style=discord.ButtonStyle.primary)
+    async def edit_reason(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = EditReasonModal(self.cog, self.sanction, self.editor)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Edit Admin Notes", style=discord.ButtonStyle.secondary)
+    async def edit_notes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = EditNotesModal(self.cog, self.sanction, self.editor)
+        await interaction.response.send_modal(modal)
+
+class EditMCInfoModal(discord.ui.Modal, title="Edit MC Info"):
+    mc_id = discord.ui.TextInput(
+        label="MC User ID (Optional)",
+        style=discord.TextStyle.short,
+        max_length=50,
+        required=False,
+    )
+    
+    mc_username = discord.ui.TextInput(
+        label="MC Username (Optional)",
+        style=discord.TextStyle.short,
+        max_length=100,
+        required=False,
+    )
+
+    def __init__(self, cog: "SanctionsManager", sanction: dict, editor: discord.Member):
+        super().__init__()
+        self.cog = cog
+        self.sanction = sanction
+        self.editor = editor
+        
+        if sanction.get('mc_user_id'):
+            self.mc_id.default = str(sanction['mc_user_id'])
+        if sanction.get('mc_username'):
+            self.mc_username.default = str(sanction['mc_username'])
+
+    async def on_submit(self, interaction: discord.Interaction):
+        updates = {}
+        
+        mc_id_val = str(self.mc_id).strip() if self.mc_id.value else None
+        mc_username_val = str(self.mc_username).strip() if self.mc_username.value else None
+        
+        if mc_id_val:
+            updates['mc_user_id'] = mc_id_val
+        if mc_username_val:
+            updates['mc_username'] = mc_username_val
+        
+        if not updates:
+            await interaction.response.send_message("No changes made.", ephemeral=True)
+            return
+        
+        self.cog.db.edit_sanction(
+            self.sanction['sanction_id'],
+            self.editor.id,
+            **updates
+        )
+        
+        await interaction.response.send_message(
+            f"✅ Updated MC info for sanction #{self.sanction['sanction_id']}",
+            ephemeral=True
+        )
+
+class EditSanctionTypeView(discord.ui.View):
+    def __init__(self, cog: "SanctionsManager", sanction: dict, editor: discord.Member):
+        super().__init__(timeout=600)
+        self.cog = cog
+        self.sanction = sanction
+        self.editor = editor
+        self.add_item(EditSanctionTypeSelect(self))
+
+class EditSanctionTypeSelect(discord.ui.Select):
+    def __init__(self, parent: EditSanctionTypeView):
+        self.parent = parent
+        options = [discord.SelectOption(label=t) for t in SANCTION_TYPES]
+        super().__init__(placeholder="Choose new sanction type", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        new_type = self.values[0]
+        
+        self.parent.cog.db.edit_sanction(
+            self.parent.sanction['sanction_id'],
+            self.parent.editor.id,
+            sanction_type=new_type
+        )
+        
+        await interaction.response.send_message(
+            f"✅ Updated sanction type to: {new_type}",
+            ephemeral=True
+        )
+
+class EditReasonModal(discord.ui.Modal, title="Edit Reason"):
+    reason_category = discord.ui.TextInput(
+        label="Reason Category",
+        style=discord.TextStyle.short,
+        max_length=100,
+        required=True,
+    )
+    
+    reason_detail = discord.ui.TextInput(
+        label="Reason Detail",
+        style=discord.TextStyle.paragraph,
+        max_length=500,
+        required=True,
+    )
+
+    def __init__(self, cog: "SanctionsManager", sanction: dict, editor: discord.Member):
+        super().__init__()
+        self.cog = cog
+        self.sanction = sanction
+        self.editor = editor
+        
+        if sanction.get('reason_category'):
+            self.reason_category.default = str(sanction['reason_category'])
+        if sanction.get('reason_detail'):
+            self.reason_detail.default = str(sanction['reason_detail'])
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self.cog.db.edit_sanction(
+            self.sanction['sanction_id'],
+            self.editor.id,
+            reason_category=str(self.reason_category),
+            reason_detail=str(self.reason_detail)
+        )
+        
+        await interaction.response.send_message(
+            f"✅ Updated reason for sanction #{self.sanction['sanction_id']}",
+            ephemeral=True
+        )
+
+class EditNotesModal(discord.ui.Modal, title="Edit Admin Notes"):
+    notes = discord.ui.TextInput(
+        label="Admin Notes",
+        style=discord.TextStyle.paragraph,
+        max_length=1000,
+        required=False,
+    )
+
+    def __init__(self, cog: "SanctionsManager", sanction: dict, editor: discord.Member):
+        super().__init__()
+        self.cog = cog
+        self.sanction = sanction
+        self.editor = editor
+        
+        if sanction.get('additional_notes'):
+            self.notes.default = str(sanction['additional_notes'])
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self.cog.db.edit_sanction(
+            self.sanction['sanction_id'],
+            self.editor.id,
+            additional_notes=str(self.notes) if self.notes.value else None
+        )
+        
+        await interaction.response.send_message(
+            f"✅ Updated admin notes for sanction #{self.sanction['sanction_id']}",
+            ephemeral=True
+        )
 
     @commands.hybrid_group(name="sanctionstats", invoke_without_command=True)
     @commands.guild_only()
