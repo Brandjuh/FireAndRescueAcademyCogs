@@ -1,0 +1,30 @@
+{
+    "author": [
+        "FireAndRescueAcademy"
+    ],
+    "description": "Comprehensive sanctions management system for alliance members with full tracking, statistics, and MemberSync integration.",
+    "install_msg": "Thanks for installing SanctionsManager! Configure channels with `[p]sanctionset` and post the button with `[p]sanctionset post`. Requires MemberSync cog for full functionality.",
+    "short": "Alliance sanctions management with tracking and statistics",
+    "name": "SanctionsManager",
+    "tags": [
+        "moderation",
+        "sanctions",
+        "warnings",
+        "alliance",
+        "missionchief",
+        "tracking"
+    ],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores Discord user IDs, Missionchief user IDs, usernames, sanction details, and admin actions in a local SQLite database for moderation tracking purposes.",
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "required_cogs": {},
+    "requirements": [],
+    "permissions": [
+        "embed_links",
+        "send_messages",
+        "manage_roles",
+        "read_message_history"
+    ]
+}
