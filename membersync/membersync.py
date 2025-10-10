@@ -1,8 +1,6 @@
 from __future__ import annotations
 import pathlib
-# MemberSync Cog
 import aiosqlite
-
 import asyncio
 import logging
 import re
@@ -20,12 +18,12 @@ log = logging.getLogger("red.FARA.MemberSync")
 
 DEFAULTS = {
     "alliance_db_path": None,
-    "review_channel_id": 1421256548977606827,   # default admin/review channel
+    "review_channel_id": 1421256548977606827,
     "log_channel_id": 668874513663918100,
     "verified_role_id": 565988933113085952,
     "reviewer_role_ids": [544117282167586836],
     "cooldown_seconds": 30,
-    "queue": {},  # user_id -> {attempts:int, enqueued_at:str, by:str, mc_id:Optional[str], guild_id:int}
+    "queue": {},
 }
 
 def utcnow_iso() -> str:
@@ -54,12 +52,9 @@ class MemberSync(commands.Cog):
         self.links_db = self.data_path / "membersync.db"
         self._bg_task: Optional[asyncio.Task] = None
 
-    # ------------------------- lifecycle -------------------------
-
     async def cog_load(self) -> None:
         await self._init_db()
         if await self.config.alliance_db_path() is None:
-            # try to auto-detect AllianceScraper DB
             guess = self._guess_alliance_db()
             if guess:
                 await self.config.alliance_db_path.set(str(guess))
@@ -70,8 +65,6 @@ class MemberSync(commands.Cog):
         if self._bg_task:
             self._bg_task.cancel()
             self._bg_task = None
-
-    # ------------------------- DB helpers ------------------------
 
     async def _init_db(self) -> None:
         """Initialize MemberSync local DB (async, no executor)."""
@@ -95,9 +88,9 @@ class MemberSync(commands.Cog):
                 attempts     INTEGER NOT NULL DEFAULT 0
             )""")
             await db.commit()
+
     def _guess_alliance_db(self) -> Optional[pathlib.Path]:
         base = pathlib.Path.home() / ".local" / "share" / "Red-DiscordBot" / "data"
-        # try to find instance folder and AllianceScraper/alliance.db
         for inst in base.iterdir():
             p = inst / "cogs" / "AllianceScraper" / "alliance.db"
             if p.exists():
@@ -124,17 +117,15 @@ class MemberSync(commands.Cog):
         rows = await self._query_alliance("SELECT MAX(snapshot_utc) AS s FROM members_history")
         if rows and rows[0]["s"]:
             return rows[0]["s"]
-        # fallback to members_current newest scraped_at if present
         rows = await self._query_alliance("SELECT MAX(scraped_at) AS s FROM members_current")
         return rows[0]["s"] if rows and rows[0]["s"] else None
-
-    # ------------------------- link API for other cogs ------------------------
 
     async def get_link_for_mc(self, mc_user_id: str) -> Optional[Dict[str, Any]]:
         """Public API: returns approved link for given MC ID or None."""
         mc_user_id = str(mc_user_id)
         def _run():
-            con = sqlite3.connect(self.links_db); con.row_factory = sqlite3.Row
+            con = sqlite3.connect(self.links_db)
+            con.row_factory = sqlite3.Row
             try:
                 r = con.execute("SELECT * FROM links WHERE mc_user_id=? AND status='approved'", (mc_user_id,)).fetchone()
                 return dict(r) if r else None
@@ -144,7 +135,8 @@ class MemberSync(commands.Cog):
 
     async def get_link_for_discord(self, discord_id: int) -> Optional[Dict[str, Any]]:
         def _run():
-            con = sqlite3.connect(self.links_db); con.row_factory = sqlite3.Row
+            con = sqlite3.connect(self.links_db)
+            con.row_factory = sqlite3.Row
             try:
                 r = con.execute("SELECT * FROM links WHERE discord_id=? AND status='approved'", (str(discord_id),)).fetchone()
                 return dict(r) if r else None
@@ -152,14 +144,10 @@ class MemberSync(commands.Cog):
                 con.close()
         return await asyncio.get_running_loop().run_in_executor(None, _run)
 
-    # ------------------------- internal finders ------------------------
-
     async def _find_member_in_db(self, candidate_name: Optional[str], candidate_mc_id: Optional[str]) -> Optional[Dict[str, Any]]:
-        # Schema variations supported: members_current has either user_id or mc_user_id; and sometimes profile_href.
         name = _lower(candidate_name) if candidate_name else None
         mcid = str(candidate_mc_id) if candidate_mc_id else None
 
-        # 1) try direct by MC id across possible columns
         if mcid:
             for col in ("user_id", "mc_user_id"):
                 rows = await self._query_alliance(f"SELECT * FROM members_current WHERE {col}=?", (mcid,))
@@ -167,19 +155,16 @@ class MemberSync(commands.Cog):
                     r = dict(rows[0])
                     r["mc_id"] = mcid
                     return r
-            # profile_href variant
             rows = await self._query_alliance("SELECT * FROM members_current WHERE profile_href LIKE ?", (f"%/users/{mcid}",))
             if rows:
                 r = dict(rows[0])
                 r["mc_id"] = mcid
                 return r
 
-        # 2) by name exact (case-insensitive)
         if name:
             rows = await self._query_alliance("SELECT * FROM members_current WHERE lower(name)=?", (name,))
             if rows:
                 r = dict(rows[0])
-                # try to derive mc_id
                 mc = r.get("user_id") or r.get("mc_user_id")
                 if not mc:
                     href = r.get("profile_href") or ""
@@ -190,13 +175,11 @@ class MemberSync(commands.Cog):
                 return r
 
         return None
-    # ------------------------- UI helpers ------------------------
 
     def _is_reviewer(self, member: discord.Member) -> bool:
         if member.guild_permissions.administrator:
             return True
         ids = set((self.bot.loop.create_task(self.config.reviewer_role_ids())) or [])
-        # can't await inside, so we won't use this path here
         return False
 
     async def _get_reviewer_roles(self, guild: discord.Guild) -> List[discord.Role]:
@@ -227,128 +210,64 @@ class MemberSync(commands.Cog):
         view.add_item(approve_btn)
         view.add_item(deny_btn)
 
-
-
-        # --- injected: direct runtime callbacks to avoid decorator binding issues ---
-
         async def __ms_approve_cb(interaction: discord.Interaction):
-
-            # Zorg dat de interactie direct geacknowledged is
-
             try:
-
                 if interaction.response and not interaction.response.is_done():
-
                     await interaction.response.defer(thinking=True, ephemeral=True)
-
             except Exception:
-
                 pass
+            
             data = getattr(interaction, "data", None) or {}
-
             cid = (data.get("custom_id") or "")
-
             parts = cid.split(":")
-
             requester_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
-
             mc_id = parts[2] if len(parts) > 2 else None
-
         
-
             guild = interaction.guild
-
             member = None
-
             if guild and requester_id:
-
                 member = guild.get_member(requester_id)
-
                 if member is None:
-
                     try:
-
                         member = await guild.fetch_member(requester_id)
-
                     except Exception:
-
                         member = None
-
         
-
             ok, msg = await self._approve_link(
-
                 guild,
-
                 member,
-
                 str(mc_id) if mc_id else "",
-
                 approver=interaction.user if isinstance(interaction.user, discord.Member) else None,
-
             )
-
         
-
-            # Probeer het review-bericht weg te halen en antwoord te sturen
-
             try:
-
                 if interaction.message:
-
                     await interaction.message.delete()
-
             except Exception:
-
                 pass
-
         
-
             try:
-
                 text = ("✅ " if ok else "⚠️ ") + (msg or "")
-
                 if interaction.response and interaction.response.is_done():
-
                     await interaction.followup.send(text, ephemeral=True)
-
                 else:
-
                     await interaction.response.send_message(text, ephemeral=True)
-
             except Exception:
-
                 pass
-
         
-
         approve_btn.callback = __ms_approve_cb
-
         
-
         async def __ms_deny_cb(interaction: discord.Interaction):
-
-            # Minimale handler om timeouts te voorkomen; jouw modal/flow kan hier later aan gekoppeld worden.
-
             try:
-
                 if interaction.response and not interaction.response.is_done():
-
                     await interaction.response.send_message("Use the deny flow/command to provide a reason.", ephemeral=True)
-
                 else:
-
                     await interaction.followup.send("Use the deny flow/command to provide a reason.", ephemeral=True)
-
             except Exception:
-
                 pass
-
         
-
         deny_btn.callback = __ms_deny_cb
 
-        # --- end injected ---
         embed = discord.Embed(
             title="Verification request",
             description=f"Discord: {requester.mention} (`{requester.id}`)\nMC: [{mc_name}]({_mc_profile_url(mc_id)}) (`{mc_id}`)",
@@ -356,44 +275,6 @@ class MemberSync(commands.Cog):
             timestamp=datetime.utcnow()
         )
         msg = await ch.send(embed=embed, view=view)
-
-        async def interaction_check(interaction: discord.Interaction) -> bool:
-            if interaction.user is None or not isinstance(interaction.user, discord.Member):
-                return False
-            ok = await self._user_is_reviewer(interaction.user)
-            if not ok:
-                await interaction.response.send_message("You are not allowed to review verifications.", ephemeral=True)
-            return ok
-
-        @approve_btn.callback
-        async def on_approve(interaction: discord.Interaction):
-            if not await interaction_check(interaction):
-                return
-            await interaction.response.defer(thinking=True, ephemeral=True)
-            ok, msgtxt = await self._approve_link(guild, requester, mc_id, approver=interaction.user)
-            try:
-                await msg.delete()
-            except Exception:
-                pass
-            await interaction.followup.send(msgtxt, ephemeral=True)
-
-        @deny_btn.callback
-        async def on_deny(interaction: discord.Interaction):
-            if not await interaction_check(interaction):
-                return
-            modal = discord.ui.Modal(title="Deny verification")
-            reason_inp = discord.ui.TextInput(label="Reason", required=True, max_length=300)
-            modal.add_item(reason_inp)
-            async def on_submit(modal_inter: discord.Interaction):
-                await modal_inter.response.defer(ephemeral=True, thinking=False)
-                try:
-                    await msg.delete()
-                except Exception:
-                    pass
-                await self._deny_link(guild, requester, mc_id, reviewer=interaction.user, reason=str(reason_inp.value))
-                await modal_inter.followup.send("Denied and notified.", ephemeral=True)
-            modal.on_submit = on_submit  # type: ignore
-            await interaction.response.send_modal(modal)
 
         return msg.id
 
@@ -429,7 +310,6 @@ class MemberSync(commands.Cog):
         except Exception:
             pass
 
-        # log
         log_ch_id = await self.config.log_channel_id()
         ch = guild.get_channel(int(log_ch_id)) if log_ch_id else None
         if isinstance(ch, discord.TextChannel):
@@ -466,8 +346,6 @@ class MemberSync(commands.Cog):
         if isinstance(ch, discord.TextChannel):
             await ch.send(f"❌ Denied verification for {user.mention} (MC `{mc_id}`): {reason}")
 
-    # ------------------------- background queue ------------------------
-
     async def _queue_loop(self):
         await self.bot.wait_until_red_ready()
         while True:
@@ -475,7 +353,8 @@ class MemberSync(commands.Cog):
                 await self._process_queue_once()
             except Exception as e:
                 log.exception("Queue loop error: %s", e)
-            await asyncio.sleep(120)  # every 2 minutes
+            await asyncio.sleep(120)
+
     async def _process_queue_once(self):
         queue = await self.config.queue()
         if not queue:
@@ -486,8 +365,6 @@ class MemberSync(commands.Cog):
 
         stale = False
         latest = await self._latest_snapshot()
-        # If there is no snapshot at all, we just keep trying.
-        # If snapshot exists, we still try each tick for the queued users.
 
         done = []
         for user_id, data in queue.items():
@@ -498,7 +375,6 @@ class MemberSync(commands.Cog):
                 done.append(user_id)
                 continue
 
-            # try resolve now
             cand = await self._find_member_in_db(discord_user.nick or discord_user.name, mc_id)
             if cand and cand.get("mc_id"):
                 await self._send_review_embed(guild, discord_user, str(cand["mc_id"]), str(cand.get("name") or discord_user.display_name))
@@ -513,7 +389,6 @@ class MemberSync(commands.Cog):
             data["attempts"] = attempts
             queue[user_id] = data
             if attempts >= 30:
-                # expire
                 try:
                     await discord_user.send("Verification queue expired. Please try again later.")
                 except Exception:
@@ -523,8 +398,6 @@ class MemberSync(commands.Cog):
         for uid in done:
             queue.pop(uid, None)
         await self.config.queue.set(queue)
-
-    # ------------------------- commands ------------------------
 
     @commands.group(name="membersync")
     @checks.admin_or_permissions(manage_guild=True)
@@ -545,7 +418,7 @@ class MemberSync(commands.Cog):
             f"Cooldown: {cfg['cooldown_seconds']} sec",
             f"Queue size: {len(cfg.get('queue', {}))}",
         ]
-    await ctx.send("\n".join(lines))
+        await ctx.send("\n".join(lines))
 
     @membersync_group.group(name="config")
     async def config_group(self, ctx: commands.Context):
@@ -585,8 +458,6 @@ class MemberSync(commands.Cog):
         await self.config.alliance_db_path.set(path)
         await ctx.send(f"Alliance DB path set to `{path}`")
 
-    # user-facing - HYBRID COMMAND
-
     @commands.hybrid_command(name="verify")
     @commands.cooldown(1, 30, commands.BucketType.user)
     @commands.guild_only()
@@ -599,10 +470,8 @@ class MemberSync(commands.Cog):
             await ctx.send("This can only be used in a server.")
             return
 
-        # already approved?
         link = await self.get_link_for_discord(ctx.author.id)
         if link:
-            # ensure role exists
             role_id = await self.config.verified_role_id()
             role = ctx.guild.get_role(int(role_id)) if role_id else None
             if role and role not in ctx.author.roles:
@@ -622,7 +491,6 @@ class MemberSync(commands.Cog):
             await ctx.send("Found you. A reviewer will approve or deny shortly.")
             return
 
-        # no match, enqueue
         q = await self.config.queue()
         q[str(ctx.author.id)] = {
             "attempts": 0,
@@ -637,8 +505,6 @@ class MemberSync(commands.Cog):
         except Exception:
             pass
         await ctx.send("I couldn't find you yet. I've queued your verification and will retry automatically.")
-
-    # retro tools
 
     @membersync_group.group(name="retro")
     async def retro_group(self, ctx: commands.Context):
@@ -697,8 +563,6 @@ class MemberSync(commands.Cog):
             count += 1
         await ctx.send(f"Retro applied: {count} link(s).")
 
-    # manual link
-
     @membersync_group.command(name="link")
     async def link(self, ctx: commands.Context, member: discord.Member, mc_id: str, *, display_name: Optional[str] = None):
         """Manually link a Discord member to an MC-ID as approved."""
@@ -708,11 +572,8 @@ class MemberSync(commands.Cog):
         await self._approve_link(ctx.guild, member, mc_id, approver=ctx.author if isinstance(ctx.author, discord.Member) else None)
         await ctx.send(f"Linked {member.mention} to MC `{mc_id}`.")
 
-    # prune job
-
     @commands.Cog.listener()
     async def on_ready(self):
-        # start a loose hourly prune loop
         async def _loop():
             await self.bot.wait_until_red_ready()
             while True:
@@ -732,7 +593,6 @@ class MemberSync(commands.Cog):
         if not role:
             return
 
-        # build current mc-id set
         rows = await self._query_alliance("SELECT user_id, mc_user_id, profile_href FROM members_current")
         current_ids: set[str] = set()
         for r in rows:
@@ -746,9 +606,9 @@ class MemberSync(commands.Cog):
             if mc:
                 current_ids.add(str(mc))
 
-        # fetch approved links
         def _run():
-            con = sqlite3.connect(self.links_db); con.row_factory = sqlite3.Row
+            con = sqlite3.connect(self.links_db)
+            con.row_factory = sqlite3.Row
             try:
                 return [dict(r) for r in con.execute("SELECT * FROM links WHERE status='approved'")]
             finally:
