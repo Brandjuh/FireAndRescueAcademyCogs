@@ -824,24 +824,35 @@ class SanctionTypeSelect(discord.ui.Select):
         super().__init__(placeholder="Choose sanction type", min_values=1, max_values=1, options=options, custom_id="sm:type")
 
     async def callback(self, interaction: discord.Interaction):
-        sanction_type = self.values[0]
-        
-        # Move to reason selection
-        view = ReasonCategoryView(
-            self.parent_view.cog,
-            self.parent_view.admin_user_id,
-            self.parent_view.admin_username,
-            self.parent_view.target_discord_id,
-            self.parent_view.target_mc_id,
-            self.parent_view.target_mc_username,
-            self.parent_view.target_discord_user,
-            sanction_type,
-        )
-        await safe_update(
-            interaction,
-            content=f"Sanction type: **{sanction_type}**\n\nSelect the reason category:",
-            view=view
-        )
+        try:
+            sanction_type = self.values[0]
+            log.info(f"Selected sanction type: {sanction_type}")
+            
+            # Move to reason selection
+            view = ReasonCategoryView(
+                self.parent_view.cog,
+                self.parent_view.admin_user_id,
+                self.parent_view.admin_username,
+                self.parent_view.target_discord_id,
+                self.parent_view.target_mc_id,
+                self.parent_view.target_mc_username,
+                self.parent_view.target_discord_user,
+                sanction_type,
+            )
+            
+            await safe_update(
+                interaction,
+                content=f"Sanction type: **{sanction_type}**\n\nSelect the reason category:",
+                view=view
+            )
+            log.info("Successfully moved to reason category selection")
+            
+        except Exception as e:
+            log.exception(f"Error in SanctionTypeSelect callback: {e}")
+            try:
+                await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+            except:
+                pass
 
 class ReasonCategoryView(discord.ui.View):
     def __init__(self, cog: "SanctionsManager", admin_user_id: int, admin_username: str,
@@ -867,8 +878,8 @@ class ReasonCategoryView(discord.ui.View):
         )
 
 class ReasonCategorySelect(discord.ui.Select):
-    def __init__(self, parent: ReasonCategoryView):
-        self.parent = parent
+    def __init__(self, parent_view: "ReasonCategoryView"):
+        self.parent_view = parent_view
         options = [discord.SelectOption(label=cat) for cat in DEFAULT_RULES.keys()]
         options.append(discord.SelectOption(label="Other reason"))
         super().__init__(placeholder="Choose reason category", min_values=1, max_values=1, options=options, custom_id="sm:category")
@@ -879,30 +890,34 @@ class ReasonCategorySelect(discord.ui.Select):
         if category == "Other reason":
             # Show modal for custom reason
             modal = CustomReasonModal(
-                self.parent.cog,
-                self.parent.admin_user_id,
-                self.parent.admin_username,
-                self.parent.target_discord_id,
-                self.parent.target_mc_id,
-                self.parent.target_mc_username,
-                self.parent.target_discord_user,
-                self.parent.sanction_type,
+                self.parent_view.cog,
+                self.parent_view.admin_user_id,
+                self.parent_view.admin_username,
+                self.parent_view.target_discord_id,
+                self.parent_view.target_mc_id,
+                self.parent_view.target_mc_username,
+                self.parent_view.target_discord_user,
+                self.parent_view.sanction_type,
             )
             await interaction.response.send_modal(modal)
         else:
             # Move to specific rule selection
             view = ReasonDetailView(
-                self.parent.cog,
-                self.parent.admin_user_id,
-                self.parent.admin_username,
-                self.parent.target_discord_id,
-                self.parent.target_mc_id,
-                self.parent.target_mc_username,
-                self.parent.target_discord_user,
-                self.parent.sanction_type,
+                self.parent_view.cog,
+                self.parent_view.admin_user_id,
+                self.parent_view.admin_username,
+                self.parent_view.target_discord_id,
+                self.parent_view.target_mc_id,
+                self.parent_view.target_mc_username,
+                self.parent_view.target_discord_user,
+                self.parent_view.sanction_type,
                 category,
             )
-            await view.send_selection(interaction)
+            await safe_update(
+                interaction,
+                content=f"Category: **{category}**\n\nSelect the specific rule:",
+                view=view
+            )
 
 class ReasonDetailView(discord.ui.View):
     def __init__(self, cog: "SanctionsManager", admin_user_id: int, admin_username: str,
@@ -929,15 +944,13 @@ class ReasonDetailView(discord.ui.View):
         )
 
 class ReasonDetailSelect(discord.ui.Select):
-    def __init__(self, parent: ReasonDetailView):
-        self.parent = parent
-        rules = DEFAULT_RULES.get(parent.reason_category, {})
+    def __init__(self, parent_view: "ReasonDetailView"):
+        self.parent_view = parent_view
+        rules = DEFAULT_RULES.get(parent_view.reason_category, {})
         
         # Get custom rules for this category
-        custom_rules = parent.cog.db.get_custom_rules(
-            parent.target_discord_user.guild.id if parent.target_discord_user else 0,
-            parent.reason_category
-        )
+        guild_id = parent_view.target_discord_user.guild.id if parent_view.target_discord_user else 0
+        custom_rules = parent_view.cog.db.get_custom_rules(guild_id, parent_view.reason_category) if guild_id else []
         
         options = []
         for code, text in rules.items():
@@ -955,27 +968,26 @@ class ReasonDetailSelect(discord.ui.Select):
         
         if selection.startswith("default:"):
             code = selection.split(":", 1)[1]
-            rules = DEFAULT_RULES.get(self.parent.reason_category, {})
+            rules = DEFAULT_RULES.get(self.parent_view.reason_category, {})
             reason_detail = f"{code}. {rules.get(code, '')}"
         else:
             rule_id = int(selection.split(":", 1)[1])
-            custom_rules = self.parent.cog.db.get_custom_rules(
-                self.parent.target_discord_user.guild.id if self.parent.target_discord_user else 0
-            )
+            guild_id = self.parent_view.target_discord_user.guild.id if self.parent_view.target_discord_user else 0
+            custom_rules = self.parent_view.cog.db.get_custom_rules(guild_id) if guild_id else []
             rule = next((r for r in custom_rules if r['rule_id'] == rule_id), None)
             reason_detail = f"{rule['rule_code']}. {rule['rule_text']}" if rule else ""
         
         # Move to summary
         view = SummarySanctionView(
-            self.parent.cog,
-            self.parent.admin_user_id,
-            self.parent.admin_username,
-            self.parent.target_discord_id,
-            self.parent.target_mc_id,
-            self.parent.target_mc_username,
-            self.parent.target_discord_user,
-            self.parent.sanction_type,
-            self.parent.reason_category,
+            self.parent_view.cog,
+            self.parent_view.admin_user_id,
+            self.parent_view.admin_username,
+            self.parent_view.target_discord_id,
+            self.parent_view.target_mc_id,
+            self.parent_view.target_mc_username,
+            self.parent_view.target_discord_user,
+            self.parent_view.sanction_type,
+            self.parent_view.reason_category,
             reason_detail,
         )
         await view.send_summary(interaction)
