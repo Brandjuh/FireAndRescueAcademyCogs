@@ -775,6 +775,77 @@ class MCOnlyModal(discord.ui.Modal, title="MC Member Info"):
             # Use username as fallback if no username provided
             display_name = mc_username_val if mc_username_val else f"MC User {mc_id_val}"
             
+            # Try to find Discord account via MemberSync (reverse lookup)
+            discord_member = None
+            discord_id = None
+            final_mc_id = mc_id_val
+            
+            membersync = self.cog.bot.get_cog("MemberSync")
+            guild = interaction.guild
+            
+            if membersync and guild:
+                try:
+                    log.info("Attempting reverse lookup via MemberSync...")
+                    
+                    # If we have MC ID, try direct lookup
+                    if mc_id_val:
+                        log.info(f"Looking up Discord account for MC ID: {mc_id_val}")
+                        link_data = await membersync.get_link_for_mc(mc_id_val)
+                        log.info(f"MemberSync reverse lookup result: {link_data}")
+                        
+                        if link_data:
+                            discord_id = int(link_data.get("discord_id"))
+                            discord_member = guild.get_member(discord_id)
+                            if not discord_member:
+                                try:
+                                    discord_member = await guild.fetch_member(discord_id)
+                                except:
+                                    pass
+                            
+                            if discord_member:
+                                log.info(f"Found Discord member: {discord_member.name} ({discord_id})")
+                            else:
+                                log.warning(f"Discord ID {discord_id} found but member not in guild")
+                    
+                    # If no MC ID provided but we have username, try to find MC ID from alliance DB
+                    if not mc_id_val and mc_username_val and membersync:
+                        try:
+                            log.info(f"Searching alliance DB for MC username: {mc_username_val}")
+                            rows = await membersync._query_alliance(
+                                "SELECT user_id, mc_user_id FROM members_current WHERE LOWER(name)=?",
+                                (mc_username_val.lower(),)
+                            )
+                            if rows and len(rows) > 0:
+                                found_mc_id = rows[0].get('user_id') or rows[0].get('mc_user_id')
+                                if found_mc_id:
+                                    final_mc_id = str(found_mc_id)
+                                    log.info(f"Found MC ID from alliance DB: {final_mc_id}")
+                                    
+                                    # Now try reverse lookup with this MC ID
+                                    link_data = await membersync.get_link_for_mc(final_mc_id)
+                                    if link_data:
+                                        discord_id = int(link_data.get("discord_id"))
+                                        discord_member = guild.get_member(discord_id)
+                                        if not discord_member:
+                                            try:
+                                                discord_member = await guild.fetch_member(discord_id)
+                                            except:
+                                                pass
+                                        
+                                        if discord_member:
+                                            log.info(f"Found Discord member via username lookup: {discord_member.name}")
+                        except Exception as e:
+                            log.error(f"Error searching alliance DB: {e}", exc_info=True)
+                
+                except Exception as e:
+                    log.error(f"MemberSync reverse lookup failed: {e}", exc_info=True)
+            else:
+                if not membersync:
+                    log.warning("MemberSync cog not loaded")
+                if not guild:
+                    log.warning("No guild context")
+            
+            log.info(f"Final data - MC ID: {final_mc_id}, Username: {display_name}, Discord: {discord_member}")
             log.info(f"Creating SanctionTypeView for MC user: {display_name}")
             
             # Move to sanction type selection
@@ -782,10 +853,10 @@ class MCOnlyModal(discord.ui.Modal, title="MC Member Info"):
                 self.cog,
                 admin_user_id=interaction.user.id,
                 admin_username=str(interaction.user),
-                target_discord_id=None,
-                target_mc_id=mc_id_val,
+                target_discord_id=discord_id,
+                target_mc_id=final_mc_id,
                 target_mc_username=display_name,
-                target_discord_user=None,
+                target_discord_user=discord_member,
             )
             
             # Send new message instead of trying to update
