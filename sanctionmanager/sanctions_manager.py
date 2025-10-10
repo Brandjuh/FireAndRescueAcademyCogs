@@ -652,38 +652,45 @@ class DiscordMemberModal(discord.ui.Modal, title="Discord Member Lookup"):
             mc_id = None
             mc_username = None
             
+            log.info(f"MemberSync cog found: {membersync is not None}")
+            
             if membersync:
                 try:
-                    log.info(f"Looking up MemberSync data for {member.id}")
+                    log.info(f"Looking up MemberSync data for Discord ID: {member.id}")
                     mc_data = await membersync.get_link_for_discord(member.id)
-                    log.info(f"MemberSync returned: {mc_data}")
+                    log.info(f"MemberSync raw data: {mc_data}")
+                    log.info(f"MemberSync data type: {type(mc_data)}")
                     
                     if mc_data:
                         # MemberSync uses 'mc_user_id' key
                         mc_id = mc_data.get("mc_user_id")
-                        log.info(f"Found MC ID: {mc_id}")
+                        log.info(f"Extracted MC ID: {mc_id}")
                         
                         # MemberSync doesn't store username, so we need to look it up
                         # Try to get it from the alliance database via MemberSync's query method
                         if mc_id:
                             try:
+                                log.info(f"Querying alliance DB for MC ID: {mc_id}")
                                 # Use MemberSync's internal method to query alliance DB
                                 rows = await membersync._query_alliance(
                                     "SELECT name FROM members_current WHERE user_id=? OR mc_user_id=?",
                                     (str(mc_id), str(mc_id))
                                 )
+                                log.info(f"Alliance DB query returned {len(rows) if rows else 0} rows")
                                 if rows and len(rows) > 0:
                                     mc_username = rows[0]['name']
                                     log.info(f"Found MC username from alliance DB: {mc_username}")
+                                else:
+                                    log.warning("No rows returned from alliance DB")
                             except Exception as e:
-                                log.warning(f"Could not fetch MC username from alliance DB: {e}")
+                                log.error(f"Could not fetch MC username from alliance DB: {e}", exc_info=True)
                         
                         # Fallback to Discord display name if we couldn't get MC username
                         if not mc_username:
                             mc_username = member.display_name
                             log.info(f"Using Discord display name as fallback: {mc_username}")
                     else:
-                        log.info("No MemberSync link found - member not verified")
+                        log.warning("MemberSync returned None - member not verified")
                         mc_username = member.display_name
                 except Exception as e:
                     log.error(f"MemberSync lookup failed: {e}", exc_info=True)
@@ -694,6 +701,8 @@ class DiscordMemberModal(discord.ui.Modal, title="Discord Member Lookup"):
             
             if not mc_username:
                 mc_username = member.display_name
+            
+            log.info(f"Final MC data - ID: {mc_id}, Username: {mc_username}")
             
             log.info(f"Creating SanctionTypeView for {mc_username}")
             
