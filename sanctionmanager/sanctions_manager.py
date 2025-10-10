@@ -661,12 +661,27 @@ class DiscordMemberModal(discord.ui.Modal, title="Discord Member Lookup"):
                     if mc_data:
                         # MemberSync uses 'mc_user_id' key
                         mc_id = mc_data.get("mc_user_id")
+                        log.info(f"Found MC ID: {mc_id}")
                         
-                        # Try to get the actual MC username from the data
-                        # The link might not have the username, so we use display_name as fallback
-                        mc_username = mc_data.get("mc_username") or mc_data.get("username") or member.display_name
+                        # MemberSync doesn't store username, so we need to look it up
+                        # Try to get it from the alliance database via MemberSync's query method
+                        if mc_id:
+                            try:
+                                # Use MemberSync's internal method to query alliance DB
+                                rows = await membersync._query_alliance(
+                                    "SELECT name FROM members_current WHERE user_id=? OR mc_user_id=?",
+                                    (str(mc_id), str(mc_id))
+                                )
+                                if rows and len(rows) > 0:
+                                    mc_username = rows[0]['name']
+                                    log.info(f"Found MC username from alliance DB: {mc_username}")
+                            except Exception as e:
+                                log.warning(f"Could not fetch MC username from alliance DB: {e}")
                         
-                        log.info(f"Found MC data: ID={mc_id}, Username={mc_username}")
+                        # Fallback to Discord display name if we couldn't get MC username
+                        if not mc_username:
+                            mc_username = member.display_name
+                            log.info(f"Using Discord display name as fallback: {mc_username}")
                     else:
                         log.info("No MemberSync link found - member not verified")
                         mc_username = member.display_name
