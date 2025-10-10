@@ -11,7 +11,7 @@ import discord
 from redbot.core import commands, checks, Config
 from redbot.core.data_manager import cog_data_path
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 
 log = logging.getLogger("red.FARA.AllianceLogsPub")
 
@@ -21,11 +21,11 @@ DEFAULTS = {
     "main_channel_id": None,
     "mirrors": {},
     "interval_minutes": 5,
-    "style": "minimal",               # minimal | compact | fields
+    "style": "minimal",
     "emoji_titles": True,
     "strict_titles": True,
-    "show_executor_minimal": True,    # default ON so you get the executor after date
-    "max_posts_per_run": 50,          # Prevent flooding
+    "show_executor_minimal": True,
+    "max_posts_per_run": 50,
     "colors": {},
     "icons": {},
 }
@@ -112,6 +112,7 @@ class AllianceLogsPub(commands.Cog):
         self.data_path = cog_data_path(self)
         self.db_path = self.data_path / "state_pub.db"
         self._bg_task: Optional[asyncio.Task] = None
+        self._posting_lock = asyncio.Lock()  # NEW: Prevent concurrent posting
 
     async def cog_load(self):
         await self._init_db()
@@ -126,6 +127,13 @@ class AllianceLogsPub(commands.Cog):
         self.data_path.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("CREATE TABLE IF NOT EXISTS state(k TEXT PRIMARY KEY, v TEXT)")
+            # NEW: Track posted IDs to prevent duplicates
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS posted_logs(
+                log_id INTEGER PRIMARY KEY,
+                posted_at TEXT NOT NULL
+            )
+            """)
             await db.commit()
 
     async def _get_last_id(self) -> int:
@@ -144,6 +152,27 @@ class AllianceLogsPub(commands.Cog):
             )
             await db.commit()
 
+    async def _mark_log_posted(self, log_id: int) -> bool:
+        """Mark a log as posted. Returns False if already posted (duplicate detection)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            try:
+                await db.execute(
+                    "INSERT INTO posted_logs(log_id, posted_at) VALUES(?, ?)",
+                    (int(log_id), now_utc())
+                )
+                await db.commit()
+                return True
+            except aiosqlite.IntegrityError:
+                # Already posted!
+                log.warning("Duplicate detected: Log ID %d was already posted", log_id)
+                return False
+
+    async def _is_already_posted(self, log_id: int) -> bool:
+        """Check if a log ID was already posted."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute("SELECT 1 FROM posted_logs WHERE log_id = ?", (int(log_id),))
+            return await cur.fetchone() is not None
+
     def _profile_url(self, mc_user_id: str) -> Optional[str]:
         """Generate profile URL. Fixed to use /profile/ instead of /users/."""
         if not mc_user_id:
@@ -157,7 +186,6 @@ class AllianceLogsPub(commands.Cog):
         """Create safe markdown link, escaping special chars."""
         if not text or not url:
             return text or url or ""
-        # Escape markdown special chars in display text
         safe_text = (text.replace("[", "\\[").replace("]", "\\]")
                         .replace("(", "\\(").replace(")", "\\)"))
         return f"[{safe_text}]({url})"
@@ -167,11 +195,10 @@ class AllianceLogsPub(commands.Cog):
         if not ts_str:
             return "-"
         try:
-            # Parse ISO format from scraper
             dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-            return dt.strftime("%d %b %H:%M")  # "06 Oct 15:30"
+            return dt.strftime("%d %b %H:%M")
         except:
-            return ts_str  # Fallback to raw
+            return ts_str
 
     async def _discord_id_for_mc(self, mc_user_id: str) -> Optional[int]:
         ms = self.bot.get_cog("MemberSync")
@@ -190,7 +217,6 @@ class AllianceLogsPub(commands.Cog):
         key = _map_user_action_input(key_raw) or _map_user_action_input(row.get("action_text") or "")
         
         if not key or key not in DISPLAY:
-            # Log unknown actions for debugging
             log.info("Unknown action_key: '%s' (text: '%s')", 
                      row.get("action_key"), row.get("action_text"))
             return "Alliance log", PALETTE["grey"], "ℹ️", ""
@@ -204,7 +230,6 @@ class AllianceLogsPub(commands.Cog):
         ts = row.get("ts") or "-"
         formatted_ts = self._format_timestamp(ts)
         
-        # First line: date and (optional) executor
         first = f"`{formatted_ts}` —"
         if await self.config.show_executor_minimal():
             by = row.get("executed_name") or "-"
@@ -217,16 +242,13 @@ class AllianceLogsPub(commands.Cog):
             first += f" by {by}"
         lines.append(first)
 
-        # Second line: description
         desc = row.get("description") or row.get("action_text") or "-"
         lines.append(str(desc))
 
-        # Add contribution amount if present
         if row.get("contribution_amount", 0) > 0:
             amount = f"{row['contribution_amount']:,}".replace(",", ".")
             lines.append(f"💰 Contributed: {amount} coins")
 
-        # Third line: target (affected or fallback to executor link)
         aff_name = row.get("affected_name") or ""
         aff_url = row.get("affected_url") or ""
         block: Optional[str] = None
@@ -278,7 +300,6 @@ class AllianceLogsPub(commands.Cog):
         details = str(row.get("description") or "-")
         lines.append(f"**Details:** {details}")
         
-        # Add contribution amount if present
         if row.get("contribution_amount", 0) > 0:
             amount = f"{row['contribution_amount']:,}".replace(",", ".")
             lines.append(f"**Contributed:** 💰 {amount} coins")
@@ -288,149 +309,164 @@ class AllianceLogsPub(commands.Cog):
         lines.append(f"**Date:** `{formatted_ts}`")
         return NL.join(lines)
 
-    async def _publish_rows(self, rows: List[Dict[str, Any]]) -> int:
-        guild = self.bot.guilds[0] if self.bot.guilds else None
-        if not guild:
-            return 0
-        ch_id = await self.config.main_channel_id()
-        if not ch_id:
-            return 0
-        main_ch = guild.get_channel(int(ch_id))
-        if not isinstance(main_ch, discord.TextChannel):
-            return 0
-        mirrors = await self.config.mirrors()
-        style = (await self.config.style()).lower()
-        emoji_titles = bool(await self.config.emoji_titles())
+    async def _publish_single_log(self, row: Dict[str, Any], main_ch: discord.TextChannel, 
+                                   mirrors: Dict, style: str, emoji_titles: bool) -> bool:
+        """
+        Publish a single log entry with transactional ID tracking.
+        Returns True if successfully posted, False otherwise.
+        """
+        log_id = int(row["id"])
+        
+        # CRITICAL: Check if already posted
+        if await self._is_already_posted(log_id):
+            log.info("Skipping log ID %d - already posted", log_id)
+            return False
+        
+        title, color, emoji, key = self._title_from_row(row)
+        title_text = f"{emoji} {title}" if emoji_titles and emoji else title
 
-        log.info("Publishing %d rows, IDs: %s", len(rows), [r.get("id") for r in rows[:10]])
-
-        posted = 0
-        for idx, row in enumerate(rows):
-            title, color, emoji, key = self._title_from_row(row)
-            title_text = f"{emoji} {title}" if emoji_titles and emoji else title
-
-            if style == "minimal":
-                desc = await self._desc_minimal(row)
-                e = discord.Embed(title=title_text, description=desc, color=color, timestamp=datetime.utcnow())
-            elif style == "compact":
-                desc = await self._desc_compact(row)
-                e = discord.Embed(title=title_text, description=desc, color=color, timestamp=datetime.utcnow())
-            else:  # fields
-                e = discord.Embed(title=title_text, color=color, timestamp=datetime.utcnow())
-                by = row.get("executed_name") or "-"
-                if row.get("executed_mc_id"):
-                    url = self._profile_url(str(row["executed_mc_id"]))
-                    by = self._safe_markdown_link(by, url)
-                    did = await self._discord_id_for_mc(str(row["executed_mc_id"]))
+        # Build embed based on style
+        if style == "minimal":
+            desc = await self._desc_minimal(row)
+            e = discord.Embed(title=title_text, description=desc, color=color, timestamp=datetime.utcnow())
+        elif style == "compact":
+            desc = await self._desc_compact(row)
+            e = discord.Embed(title=title_text, description=desc, color=color, timestamp=datetime.utcnow())
+        else:  # fields
+            e = discord.Embed(title=title_text, color=color, timestamp=datetime.utcnow())
+            by = row.get("executed_name") or "-"
+            if row.get("executed_mc_id"):
+                url = self._profile_url(str(row["executed_mc_id"]))
+                by = self._safe_markdown_link(by, url)
+                did = await self._discord_id_for_mc(str(row["executed_mc_id"]))
+                if did:
+                    by += f" [[D]]({self._discord_profile_url(did)})"
+            e.add_field(name="By", value=by, inline=False)
+            
+            aff_name = row.get("affected_name") or ""
+            aff_url = row.get("affected_url") or ""
+            aff_value = "-"
+            if aff_name or aff_url:
+                acc = self._safe_markdown_link(aff_name or "link", aff_url) if aff_url else (aff_name or "link")
+                if str(row.get("affected_type") or "") == "user" and row.get("affected_mc_id"):
+                    did = await self._discord_id_for_mc(str(row["affected_mc_id"]))
                     if did:
-                        by += f" [[D]]({self._discord_profile_url(did)})"
-                e.add_field(name="By", value=by, inline=False)
-                
-                aff_name = row.get("affected_name") or ""
-                aff_url = row.get("affected_url") or ""
-                aff_value = "-"
-                if aff_name or aff_url:
-                    acc = self._safe_markdown_link(aff_name or "link", aff_url) if aff_url else (aff_name or "link")
-                    if str(row.get("affected_type") or "") == "user" and row.get("affected_mc_id"):
-                        did = await self._discord_id_for_mc(str(row["affected_mc_id"]))
-                        if did:
-                            acc += f" [[D]]({self._discord_profile_url(did)})"
-                    aff_value = acc
-                e.add_field(name="Affected", value=aff_value, inline=False)
-                e.add_field(name="Details", value=str(row.get("description") or "-"), inline=False)
-                
-                # Add contribution if present
-                if row.get("contribution_amount", 0) > 0:
-                    amount = f"{row['contribution_amount']:,}".replace(",", ".")
-                    e.add_field(name="Contribution", value=f"💰 {amount} coins", inline=False)
-                
-                ts = row.get("ts") or "-"
-                formatted_ts = self._format_timestamp(ts)
-                e.add_field(name="Date", value=f"`{formatted_ts}`", inline=False)
+                        acc += f" [[D]]({self._discord_profile_url(did)})"
+                aff_value = acc
+            e.add_field(name="Affected", value=aff_value, inline=False)
+            e.add_field(name="Details", value=str(row.get("description") or "-"), inline=False)
+            
+            if row.get("contribution_amount", 0) > 0:
+                amount = f"{row['contribution_amount']:,}".replace(",", ".")
+                e.add_field(name="Contribution", value=f"💰 {amount} coins", inline=False)
+            
+            ts = row.get("ts") or "-"
+            formatted_ts = self._format_timestamp(ts)
+            e.add_field(name="Date", value=f"`{formatted_ts}`", inline=False)
 
-            try:
-                await main_ch.send(embed=e)
-                posted += 1
-                
-                # Rate limiting: small delay every 5 messages
-                if (idx + 1) % 5 == 0:
-                    await asyncio.sleep(1)
-                    
-            except discord.Forbidden as e:
-                log.error("No permission to post in main channel: %s", e)
-                break  # Stop trying if we don't have permissions
-            except discord.HTTPException as e:
-                log.warning("Failed to post log #%d: %s", row.get("id", "?"), e)
-                continue
-            except Exception as e:
-                log.exception("Unexpected error posting log #%d: %s", row.get("id", "?"), e)
-                continue
+        # Post to main channel
+        try:
+            await main_ch.send(embed=e)
+            log.info("Posted log ID %d to main channel", log_id)
+        except discord.Forbidden as ex:
+            log.error("No permission to post in main channel: %s", ex)
+            return False
+        except discord.HTTPException as ex:
+            log.warning("Failed to post log ID %d to main: %s", log_id, ex)
+            return False
+        except Exception as ex:
+            log.exception("Unexpected error posting log ID %d: %s", log_id, ex)
+            return False
 
-            # Mirror to other channels
-            if key:
-                m = mirrors.get(key, {})
-                if m and m.get("enabled"):
-                    for cid in m.get("channels") or []:
-                        mch = guild.get_channel(int(cid))
-                        if not isinstance(mch, discord.TextChannel):
-                            continue
-                        try:
-                            await mch.send(embed=e)
-                        except discord.Forbidden:
-                            log.warning("No permission to mirror to channel %d", cid)
-                        except discord.HTTPException as e:
-                            log.warning("Failed to mirror to channel %d: %s", cid, e)
-                        except Exception as e:
-                            log.exception("Unexpected error mirroring to channel %d: %s", cid, e)
+        # CRITICAL: Mark as posted immediately after successful main post
+        if not await self._mark_log_posted(log_id):
+            # This should never happen since we checked above, but just in case
+            log.error("RACE CONDITION: Log ID %d was posted by another process!", log_id)
+            return False
+        
+        # Update last_id immediately after successful post
+        await self._set_last_id(log_id)
+        log.debug("Updated last_id to %d after posting", log_id)
 
-        return posted
+        # Mirror to other channels (failures here don't affect main post)
+        if key:
+            m = mirrors.get(key, {})
+            if m and m.get("enabled"):
+                guild = main_ch.guild
+                for cid in m.get("channels") or []:
+                    mch = guild.get_channel(int(cid))
+                    if not isinstance(mch, discord.TextChannel):
+                        continue
+                    try:
+                        await mch.send(embed=e)
+                    except discord.Forbidden:
+                        log.warning("No permission to mirror to channel %d", cid)
+                    except discord.HTTPException as ex:
+                        log.warning("Failed to mirror to channel %d: %s", cid, ex)
+                    except Exception as ex:
+                        log.exception("Unexpected error mirroring to channel %d: %s", cid, ex)
+
+        return True
 
     async def _tick_once(self) -> int:
-        sc = self.bot.get_cog("AllianceScraper")
-        if not sc or not hasattr(sc, "get_logs_after"):
+        """Process new logs one at a time with transactional safety."""
+        # Prevent concurrent runs
+        if self._posting_lock.locked():
+            log.info("Skipping tick - already posting")
             return 0
         
-        last_id = await self._get_last_id()
-        max_posts = await self.config.max_posts_per_run()
-        
-        try:
-            # Fetch more than we'll post so we can queue the rest
-            rows = await sc.get_logs_after(int(last_id), limit=max_posts)  # type: ignore
-        except Exception as e:
-            log.exception("Failed to fetch logs: %s", e)
-            return 0
-        
-        if not rows:
-            return 0
-        
-        # BELANGRIJK: Filter dubbele IDs voor de zekerheid
-        seen_ids = set()
-        unique_rows = []
-        for row in rows:
-            row_id = int(row["id"])
-            if row_id not in seen_ids:
-                seen_ids.add(row_id)
-                unique_rows.append(row)
-            else:
-                log.warning("Skipping duplicate row ID %d", row_id)
-        
-        if not unique_rows:
-            return 0
-        
-        posted = await self._publish_rows(unique_rows)
-        
-        if posted > 0:
-            # Update last_id to the highest ID we successfully posted
-            newest = max((int(r["id"]) for r in unique_rows[:posted]), default=last_id)
+        async with self._posting_lock:
+            sc = self.bot.get_cog("AllianceScraper")
+            if not sc or not hasattr(sc, "get_logs_after"):
+                return 0
             
-            # EXTRA VEILIGHEID: Alleen updaten als newest echt hoger is
-            if newest > last_id:
-                await self._set_last_id(newest)
-                log.info("Updated last_id from %d to %d (posted %d logs)", last_id, newest, posted)
-            else:
-                log.warning("Newest ID %d not greater than last_id %d, not updating", newest, last_id)
-        
-        return posted
+            last_id = await self._get_last_id()
+            max_posts = await self.config.max_posts_per_run()
+            
+            # Get channel config
+            guild = self.bot.guilds[0] if self.bot.guilds else None
+            if not guild:
+                return 0
+            ch_id = await self.config.main_channel_id()
+            if not ch_id:
+                return 0
+            main_ch = guild.get_channel(int(ch_id))
+            if not isinstance(main_ch, discord.TextChannel):
+                return 0
+            
+            mirrors = await self.config.mirrors()
+            style = (await self.config.style()).lower()
+            emoji_titles = bool(await self.config.emoji_titles())
+            
+            try:
+                # Fetch logs after last_id
+                rows = await sc.get_logs_after(int(last_id), limit=max_posts)
+            except Exception as e:
+                log.exception("Failed to fetch logs: %s", e)
+                return 0
+            
+            if not rows:
+                return 0
+            
+            log.info("Fetched %d logs after ID %d (IDs: %s)", 
+                    len(rows), last_id, [r["id"] for r in rows[:10]])
+            
+            posted = 0
+            for idx, row in enumerate(rows):
+                # Post single log with full transaction safety
+                success = await self._publish_single_log(row, main_ch, mirrors, style, emoji_titles)
+                
+                if success:
+                    posted += 1
+                    # Small delay every 5 posts to avoid rate limits
+                    if (posted % 5) == 0:
+                        await asyncio.sleep(1)
+                else:
+                    # If posting failed (permissions, duplicate, etc), log but continue
+                    log.debug("Failed to post log ID %d, continuing", row["id"])
+            
+            log.info("Posted %d/%d logs successfully", posted, len(rows))
+            return posted
 
     async def _maybe_start_background(self):
         if self._bg_task is None:
@@ -474,11 +510,9 @@ class AllianceLogsPub(commands.Cog):
         """Show current status and last processed ID."""
         last_id = await self._get_last_id()
         
-        # Check if scraper is available
         sc = self.bot.get_cog("AllianceScraper")
         scraper_available = sc is not None and hasattr(sc, "get_logs_after")
         
-        # Get total log count if scraper available
         total_logs = "N/A"
         if scraper_available:
             try:
@@ -490,6 +524,17 @@ class AllianceLogsPub(commands.Cog):
             except Exception as e:
                 total_logs = f"Error: {e}"
         
+        # Check posted logs table
+        posted_count = 0
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cur = await db.execute("SELECT COUNT(*) FROM posted_logs")
+                row = await cur.fetchone()
+                if row:
+                    posted_count = row[0]
+        except Exception:
+            pass
+        
         cfg = await self.config.all()
         
         lines = [
@@ -497,6 +542,7 @@ class AllianceLogsPub(commands.Cog):
             "=== AllianceLogsPub Status ===",
             f"Last processed ID: {last_id}",
             f"Total logs in DB: {total_logs}",
+            f"Posted logs tracked: {posted_count}",
             f"Scraper available: {scraper_available}",
             f"Max posts per run: {cfg['max_posts_per_run']}",
             f"Interval: {cfg['interval_minutes']} minutes",
@@ -512,6 +558,27 @@ class AllianceLogsPub(commands.Cog):
         await self._set_last_id(int(new_id))
         await ctx.send(f"✅ Updated last_id from {old_id} to {new_id}")
         log.info("Manual last_id update: %d -> %d (by %s)", old_id, new_id, ctx.author)
+
+    @alog_group.command(name="clearposted")
+    async def clearposted(self, ctx: commands.Context):
+        """Clear the posted_logs tracking table (nuclear option!)."""
+        await ctx.send("⚠️ This will clear all tracking of posted logs. Are you sure? Type `yes` to confirm.")
+        
+        def check(m):
+            return m.author == ctx.author and m.channel == ctx.channel and m.content.lower() == "yes"
+        
+        try:
+            await self.bot.wait_for("message", check=check, timeout=30.0)
+        except asyncio.TimeoutError:
+            await ctx.send("❌ Cancelled - no confirmation received")
+            return
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM posted_logs")
+            await db.commit()
+        
+        await ctx.send("✅ Cleared posted_logs table. Be careful of duplicates!")
+        log.warning("Posted logs table cleared by %s", ctx.author)
 
     @alog_group.command(name="listactions")
     async def listactions(self, ctx: commands.Context):
@@ -698,6 +765,7 @@ class AllianceLogsPub(commands.Cog):
     async def run(self, ctx: commands.Context):
         n = await self._tick_once()
         await ctx.send(f"Posted {n} new log(s).")
+
 
 async def setup(bot):
     cog = AllianceLogsPub(bot)
