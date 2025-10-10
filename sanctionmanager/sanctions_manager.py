@@ -2,6 +2,7 @@ import asyncio
 import aiohttp
 import json
 import logging
+import re
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -587,46 +588,69 @@ class DiscordMemberModal(discord.ui.Modal, title="Discord Member Lookup"):
             return
         
         # Try to find member
-        member_str = str(self.member_input).strip()
+        member_str = str(self.member_input.value).strip()
         member = None
         
-        # Try mention
-        if member_str.startswith('<@') and member_str.endswith('>'):
-            member_id = member_str.strip('<@!>')
+        # Try mention format <@!123> or <@123>
+        import re
+        mention_match = re.match(r'<@!?(\d+)>', member_str)
+        if mention_match:
             try:
-                member = guild.get_member(int(member_id))
+                member = guild.get_member(int(mention_match.group(1)))
+                if not member:
+                    member = await guild.fetch_member(int(mention_match.group(1)))
             except:
                 pass
         
-        # Try ID
+        # Try direct ID
         if not member and member_str.isdigit():
             try:
                 member = guild.get_member(int(member_str))
+                if not member:
+                    member = await guild.fetch_member(int(member_str))
             except:
                 pass
         
-        # Try username
+        # Try username (case insensitive)
+        if not member:
+            member_str_lower = member_str.lower()
+            for m in guild.members:
+                if m.name.lower() == member_str_lower or (m.nick and m.nick.lower() == member_str_lower):
+                    member = m
+                    break
+        
+        # Try display name
         if not member:
             for m in guild.members:
-                if m.name.lower() == member_str.lower() or (m.nick and m.nick.lower() == member_str.lower()):
+                if m.display_name.lower() == member_str_lower:
                     member = m
                     break
         
         if not member:
-            await interaction.followup.send("❌ Could not find that Discord member.", ephemeral=True)
+            await interaction.followup.send(
+                f"❌ Could not find Discord member: `{member_str}`\n"
+                f"Try using their exact Discord ID or mention them.",
+                ephemeral=True
+            )
             return
         
         # Look up MC info via MemberSync
         membersync = self.cog.bot.get_cog("MemberSync")
         mc_data = None
-        if membersync:
-            mc_data = await membersync.get_link_for_discord(member.id)
+        mc_id = None
+        mc_username = None
         
-        if mc_data:
-            mc_id = mc_data.get("mc_user_id")
-            mc_username = mc_data.get("mc_username") or member.display_name
-        else:
-            mc_id = None
+        if membersync:
+            try:
+                mc_data = await membersync.get_link_for_discord(member.id)
+                if mc_data:
+                    mc_id = mc_data.get("mc_user_id")
+                    # Try to get username from alliance DB if not in link
+                    mc_username = member.display_name
+            except Exception as e:
+                log.warning(f"MemberSync lookup failed: {e}")
+        
+        if not mc_username:
             mc_username = member.display_name
         
         # Move to sanction type selection
@@ -639,7 +663,15 @@ class DiscordMemberModal(discord.ui.Modal, title="Discord Member Lookup"):
             target_mc_username=mc_username,
             target_discord_user=member,
         )
-        await view.send_selection(interaction)
+        
+        # Send new message instead of trying to update
+        embed = view._create_target_embed()
+        await interaction.followup.send(
+            content="Select the type of sanction:",
+            embed=embed,
+            view=view,
+            ephemeral=True
+        )
 
 class MCOnlyModal(discord.ui.Modal, title="MC Member Info"):
     mc_id = discord.ui.TextInput(
@@ -665,8 +697,8 @@ class MCOnlyModal(discord.ui.Modal, title="MC Member Info"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         
-        mc_id_val = str(self.mc_id).strip() if self.mc_id.value else None
-        mc_username_val = str(self.mc_username).strip() if self.mc_username.value else None
+        mc_id_val = str(self.mc_id.value).strip() if self.mc_id.value else None
+        mc_username_val = str(self.mc_username.value).strip() if self.mc_username.value else None
         
         # At least one must be provided
         if not mc_id_val and not mc_username_val:
@@ -686,7 +718,15 @@ class MCOnlyModal(discord.ui.Modal, title="MC Member Info"):
             target_mc_username=display_name,
             target_discord_user=None,
         )
-        await view.send_selection(interaction)
+        
+        # Send new message instead of trying to update
+        embed = view._create_target_embed()
+        await interaction.followup.send(
+            content="Select the type of sanction:",
+            embed=embed,
+            view=view,
+            ephemeral=True
+        )
 
 class SanctionTypeView(discord.ui.View):
     def __init__(self, cog: "SanctionsManager", admin_user_id: int, admin_username: str,
@@ -702,17 +742,33 @@ class SanctionTypeView(discord.ui.View):
         self.target_discord_user = target_discord_user
         self.add_item(SanctionTypeSelect(self))
 
-    async def send_selection(self, interaction: discord.Interaction):
-        target_info = f"**Target**: {self.target_mc_username}"
-        if self.target_discord_user:
-            target_info += f" ({self.target_discord_user.mention})"
-        elif not self.target_discord_id:
-            target_info += " (No Discord found)"
+    def _create_target_embed(self) -> discord.Embed:
+        """Create embed showing target info."""
+        embed = discord.Embed(
+            title="🎯 Target Member",
+            color=discord.Color.blue(),
+        )
         
-        await safe_update(
-            interaction,
-            content=f"{target_info}\n\nSelect the type of sanction:",
-            view=self
+        member_info = f"**MC Username**: {self.target_mc_username}\n"
+        if self.target_mc_id:
+            member_info += f"**MC ID**: {self.target_mc_id}\n"
+            member_info += f"**MC Profile**: [Link]({_mc_profile_url(self.target_mc_id)})\n"
+        if self.target_discord_user:
+            member_info += f"**Discord**: {self.target_discord_user.mention}\n"
+        else:
+            member_info += f"**Discord**: No Discord found\n"
+        
+        embed.description = member_info
+        return embed
+
+    async def send_selection(self, interaction: discord.Interaction):
+        """Deprecated - use followup.send with embed instead."""
+        embed = self._create_target_embed()
+        await interaction.followup.send(
+            content="Select the type of sanction:",
+            embed=embed,
+            view=self,
+            ephemeral=True
         )
 
 class SanctionTypeSelect(discord.ui.Select):
