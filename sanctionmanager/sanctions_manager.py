@@ -28,7 +28,7 @@ def fmt_dt(timestamp: int) -> str:
 
 def _mc_profile_url(mc_id: str) -> str:
     """Generate Missionchief profile URL."""
-    return f"https://www.missionchief.com/users/{mc_id}"
+    return f"https://www.missionchief.com/profile/{mc_id}"
 
 async def safe_update(interaction: discord.Interaction, *, content=None, embed=None, view=None):
     """Robust message updater for component/modal callbacks."""
@@ -656,16 +656,26 @@ class DiscordMemberModal(discord.ui.Modal, title="Discord Member Lookup"):
                 try:
                     log.info(f"Looking up MemberSync data for {member.id}")
                     mc_data = await membersync.get_link_for_discord(member.id)
+                    log.info(f"MemberSync returned: {mc_data}")
+                    
                     if mc_data:
+                        # MemberSync uses 'mc_user_id' key
                         mc_id = mc_data.get("mc_user_id")
-                        mc_username = member.display_name
+                        
+                        # Try to get the actual MC username from the data
+                        # The link might not have the username, so we use display_name as fallback
+                        mc_username = mc_data.get("mc_username") or mc_data.get("username") or member.display_name
+                        
                         log.info(f"Found MC data: ID={mc_id}, Username={mc_username}")
                     else:
-                        log.info("No MemberSync data found")
+                        log.info("No MemberSync link found - member not verified")
+                        mc_username = member.display_name
                 except Exception as e:
-                    log.error(f"MemberSync lookup failed: {e}")
+                    log.error(f"MemberSync lookup failed: {e}", exc_info=True)
+                    mc_username = member.display_name
             else:
-                log.warning("MemberSync cog not found")
+                log.warning("MemberSync cog not loaded")
+                mc_username = member.display_name
             
             if not mc_username:
                 mc_username = member.display_name
@@ -885,39 +895,51 @@ class ReasonCategorySelect(discord.ui.Select):
         super().__init__(placeholder="Choose reason category", min_values=1, max_values=1, options=options, custom_id="sm:category")
 
     async def callback(self, interaction: discord.Interaction):
-        category = self.values[0]
-        
-        if category == "Other reason":
-            # Show modal for custom reason
-            modal = CustomReasonModal(
-                self.parent_view.cog,
-                self.parent_view.admin_user_id,
-                self.parent_view.admin_username,
-                self.parent_view.target_discord_id,
-                self.parent_view.target_mc_id,
-                self.parent_view.target_mc_username,
-                self.parent_view.target_discord_user,
-                self.parent_view.sanction_type,
-            )
-            await interaction.response.send_modal(modal)
-        else:
-            # Move to specific rule selection
-            view = ReasonDetailView(
-                self.parent_view.cog,
-                self.parent_view.admin_user_id,
-                self.parent_view.admin_username,
-                self.parent_view.target_discord_id,
-                self.parent_view.target_mc_id,
-                self.parent_view.target_mc_username,
-                self.parent_view.target_discord_user,
-                self.parent_view.sanction_type,
-                category,
-            )
-            await safe_update(
-                interaction,
-                content=f"Category: **{category}**\n\nSelect the specific rule:",
-                view=view
-            )
+        try:
+            category = self.values[0]
+            log.info(f"Selected reason category: {category}")
+            
+            if category == "Other reason":
+                # Show modal for custom reason
+                modal = CustomReasonModal(
+                    self.parent_view.cog,
+                    self.parent_view.admin_user_id,
+                    self.parent_view.admin_username,
+                    self.parent_view.target_discord_id,
+                    self.parent_view.target_mc_id,
+                    self.parent_view.target_mc_username,
+                    self.parent_view.target_discord_user,
+                    self.parent_view.sanction_type,
+                )
+                await interaction.response.send_modal(modal)
+                log.info("Sent custom reason modal")
+            else:
+                # Move to specific rule selection
+                view = ReasonDetailView(
+                    self.parent_view.cog,
+                    self.parent_view.admin_user_id,
+                    self.parent_view.admin_username,
+                    self.parent_view.target_discord_id,
+                    self.parent_view.target_mc_id,
+                    self.parent_view.target_mc_username,
+                    self.parent_view.target_discord_user,
+                    self.parent_view.sanction_type,
+                    category,
+                )
+                
+                await safe_update(
+                    interaction,
+                    content=f"Category: **{category}**\n\nSelect the specific rule:",
+                    view=view
+                )
+                log.info("Successfully moved to reason detail selection")
+                
+        except Exception as e:
+            log.exception(f"Error in ReasonCategorySelect callback: {e}")
+            try:
+                await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+            except:
+                pass
 
 class ReasonDetailView(discord.ui.View):
     def __init__(self, cog: "SanctionsManager", admin_user_id: int, admin_username: str,
@@ -964,33 +986,45 @@ class ReasonDetailSelect(discord.ui.Select):
         super().__init__(placeholder="Choose specific rule", min_values=1, max_values=1, options=options[:25], custom_id="sm:detail")
 
     async def callback(self, interaction: discord.Interaction):
-        selection = self.values[0]
-        
-        if selection.startswith("default:"):
-            code = selection.split(":", 1)[1]
-            rules = DEFAULT_RULES.get(self.parent_view.reason_category, {})
-            reason_detail = f"{code}. {rules.get(code, '')}"
-        else:
-            rule_id = int(selection.split(":", 1)[1])
-            guild_id = self.parent_view.target_discord_user.guild.id if self.parent_view.target_discord_user else 0
-            custom_rules = self.parent_view.cog.db.get_custom_rules(guild_id) if guild_id else []
-            rule = next((r for r in custom_rules if r['rule_id'] == rule_id), None)
-            reason_detail = f"{rule['rule_code']}. {rule['rule_text']}" if rule else ""
-        
-        # Move to summary
-        view = SummarySanctionView(
-            self.parent_view.cog,
-            self.parent_view.admin_user_id,
-            self.parent_view.admin_username,
-            self.parent_view.target_discord_id,
-            self.parent_view.target_mc_id,
-            self.parent_view.target_mc_username,
-            self.parent_view.target_discord_user,
-            self.parent_view.sanction_type,
-            self.parent_view.reason_category,
-            reason_detail,
-        )
-        await view.send_summary(interaction)
+        try:
+            selection = self.values[0]
+            log.info(f"Selected reason detail: {selection}")
+            
+            if selection.startswith("default:"):
+                code = selection.split(":", 1)[1]
+                rules = DEFAULT_RULES.get(self.parent_view.reason_category, {})
+                reason_detail = f"{code}. {rules.get(code, '')}"
+            else:
+                rule_id = int(selection.split(":", 1)[1])
+                guild_id = self.parent_view.target_discord_user.guild.id if self.parent_view.target_discord_user else 0
+                custom_rules = self.parent_view.cog.db.get_custom_rules(guild_id) if guild_id else []
+                rule = next((r for r in custom_rules if r['rule_id'] == rule_id), None)
+                reason_detail = f"{rule['rule_code']}. {rule['rule_text']}" if rule else ""
+            
+            log.info(f"Reason detail: {reason_detail}")
+            
+            # Move to summary
+            view = SummarySanctionView(
+                self.parent_view.cog,
+                self.parent_view.admin_user_id,
+                self.parent_view.admin_username,
+                self.parent_view.target_discord_id,
+                self.parent_view.target_mc_id,
+                self.parent_view.target_mc_username,
+                self.parent_view.target_discord_user,
+                self.parent_view.sanction_type,
+                self.parent_view.reason_category,
+                reason_detail,
+            )
+            await view.send_summary(interaction)
+            log.info("Successfully sent summary")
+            
+        except Exception as e:
+            log.exception(f"Error in ReasonDetailSelect callback: {e}")
+            try:
+                await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
+            except:
+                pass
 
 class CustomReasonModal(discord.ui.Modal, title="Custom Reason"):
     reason = discord.ui.TextInput(
@@ -1901,7 +1935,36 @@ class EditNotesModal(discord.ui.Modal, title="Edit Admin Notes"):
         
         await ctx.send(embed=embed)
 
-    @commands.command(name="warnings")
+    @commands.command(name="testmembersync")
+    @commands.admin()
+    async def testmembersync(self, ctx: commands.Context, member: discord.Member):
+        """Test MemberSync integration for debugging."""
+        membersync = self.bot.get_cog("MemberSync")
+        
+        if not membersync:
+            await ctx.send("❌ MemberSync cog not loaded!")
+            return
+        
+        await ctx.send(f"Testing MemberSync for {member.mention}...")
+        
+        try:
+            mc_data = await membersync.get_link_for_discord(member.id)
+            
+            if mc_data:
+                output = "✅ **MemberSync Data Found:**\n"
+                output += f"```json\n{json.dumps(mc_data, indent=2)}\n```"
+                
+                mc_id = mc_data.get("mc_user_id")
+                if mc_id:
+                    output += f"\n**MC Profile:** {_mc_profile_url(mc_id)}"
+            else:
+                output = "⚠️ No MemberSync link found for this member."
+            
+            await ctx.send(output)
+            
+        except Exception as e:
+            await ctx.send(f"❌ Error: {e}")
+            log.exception(f"testmembersync error: {e}")
     @commands.guild_only()
     async def warnings(self, ctx: commands.Context, member: discord.Member = None):
         """Check active official warnings for a member."""
