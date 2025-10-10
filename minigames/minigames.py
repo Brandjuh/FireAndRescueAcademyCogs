@@ -2,6 +2,7 @@ import logging
 import discord
 from typing import Dict, List, Optional, Type, Union
 from datetime import datetime, timedelta
+import random
 from redbot.core import commands, Config, bank
 from redbot.core.bot import Red
 
@@ -27,7 +28,8 @@ class Minigames(BaseMinigameCog):
         
         default_guild = {
             "bet_amount": 100,
-            "win_amount": 500,
+            "win_min": 400,
+            "win_max": 600,
         }
         
         default_member = {
@@ -49,7 +51,8 @@ class Minigames(BaseMinigameCog):
         """Configure minigame settings"""
         if ctx.invoked_subcommand is None:
             bet = await self.config.guild(ctx.guild).bet_amount()
-            win = await self.config.guild(ctx.guild).win_amount()
+            win_min = await self.config.guild(ctx.guild).win_min()
+            win_max = await self.config.guild(ctx.guild).win_max()
             currency = await bank.get_currency_name(ctx.guild)
             
             embed = discord.Embed(
@@ -57,7 +60,7 @@ class Minigames(BaseMinigameCog):
                 color=await ctx.embed_color()
             )
             embed.add_field(name="Bet Amount", value=f"{bet} {currency}", inline=True)
-            embed.add_field(name="Win Amount", value=f"{win} {currency}", inline=True)
+            embed.add_field(name="Win Range", value=f"{win_min} - {win_max} {currency}", inline=True)
             embed.set_footer(text=f"Use {ctx.prefix}help minigameset to see available commands")
             
             await ctx.send(embed=embed)
@@ -72,15 +75,33 @@ class Minigames(BaseMinigameCog):
         currency = await bank.get_currency_name(ctx.guild)
         await ctx.send(f"✅ Bet amount set to {amount} {currency}")
 
-    @minigameset.command(name="win")
-    async def set_win(self, ctx: commands.Context, amount: int):
-        """Set the win amount for winning a game"""
+    @minigameset.command(name="winmin")
+    async def set_win_min(self, ctx: commands.Context, amount: int):
+        """Set the minimum win amount"""
         if amount < 0:
-            return await ctx.send("Win amount must be 0 or positive!")
+            return await ctx.send("Win minimum must be 0 or positive!")
         
-        await self.config.guild(ctx.guild).win_amount.set(amount)
+        win_max = await self.config.guild(ctx.guild).win_max()
+        if amount > win_max:
+            return await ctx.send(f"Win minimum cannot be higher than win maximum ({win_max})!")
+        
+        await self.config.guild(ctx.guild).win_min.set(amount)
         currency = await bank.get_currency_name(ctx.guild)
-        await ctx.send(f"✅ Win amount set to {amount} {currency}")
+        await ctx.send(f"✅ Win minimum set to {amount} {currency}")
+
+    @minigameset.command(name="winmax")
+    async def set_win_max(self, ctx: commands.Context, amount: int):
+        """Set the maximum win amount"""
+        if amount < 0:
+            return await ctx.send("Win maximum must be 0 or positive!")
+        
+        win_min = await self.config.guild(ctx.guild).win_min()
+        if amount < win_min:
+            return await ctx.send(f"Win maximum cannot be lower than win minimum ({win_min})!")
+        
+        await self.config.guild(ctx.guild).win_max.set(amount)
+        currency = await bank.get_currency_name(ctx.guild)
+        await ctx.send(f"✅ Win maximum set to {amount} {currency}")
 
     @commands.hybrid_command(name="tictactoe", aliases=["ttt"])
     @commands.guild_only()
@@ -106,7 +127,6 @@ class Minigames(BaseMinigameCog):
         
         # Randomize player order only when playing against bot
         if opponent.bot:
-            import random
             players = [ctx.author, opponent]
             random.shuffle(players)
         else:
@@ -236,7 +256,9 @@ class Minigames(BaseMinigameCog):
         
         # Get bet and win amounts
         bet_amount = await self.config.guild(ctx.guild).bet_amount()
-        win_amount = await self.config.guild(ctx.guild).win_amount()
+        win_min = await self.config.guild(ctx.guild).win_min()
+        win_max = await self.config.guild(ctx.guild).win_max()
+        win_amount = random.randint(win_min, win_max)
         currency = await bank.get_currency_name(ctx.guild)
         
         # Check if player has enough balance
