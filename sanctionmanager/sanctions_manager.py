@@ -580,98 +580,128 @@ class DiscordMemberModal(discord.ui.Modal, title="Discord Member Lookup"):
         self.cog = cog
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        
-        guild = interaction.guild
-        if not guild:
-            await interaction.followup.send("This command must be used in a server.", ephemeral=True)
-            return
-        
-        # Try to find member
-        member_str = str(self.member_input.value).strip()
-        member = None
-        
-        # Try mention format <@!123> or <@123>
-        import re
-        mention_match = re.match(r'<@!?(\d+)>', member_str)
-        if mention_match:
-            try:
-                member = guild.get_member(int(mention_match.group(1)))
-                if not member:
-                    member = await guild.fetch_member(int(mention_match.group(1)))
-            except:
-                pass
-        
-        # Try direct ID
-        if not member and member_str.isdigit():
-            try:
-                member = guild.get_member(int(member_str))
-                if not member:
-                    member = await guild.fetch_member(int(member_str))
-            except:
-                pass
-        
-        # Try username (case insensitive)
-        if not member:
-            member_str_lower = member_str.lower()
-            for m in guild.members:
-                if m.name.lower() == member_str_lower or (m.nick and m.nick.lower() == member_str_lower):
-                    member = m
-                    break
-        
-        # Try display name
-        if not member:
-            for m in guild.members:
-                if m.display_name.lower() == member_str_lower:
-                    member = m
-                    break
-        
-        if not member:
+        try:
+            await interaction.response.defer(ephemeral=True)
+            
+            guild = interaction.guild
+            if not guild:
+                await interaction.followup.send("This command must be used in a server.", ephemeral=True)
+                return
+            
+            # Try to find member
+            member_str = str(self.member_input.value).strip()
+            log.info(f"Looking up member: {member_str}")
+            member = None
+            
+            # Try mention format <@!123> or <@123>
+            mention_match = re.match(r'<@!?(\d+)>', member_str)
+            if mention_match:
+                try:
+                    member_id = int(mention_match.group(1))
+                    member = guild.get_member(member_id)
+                    if not member:
+                        log.info(f"Member {member_id} not in cache, fetching...")
+                        member = await guild.fetch_member(member_id)
+                    log.info(f"Found member via mention: {member}")
+                except Exception as e:
+                    log.error(f"Error finding member via mention: {e}")
+            
+            # Try direct ID
+            if not member and member_str.isdigit():
+                try:
+                    member_id = int(member_str)
+                    member = guild.get_member(member_id)
+                    if not member:
+                        log.info(f"Member {member_id} not in cache, fetching...")
+                        member = await guild.fetch_member(member_id)
+                    log.info(f"Found member via ID: {member}")
+                except Exception as e:
+                    log.error(f"Error finding member via ID: {e}")
+            
+            # Try username (case insensitive)
+            if not member:
+                member_str_lower = member_str.lower()
+                for m in guild.members:
+                    if m.name.lower() == member_str_lower:
+                        member = m
+                        log.info(f"Found member via username: {member}")
+                        break
+                    if m.nick and m.nick.lower() == member_str_lower:
+                        member = m
+                        log.info(f"Found member via nickname: {member}")
+                        break
+                    if m.display_name.lower() == member_str_lower:
+                        member = m
+                        log.info(f"Found member via display name: {member}")
+                        break
+            
+            if not member:
+                log.warning(f"Could not find member: {member_str}")
+                await interaction.followup.send(
+                    f"❌ Could not find Discord member: `{member_str}`\n"
+                    f"Try using their exact Discord ID (right-click → Copy ID) or @mention them.",
+                    ephemeral=True
+                )
+                return
+            
+            log.info(f"Successfully found member: {member.name} ({member.id})")
+            
+            # Look up MC info via MemberSync
+            membersync = self.cog.bot.get_cog("MemberSync")
+            mc_data = None
+            mc_id = None
+            mc_username = None
+            
+            if membersync:
+                try:
+                    log.info(f"Looking up MemberSync data for {member.id}")
+                    mc_data = await membersync.get_link_for_discord(member.id)
+                    if mc_data:
+                        mc_id = mc_data.get("mc_user_id")
+                        mc_username = member.display_name
+                        log.info(f"Found MC data: ID={mc_id}, Username={mc_username}")
+                    else:
+                        log.info("No MemberSync data found")
+                except Exception as e:
+                    log.error(f"MemberSync lookup failed: {e}")
+            else:
+                log.warning("MemberSync cog not found")
+            
+            if not mc_username:
+                mc_username = member.display_name
+            
+            log.info(f"Creating SanctionTypeView for {mc_username}")
+            
+            # Move to sanction type selection
+            view = SanctionTypeView(
+                self.cog,
+                admin_user_id=interaction.user.id,
+                admin_username=str(interaction.user),
+                target_discord_id=member.id,
+                target_mc_id=mc_id,
+                target_mc_username=mc_username,
+                target_discord_user=member,
+            )
+            
+            # Send new message instead of trying to update
+            embed = view._create_target_embed()
             await interaction.followup.send(
-                f"❌ Could not find Discord member: `{member_str}`\n"
-                f"Try using their exact Discord ID or mention them.",
+                content="Select the type of sanction:",
+                embed=embed,
+                view=view,
                 ephemeral=True
             )
-            return
-        
-        # Look up MC info via MemberSync
-        membersync = self.cog.bot.get_cog("MemberSync")
-        mc_data = None
-        mc_id = None
-        mc_username = None
-        
-        if membersync:
+            log.info("Successfully sent sanction type selection")
+            
+        except Exception as e:
+            log.exception(f"Error in DiscordMemberModal.on_submit: {e}")
             try:
-                mc_data = await membersync.get_link_for_discord(member.id)
-                if mc_data:
-                    mc_id = mc_data.get("mc_user_id")
-                    # Try to get username from alliance DB if not in link
-                    mc_username = member.display_name
-            except Exception as e:
-                log.warning(f"MemberSync lookup failed: {e}")
-        
-        if not mc_username:
-            mc_username = member.display_name
-        
-        # Move to sanction type selection
-        view = SanctionTypeView(
-            self.cog,
-            admin_user_id=interaction.user.id,
-            admin_username=str(interaction.user),
-            target_discord_id=member.id,
-            target_mc_id=mc_id,
-            target_mc_username=mc_username,
-            target_discord_user=member,
-        )
-        
-        # Send new message instead of trying to update
-        embed = view._create_target_embed()
-        await interaction.followup.send(
-            content="Select the type of sanction:",
-            embed=embed,
-            view=view,
-            ephemeral=True
-        )
+                await interaction.followup.send(
+                    f"❌ An error occurred: {str(e)}\nPlease check the logs.",
+                    ephemeral=True
+                )
+            except:
+                pass
 
 class MCOnlyModal(discord.ui.Modal, title="MC Member Info"):
     mc_id = discord.ui.TextInput(
