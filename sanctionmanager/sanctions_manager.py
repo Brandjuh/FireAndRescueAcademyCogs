@@ -489,7 +489,8 @@ DEFAULT_RULES = {
 }
 
 SANCTION_TYPES = [
-    "Warning - Verbal warning",
+    "Warning - In direct message,
+    "Warning - In chat",
     "Warning - Official 1st warning",
     "Warning - Official 2nd warning",
     "Warning - Official 3rd and last warning",
