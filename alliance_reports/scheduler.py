@@ -174,12 +174,66 @@ class ReportScheduler:
             return None
     
     async def _execute_daily_reports(self):
-        """Execute daily reports."""
-        log.info("Executing daily reports (not yet implemented)")
+        """Execute daily report generation."""
+        log.info("Executing daily reports...")
+        
+        try:
+            member_enabled = await self.config_manager.config.daily_member_enabled()
+            admin_enabled = await self.config_manager.config.daily_admin_enabled()
+            
+            if not member_enabled and not admin_enabled:
+                log.info("Daily reports disabled, skipping")
+                return
+            
+            # Import here to avoid issues
+            from .templates.daily_member import DailyMemberReport
+            
+            # Generate member report
+            if member_enabled:
+                channel_id = await self.config_manager.config.daily_member_channel()
+                if channel_id:
+                    channel = self.bot.get_channel(int(channel_id))
+                    if channel:
+                        report_gen = DailyMemberReport(self.bot, self.config_manager)
+                        success = await report_gen.post(channel)
+                        if success:
+                            log.info("Daily member report posted successfully")
+                        else:
+                            log.error("Failed to post daily member report")
+                    else:
+                        log.error(f"Daily member channel not found: {channel_id}")
+                else:
+                    log.warning("Daily member channel not configured")
+            
+            # Admin report (not yet implemented)
+            if admin_enabled:
+                log.info("Daily admin report not yet implemented (Phase 3)")
+                
+        except Exception as e:
+            log.exception(f"Error executing daily reports: {e}")
+            await self._send_error_notification(f"Daily report generation failed: {e}")
     
     async def _execute_monthly_reports(self):
         """Execute monthly reports."""
         log.info("Executing monthly reports (not yet implemented)")
+    
+    async def _send_error_notification(self, message: str):
+        """Send error notification to configured error channel."""
+        try:
+            error_channel_id = await self.config_manager.config.error_channel()
+            if not error_channel_id:
+                log.warning("No error channel configured")
+                return
+            
+            channel = self.bot.get_channel(int(error_channel_id))
+            if not channel:
+                log.warning(f"Error channel not found: {error_channel_id}")
+                return
+            
+            await channel.send(f"⚠️ **AllianceReports Error**\n{message}")
+            
+        except Exception as e:
+            log.exception(f"Failed to send error notification: {e}")
     
     def is_running(self):
         """Check if scheduler is running."""
