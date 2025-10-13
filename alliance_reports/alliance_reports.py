@@ -343,3 +343,105 @@ class AllianceReports(commands.Cog):
         
         await ctx.send("🔄 Test mode - reports will be generated but not posted...")
         await ctx.send("✅ (Report generation not yet implemented - Phase 2+)")
+
+# ADD THIS TO alliance_reports.py AFTER THE report_test COMMAND
+# Around line 280
+
+    @report_group.command(name="testdata")
+    async def report_testdata(self, ctx: commands.Context):
+        """Test data aggregation (Phase 2 testing)."""
+        if not await self._is_authorized(ctx):
+            await ctx.send("❌ You don't have permission to use this command.")
+            return
+        
+        await ctx.send("🔄 Testing data aggregation...")
+        
+        try:
+            # Import here to avoid circular imports
+            from .data_aggregator import DataAggregator
+            from .calculators.activity_score import ActivityScoreCalculator
+            
+            # Create aggregator
+            aggregator = DataAggregator(self.config_manager)
+            
+            # Get daily data
+            data = await aggregator.get_daily_data()
+            
+            # Calculate activity score
+            weights = await self.config.activity_weights()
+            calculator = ActivityScoreCalculator(weights)
+            score_data = calculator.calculate_daily_score(data)
+            
+            # Format output
+            lines = []
+            lines.append("**📊 Data Aggregation Test**\n")
+            
+            # Membership
+            membership = data.get("membership", {})
+            if "error" not in membership:
+                lines.append(f"👥 **Membership (24h)**")
+                lines.append(f"  Total: {membership.get('total_members', 0)}")
+                lines.append(f"  New joins: {membership.get('new_joins', 0)} ({membership.get('day_over_day_change', 0):+d})")
+                lines.append(f"  Left: {membership.get('left', 0)}")
+                lines.append(f"  Kicked: {membership.get('kicked', 0)}")
+                lines.append(f"  Verifications: {membership.get('verifications_approved', 0)}")
+                lines.append("")
+            
+            # Training
+            training = data.get("training", {})
+            if "error" not in training:
+                lines.append(f"🎓 **Training (24h)**")
+                lines.append(f"  Started: {training.get('started', 0)} ({training.get('day_over_day_started', 0):+d})")
+                lines.append(f"  Completed: {training.get('completed', 0)} ({training.get('day_over_day_completed', 0):+d})")
+                lines.append("")
+            
+            # Buildings
+            buildings = data.get("buildings", {})
+            if "error" not in buildings:
+                lines.append(f"🏗️ **Buildings (24h)**")
+                lines.append(f"  Approved: {buildings.get('approved', 0)} ({buildings.get('day_over_day_approved', 0):+d})")
+                lines.append(f"  Extensions started: {buildings.get('extensions_started', 0)} ({buildings.get('day_over_day_extensions_started', 0):+d})")
+                lines.append(f"  Extensions completed: {buildings.get('extensions_completed', 0)} ({buildings.get('day_over_day_extensions_completed', 0):+d})")
+                lines.append("")
+            
+            # Operations
+            operations = data.get("operations", {})
+            if "error" not in operations:
+                lines.append(f"🎯 **Operations (24h)**")
+                lines.append(f"  Large missions: {operations.get('large_missions_started', 0)} ({operations.get('day_over_day_missions', 0):+d})")
+                lines.append(f"  Alliance events: {operations.get('alliance_events_started', 0)} ({operations.get('day_over_day_events', 0):+d})")
+                lines.append("")
+            
+            # Treasury
+            treasury = data.get("treasury", {})
+            if "error" not in treasury:
+                lines.append(f"💰 **Treasury**")
+                balance = treasury.get('current_balance', 0)
+                change = treasury.get('change_24h', 0)
+                change_pct = treasury.get('change_percent', 0)
+                lines.append(f"  Balance: {balance:,} credits")
+                lines.append(f"  24h change: {change:+,} ({change_pct:+.1f}%)")
+                lines.append(f"  Contributors: {treasury.get('contributors_24h', 0)}")
+                lines.append("")
+            
+            # Activity Score
+            lines.append(f"🔥 **Activity Score: {score_data['overall']}/100**")
+            components = score_data.get('components', {})
+            lines.append(f"  Membership: {components.get('membership', 0)}/100")
+            lines.append(f"  Training: {components.get('training', 0)}/100")
+            lines.append(f"  Buildings: {components.get('buildings', 0)}/100")
+            lines.append(f"  Treasury: {components.get('treasury', 0)}/100")
+            lines.append(f"  Operations: {components.get('operations', 0)}/100")
+            
+            output = "\n".join(lines)
+            
+            # Send in chunks if needed
+            if len(output) > 1900:
+                for chunk in [output[i:i+1900] for i in range(0, len(output), 1900)]:
+                    await ctx.send(chunk)
+            else:
+                await ctx.send(output)
+            
+        except Exception as e:
+            log.exception(f"Error testing data: {e}")
+            await ctx.send(f"❌ Error: {e}")
