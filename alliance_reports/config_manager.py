@@ -145,36 +145,24 @@ class ConfigManager:
         return ConfigManager.DEFAULTS.copy()
     
     async def detect_database_paths(self, instance_name: Optional[str] = None) -> Dict[str, Optional[Path]]:
-        """
-        Auto-detect database paths for all required cogs.
-        
-        Args:
-            instance_name: Bot instance name (optional, will detect if None)
-        
-        Returns:
-            Dictionary with database paths
-        """
+        """Auto-detect database paths for all required cogs."""
         if self._db_cache:
             return self._db_cache
         
         try:
-            # Get Red-DiscordBot data directory
             base_path = Path.home() / ".local" / "share" / "Red-DiscordBot" / "data"
             
             if not base_path.exists():
                 log.warning(f"Red-DiscordBot data directory not found: {base_path}")
                 return {}
             
-            # Find instance directory
             if instance_name:
                 instance_path = base_path / instance_name
             else:
-                # Try to detect from current cog data path
                 try:
                     current_cog_path = cog_data_path(raw_name="AllianceReports")
                     instance_path = current_cog_path.parent.parent
                 except Exception:
-                    # Fallback: use first instance found
                     instances = [d for d in base_path.iterdir() if d.is_dir()]
                     if not instances:
                         log.error("No Red-DiscordBot instances found")
@@ -187,7 +175,6 @@ class ConfigManager:
             
             cogs_path = instance_path / "cogs"
             
-            # Define expected database locations
             db_locations = {
                 "alliance_db_path": cogs_path / "AllianceScraper" / "alliance.db",
                 "membersync_db_path": cogs_path / "MemberSync" / "membersync.db",
@@ -195,7 +182,6 @@ class ConfigManager:
                 "sanctions_db_path": cogs_path / "SanctionsManager" / "sanctions.db",
             }
             
-            # Verify and cache paths
             result = {}
             for key, path in db_locations.items():
                 if path.exists():
@@ -213,65 +199,20 @@ class ConfigManager:
             return {}
     
     async def get_db_path(self, db_name: str) -> Optional[Path]:
-        """
-        Get a specific database path.
-        
-        Args:
-            db_name: Name of database (alliance_db_path, membersync_db_path, etc.)
-        
-        Returns:
-            Path to database or None if not found
-        """
-        # Check config override first
+        """Get a specific database path."""
         config_path = await self.config.get_raw(db_name, default=None)
         if config_path:
             path = Path(config_path)
             if path.exists():
                 return path
         
-        # Auto-detect
         if not self._db_cache:
             await self.detect_database_paths()
         
         return self._db_cache.get(db_name)
     
-    async def validate_channels(self, guild) -> Dict[str, bool]:
-        """
-        Validate that configured channels exist and are accessible.
-        
-        Returns:
-            Dictionary with validation results
-        """
-        results = {}
-        channel_keys = [
-            "daily_member_channel",
-            "daily_admin_channel", 
-            "monthly_member_channel",
-            "monthly_admin_channel",
-            "error_channel",
-        ]
-        
-        for key in channel_keys:
-            channel_id = await self.config.get_raw(key, default=None)
-            if channel_id is None:
-                results[key] = False
-                continue
-            
-            channel = guild.get_channel(int(channel_id))
-            results[key] = channel is not None
-        
-        return results
-    
     async def validate_time_format(self, time_str: str) -> bool:
-        """
-        Validate time string format (HH:MM).
-        
-        Args:
-            time_str: Time string to validate
-        
-        Returns:
-            True if valid, False otherwise
-        """
+        """Validate time string format (HH:MM)."""
         try:
             parts = time_str.split(":")
             if len(parts) != 2:
@@ -280,22 +221,6 @@ class ConfigManager:
             hour, minute = int(parts[0]), int(parts[1])
             return 0 <= hour <= 23 and 0 <= minute <= 59
         except (ValueError, AttributeError):
-            return False
-    
-    async def validate_activity_weights(self, weights: Dict[str, int]) -> bool:
-        """
-        Validate that activity weights sum to 100.
-        
-        Args:
-            weights: Dictionary of activity weights
-        
-        Returns:
-            True if valid (sum = 100), False otherwise
-        """
-        try:
-            total = sum(weights.values())
-            return total == 100
-        except (TypeError, AttributeError):
             return False
     
     async def get_all_settings(self) -> Dict[str, Any]:
@@ -308,18 +233,9 @@ class ConfigManager:
         log.info("Configuration reset to defaults")
     
     def format_settings_display(self, settings: Dict[str, Any]) -> str:
-        """
-        Format settings for display in Discord.
-        
-        Args:
-            settings: Dictionary of settings
-        
-        Returns:
-            Formatted string for display
-        """
+        """Format settings for display in Discord."""
         lines = []
         
-        # Channels
         lines.append("📢 CHANNELS")
         lines.append(f"  Daily Member: {settings.get('daily_member_channel') or 'Not set'}")
         lines.append(f"  Daily Admin: {settings.get('daily_admin_channel') or 'Not set'}")
@@ -328,13 +244,11 @@ class ConfigManager:
         lines.append(f"  Error Channel: {settings.get('error_channel') or 'Not set'}")
         lines.append("")
         
-        # Timing
         lines.append("⏰ TIMING")
         lines.append(f"  Daily: {settings.get('daily_time', '06:00')} {settings.get('timezone', 'Europe/Amsterdam')}")
         lines.append(f"  Monthly: Day {settings.get('monthly_day', 1)} at {settings.get('monthly_time', '06:00')}")
         lines.append("")
         
-        # Report Status
         lines.append("📊 REPORT STATUS")
         lines.append(f"  Daily Member: {'✅ Enabled' if settings.get('daily_member_enabled') else '❌ Disabled'}")
         lines.append(f"  Daily Admin: {'✅ Enabled' if settings.get('daily_admin_enabled') else '❌ Disabled'}")
@@ -342,7 +256,6 @@ class ConfigManager:
         lines.append(f"  Monthly Admin: {'✅ Enabled' if settings.get('monthly_admin_enabled') else '❌ Disabled'}")
         lines.append("")
         
-        # Database Status
         lines.append("💾 DATABASES")
         db_paths = {
             "Alliance": settings.get('alliance_db_path'),
@@ -355,7 +268,6 @@ class ConfigManager:
             lines.append(f"  {name}: {status}")
         lines.append("")
         
-        # Advanced
         lines.append("⚙️ ADVANCED")
         lines.append(f"  Test Mode: {'✅ On' if settings.get('test_mode') else '❌ Off'}")
         lines.append(f"  Verbose Logging: {'✅ On' if settings.get('verbose_logging') else '❌ Off'}")
