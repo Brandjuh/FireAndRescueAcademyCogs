@@ -143,6 +143,54 @@ class MemberOverviewView(discord.ui.View):
         await interaction.response.send_modal(modal)
     
     @discord.ui.button(
+        label="Edit Note",
+        style=discord.ButtonStyle.secondary,
+        emoji="✏️",
+        custom_id="mm:edit_note",
+        row=1
+    )
+    async def btn_edit_note(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        """Open modal to edit a note."""
+        # Only show in notes tab
+        if self.current_tab != "notes":
+            await interaction.response.send_message(
+                "⚠️ Switch to the Notes tab first to edit notes.",
+                ephemeral=True
+            )
+            return
+        
+        modal = EditNoteModal(self)
+        await interaction.response.send_modal(modal)
+    
+    @discord.ui.button(
+        label="Delete Note",
+        style=discord.ButtonStyle.danger,
+        emoji="🗑️",
+        custom_id="mm:delete_note",
+        row=1
+    )
+    async def btn_delete_note(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        """Open modal to delete a note."""
+        # Only show in notes tab
+        if self.current_tab != "notes":
+            await interaction.response.send_message(
+                "⚠️ Switch to the Notes tab first to delete notes.",
+                ephemeral=True
+            )
+            return
+        
+        modal = DeleteNoteModal(self)
+        await interaction.response.send_modal(modal)
+    
+    @discord.ui.button(
         label="Export Data",
         style=discord.ButtonStyle.secondary,
         emoji="💾",
@@ -159,6 +207,33 @@ class MemberOverviewView(discord.ui.View):
             "📦 Export feature coming soon!",
             ephemeral=True
         )
+    
+    @discord.ui.button(
+        label="Close",
+        style=discord.ButtonStyle.danger,
+        emoji="❌",
+        custom_id="mm:close",
+        row=1
+    )
+    async def btn_close(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        """Close the view and delete the message."""
+        # Disable all buttons
+        for item in self.children:
+            item.disabled = True
+        
+        try:
+            await interaction.message.delete()
+        except:
+            # If we can't delete, just disable the view
+            await interaction.response.edit_message(
+                content="*View closed*",
+                embed=None,
+                view=self
+            )
     
     # ==================== EMBED BUILDERS ====================
     
@@ -558,5 +633,147 @@ class AddNoteModal(discord.ui.Modal, title="Add Note"):
             log.error(f"Failed to add note: {e}", exc_info=True)
             await interaction.response.send_message(
                 f"❌ Failed to add note: {str(e)}",
+                ephemeral=True
+            )
+
+
+class EditNoteModal(discord.ui.Modal, title="Edit Note"):
+    """Modal for editing an existing note."""
+    
+    ref_code = discord.ui.TextInput(
+        label="Note Reference Code",
+        style=discord.TextStyle.short,
+        placeholder="e.g., N2025-000123",
+        required=True,
+        max_length=50
+    )
+    
+    new_text = discord.ui.TextInput(
+        label="New Note Text",
+        style=discord.TextStyle.paragraph,
+        placeholder="Enter the updated note text...",
+        required=True,
+        max_length=2000
+    )
+    
+    def __init__(self, parent_view: MemberOverviewView):
+        super().__init__()
+        self.parent_view = parent_view
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        """Handle note edit submission."""
+        try:
+            # Update note in database
+            success = await self.parent_view.db.update_note(
+                ref_code=self.ref_code.value,
+                new_text=self.new_text.value,
+                updated_by=interaction.user.id
+            )
+            
+            if not success:
+                await interaction.response.send_message(
+                    f"❌ Note `{self.ref_code.value}` not found.",
+                    ephemeral=True
+                )
+                return
+            
+            await interaction.response.send_message(
+                f"✅ Note `{self.ref_code.value}` updated successfully!",
+                ephemeral=True
+            )
+            
+            # Refresh the notes view
+            self.parent_view.current_tab = "notes"
+            embed = await self.parent_view.get_notes_embed()
+            
+            if self.parent_view.message:
+                await self.parent_view.message.edit(embed=embed, view=self.parent_view)
+        
+        except Exception as e:
+            log.error(f"Failed to edit note: {e}", exc_info=True)
+            await interaction.response.send_message(
+                f"❌ Failed to edit note: {str(e)}",
+                ephemeral=True
+            )
+
+
+class DeleteNoteModal(discord.ui.Modal, title="Delete Note"):
+    """Modal for deleting a note."""
+    
+    ref_code = discord.ui.TextInput(
+        label="Note Reference Code",
+        style=discord.TextStyle.short,
+        placeholder="e.g., N2025-000123",
+        required=True,
+        max_length=50
+    )
+    
+    reason = discord.ui.TextInput(
+        label="Reason for Deletion",
+        style=discord.TextStyle.paragraph,
+        placeholder="Why are you deleting this note?",
+        required=True,
+        max_length=500
+    )
+    
+    def __init__(self, parent_view: MemberOverviewView):
+        super().__init__()
+        self.parent_view = parent_view
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        """Handle note deletion."""
+        try:
+            # Check if note exists first
+            notes = await self.parent_view.db.get_notes(ref_code=self.ref_code.value)
+            
+            if not notes:
+                await interaction.response.send_message(
+                    f"❌ Note `{self.ref_code.value}` not found.",
+                    ephemeral=True
+                )
+                return
+            
+            # Delete note
+            success = await self.parent_view.db.delete_note(self.ref_code.value)
+            
+            if success:
+                # Log the deletion as an event
+                await self.parent_view.db.add_event(
+                    guild_id=interaction.guild.id,
+                    discord_id=self.parent_view.member_data.discord_id,
+                    mc_user_id=self.parent_view.member_data.mc_user_id,
+                    event_type="note_deleted",
+                    event_data={
+                        "ref_code": self.ref_code.value,
+                        "reason": self.reason.value
+                    },
+                    triggered_by="admin",
+                    actor_id=interaction.user.id
+                )
+                
+                # Update count
+                self.parent_view.member_data.notes_count -= 1
+                
+                await interaction.response.send_message(
+                    f"✅ Note `{self.ref_code.value}` deleted successfully!",
+                    ephemeral=True
+                )
+                
+                # Refresh the notes view
+                self.parent_view.current_tab = "notes"
+                embed = await self.parent_view.get_notes_embed()
+                
+                if self.parent_view.message:
+                    await self.parent_view.message.edit(embed=embed, view=self.parent_view)
+            else:
+                await interaction.response.send_message(
+                    f"❌ Failed to delete note `{self.ref_code.value}`.",
+                    ephemeral=True
+                )
+        
+        except Exception as e:
+            log.error(f"Failed to delete note: {e}", exc_info=True)
+            await interaction.response.send_message(
+                f"❌ Failed to delete note: {str(e)}",
                 ephemeral=True
             )
