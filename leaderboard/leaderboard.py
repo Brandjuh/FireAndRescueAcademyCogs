@@ -273,6 +273,7 @@ class Leaderboard(commands.Cog):
         """
         Get earned credits rankings for current and previous period.
         Only includes members that are CURRENTLY in the alliance.
+        Calculates DELTA (growth) between two time periods.
         Returns dict with 'current' and 'previous' rankings.
         """
         if not self.db_path.exists():
@@ -315,20 +316,7 @@ class Leaderboard(commands.Cog):
             
             previous_time = previous_dt.isoformat()
             
-            # Get current period rankings - ONLY current members
-            query = f"""
-                SELECT user_id, name, earned_credits, scraped_at
-                FROM members_history
-                WHERE scraped_at = ? AND earned_credits > 0 
-                AND user_id IN ({placeholders})
-                ORDER BY earned_credits DESC
-                LIMIT 20
-            """
-            cur = await db.execute(query, [current_time] + current_member_ids)
-            current_raw = [dict(row) for row in await cur.fetchall()]
-            current = self._filter_invalid_entries(current_raw, 'earned_credits')[:10]
-            
-            # Get previous period rankings - find closest timestamp
+            # Get previous period timestamp - find closest timestamp
             cur = await db.execute("""
                 SELECT DISTINCT scraped_at
                 FROM members_history
@@ -338,18 +326,110 @@ class Leaderboard(commands.Cog):
             """, (previous_time,))
             prev_time_row = await cur.fetchone()
             
+            if not prev_time_row:
+                log.warning("No previous period data found for comparison")
+                return None
+            
+            previous_scrape_time = prev_time_row['scraped_at']
+            
+            # Get current period data - ONLY current members
+            query_current = f"""
+                SELECT user_id, name, earned_credits, scraped_at
+                FROM members_history
+                WHERE scraped_at = ? AND user_id IN ({placeholders})
+                ORDER BY earned_credits DESC
+            """
+            cur = await db.execute(query_current, [current_time] + current_member_ids)
+            current_data = {row['user_id']: dict(row) for row in await cur.fetchall()}
+            
+            # Get previous period data
+            query_previous = f"""
+                SELECT user_id, name, earned_credits, scraped_at
+                FROM members_history
+                WHERE scraped_at = ? AND user_id IN ({placeholders})
+                ORDER BY earned_credits DESC
+            """
+            cur = await db.execute(query_previous, [previous_scrape_time] + current_member_ids)
+            previous_data = {row['user_id']: dict(row) for row in await cur.fetchall()}
+            
+            # Calculate deltas (growth in the period)
+            deltas = []
+            for user_id, current_entry in current_data.items():
+                current_credits = current_entry['earned_credits']
+                
+                # Get previous credits (or 0 if new member)
+                previous_credits = 0
+                if user_id in previous_data:
+                    previous_credits = previous_data[user_id]['earned_credits']
+                
+                # Calculate delta
+                delta = current_credits - previous_credits
+                
+                if delta > 0:  # Only include members with positive growth
+                    deltas.append({
+                        'user_id': user_id,
+                        'name': current_entry['name'],
+                        'earned_credits': delta,  # Use delta as the value
+                        'scraped_at': current_entry['scraped_at']
+                    })
+            
+            # Sort by delta and get top entries
+            deltas.sort(key=lambda x: x['earned_credits'], reverse=True)
+            current_raw = deltas[:20]
+            current = self._filter_invalid_entries(current_raw, 'earned_credits')[:10]
+            
+            # For previous rankings, calculate deltas from one period before that
+            # Find timestamp before previous
+            if period == 'daily':
+                dt = datetime.fromisoformat(previous_scrape_time.replace('Z', '+00:00'))
+                before_previous_dt = dt - timedelta(days=1)
+            else:
+                dt = datetime.fromisoformat(previous_scrape_time.replace('Z', '+00:00'))
+                before_previous_dt = dt - timedelta(days=30)
+            
+            before_previous_time = before_previous_dt.isoformat()
+            
+            cur = await db.execute("""
+                SELECT DISTINCT scraped_at
+                FROM members_history
+                WHERE scraped_at <= ?
+                ORDER BY scraped_at DESC
+                LIMIT 1
+            """, (before_previous_time,))
+            before_prev_row = await cur.fetchone()
+            
             previous = []
-            if prev_time_row:
-                query = f"""
+            if before_prev_row:
+                # Get data from before previous period
+                query_before = f"""
                     SELECT user_id, name, earned_credits, scraped_at
                     FROM members_history
-                    WHERE scraped_at = ? AND earned_credits > 0
-                    AND user_id IN ({placeholders})
-                    ORDER BY earned_credits DESC
-                    LIMIT 30
+                    WHERE scraped_at = ? AND user_id IN ({placeholders})
                 """
-                cur = await db.execute(query, [prev_time_row['scraped_at']] + current_member_ids)
-                previous_raw = [dict(row) for row in await cur.fetchall()]
+                cur = await db.execute(query_before, [before_prev_row['scraped_at']] + current_member_ids)
+                before_previous_data = {row['user_id']: dict(row) for row in await cur.fetchall()}
+                
+                # Calculate deltas for previous period
+                prev_deltas = []
+                for user_id, prev_entry in previous_data.items():
+                    prev_credits = prev_entry['earned_credits']
+                    
+                    before_credits = 0
+                    if user_id in before_previous_data:
+                        before_credits = before_previous_data[user_id]['earned_credits']
+                    
+                    delta = prev_credits - before_credits
+                    
+                    if delta > 0:
+                        prev_deltas.append({
+                            'user_id': user_id,
+                            'name': prev_entry['name'],
+                            'earned_credits': delta,
+                            'scraped_at': prev_entry['scraped_at']
+                        })
+                
+                prev_deltas.sort(key=lambda x: x['earned_credits'], reverse=True)
+                previous_raw = prev_deltas[:30]
                 previous = self._filter_invalid_entries(previous_raw, 'earned_credits')[:20]
             
             return {
