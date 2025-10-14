@@ -27,6 +27,9 @@ from .models import MemberData, NoteData, InfractionData
 from .views import MemberOverviewView, NotesView, InfractionsView
 from .utils import fuzzy_search_member, format_contribution_trend
 from .automation import ContributionMonitor
+from .config_commands import ConfigCommandsesView, InfractionsView
+from .utils import fuzzy_search_member, format_contribution_trend
+from .automation import ContributionMonitor
 
 log = logging.getLogger("red.FARA.MemberManager")
 
@@ -46,7 +49,7 @@ DEFAULTS = {
 }
 
 
-class MemberManager(commands.Cog):
+class MemberManager(ConfigCommands, commands.Cog):
     """
     Member Management System for Fire & Rescue Academy.
     
