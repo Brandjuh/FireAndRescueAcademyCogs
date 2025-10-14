@@ -31,6 +31,19 @@ MEDALS = {
     3: "🥉"
 }
 
+# Blacklist for corrupted/invalid entries
+BLACKLISTED_USER_IDS = [
+    "26856671065906104064",  # Corrupted user ID
+]
+
+BLACKLISTED_USERNAMES = [
+    "Yeehaw12121212212112",  # Invalid username pattern
+    "52525255252",  # Invalid username (looks like ID)
+]
+
+# Sanity check: INT64_MAX indicates parsing error
+INT64_MAX = 9223372036854775807
+
 
 class Leaderboard(commands.Cog):
     """Alliance leaderboard system - daily and monthly top 10 rankings."""
@@ -253,14 +266,14 @@ class Leaderboard(commands.Cog):
             
             previous_time = previous_dt.isoformat()
             
-            # Get current period rankings
+            # Get current period rankings - filter out unrealistic values
             cur = await db.execute("""
                 SELECT user_id, name, earned_credits, scraped_at
                 FROM members_history
-                WHERE scraped_at = ?
+                WHERE scraped_at = ? AND earned_credits > 0 AND earned_credits < ?
                 ORDER BY earned_credits DESC
                 LIMIT 10
-            """, (current_time,))
+            """, (current_time, MAX_REALISTIC_EARNED_CREDITS))
             current = [dict(row) for row in await cur.fetchall()]
             
             # Get previous period rankings - find closest timestamp
@@ -278,10 +291,10 @@ class Leaderboard(commands.Cog):
                 cur = await db.execute("""
                     SELECT user_id, name, earned_credits, scraped_at
                     FROM members_history
-                    WHERE scraped_at = ?
+                    WHERE scraped_at = ? AND earned_credits > 0 AND earned_credits < ?
                     ORDER BY earned_credits DESC
                     LIMIT 20
-                """, (prev_time_row['scraped_at'],))
+                """, (prev_time_row['scraped_at'], MAX_REALISTIC_EARNED_CREDITS))
                 previous = [dict(row) for row in await cur.fetchall()]
             
             return {
@@ -315,14 +328,14 @@ class Leaderboard(commands.Cog):
             
             current_time = row['latest']
             
-            # Get current rankings
+            # Get current rankings - filter out unrealistic values
             cur = await db.execute("""
                 SELECT user_id, user_name as name, credits, scraped_at
                 FROM treasury_income
-                WHERE period = ? AND scraped_at = ?
+                WHERE period = ? AND scraped_at = ? AND credits > 0 AND credits < ?
                 ORDER BY credits DESC
                 LIMIT 10
-            """, (period_type, current_time))
+            """, (period_type, current_time, MAX_REALISTIC_CONTRIBUTION))
             current = [dict(row) for row in await cur.fetchall()]
             
             # Get previous period rankings
@@ -352,10 +365,10 @@ class Leaderboard(commands.Cog):
                 cur = await db.execute("""
                     SELECT user_id, user_name as name, credits, scraped_at
                     FROM treasury_income
-                    WHERE period = ? AND scraped_at = ?
+                    WHERE period = ? AND scraped_at = ? AND credits > 0 AND credits < ?
                     ORDER BY credits DESC
                     LIMIT 20
-                """, (period_type, prev_time_row['scraped_at']))
+                """, (period_type, prev_time_row['scraped_at'], MAX_REALISTIC_CONTRIBUTION))
                 previous = [dict(row) for row in await cur.fetchall()]
             
             return {
