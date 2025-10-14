@@ -25,7 +25,17 @@ class DailyAdminReport:
         self.bot = bot
         self.config_manager = config_manager
         self.aggregator = DataAggregator(config_manager)
-        self.calculator = ActivityScoreCalculator()
+        
+        # Get activity weights from config
+        # Default weights if not configured
+        default_weights = {
+            "membership": 20,
+            "training": 20,
+            "buildings": 20,
+            "treasury": 20,
+            "operations": 20
+        }
+        self.calculator = ActivityScoreCalculator(default_weights)
         self.formatter = EmbedFormatter()
     
     async def generate(self) -> Optional[discord.Embed]:
