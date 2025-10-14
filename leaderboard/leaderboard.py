@@ -433,40 +433,40 @@ class Leaderboard(commands.Cog):
 
     # ==================== COMMANDS ====================
 
-    @commands.group(name="leaderboard")
+    @commands.group(name="topplayers")
     @checks.admin_or_permissions(manage_guild=True)
-    async def leaderboard_group(self, ctx):
-        """Leaderboard configuration commands."""
+    async def topplayers_group(self, ctx):
+        """Top players leaderboard configuration commands."""
         if ctx.invoked_subcommand is None:
             await ctx.send_help(ctx.command)
 
-    @leaderboard_group.command(name="dailyearnedchannel")
+    @topplayers_group.command(name="dailyearnedchannel")
     async def set_daily_earned_channel(self, ctx, channel: discord.TextChannel):
         """Set channel for daily earned credits leaderboard."""
         await self.config.daily_earned_channel.set(channel.id)
         await ctx.send(f"✅ Daily earned credits leaderboard will be posted in {channel.mention}")
 
-    @leaderboard_group.command(name="dailycontribchannel")
+    @topplayers_group.command(name="dailycontribchannel")
     async def set_daily_contrib_channel(self, ctx, channel: discord.TextChannel):
         """Set channel for daily treasury contributions leaderboard."""
         await self.config.daily_contrib_channel.set(channel.id)
         await ctx.send(f"✅ Daily treasury contributions leaderboard will be posted in {channel.mention}")
 
-    @leaderboard_group.command(name="monthlyearnedchannel")
+    @topplayers_group.command(name="monthlyearnedchannel")
     async def set_monthly_earned_channel(self, ctx, channel: discord.TextChannel):
         """Set channel for monthly earned credits leaderboard."""
         await self.config.monthly_earned_channel.set(channel.id)
         await ctx.send(f"✅ Monthly earned credits leaderboard will be posted in {channel.mention}")
 
-    @leaderboard_group.command(name="monthlycontribchannel")
+    @topplayers_group.command(name="monthlycontribchannel")
     async def set_monthly_contrib_channel(self, ctx, channel: discord.TextChannel):
         """Set channel for monthly treasury contributions leaderboard."""
         await self.config.monthly_contrib_channel.set(channel.id)
         await ctx.send(f"✅ Monthly treasury contributions leaderboard will be posted in {channel.mention}")
 
-    @leaderboard_group.command(name="settings")
+    @topplayers_group.command(name="settings")
     async def show_settings(self, ctx):
-        """Show current leaderboard settings."""
+        """Show current top players leaderboard settings."""
         daily_earned = await self.config.daily_earned_channel()
         daily_contrib = await self.config.daily_contrib_channel()
         monthly_earned = await self.config.monthly_earned_channel()
