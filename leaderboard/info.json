@@ -1,0 +1,25 @@
+{
+    "author": [
+        "FireAndRescueAcademy"
+    ],
+    "description": "Alliance leaderboard system for Missionchief USA. Displays daily and monthly top 10 rankings for earned credits and treasury contributions with position tracking.",
+    "install_msg": "Thanks for installing Leaderboard! Use `[p]leaderboard settings` to configure channels. The leaderboards will automatically post daily at 06:00 Amsterdam time and monthly on the last day of each month.",
+    "short": "Alliance leaderboard system with daily/monthly top 10 rankings",
+    "name": "Leaderboard",
+    "tags": [
+        "missionchief",
+        "alliance",
+        "leaderboard",
+        "rankings",
+        "statistics"
+    ],
+    "type": "COG",
+    "end_user_data_statement": "This cog does not store any end user data. It only reads data from the AllianceScraper database.",
+    "required_cogs": {
+        "AllianceScraper": "https://github.com/Brandjuh/FireAndRescueAcademyCogs"
+    },
+    "requirements": [
+        "pytz"
+    ],
+    "min_bot_version": "3.5.0"
+}
