@@ -473,12 +473,53 @@ class AllianceReports(commands.Cog):
     
     @report_group.command(name="monthlymember")
     async def report_monthly_member(self, ctx: commands.Context):
-        """Generate monthly member report now (placeholder)."""
+        """Generate monthly member report now."""
         if not await self._is_authorized(ctx):
             await ctx.send("❌ You don't have permission to use this command.")
             return
         
-        await ctx.send("⏳ Monthly member reports coming in Phase 4...")
+        await ctx.send("🔄 Generating monthly member report...")
+        
+        try:
+            from .templates.monthly_member import MonthlyMemberReport
+            
+            # Create report generator
+            report_gen = MonthlyMemberReport(self.bot, self.config_manager)
+            
+            # Generate embeds
+            embeds = await report_gen.generate()
+            
+            if not embeds:
+                await ctx.send("❌ Failed to generate report")
+                return
+            
+            # Check if channel is configured
+            channel_id = await self.config.monthly_member_channel()
+            if not channel_id:
+                # Post in current channel as test
+                await ctx.send("ℹ️ No channel configured, posting here:")
+                for embed in embeds:
+                    await ctx.send(embed=embed)
+                await ctx.send("✅ Set channel with `[p]reportset channel monthlymember #channel`")
+                return
+            
+            # Get configured channel
+            channel = self.bot.get_channel(int(channel_id))
+            if not channel:
+                await ctx.send(f"❌ Configured channel not found (ID: {channel_id})")
+                return
+            
+            # Post to configured channel
+            success = await report_gen.post(channel)
+            
+            if success:
+                await ctx.send(f"✅ Monthly member report posted to {channel.mention}")
+            else:
+                await ctx.send("❌ Failed to post report (check logs)")
+        
+        except Exception as e:
+            log.exception(f"Error generating monthly member report: {e}")
+            await ctx.send(f"❌ Error: {e}")
     
     @report_group.command(name="monthlyadmin")
     async def report_monthly_admin(self, ctx: commands.Context):
