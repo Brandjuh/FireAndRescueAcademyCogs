@@ -9,7 +9,6 @@ from ..embed_formatter import EmbedFormatter
 log = logging.getLogger("red.FARA.AllianceReports.DailyAdmin")
 class DailyAdminReport:
 """Generate comprehensive daily admin report."""
-
 def __init__(self, bot, config_manager):
     """Initialize daily admin report generator."""
     self.bot = bot
@@ -565,55 +564,3 @@ log.info("Executing daily reports...")
     
 except Exception as e:
     log.exception(f"Critical error in daily reports execution: {e}")
-</artifact>
-En we moeten ook een test command toevoegen:
-<artifact identifier="alliance-reports-test-command" type="application/vnd.ant.code" language="python" title="Add Test Command for Daily Admin">
-# Voeg deze command toe aan alliance_reports.py in de report_group
-@report_group.command(name="dailyadmin")
-async def report_daily_admin(self, ctx: commands.Context):
-"""Generate daily admin report now."""
-if not await self._is_authorized(ctx):
-await ctx.send("❌ You don't have permission to use this command.")
-return
-await ctx.send("🔄 Generating daily admin report...")
-
-try:
-    from .templates.daily_admin import DailyAdminReport
-    
-    # Create report generator
-    report_gen = DailyAdminReport(self.bot, self.config_manager)
-    
-    # Generate embeds
-    embeds = await report_gen.generate()
-    
-    if not embeds:
-        await ctx.send("❌ Failed to generate report")
-        return
-    
-    # Check if channel is configured
-    channel_id = await self.config.daily_admin_channel()
-    if not channel_id:
-        # Post in current channel as test
-        await ctx.send("ℹ️ No channel configured, posting here:")
-        for embed in embeds:
-            await ctx.send(embed=embed)
-        await ctx.send("✅ Set channel with `[p]reportset channel dailyadmin #channel`")
-        return
-    
-    # Get configured channel
-    channel = self.bot.get_channel(int(channel_id))
-    if not channel:
-        await ctx.send(f"❌ Configured channel not found (ID: {channel_id})")
-        return
-    
-    # Post to configured channel
-    success = await report_gen.post(channel)
-    
-    if success:
-        await ctx.send(f"✅ Daily admin report posted to {channel.mention} ({len(embeds)} embeds)")
-    else:
-        await ctx.send("❌ Failed to post report (check logs)")
-
-except Exception as e:
-    log.exception(f"Error generating daily admin report: {e}")
-    await ctx.send(f"❌ Error: {e}")
