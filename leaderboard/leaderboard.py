@@ -272,6 +272,7 @@ class Leaderboard(commands.Cog):
     async def _get_earned_credits_rankings(self, period: str) -> Optional[Dict]:
         """
         Get earned credits rankings for current and previous period.
+        Only includes members that are CURRENTLY in the alliance.
         Returns dict with 'current' and 'previous' rankings.
         """
         if not self.db_path.exists():
@@ -280,6 +281,19 @@ class Leaderboard(commands.Cog):
 
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
+            
+            # Get list of current active member IDs
+            cur = await db.execute("""
+                SELECT DISTINCT user_id FROM members_current WHERE user_id != ''
+            """)
+            current_member_ids = [row['user_id'] for row in await cur.fetchall()]
+            
+            if not current_member_ids:
+                log.warning("No current members found in database")
+                return None
+            
+            # Create placeholder string for SQL IN clause
+            placeholders = ','.join('?' * len(current_member_ids))
             
             # Get most recent scrape
             cur = await db.execute("""
@@ -293,24 +307,24 @@ class Leaderboard(commands.Cog):
             
             # Calculate previous time based on period
             if period == 'daily':
-                # Parse timestamp and subtract 24 hours
                 dt = datetime.fromisoformat(current_time.replace('Z', '+00:00'))
                 previous_dt = dt - timedelta(days=1)
             else:  # monthly
                 dt = datetime.fromisoformat(current_time.replace('Z', '+00:00'))
-                # Go back approximately 30 days
                 previous_dt = dt - timedelta(days=30)
             
             previous_time = previous_dt.isoformat()
             
-            # Get current period rankings
-            cur = await db.execute("""
+            # Get current period rankings - ONLY current members
+            query = f"""
                 SELECT user_id, name, earned_credits, scraped_at
                 FROM members_history
-                WHERE scraped_at = ? AND earned_credits > 0
+                WHERE scraped_at = ? AND earned_credits > 0 
+                AND user_id IN ({placeholders})
                 ORDER BY earned_credits DESC
                 LIMIT 20
-            """, (current_time,))
+            """
+            cur = await db.execute(query, [current_time] + current_member_ids)
             current_raw = [dict(row) for row in await cur.fetchall()]
             current = self._filter_invalid_entries(current_raw, 'earned_credits')[:10]
             
@@ -326,13 +340,15 @@ class Leaderboard(commands.Cog):
             
             previous = []
             if prev_time_row:
-                cur = await db.execute("""
+                query = f"""
                     SELECT user_id, name, earned_credits, scraped_at
                     FROM members_history
                     WHERE scraped_at = ? AND earned_credits > 0
+                    AND user_id IN ({placeholders})
                     ORDER BY earned_credits DESC
                     LIMIT 30
-                """, (prev_time_row['scraped_at'],))
+                """
+                cur = await db.execute(query, [prev_time_row['scraped_at']] + current_member_ids)
                 previous_raw = [dict(row) for row in await cur.fetchall()]
                 previous = self._filter_invalid_entries(previous_raw, 'earned_credits')[:20]
             
