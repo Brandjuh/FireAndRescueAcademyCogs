@@ -251,6 +251,19 @@ class MemberOverviewView(discord.ui.View):
         if data.has_discord():
             discord_lines.append(f"**Username:** {data.discord_username or 'Unknown'}")
             discord_lines.append(f"**ID:** `{data.discord_id}`")
+            
+            # Show server nickname if different from username
+            if data.discord_id:
+                guild = None
+                # Try to get guild from interaction context
+                if hasattr(self, 'message') and self.message:
+                    guild = self.message.guild
+                
+                if guild:
+                    member = guild.get_member(data.discord_id)
+                    if member and member.display_name != member.name:
+                        discord_lines.append(f"**Server Nickname:** {member.display_name}")
+            
             discord_lines.append(f"**Roles:** {format_role_list(data.discord_roles)}")
             
             if data.discord_joined:
