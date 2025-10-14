@@ -230,6 +230,43 @@ class Leaderboard(commands.Cog):
         except Exception as e:
             log.exception(f"Error sending to channel {channel_id}: {e}")
 
+    # ==================== FILTERING ====================
+
+    def _filter_invalid_entries(self, rankings: List[Dict], metric: str) -> List[Dict]:
+        """Filter out corrupted/invalid entries from rankings."""
+        filtered = []
+        for entry in rankings:
+            user_id = entry.get('user_id', '')
+            name = entry.get('name', '')
+            
+            # Check blacklists
+            if user_id in BLACKLISTED_USER_IDS:
+                log.warning(f"Filtered blacklisted user_id: {user_id}")
+                continue
+            
+            if name in BLACKLISTED_USERNAMES:
+                log.warning(f"Filtered blacklisted username: {name}")
+                continue
+            
+            # Check for INT64_MAX (parsing error indicator)
+            if metric == 'earned_credits':
+                value = entry.get('earned_credits', 0)
+            else:
+                value = entry.get('credits', 0)
+            
+            if value >= INT64_MAX:
+                log.warning(f"Filtered INT64_MAX value for {name}: {value}")
+                continue
+            
+            # Check for suspiciously numeric usernames (likely IDs)
+            if name and name.isdigit() and len(name) > 10:
+                log.warning(f"Filtered numeric username (likely ID): {name}")
+                continue
+            
+            filtered.append(entry)
+        
+        return filtered
+
     # ==================== DATA RETRIEVAL ====================
 
     async def _get_earned_credits_rankings(self, period: str) -> Optional[Dict]:
@@ -266,15 +303,16 @@ class Leaderboard(commands.Cog):
             
             previous_time = previous_dt.isoformat()
             
-            # Get current period rankings - filter out unrealistic values
+            # Get current period rankings
             cur = await db.execute("""
                 SELECT user_id, name, earned_credits, scraped_at
                 FROM members_history
-                WHERE scraped_at = ? AND earned_credits > 0 AND earned_credits < ?
+                WHERE scraped_at = ? AND earned_credits > 0
                 ORDER BY earned_credits DESC
-                LIMIT 10
-            """, (current_time, MAX_REALISTIC_EARNED_CREDITS))
-            current = [dict(row) for row in await cur.fetchall()]
+                LIMIT 20
+            """, (current_time,))
+            current_raw = [dict(row) for row in await cur.fetchall()]
+            current = self._filter_invalid_entries(current_raw, 'earned_credits')[:10]
             
             # Get previous period rankings - find closest timestamp
             cur = await db.execute("""
@@ -291,11 +329,12 @@ class Leaderboard(commands.Cog):
                 cur = await db.execute("""
                     SELECT user_id, name, earned_credits, scraped_at
                     FROM members_history
-                    WHERE scraped_at = ? AND earned_credits > 0 AND earned_credits < ?
+                    WHERE scraped_at = ? AND earned_credits > 0
                     ORDER BY earned_credits DESC
-                    LIMIT 20
-                """, (prev_time_row['scraped_at'], MAX_REALISTIC_EARNED_CREDITS))
-                previous = [dict(row) for row in await cur.fetchall()]
+                    LIMIT 30
+                """, (prev_time_row['scraped_at'],))
+                previous_raw = [dict(row) for row in await cur.fetchall()]
+                previous = self._filter_invalid_entries(previous_raw, 'earned_credits')[:20]
             
             return {
                 'current': current,
@@ -328,15 +367,16 @@ class Leaderboard(commands.Cog):
             
             current_time = row['latest']
             
-            # Get current rankings - filter out unrealistic values
+            # Get current rankings
             cur = await db.execute("""
                 SELECT user_id, user_name as name, credits, scraped_at
                 FROM treasury_income
-                WHERE period = ? AND scraped_at = ? AND credits > 0 AND credits < ?
+                WHERE period = ? AND scraped_at = ? AND credits > 0
                 ORDER BY credits DESC
-                LIMIT 10
-            """, (period_type, current_time, MAX_REALISTIC_CONTRIBUTION))
-            current = [dict(row) for row in await cur.fetchall()]
+                LIMIT 20
+            """, (period_type, current_time))
+            current_raw = [dict(row) for row in await cur.fetchall()]
+            current = self._filter_invalid_entries(current_raw, 'contributions')[:10]
             
             # Get previous period rankings
             # For treasury, we need to go back to previous scrape
@@ -365,11 +405,12 @@ class Leaderboard(commands.Cog):
                 cur = await db.execute("""
                     SELECT user_id, user_name as name, credits, scraped_at
                     FROM treasury_income
-                    WHERE period = ? AND scraped_at = ? AND credits > 0 AND credits < ?
+                    WHERE period = ? AND scraped_at = ? AND credits > 0
                     ORDER BY credits DESC
-                    LIMIT 20
-                """, (period_type, prev_time_row['scraped_at'], MAX_REALISTIC_CONTRIBUTION))
-                previous = [dict(row) for row in await cur.fetchall()]
+                    LIMIT 30
+                """, (period_type, prev_time_row['scraped_at']))
+                previous_raw = [dict(row) for row in await cur.fetchall()]
+                previous = self._filter_invalid_entries(previous_raw, 'contributions')[:20]
             
             return {
                 'current': current,
