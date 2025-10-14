@@ -1,0 +1,29 @@
+{
+    "author": [
+        "FireAndRescueAcademy"
+    ],
+    "description": "Comprehensive member management system for Fire & Rescue Academy alliance. Tracks Discord and MissionChief data, notes, infractions, contribution rates, and provides automated monitoring.",
+    "install_msg": "Thank you for installing MemberManager!\n\nThis cog integrates with:\n- MemberSync (for Discord ↔ MC linking)\n- AllianceScraper (for MC member data)\n- Red's modlog (for Discord infractions)\n\nUse `[p]member help` to get started.\n\nRecommended setup:\n1. Configure admin roles: `[p]memberset adminroles`\n2. Set alert channel: `[p]memberset alertchannel`\n3. Enable automation: `[p]memberset autocontribution on`\n\nFor full documentation, see the README.",
+    "short": "Member management with notes, infractions, and automation",
+    "name": "MemberManager",
+    "tags": [
+        "member",
+        "management",
+        "moderation",
+        "tracking",
+        "alliance",
+        "missionchief",
+        "notes",
+        "infractions",
+        "automation"
+    ],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores member information including Discord IDs, MissionChief IDs, notes, infractions, and audit trails. Data can be deleted upon user request.",
+    "min_bot_version": "3.5.0",
+    "required_cogs": {},
+    "requirements": [
+        "aiosqlite"
+    ],
+    "hidden": false,
+    "disabled": false
+}
