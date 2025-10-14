@@ -32,16 +32,16 @@ Alliance leaderboard system for Missionchief USA Fire and Rescue Academy. Automa
 Configure where each leaderboard should be posted:
 
 ```
-[p]leaderboard dailyearnedchannel #daily-earned-credits
-[p]leaderboard dailycontribchannel #daily-contributions
-[p]leaderboard monthlyearnedchannel #monthly-earned-credits
-[p]leaderboard monthlycontribchannel #monthly-contributions
+[p]topplayers dailyearnedchannel #daily-earned-credits
+[p]topplayers dailycontribchannel #daily-contributions
+[p]topplayers monthlyearnedchannel #monthly-earned-credits
+[p]topplayers monthlycontribchannel #monthly-contributions
 ```
 
 ### View Settings
 
 ```
-[p]leaderboard settings
+[p]topplayers settings
 ```
 
 Shows current channel configuration and posting schedule.
