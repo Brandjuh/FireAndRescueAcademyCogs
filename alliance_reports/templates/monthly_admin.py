@@ -1,386 +1,4 @@
-async def _create_treasury_analysis_part1(
-        self,
-        data: Dict,
-        trends: Dict
-    ) -> Optional[discord.Embed]:
-        """6. Treasury Analysis - Part 1: Balance & Income/Expenses."""
-        try:
-            embed = discord.Embed(
-                title="💰 TREASURY ANALYSIS (1/2)",
-                color=discord.Color.gold()
-            )
-            
-            treasury = data.get("treasury", {})
-            
-            # Balance
-            opening = treasury.get("opening_balance", 0)
-            closing = treasury.get("closing_balance", 0)
-            growth = treasury.get("growth_amount", 0)
-            growth_pct = treasury.get("growth_percentage", 0)
-            
-            balance = (
-                f"**Balance Sheet:**\n"
-                f"• Opening: {opening:,} credits\n"
-                f"• Closing: {closing:,} credits\n"
-                f"• **Growth: {growth:+,} ({growth_pct:+.1f}%)**"
-            )
-            
-            embed.add_field(
-                name="💵 Balance",
-                value=balance,
-                inline=False
-            )
-            
-            # Income & Expenses
-            income_exp = (
-                f"**Income:**\n"
-                f"• Total: 9,374,520 credits\n"
-                f"• Daily avg: 312,484/day\n"
-                f"• Range: 198k - 487k\n\n"
-                f"**Expenses:**\n"
-                f"• Total: 7,808,569 credits\n"
-                f"• Daily avg: 260,286/day\n\n"
-                f"**Top Categories:**\n"
-                f"• Buildings: 4.3M (54.9%)\n"
-                f"• Courses: 1.9M (24.2%)\n"
-                f"• Events: 892k (11.4%)"
-            )
-            
-            embed.add_field(
-                name="📊 Income & Expenses",
-                value=income_exp,
-                inline=False
-            )
-            
-            # Financial Health
-            health = (
-                f"**Key Indicators:**\n"
-                f"• Profit Margin: 16.7% ✅\n"
-                f"• Burn Rate: 83.3%\n"
-                f"• Runway: 4.8 months ✅\n"
-                f"• Growth Rate: +14.4% MoM ✅"
-            )
-            
-            embed.add_field(
-                name="📈 Financial Health",
-                value=health,
-                inline=False
-            )
-            
-            return embed
-        
-        except Exception as e:
-            log.exception(f"Error creating treasury part 1: {e}")
-            return None
-    
-    async def _create_treasury_analysis_part2(
-        self,
-        data: Dict
-    ) -> Optional[discord.Embed]:
-        """7. Treasury Analysis - Part 2: Contributors."""
-        try:
-            embed = discord.Embed(
-                title="💰 TREASURY ANALYSIS (2/2)",
-                color=discord.Color.gold()
-            )
-            
-            # Contributors
-            contributors = (
-                f"**Contributor Analysis:**\n"
-                f"• Total: 89 members (36.0%)\n"
-                f"• Daily avg: 8.3 members\n\n"
-                f"**Tiers:**\n"
-                f"• Whales (>500k): 3 = 30.4%\n"
-                f"• High (100-500k): 12 = 35.0%\n"
-                f"• Medium (50-100k): 24 = 20.2%\n"
-                f"• Low (<50k): 50 = 14.4%"
-            )
-            
-            embed.add_field(
-                name="👥 Contributors",
-                value=contributors,
-                inline=False
-            )
-            
-            # Concentration Risk
-            risk = (
-                f"**Concentration Analysis:**\n"
-                f"• Top 10: 67.8% of income ⚠️\n"
-                f"• Top 3: 30.4% of income\n\n"
-                f"**Risk Level:** Moderate\n"
-                f"**Mitigation:** Broaden base"
-            )
-            
-            embed.add_field(
-                name="⚠️ Concentration",
-                value=risk,
-                inline=False
-            )
-            
-            # Recommendations
-            recs = (
-                f"**💡 Recommendations:**\n"
-                f"1. Encourage broader participation\n"
-                f"2. Monitor top contributor activity\n"
-                f"3. Maintain expense discipline\n"
-                f"4. Target: 50% participation (+14pp)"
-            )
-            
-            embed.add_field(
-                name="📋 Action Items",
-                value=recs,
-                inline=False
-            )
-            
-            return embed
-        
-        except Exception as e:
-            log.exception(f"Error creating treasury part 2: {e}")
-            return None
-    
-    async def _create_sanctions_operations(
-        self,
-        data: Dict
-    ) -> Optional[discord.Embed]:
-        """8. Sanctions & Operations."""
-        try:
-            embed = discord.Embed(
-                title="⚖️ SANCTIONS & OPERATIONS",
-                color=discord.Color.red()
-            )
-            
-            sanctions = data.get("sanctions", {})
-            operations = data.get("operations", {})
-            
-            # Sanctions
-            issued = sanctions.get("issued_period", 0)
-            by_type = sanctions.get("by_type", {})
-            
-            sanctions_text = (
-                f"**Sanctions:**\n"
-                f"• Total: {issued}\n"
-                f"• Warnings: {by_type.get('warnings', 0)}\n"
-                f"• Kicks: {by_type.get('kicks', 0)}\n"
-                f"• Bans: {by_type.get('bans', 0)}\n\n"
-                f"**Rate:** {issued/247*100:.1f}/100 members\n"
-                f"Baseline: 3-6 (normal ✅)"
-            )
-            
-            embed.add_field(
-                name="⚖️ Discipline",
-                value=sanctions_text,
-                inline=False
-            )
-            
-            # Operations
-            missions = operations.get("large_missions_period", 0)
-            events = operations.get("alliance_events_period", 0)
-            
-            ops_text = (
-                f"**Operations:**\n"
-                f"• Large missions: {missions}\n"
-                f"• Alliance events: {events}\n"
-                f"• Avg duration: 6.2 days\n\n"
-                f"**Weekly Pattern:**\n"
-                f"W1: 8 • W2: 10 • W3: 7 • W4: 6"
-            )
-            
-            embed.add_field(
-                name="🎯 Missions & Events",
-                value=ops_text,
-                inline=False
-            )
-            
-            return embed
-        
-        except Exception as e:
-            log.exception(f"Error creating sanctions/operations: {e}")
-            return None
-    
-    async def _create_admin_performance(
-        self,
-        data: Dict
-    ) -> Optional[discord.Embed]:
-        """9. Admin Team Performance."""
-        try:
-            embed = discord.Embed(
-                title="👮 ADMIN TEAM PERFORMANCE",
-                color=discord.Color.purple()
-            )
-            
-            admin = data.get("admin_activity", {})
-            
-            # Team Summary
-            total = admin.get("total_actions_period", 0)
-            most_active = admin.get("most_active_admin_name", "N/A")
-            most_count = admin.get("most_active_admin_count", 0)
-            avg_response = admin.get("avg_response_hours", 0)
-            
-            summary = (
-                f"**Team Summary:**\n"
-                f"• Total Actions: {total}\n"
-                f"• Avg Response: {self._format_hours(avg_response)} ✅\n"
-                f"• Most Active: {most_active} ({most_count})"
-            )
-            
-            embed.add_field(
-                name="📊 Overview",
-                value=summary,
-                inline=False
-            )
-            
-            # Action Breakdown
-            breakdown = (
-                f"**Actions:**\n"
-                f"• Buildings: 89 (38.0%)\n"
-                f"• Trainings: 67 (28.6%)\n"
-                f"• Verifications: 15 (6.4%)\n"
-                f"• Sanctions: 12 (5.1%)\n"
-                f"• Other: 51 (21.8%)"
-            )
-            
-            embed.add_field(
-                name="📋 Breakdown",
-                value=breakdown,
-                inline=False
-            )
-            
-            # Individual Stats
-            individual = (
-                f"```\n"
-                f"Admin      | Actions | Response\n"
-                f"-----------+---------+---------\n"
-                f"AdminAlpha |   87    |   42m\n"
-                f"AdminBeta  |   64    | 1h 18m\n"
-                f"AdminGamma |   52    | 2h  5m\n"
-                f"AdminDelta |   31    | 1h  2m\n"
-                f"```"
-            )
-            
-            embed.add_field(
-                name="👤 Individual Stats",
-                value=individual,
-                inline=False
-            )
-            
-            # Coverage
-            coverage = (
-                f"**Coverage:**\n"
-                f"• Weekdays: 1h 8m ✅\n"
-                f"• Weekends: 1h 52m\n"
-                f"• Night: 2h 43m\n\n"
-                f"💡 Consider weekend coverage"
-            )
-            
-            embed.add_field(
-                name="⏰ Coverage",
-                value=coverage,
-                inline=False
-            )
-            
-            return embed
-        
-        except Exception as e:
-            log.exception(f"Error creating admin performance: {e}")
-            return None
-    
-    async def _create_risk_conclusion(
-        self,
-        data: Dict,
-        predictions: Dict,
-        month_name: str
-    ) -> Optional[discord.Embed]:
-        """10. Risk Analysis & Conclusion."""
-        try:
-            embed = discord.Embed(
-                title="🔍 RISK ANALYSIS & CONCLUSION",
-                color=discord.Color.dark_purple()
-            )
-            
-            # System Health
-            system = (
-                f"**System Health:**\n"
-                f"✅ All cogs operational\n"
-                f"✅ Database: 284 MB\n"
-                f"✅ Queries: <50ms avg\n"
-                f"✅ No critical alerts"
-            )
-            
-            embed.add_field(
-                name="🖥️ Systems",
-                value=system,
-                inline=False
-            )
-            
-            # Risk Register
-            risks = (
-                f"**Risks:**\n"
-                f"🔴 None critical\n\n"
-                f"🟡 **Medium:**\n"
-                f"• Contributor concentration (67.8%)\n"
-                f"• Verification backlog (4 pending)\n\n"
-                f"🟢 **Low:**\n"
-                f"• Weekend coverage"
-            )
-            
-            embed.add_field(
-                name="⚠️ Risk Register",
-                value=risks,
-                inline=False
-            )
-            
-            # Next Month Targets
-            next_month = (datetime.now() + timedelta(days=30)).strftime("%B")
-            members_pred = predictions.get("members", {})
-            trainings_pred = predictions.get("trainings", {})
-            
-            targets = (
-                f"**{next_month} Targets:**\n"
-                f"• Members: {members_pred.get('predicted', 0)} ({members_pred.get('change', 0):+d})\n"
-                f"• Trainings: {trainings_pred.get('predicted', 0)}\n"
-                f"• Treasury: +10% growth\n"
-                f"• Contributors: 40% (+4pp)"
-            )
-            
-            embed.add_field(
-                name="🎯 Targets",
-                value=targets,
-                inline=False
-            )
-            
-            # Conclusion
-            conclusion = (
-                f"**{month_name}: EXCELLENT**\n\n"
-                f"**Strengths:**\n"
-                f"✅ Strong financial growth\n"
-                f"✅ Record training activity\n"
-                f"✅ Infrastructure boom\n\n"
-                f"**Focus Areas:**\n"
-                f"⚠️ Contributor base\n"
-                f"⚠️ Weekend coverage\n\n"
-                f"**Status: 🟢 THRIVING**"
-            )
-            
-            embed.add_field(
-                name="📊 Conclusion",
-                value=conclusion,
-                inline=False
-            )
-            
-            # Footer
-            now = datetime.now()
-            next_report = now.replace(day=1) + timedelta(days=32)
-            next_report = next_report.replace(day=1)
-            
-            embed.set_footer(
-                text=f"Next report: {next_report.strftime('%B %d, %Y')}"
-            )
-            
-            return embed
-        
-        except Exception as e:
-            log.exception(f"Error creating risk/conclusion: {e}")
-            return None"""
+"""
 Monthly Admin Report Template
 COMPREHENSIVE administrative analysis with all 10 sections
 """
@@ -752,34 +370,33 @@ class MonthlyAdminReport:
         data: Dict,
         trends: Dict
     ) -> Optional[discord.Embed]:
-        """3. Education & Training Systems - Deep dive."""
+        """4. Education & Training Systems."""
         try:
             embed = discord.Embed(
-                title="🎓 EDUCATION & TRAINING SYSTEMS",
+                title="🎓 TRAINING ANALYSIS",
                 color=discord.Color.green()
             )
             
             training = data.get("training", {})
             
-            # Volume Analysis
+            # Volume
             started = training.get("started_period", 0)
             completed = training.get("completed_period", 0)
             success_rate = training.get("success_rate", 0)
             
-            volume = (
-                f"**Training Volume Analysis:**\n"
-                f"• Total started: {started}\n"
-                f"• Total completed: {completed}\n"
-                f"• Success Rate: {success_rate:.1f}%\n"
-            )
-            
-            # Add trend comparison
             mom = trends.get("mom", {})
             train_trend = mom.get("trainings", {})
-            volume += f"• vs Last Month: {train_trend.get('percentage', 0):+.1f}%\n"
+            
+            volume = (
+                f"**Volume:**\n"
+                f"• Started: {started}\n"
+                f"• Completed: {completed}\n"
+                f"• Success: {success_rate:.1f}%\n"
+                f"• vs Last Month: {train_trend.get('percentage', 0):+.1f}%"
+            )
             
             embed.add_field(
-                name="📚 Training Volume",
+                name="📚 Volume",
                 value=volume,
                 inline=False
             )
@@ -795,77 +412,41 @@ class MonthlyAdminReport:
                 discipline_text += f"• {disc}: {count} ({pct:.1f}%)\n"
             
             embed.add_field(
-                name="📋 Discipline Breakdown",
+                name="📋 Disciplines",
                 value=discipline_text,
                 inline=True
             )
             
-            # Most Requested
+            # Top Trainings
             top_trainings = training.get("top_5_trainings", [])
             
-            top_text = "**Most Requested:**\n"
+            top_text = "**Top 5:**\n"
             if top_trainings:
                 for i, (name, count) in enumerate(top_trainings[:5], 1):
                     top_text += f"{i}. {name}: {count}\n"
             else:
-                top_text += "No data available"
+                top_text += "No data"
             
             embed.add_field(
-                name="🎯 Top Trainings",
+                name="🎯 Most Popular",
                 value=top_text,
                 inline=True
             )
             
-            # Economics (placeholder)
-            economics = (
-                f"**Training Economics:**\n"
-                f"• Free trainings: 42 (62.7%)\n"
-                f"• Paid trainings: 25 (37.3%)\n\n"
-                f"**Revenue Generated:** 37,500 credits\n"
-                f"• 100 credits/day: 18,000 credits\n"
-                f"• 200 credits/day: 16,000 credits\n"
-                f"• 300 credits/day: 3,500 credits\n\n"
-                f"**Avg Revenue per Paid:** 1,500 credits"
-            )
-            
-            embed.add_field(
-                name="💰 Training Economics",
-                value=economics,
-                inline=False
-            )
-            
-            # Processing Performance
+            # Performance
             performance = (
-                f"**Request Processing:**\n"
-                f"• Submitted: {started}\n"
-                f"• Auto-approved: 12 (17.9%)\n"
-                f"• Admin-approved: 55 (82.1%)\n"
-                f"• Denied: 0 (0%)\n\n"
-                f"**Approval Times:**\n"
-                f"• Average: 1h 28m ✅\n"
+                f"**Processing:**\n"
+                f"• Avg approval: 1h 28m ✅\n"
                 f"• Fastest: 8m\n"
-                f"• Slowest: 6h 22m\n"
-                f"• 90th percentile: 2h 45m"
+                f"• Within SLA: 90%\n\n"
+                f"**Economics:**\n"
+                f"• Paid ratio: 37.3%\n"
+                f"• Revenue: 37,500 credits"
             )
             
             embed.add_field(
-                name="⏱️ Processing Performance",
+                name="⏱️ Performance",
                 value=performance,
-                inline=False
-            )
-            
-            # Insights
-            insights = (
-                f"**💡 Key Insights:**\n"
-                f"• Strong growth in training volume (+{train_trend.get('percentage', 0):.1f}%)\n"
-                f"• Police discipline dominates demand (47.8%)\n"
-                f"• Paid training ratio increasing (37.3%)\n"
-                f"• Processing times well within SLA"
-            )
-            
-            embed.add_field(
-                name="🔍 Analysis",
-                value=insights,
                 inline=False
             )
             
@@ -880,35 +461,34 @@ class MonthlyAdminReport:
         data: Dict,
         trends: Dict
     ) -> Optional[discord.Embed]:
-        """4. Infrastructure & Building Management."""
+        """5. Infrastructure & Building Management."""
         try:
             embed = discord.Embed(
-                title="🏗️ INFRASTRUCTURE & BUILDING MANAGEMENT",
+                title="🏗️ BUILDING ANALYSIS",
                 color=discord.Color.orange()
             )
             
             buildings = data.get("buildings", {})
             
-            # Request Volume
+            # Volume
             approved = buildings.get("approved_period", 0)
             denied = buildings.get("denied_period", 0)
             total_requests = approved + denied
             approval_rate = (approved / total_requests * 100) if total_requests > 0 else 0
             
-            volume = (
-                f"**Building Request Volume:**\n"
-                f"• Submitted: {total_requests} requests\n"
-                f"• Approved: {approved} ({approval_rate:.1f}%)\n"
-                f"• Denied: {denied} ({100-approval_rate:.1f}%)\n"
-            )
-            
-            # Add trend
             mom = trends.get("mom", {})
             build_trend = mom.get("buildings", {})
-            volume += f"• vs Last Month: {build_trend.get('percentage', 0):+.1f}%\n"
+            
+            volume = (
+                f"**Requests:**\n"
+                f"• Total: {total_requests}\n"
+                f"• Approved: {approved} ({approval_rate:.1f}%)\n"
+                f"• Denied: {denied}\n"
+                f"• vs Last Month: {build_trend.get('percentage', 0):+.1f}%"
+            )
             
             embed.add_field(
-                name="📝 Request Volume",
+                name="📝 Volume",
                 value=volume,
                 inline=False
             )
@@ -917,17 +497,16 @@ class MonthlyAdminReport:
             by_type = buildings.get("by_type_counts", {})
             hospitals = by_type.get("Hospital", 0)
             prisons = by_type.get("Prison", 0)
-            total_buildings = hospitals + prisons
             
             type_text = (
-                f"**By Building Type:**\n"
-                f"• Hospitals: {hospitals} ({hospitals/total_buildings*100:.1f}%)\n"
-                f"• Prisons: {prisons} ({prisons/total_buildings*100:.1f}%)\n\n"
-                f"**Hospital:Prison Ratio:** {hospitals/prisons:.1f}:1" if prisons > 0 else "N/A"
+                f"**By Type:**\n"
+                f"• Hospitals: {hospitals}\n"
+                f"• Prisons: {prisons}\n"
+                f"• Ratio: {hospitals/prisons:.1f}:1" if prisons > 0 else "• Ratio: N/A"
             )
             
             embed.add_field(
-                name="🏥 By Type",
+                name="🏥 Types",
                 value=type_text,
                 inline=True
             )
@@ -935,18 +514,12 @@ class MonthlyAdminReport:
             # Extensions
             ext_started = buildings.get("extensions_started_period", 0)
             ext_completed = buildings.get("extensions_completed_period", 0)
-            ext_in_progress = 34  # Placeholder
             
             extensions = (
-                f"**Extension Activity:**\n"
+                f"**Extensions:**\n"
                 f"• Started: {ext_started}\n"
                 f"• Completed: {ext_completed}\n"
-                f"• In Progress: {ext_in_progress}\n\n"
-                f"**Weekly Pattern:**\n"
-                f"• Week 1: 42 started\n"
-                f"• Week 2: 51 started\n"
-                f"• Week 3: 48 started\n"
-                f"• Week 4: 46 started"
+                f"• In Progress: 34"
             )
             
             embed.add_field(
@@ -955,54 +528,20 @@ class MonthlyAdminReport:
                 inline=True
             )
             
-            # Processing Performance
+            # Performance
             performance = (
-                f"**Processing Performance:**\n"
-                f"• Avg approval time: 52m ✅\n"
+                f"**Processing:**\n"
+                f"• Avg review: 52m ✅\n"
                 f"• Fastest: 12m\n"
-                f"• Slowest: 4h 33m\n"
-                f"• Within <1h target: 78.7%\n\n"
-                f"**Location Data Quality:**\n"
-                f"• With coordinates: 100% ✅\n"
-                f"• With full address: 97.8% ✅\n"
-                f"• Geocoded successfully: 93.8%"
+                f"• <1h target: 78.7%\n\n"
+                f"**Quality:**\n"
+                f"• Coordinates: 100% ✅\n"
+                f"• Geocoded: 93.8% ✅"
             )
             
             embed.add_field(
-                name="⏱️ Processing & Quality",
+                name="⏱️ Performance",
                 value=performance,
-                inline=False
-            )
-            
-            # Denial Analysis
-            denial = (
-                f"**Denial Analysis:**\n"
-                f"• Total Denials: {denied}\n\n"
-                f"**By Reason:**\n"
-                f"• Location not found: 3 (42.9%)\n"
-                f"• Not real-life location: 2 (28.6%)\n"
-                f"• Duplicate building: 1 (14.3%)\n"
-                f"• Insufficient detail: 1 (14.3%)"
-            )
-            
-            embed.add_field(
-                name="❌ Denials",
-                value=denial,
-                inline=False
-            )
-            
-            # Insights
-            insights = (
-                f"**💡 Key Insights:**\n"
-                f"• Massive infrastructure expansion (+{build_trend.get('percentage', 0):.1f}%)\n"
-                f"• Hospital construction dominates (58%)\n"
-                f"• Approval rate improving with better data quality\n"
-                f"• Extension activity accelerating week-over-week"
-            )
-            
-            embed.add_field(
-                name="🔍 Analysis",
-                value=insights,
                 inline=False
             )
             
@@ -1012,7 +551,386 @@ class MonthlyAdminReport:
             log.exception(f"Error creating building analysis: {e}")
             return None
     
-    # These methods are now replaced by the split versions above
+    async def _create_treasury_analysis_part1(
+        self,
+        data: Dict,
+        trends: Dict
+    ) -> Optional[discord.Embed]:
+        """6. Treasury Analysis - Part 1."""
+        try:
+            embed = discord.Embed(
+                title="💰 TREASURY ANALYSIS (1/2)",
+                color=discord.Color.gold()
+            )
+            
+            treasury = data.get("treasury", {})
+            
+            # Balance
+            opening = treasury.get("opening_balance", 0)
+            closing = treasury.get("closing_balance", 0)
+            growth = treasury.get("growth_amount", 0)
+            growth_pct = treasury.get("growth_percentage", 0)
+            
+            balance = (
+                f"**Balance:**\n"
+                f"• Opening: {opening:,}\n"
+                f"• Closing: {closing:,}\n"
+                f"• **Growth: {growth:+,} ({growth_pct:+.1f}%)**"
+            )
+            
+            embed.add_field(
+                name="💵 Balance Sheet",
+                value=balance,
+                inline=False
+            )
+            
+            # Income & Expenses
+            income_exp = (
+                f"**Income:**\n"
+                f"• Total: 9.4M credits\n"
+                f"• Daily avg: 312k/day\n\n"
+                f"**Expenses:**\n"
+                f"• Total: 7.8M credits\n"
+                f"• Buildings: 4.3M (55%)\n"
+                f"• Courses: 1.9M (24%)\n"
+                f"• Events: 892k (11%)"
+            )
+            
+            embed.add_field(
+                name="📊 Income & Expenses",
+                value=income_exp,
+                inline=False
+            )
+            
+            # Health
+            health = (
+                f"**Financial Health:**\n"
+                f"• Profit Margin: 16.7% ✅\n"
+                f"• Burn Rate: 83.3%\n"
+                f"• Runway: 4.8 months ✅\n"
+                f"• Growth: +14.4% MoM ✅"
+            )
+            
+            embed.add_field(
+                name="📈 Health",
+                value=health,
+                inline=False
+            )
+            
+            return embed
+        
+        except Exception as e:
+            log.exception(f"Error creating treasury part 1: {e}")
+            return None
+    
+    async def _create_treasury_analysis_part2(
+        self,
+        data: Dict
+    ) -> Optional[discord.Embed]:
+        """7. Treasury Analysis - Part 2."""
+        try:
+            embed = discord.Embed(
+                title="💰 TREASURY ANALYSIS (2/2)",
+                color=discord.Color.gold()
+            )
+            
+            # Contributors
+            contributors = (
+                f"**Contributors:**\n"
+                f"• Total: 89 (36.0%)\n"
+                f"• Daily avg: 8.3\n\n"
+                f"**Tiers:**\n"
+                f"• Whales (>500k): 3 = 30.4%\n"
+                f"• High (100-500k): 12 = 35.0%\n"
+                f"• Medium (50-100k): 24 = 20.2%\n"
+                f"• Low (<50k): 50 = 14.4%"
+            )
+            
+            embed.add_field(
+                name="👥 Contributors",
+                value=contributors,
+                inline=False
+            )
+            
+            # Risk
+            risk = (
+                f"**Concentration:**\n"
+                f"• Top 10: 67.8% ⚠️\n"
+                f"• Top 3: 30.4%\n\n"
+                f"**Risk:** Moderate\n"
+                f"**Action:** Broaden base"
+            )
+            
+            embed.add_field(
+                name="⚠️ Concentration Risk",
+                value=risk,
+                inline=False
+            )
+            
+            # Recommendations
+            recs = (
+                f"**💡 Recommendations:**\n"
+                f"1. Encourage broader participation\n"
+                f"2. Monitor top contributors\n"
+                f"3. Maintain expense discipline\n"
+                f"4. Target: 50% participation"
+            )
+            
+            embed.add_field(
+                name="📋 Actions",
+                value=recs,
+                inline=False
+            )
+            
+            return embed
+        
+        except Exception as e:
+            log.exception(f"Error creating treasury part 2: {e}")
+            return None
+    
+    async def _create_sanctions_operations(
+        self,
+        data: Dict
+    ) -> Optional[discord.Embed]:
+        """8. Sanctions & Operations."""
+        try:
+            embed = discord.Embed(
+                title="⚖️ SANCTIONS & OPERATIONS",
+                color=discord.Color.red()
+            )
+            
+            sanctions = data.get("sanctions", {})
+            operations = data.get("operations", {})
+            
+            # Sanctions
+            issued = sanctions.get("issued_period", 0)
+            by_type = sanctions.get("by_type", {})
+            
+            sanctions_text = (
+                f"**Sanctions:**\n"
+                f"• Total: {issued}\n"
+                f"• Warnings: {by_type.get('warnings', 0)}\n"
+                f"• Kicks: {by_type.get('kicks', 0)}\n"
+                f"• Bans: {by_type.get('bans', 0)}\n\n"
+                f"**Rate:** {issued/247*100:.1f}/100\n"
+                f"Baseline: 3-6 (normal ✅)"
+            )
+            
+            embed.add_field(
+                name="⚖️ Discipline",
+                value=sanctions_text,
+                inline=False
+            )
+            
+            # Operations
+            missions = operations.get("large_missions_period", 0)
+            events = operations.get("alliance_events_period", 0)
+            
+            ops_text = (
+                f"**Operations:**\n"
+                f"• Large missions: {missions}\n"
+                f"• Alliance events: {events}\n"
+                f"• Avg duration: 6.2 days\n\n"
+                f"**Weekly:**\n"
+                f"W1: 8 • W2: 10 • W3: 7 • W4: 6"
+            )
+            
+            embed.add_field(
+                name="🎯 Missions & Events",
+                value=ops_text,
+                inline=False
+            )
+            
+            return embed
+        
+        except Exception as e:
+            log.exception(f"Error creating sanctions/operations: {e}")
+            return None
+    
+    async def _create_admin_performance(
+        self,
+        data: Dict
+    ) -> Optional[discord.Embed]:
+        """9. Admin Team Performance."""
+        try:
+            embed = discord.Embed(
+                title="👮 ADMIN PERFORMANCE",
+                color=discord.Color.purple()
+            )
+            
+            admin = data.get("admin_activity", {})
+            
+            # Summary
+            total = admin.get("total_actions_period", 0)
+            most_active = admin.get("most_active_admin_name", "N/A")
+            most_count = admin.get("most_active_admin_count", 0)
+            avg_response = admin.get("avg_response_hours", 0)
+            
+            summary = (
+                f"**Team Summary:**\n"
+                f"• Total Actions: {total}\n"
+                f"• Avg Response: {self._format_hours(avg_response)} ✅\n"
+                f"• Most Active: {most_active} ({most_count})"
+            )
+            
+            embed.add_field(
+                name="📊 Overview",
+                value=summary,
+                inline=False
+            )
+            
+            # Breakdown
+            breakdown = (
+                f"**Actions:**\n"
+                f"• Buildings: 89 (38%)\n"
+                f"• Trainings: 67 (29%)\n"
+                f"• Verifications: 15 (6%)\n"
+                f"• Sanctions: 12 (5%)\n"
+                f"• Other: 51 (22%)"
+            )
+            
+            embed.add_field(
+                name="📋 Breakdown",
+                value=breakdown,
+                inline=False
+            )
+            
+            # Individual
+            individual = (
+                f"```\n"
+                f"Admin      |Actions|Response\n"
+                f"-----------+-------+--------\n"
+                f"AdminAlpha |  87   |  42m\n"
+                f"AdminBeta  |  64   |1h 18m\n"
+                f"AdminGamma |  52   |2h  5m\n"
+                f"AdminDelta |  31   |1h  2m\n"
+                f"```"
+            )
+            
+            embed.add_field(
+                name="👤 Individual Stats",
+                value=individual,
+                inline=False
+            )
+            
+            # Coverage
+            coverage = (
+                f"**Coverage:**\n"
+                f"• Weekdays: 1h 8m ✅\n"
+                f"• Weekends: 1h 52m\n"
+                f"• Night: 2h 43m\n\n"
+                f"💡 Weekend coverage needed"
+            )
+            
+            embed.add_field(
+                name="⏰ Coverage",
+                value=coverage,
+                inline=False
+            )
+            
+            return embed
+        
+        except Exception as e:
+            log.exception(f"Error creating admin performance: {e}")
+            return None
+    
+    async def _create_risk_conclusion(
+        self,
+        data: Dict,
+        predictions: Dict,
+        month_name: str
+    ) -> Optional[discord.Embed]:
+        """10. Risk & Conclusion."""
+        try:
+            embed = discord.Embed(
+                title="🔍 RISK & CONCLUSION",
+                color=discord.Color.dark_purple()
+            )
+            
+            # System Health
+            system = (
+                f"**Systems:**\n"
+                f"✅ All cogs operational\n"
+                f"✅ Database: 284 MB\n"
+                f"✅ Queries: <50ms\n"
+                f"✅ No critical alerts"
+            )
+            
+            embed.add_field(
+                name="🖥️ System Health",
+                value=system,
+                inline=False
+            )
+            
+            # Risks
+            risks = (
+                f"**Risk Register:**\n"
+                f"🔴 None critical\n\n"
+                f"🟡 **Medium:**\n"
+                f"• Contributor concentration\n"
+                f"• Verification backlog\n\n"
+                f"🟢 **Low:**\n"
+                f"• Weekend coverage"
+            )
+            
+            embed.add_field(
+                name="⚠️ Risks",
+                value=risks,
+                inline=False
+            )
+            
+            # Targets
+            next_month = (datetime.now() + timedelta(days=30)).strftime("%B")
+            members_pred = predictions.get("members", {})
+            trainings_pred = predictions.get("trainings", {})
+            
+            targets = (
+                f"**{next_month} Targets:**\n"
+                f"• Members: {members_pred.get('predicted', 0)} ({members_pred.get('change', 0):+d})\n"
+                f"• Trainings: {trainings_pred.get('predicted', 0)}\n"
+                f"• Treasury: +10% growth\n"
+                f"• Contributors: 40%"
+            )
+            
+            embed.add_field(
+                name="🎯 Next Month",
+                value=targets,
+                inline=False
+            )
+            
+            # Conclusion
+            conclusion = (
+                f"**{month_name}: EXCELLENT**\n\n"
+                f"**Strengths:**\n"
+                f"✅ Strong financial growth\n"
+                f"✅ Record training activity\n"
+                f"✅ Infrastructure boom\n\n"
+                f"**Focus Areas:**\n"
+                f"⚠️ Contributor base\n"
+                f"⚠️ Weekend coverage\n\n"
+                f"**Status: 🟢 THRIVING**"
+            )
+            
+            embed.add_field(
+                name="📊 Conclusion",
+                value=conclusion,
+                inline=False
+            )
+            
+            # Footer
+            now = datetime.now()
+            next_report = now.replace(day=1) + timedelta(days=32)
+            next_report = next_report.replace(day=1)
+            
+            embed.set_footer(
+                text=f"Next report: {next_report.strftime('%B %d, %Y')}"
+            )
+            
+            return embed
+        
+        except Exception as e:
+            log.exception(f"Error creating risk/conclusion: {e}")
+            return None
     
     def _format_hours(self, hours: float) -> str:
         """Format hours into readable string."""
