@@ -66,7 +66,7 @@ class MemberManager(ConfigCommands, commands.Cog):
         self.bot = bot
         self.config = Config.get_conf(
             self,
-            identifier=0xFA11A9E5MEMBER,
+            identifier=0xFA11A9E5,  # Unique identifier for this cog
             force_registration=True
         )
         self.config.register_global(**DEFAULTS)
