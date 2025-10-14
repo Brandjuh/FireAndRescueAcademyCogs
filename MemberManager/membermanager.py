@@ -24,7 +24,7 @@ from redbot.core.utils.chat_formatting import box, pagify
 
 from .database import MemberDatabase
 from .models import MemberData, NoteData, InfractionData
-from .views import MemberOverviewView, NotesView, InfractionsView
+from .views import MemberOverviewView
 from .utils import fuzzy_search_member, format_contribution_trend
 from .automation import ContributionMonitor
 from .config_commands import ConfigCommandsesView, InfractionsView
