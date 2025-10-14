@@ -1,3 +1,15 @@
+import logging
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+from typing import Dict, List, Optional, Tuple
+import discord
+from ..data_aggregator import DataAggregator
+from ..calculators.activity_score import ActivityCalculator
+from ..embed_formatter import EmbedFormatter
+log = logging.getLogger("red.FARA.AllianceReports.DailyAdmin")
+class DailyAdminReport:
+"""Generate comprehensive daily admin report."""
+
 def __init__(self, bot, config_manager):
     """Initialize daily admin report generator."""
     self.bot = bot
