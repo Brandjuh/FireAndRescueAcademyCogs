@@ -1,730 +1,1125 @@
-"""
-Alliance Leaderboard System for Missionchief USA
-Displays daily and monthly top 10 rankings for earned credits and treasury contributions.
-"""
+# alliance_scraper.py (v0.9.3) - Final corrected version
+from __future__ import annotations
 
 import asyncio
-import logging
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
-from pathlib import Path
-
-import discord
 import aiosqlite
-from redbot.core import commands, Config, checks
-from redbot.core.bot import Red
-from redbot.core.data_manager import cog_data_path
-import pytz
+import aiohttp
+import re
+import random
+import logging
+from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timezone
 
-log = logging.getLogger("red.leaderboard")
+from bs4 import BeautifulSoup
+import discord
+
+from redbot.core import commands, checks, Config
+from redbot.core.data_manager import cog_data_path
+
+log = logging.getLogger("red.FARA.AllianceScraper")
 
 DEFAULTS = {
-    "daily_earned_channel": None,
-    "daily_contrib_channel": None,
-    "monthly_earned_channel": None,
-    "monthly_contrib_channel": None,
+    "base_url": "https://www.missionchief.com",
+    "alliance_id": 1621,
+    "pages_per_minute": 10,
+    "members_refresh_minutes": 60,
+    "backfill_auto": True,
+    "backfill_concurrency": 5,
+    "backfill_retry": 3,
+    "backfill_jitter_ms": 250,
+    "logs_refresh_minutes": 5,
+    "treasury_refresh_minutes": 15,
+    "treasury_initial_backfill": True,
+    "treasury_expenses_per_minute": 20,
+    "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+    "members_path_template": "/verband/mitglieder/{alliance_id}?page={page}",
 }
 
-MEDALS = {
-    1: "🥇",
-    2: "🥈", 
-    3: "🥉"
-}
-
-# Blacklist for corrupted/invalid entries
-BLACKLISTED_USER_IDS = [
-    "26856671065906104064",  # Corrupted user ID
+ID_REGEXPS = [
+    re.compile(r"/users/(\d+)", re.I),
+    re.compile(r"/profile/(\d+)", re.I),
 ]
 
-BLACKLISTED_USERNAMES = [
-    "Yeehaw12121212212112",  # Invalid username pattern
-    "52525255252",  # Invalid username (looks like ID)
+LOG_ID_RX = [
+    re.compile(r"/users/(\d+)", re.I),
+    re.compile(r"/profile/(\d+)", re.I),
+    re.compile(r"/buildings/(\d+)", re.I),
 ]
 
-# Sanity check: INT64_MAX indicates parsing error
 INT64_MAX = 9223372036854775807
+INT64_MIN = -9223372036854775808
 
+def now_utc() -> str:
+    """Return current UTC time as ISO format string."""
+    return datetime.now(timezone.utc).isoformat()
 
-class Leaderboard(commands.Cog):
-    """Alliance leaderboard system - daily and monthly top 10 rankings."""
+def parse_int64_from_text(txt: str) -> int:
+    """Parse integer from text with international number formatting."""
+    if not txt:
+        return 0
+    m = re.search(r"(-?\d[\d.,]*)", txt)
+    if not m:
+        return 0
+    raw = m.group(1)
+    neg = raw.strip().startswith("-")
+    digits = re.sub(r"[^\d]", "", raw)
+    if not digits:
+        return 0
+    try:
+        val = int(digits)
+    except (ValueError, OverflowError):
+        return INT64_MIN if neg else INT64_MAX
+    if neg:
+        val = -val
+    return max(INT64_MIN, min(INT64_MAX, val))
 
-    def __init__(self, bot: Red):
+def parse_percent(txt: str) -> float:
+    """Parse percentage value from text."""
+    if not txt or "%" not in txt:
+        return 0.0
+    m = re.search(r"(-?\d+(?:[.,]\d+)?)\s*%", txt)
+    if not m:
+        return 0.0
+    try:
+        return float(m.group(1).replace(",", "."))
+    except (ValueError, TypeError):
+        return 0.0
+
+def _extract_id_from_href(href: str) -> Optional[str]:
+    """Extract user ID from profile href."""
+    if not href:
+        return None
+    for rx in ID_REGEXPS:
+        m = rx.search(href)
+        if m:
+            return m.group(1)
+    return None
+
+def _extract_any_id(url: str) -> Optional[str]:
+    """Extract any ID (user, building, etc.) from URL."""
+    if not url:
+        return None
+    for rx in LOG_ID_RX:
+        m = rx.search(url)
+        if m:
+            return m.group(1)
+    return None
+
+def _hash_key(ts: str, exec_name: str, action_text: str, affected_name: str, desc: str) -> str:
+    """Generate hash key for log deduplication."""
+    import hashlib
+    raw = f"{ts}|{exec_name}|{action_text}|{affected_name}|{desc}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+def _hash_expense(date: str, credits: str, name: str, desc: str) -> str:
+    """Generate hash key for expense deduplication."""
+    import hashlib
+    raw = f"{date}|{credits}|{name}|{desc}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+ACTION_MAP = [
+    ("added_to_alliance", [r"added to the alliance", r"added to alliance"]),
+    ("application_denied", [r"application denied"]),
+    ("left_alliance", [r"left the alliance", r"has left the alliance"]),
+    ("kicked_from_alliance", [r"kicked from the alliance", r"removed from the alliance"]),
+    ("set_transport_admin", [r"set as transport request admin"]),
+    ("removed_transport_admin", [r"removed as transport request admin"]),
+    ("removed_admin", [r"removed as admin"]),
+    ("set_admin", [r"set as admin"]),
+    ("removed_education_admin", [r"removed as education admin"]),
+    ("set_education_admin", [r"set as education admin"]),
+    ("set_finance_admin", [r"set as finance admin"]),
+    ("removed_finance_admin", [r"removed as finance admin"]),
+    ("set_co_admin", [r"set as co admin", r"set as co-admin"]),
+    ("removed_co_admin", [r"removed as co admin", r"removed as co-admin"]),
+    ("set_mod_action_admin", [r"set as moderator action admin"]),
+    ("removed_mod_action_admin", [r"removed as moderator action admin"]),
+    ("chat_ban_removed", [r"chat ban removed"]),
+    ("chat_ban_set", [r"chat ban set"]),
+    ("allowed_to_apply", [r"allowed to apply for the alliance"]),
+    ("not_allowed_to_apply", [r"not allowed to apply for the alliance"]),
+    ("created_course", [r"created a course"]),
+    ("course_completed", [r"course completed"]),
+    ("building_destroyed", [r"building destroyed"]),
+    ("building_constructed", [r"building constructed"]),
+    ("extension_started", [r"extension started"]),
+    ("expansion_finished", [r"expansion finished"]),
+    ("large_mission_started", [r"large mission started"]),
+    ("alliance_event_started", [r"alliance event started"]),
+    ("set_as_staff", [r"set as staff"]),
+    ("removed_as_staff", [r"removed as staff"]),
+    ("removed_event_manager", [r"removed as event manager"]),
+    ("removed_custom_large_mission", [r"removed custom large scale mission"]),
+    ("promoted_event_manager", [r"promoted to event manager"]),
+    ("contributed_to_alliance", [r"contributed .* coins to the alliance"]),
+]
+
+def _norm_action(text: str) -> Tuple[str, str]:
+    """Normalize action text to standardized key."""
+    t = (text or "").strip().lower()
+    for key, patterns in ACTION_MAP:
+        for pat in patterns:
+            if re.search(pat, t, re.I):
+                return key, text
+    key = re.sub(r"[^a-z0-9]+", "_", t)[:60].strip("_") or "unknown"
+    return key, text
+
+class AllianceScraper(commands.Cog):
+    """Scrape alliance data with robust member ID extraction; store alliance logs; provide APIs for other cogs."""
+
+    def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0x4C45414442, force_registration=True)
+        self.config = Config.get_conf(self, identifier=0xFA11A9E55C0, force_registration=True)
         self.config.register_global(**DEFAULTS)
-        
-        # Get AllianceScraper database path
-        scraper_cog = self.bot.get_cog("AllianceScraper")
-        if scraper_cog and hasattr(scraper_cog, 'db_path'):
-            self.db_path = scraper_cog.db_path
-        else:
-            # Fallback: try to guess path
-            data_path = cog_data_path(raw_name="AllianceScraper")
-            self.db_path = data_path / "alliance.db"
-        
-        self._daily_task: Optional[asyncio.Task] = None
-        self._monthly_task: Optional[asyncio.Task] = None
+        self.data_path = cog_data_path(self)
+        self.db_path = self.data_path / "alliance.db"
+        self._bg_members: Optional[asyncio.Task] = None
+        self._bg_logs: Optional[asyncio.Task] = None
+        self._bg_treasury: Optional[asyncio.Task] = None
+        self._task_lock = asyncio.Lock()
 
     async def cog_load(self):
-        """Start background tasks on cog load."""
-        self._daily_task = asyncio.create_task(self._daily_loop())
-        self._monthly_task = asyncio.create_task(self._monthly_loop())
-        log.info("Leaderboard cog loaded - tasks started")
+        """Initialize cog on load."""
+        await self._init_db()
+        await self._maybe_start_background()
 
     async def cog_unload(self):
-        """Cancel background tasks on cog unload."""
-        if self._daily_task:
-            self._daily_task.cancel()
-        if self._monthly_task:
-            self._monthly_task.cancel()
-        log.info("Leaderboard cog unloaded")
+        """Cleanup on cog unload."""
+        tasks = [self._bg_members, self._bg_logs, self._bg_treasury]
+        for task in tasks:
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
-    # ==================== BACKGROUND TASKS ====================
+    async def _init_db(self):
+        """Initialize database tables and indexes."""
+        self.data_path.mkdir(parents=True, exist_ok=True)
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS members_current(
+                user_id TEXT, name TEXT, role TEXT, earned_credits INTEGER,
+                contribution_rate REAL, profile_href TEXT, scraped_at TEXT
+            )
+            """)
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS members_history(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, name TEXT, role TEXT,
+                earned_credits INTEGER, contribution_rate REAL, profile_href TEXT, scraped_at TEXT
+            )
+            """)
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS logs(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, hash TEXT UNIQUE, ts TEXT,
+                action_key TEXT, action_text TEXT, executed_name TEXT, executed_mc_id TEXT,
+                executed_url TEXT, affected_name TEXT, affected_type TEXT, affected_mc_id TEXT,
+                affected_url TEXT, description TEXT, contribution_amount INTEGER DEFAULT 0, scraped_at TEXT
+            )
+            """)
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS treasury_income(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, period TEXT, user_name TEXT,
+                user_id TEXT, credits INTEGER, scraped_at TEXT,
+                UNIQUE(period, user_id, scraped_at)
+            )
+            """)
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS treasury_balance(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, total_funds INTEGER, scraped_at TEXT
+            )
+            """)
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS treasury_expenses(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, hash TEXT UNIQUE, expense_date TEXT,
+                credits INTEGER, name TEXT, description TEXT, scraped_at TEXT
+            )
+            """)
+            
+            # Create indices
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_logs_hash ON logs(hash)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_logs_action_key ON logs(action_key)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_logs_executed_mc_id ON logs(executed_mc_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_members_history_scraped ON members_history(scraped_at)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_members_history_user_id ON members_history(user_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_treasury_income_period ON treasury_income(period)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_treasury_income_user_id ON treasury_income(user_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_treasury_income_scraped ON treasury_income(scraped_at)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_treasury_expenses_hash ON treasury_expenses(hash)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_treasury_expenses_date ON treasury_expenses(expense_date)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_treasury_balance_scraped ON treasury_balance(scraped_at)")
+            
+            await db.commit()
+        await self._migrate_db()
 
-    async def _daily_loop(self):
-        """Daily leaderboard posting loop - runs at 06:00 Amsterdam time."""
-        await self.bot.wait_until_ready()
-        tz = pytz.timezone('Europe/Amsterdam')
-        
-        while True:
+    async def _migrate_db(self):
+        """Perform database migrations for schema updates."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await self._ensure_columns(db, "members_current", [
+                ("user_id", "TEXT", "''"), ("name", "TEXT", "''"), ("role", "TEXT", "''"),
+                ("earned_credits", "INTEGER", "0"), ("contribution_rate", "REAL", "0.0"),
+                ("profile_href", "TEXT", "''"), ("scraped_at", "TEXT", "''"),
+            ])
+            await self._ensure_columns(db, "members_history", [
+                ("user_id", "TEXT", "''"), ("name", "TEXT", "''"), ("role", "TEXT", "''"),
+                ("earned_credits", "INTEGER", "0"), ("contribution_rate", "REAL", "0.0"),
+                ("profile_href", "TEXT", "''"), ("scraped_at", "TEXT", "''"),
+            ])
+            await self._ensure_columns(db, "logs", [("contribution_amount", "INTEGER", "0")])
+            await db.commit()
+
+    async def _ensure_columns(self, db: aiosqlite.Connection, table: str, cols: List[Tuple[str, str, str]]):
+        """Ensure table has required columns, add if missing."""
+        cur = await db.execute(f"PRAGMA table_info({table})")
+        existing = {row[1] for row in await cur.fetchall()}
+        for name, coltype, default in cols:
+            if name not in existing:
+                try:
+                    await db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {coltype} DEFAULT {default}")
+                    log.info("Added column %s to %s", name, table)
+                except Exception as e:
+                    log.warning("Failed to add column %s to %s: %s", name, table, e)
+
+    async def _get_auth_session(self) -> Tuple[aiohttp.ClientSession, bool]:
+        """Get authenticated session, either from CookieManager or new session."""
+        headers = {"User-Agent": (await self.config.user_agent())}
+        timeout = aiohttp.ClientTimeout(total=30)
+        cm = self.bot.get_cog("CookieManager")
+        if cm:
             try:
-                now = datetime.now(tz)
-                # Calculate next 06:00
-                target = now.replace(hour=6, minute=0, second=0, microsecond=0)
-                if now >= target:
-                    target += timedelta(days=1)
-                
-                wait_seconds = (target - now).total_seconds()
-                log.info(f"Daily leaderboard: waiting {wait_seconds:.0f}s until {target}")
-                
-                await asyncio.sleep(wait_seconds)
-                
-                # Post daily leaderboards
-                await self._post_daily_leaderboards()
-                
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                log.exception(f"Error in daily leaderboard loop: {e}")
-                await asyncio.sleep(300)  # Wait 5 minutes on error
+                sess = await cm.get_session()
+                sess.headers.update(headers)
+                return sess, False
+            except (AttributeError, RuntimeError) as e:
+                log.warning("Failed to get CookieManager session: %s", e)
+        sess = aiohttp.ClientSession(headers=headers, timeout=timeout)
+        return sess, True
 
-    async def _monthly_loop(self):
-        """Monthly leaderboard posting loop - runs on last day of month at 06:00 Amsterdam time."""
-        await self.bot.wait_until_ready()
-        tz = pytz.timezone('Europe/Amsterdam')
-        
-        while True:
+    async def _fetch(self, session: aiohttp.ClientSession, url: str) -> Tuple[str, str]:
+        """Fetch URL and return content and final URL."""
+        async with session.get(url, allow_redirects=True) as resp:
+            resp.raise_for_status()
+            text = await resp.text()
+            return text, str(resp.url)
+
+    def _extract_member_rows(self, html: str) -> List[Dict[str, Any]]:
+        """Extract member data from HTML table."""
+        soup = BeautifulSoup(html, "html.parser")
+        rows: List[Dict[str, Any]] = []
+        for tr in soup.find_all("tr"):
+            a = tr.find("a", href=True)
+            if not a:
+                continue
+            name = a.get_text(strip=True)
+            if not name:
+                continue
+            href = a["href"]
+            user_id = _extract_id_from_href(href) or ""
+            tds = tr.find_all("td")
+            role = ""
+            credits = 0
+            rate = 0.0
+            for td in tds:
+                txt = td.get_text(" ", strip=True)
+                if not role and txt and not any(ch.isdigit() for ch in txt) and name not in txt:
+                    role = txt
+                if credits == 0:
+                    val = parse_int64_from_text(txt)
+                    if val != 0:
+                        credits = val
+                if "%" in txt and rate == 0.0:
+                    rate = parse_percent(txt)
+            rows.append({
+                "user_id": user_id, "name": name, "role": role,
+                "earned_credits": credits, "contribution_rate": rate, "profile_href": href,
+            })
+        return rows
+
+    async def _save_members(self, rows: List[Dict[str, Any]]):
+        """Save member data to database with transaction safety."""
+        async with aiosqlite.connect(self.db_path) as db:
             try:
-                now = datetime.now(tz)
+                await db.execute("BEGIN TRANSACTION")
+                await db.execute("DELETE FROM members_current")
                 
-                # Calculate next last day of month at 06:00
-                # Try this month first
-                last_day = self._get_last_day_of_month(now.year, now.month)
-                target = now.replace(day=last_day, hour=6, minute=0, second=0, microsecond=0)
+                # Use executemany for better performance
+                timestamp = now_utc()
+                current_data = []
+                history_data = []
                 
-                # If we're past that time, go to next month
-                if now >= target:
-                    next_month = now.month + 1 if now.month < 12 else 1
-                    next_year = now.year if now.month < 12 else now.year + 1
-                    last_day = self._get_last_day_of_month(next_year, next_month)
-                    target = datetime(next_year, next_month, last_day, 6, 0, 0, tzinfo=tz)
+                for r in rows:
+                    credits = r.get("earned_credits") or 0
+                    credits = max(INT64_MIN, min(INT64_MAX, credits))
+                    
+                    record = (
+                        r.get("user_id") or "", 
+                        r.get("name") or "", 
+                        r.get("role") or "", 
+                        int(credits),
+                        float(r.get("contribution_rate") or 0.0), 
+                        r.get("profile_href") or "", 
+                        timestamp
+                    )
+                    current_data.append(record)
+                    history_data.append(record)
                 
-                wait_seconds = (target - now).total_seconds()
-                log.info(f"Monthly leaderboard: waiting {wait_seconds:.0f}s until {target}")
+                if current_data:
+                    await db.executemany("""
+                    INSERT INTO members_current(user_id, name, role, earned_credits, contribution_rate, profile_href, scraped_at)
+                    VALUES(?,?,?,?,?,?,?)
+                    """, current_data)
                 
-                await asyncio.sleep(wait_seconds)
+                if history_data:
+                    await db.executemany("""
+                    INSERT INTO members_history(user_id, name, role, earned_credits, contribution_rate, profile_href, scraped_at)
+                    VALUES(?,?,?,?,?,?,?)
+                    """, history_data)
                 
-                # Post monthly leaderboards
-                await self._post_monthly_leaderboards()
-                
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                log.exception(f"Error in monthly leaderboard loop: {e}")
-                await asyncio.sleep(300)
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
 
-    def _get_last_day_of_month(self, year: int, month: int) -> int:
-        """Get last day of given month."""
-        if month == 12:
-            next_month = datetime(year + 1, 1, 1)
-        else:
-            next_month = datetime(year, month + 1, 1)
-        last_day = next_month - timedelta(days=1)
-        return last_day.day
+    async def get_members(self) -> List[Dict[str, Any]]:
+        """Get current member list from database."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT user_id, name, role, earned_credits, contribution_rate FROM members_current")
+            return [dict(r) for r in await cur.fetchall()]
 
-    # ==================== POSTING LOGIC ====================
-
-    async def _post_daily_leaderboards(self):
-        """Post both daily earned credits and contributions leaderboards."""
-        log.info("Posting daily leaderboards...")
-        
-        # Get earned credits data
-        earned_data = await self._get_earned_credits_rankings(period='daily')
-        if earned_data:
-            earned_embed = self._create_leaderboard_embed(
-                title="🏆 Daily Top 10 - Earned Credits",
-                current_rankings=earned_data['current'],
-                previous_rankings=earned_data['previous'],
-                period='daily',
-                metric='earned_credits'
-            )
-            channel_id = await self.config.daily_earned_channel()
-            if channel_id:
-                await self._send_to_channel(channel_id, earned_embed)
-        
-        # Get treasury contributions data
-        contrib_data = await self._get_treasury_rankings(period='daily')
-        if contrib_data:
-            contrib_embed = self._create_leaderboard_embed(
-                title="💰 Daily Top 10 - Treasury Contributions",
-                current_rankings=contrib_data['current'],
-                previous_rankings=contrib_data['previous'],
-                period='daily',
-                metric='contributions'
-            )
-            channel_id = await self.config.daily_contrib_channel()
-            if channel_id:
-                await self._send_to_channel(channel_id, contrib_embed)
-
-    async def _post_monthly_leaderboards(self):
-        """Post both monthly earned credits and contributions leaderboards."""
-        log.info("Posting monthly leaderboards...")
-        
-        # Get earned credits data
-        earned_data = await self._get_earned_credits_rankings(period='monthly')
-        if earned_data:
-            earned_embed = self._create_leaderboard_embed(
-                title="🏆 Monthly Top 10 - Earned Credits",
-                current_rankings=earned_data['current'],
-                previous_rankings=earned_data['previous'],
-                period='monthly',
-                metric='earned_credits'
-            )
-            channel_id = await self.config.monthly_earned_channel()
-            if channel_id:
-                await self._send_to_channel(channel_id, earned_embed)
-        
-        # Get treasury contributions data
-        contrib_data = await self._get_treasury_rankings(period='monthly')
-        if contrib_data:
-            contrib_embed = self._create_leaderboard_embed(
-                title="💰 Monthly Top 10 - Treasury Contributions",
-                current_rankings=contrib_data['current'],
-                previous_rankings=contrib_data['previous'],
-                period='monthly',
-                metric='contributions'
-            )
-            channel_id = await self.config.monthly_contrib_channel()
-            if channel_id:
-                await self._send_to_channel(channel_id, contrib_embed)
-
-    async def _send_to_channel(self, channel_id: int, embed: discord.Embed):
-        """Send embed to specified channel."""
+    async def _resolve_member_id(self, session: aiohttp.ClientSession, base: str, href: str) -> Optional[str]:
+        """Resolve member ID by following redirects if needed."""
+        if not href:
+            return None
+        uid = _extract_id_from_href(href)
+        if uid:
+            return uid
+        url = href if href.startswith("http") else f"{base}{href}"
         try:
-            channel = self.bot.get_channel(channel_id)
-            if channel:
-                await channel.send(embed=embed)
-                log.info(f"Posted leaderboard to channel {channel_id}")
-            else:
-                log.warning(f"Channel {channel_id} not found")
-        except Exception as e:
-            log.exception(f"Error sending to channel {channel_id}: {e}")
-
-    # ==================== FILTERING ====================
-
-    def _filter_invalid_entries(self, rankings: List[Dict], metric: str) -> List[Dict]:
-        """Filter out corrupted/invalid entries from rankings."""
-        filtered = []
-        for entry in rankings:
-            user_id = entry.get('user_id', '')
-            name = entry.get('name', '')
-            
-            # Check blacklists
-            if user_id in BLACKLISTED_USER_IDS:
-                log.warning(f"Filtered blacklisted user_id: {user_id}")
-                continue
-            
-            if name in BLACKLISTED_USERNAMES:
-                log.warning(f"Filtered blacklisted username: {name}")
-                continue
-            
-            # Check for INT64_MAX (parsing error indicator)
-            if metric == 'earned_credits':
-                value = entry.get('earned_credits', 0)
-            else:
-                value = entry.get('credits', 0)
-            
-            if value >= INT64_MAX:
-                log.warning(f"Filtered INT64_MAX value for {name}: {value}")
-                continue
-            
-            # Check for suspiciously numeric usernames (likely IDs)
-            if name and name.isdigit() and len(name) > 10:
-                log.warning(f"Filtered numeric username (likely ID): {name}")
-                continue
-            
-            filtered.append(entry)
-        
-        return filtered
-
-    # ==================== DATA RETRIEVAL ====================
-
-    async def _get_earned_credits_rankings(self, period: str) -> Optional[Dict]:
-        """
-        Get earned credits rankings for current and previous period.
-        Only includes members that are CURRENTLY in the alliance.
-        Calculates DELTA (growth) between two time periods.
-        Returns dict with 'current' and 'previous' rankings.
-        """
-        if not self.db_path.exists():
-            log.error(f"Database not found at {self.db_path}")
+            async with session.get(url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                final_url = str(resp.url)
+                for rx in ID_REGEXPS:
+                    m = rx.search(final_url)
+                    if m:
+                        return m.group(1)
+                text = await resp.text()
+                for rx in ID_REGEXPS:
+                    m = rx.search(text)
+                    if m:
+                        return m.group(1)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            log.debug("Failed to resolve member ID from %s: %s", href, e)
             return None
+        return None
 
+    async def _backfill_missing_ids(self, session: aiohttp.ClientSession, base: str, limit: Optional[int] = None) -> int:
+        """Backfill missing member IDs by resolving profile URLs."""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            
-            # Get list of current active member IDs
-            cur = await db.execute("""
-                SELECT DISTINCT user_id FROM members_current WHERE user_id != ''
-            """)
-            current_member_ids = [row['user_id'] for row in await cur.fetchall()]
-            
-            if not current_member_ids:
-                log.warning("No current members found in database")
-                return None
-            
-            # Create placeholder string for SQL IN clause
-            placeholders = ','.join('?' * len(current_member_ids))
-            
-            # Get most recent scrape
-            cur = await db.execute("""
-                SELECT MAX(scraped_at) as latest FROM members_history
-            """)
-            row = await cur.fetchone()
-            if not row or not row['latest']:
-                return None
-            
-            current_time = row['latest']
-            
-            # Calculate previous time based on period
-            if period == 'daily':
-                dt = datetime.fromisoformat(current_time.replace('Z', '+00:00'))
-                previous_dt = dt - timedelta(days=1)
-            else:  # monthly
-                dt = datetime.fromisoformat(current_time.replace('Z', '+00:00'))
-                previous_dt = dt - timedelta(days=30)
-            
-            previous_time = previous_dt.isoformat()
-            
-            # Get previous period timestamp - find closest timestamp
-            cur = await db.execute("""
-                SELECT DISTINCT scraped_at
-                FROM members_history
-                WHERE scraped_at <= ?
-                ORDER BY scraped_at DESC
-                LIMIT 1
-            """, (previous_time,))
-            prev_time_row = await cur.fetchone()
-            
-            if not prev_time_row:
-                log.warning("No previous period data found for comparison")
-                return None
-            
-            previous_scrape_time = prev_time_row['scraped_at']
-            
-            # Get current period data - ONLY current members
-            query_current = f"""
-                SELECT user_id, name, earned_credits, scraped_at
-                FROM members_history
-                WHERE scraped_at = ? AND user_id IN ({placeholders})
-                ORDER BY earned_credits DESC
-            """
-            cur = await db.execute(query_current, [current_time] + current_member_ids)
-            current_data = {row['user_id']: dict(row) for row in await cur.fetchall()}
-            
-            # Get previous period data
-            query_previous = f"""
-                SELECT user_id, name, earned_credits, scraped_at
-                FROM members_history
-                WHERE scraped_at = ? AND user_id IN ({placeholders})
-                ORDER BY earned_credits DESC
-            """
-            cur = await db.execute(query_previous, [previous_scrape_time] + current_member_ids)
-            previous_data = {row['user_id']: dict(row) for row in await cur.fetchall()}
-            
-            # Calculate deltas (growth in the period)
-            deltas = []
-            for user_id, current_entry in current_data.items():
-                current_credits = current_entry['earned_credits']
-                
-                # Get previous credits (or 0 if new member)
-                previous_credits = 0
-                if user_id in previous_data:
-                    previous_credits = previous_data[user_id]['earned_credits']
-                
-                # Calculate delta
-                delta = current_credits - previous_credits
-                
-                if delta > 0:  # Only include members with positive growth
-                    deltas.append({
-                        'user_id': user_id,
-                        'name': current_entry['name'],
-                        'earned_credits': delta,  # Use delta as the value
-                        'scraped_at': current_entry['scraped_at']
-                    })
-            
-            # Sort by delta and get top entries
-            deltas.sort(key=lambda x: x['earned_credits'], reverse=True)
-            current_raw = deltas[:20]
-            current = self._filter_invalid_entries(current_raw, 'earned_credits')[:10]
-            
-            # For previous rankings, calculate deltas from one period before that
-            # Find timestamp before previous
-            if period == 'daily':
-                dt = datetime.fromisoformat(previous_scrape_time.replace('Z', '+00:00'))
-                before_previous_dt = dt - timedelta(days=1)
+            sql = "SELECT rowid, name, profile_href FROM members_current WHERE (user_id IS NULL OR user_id='')"
+            if limit:
+                sql += " LIMIT ?"
+                cur = await db.execute(sql, (int(limit),))
             else:
-                dt = datetime.fromisoformat(previous_scrape_time.replace('Z', '+00:00'))
-                before_previous_dt = dt - timedelta(days=30)
+                cur = await db.execute(sql)
+            rows = await cur.fetchall()
+        
+        if not rows:
+            return 0
+        
+        sem = asyncio.Semaphore(int(await self.config.backfill_concurrency()))
+        retry = int(await self.config.backfill_retry())
+        jitter = int(await self.config.backfill_jitter_ms())
+        updated = 0
+
+        async def worker(row):
+            nonlocal updated
+            async with sem:
+                href = row["profile_href"] or ""
+                if not href:
+                    return
+                uid = None
+                for attempt in range(1, retry + 1):
+                    await asyncio.sleep(random.uniform(0, jitter / 1000.0))
+                    try:
+                        uid = await self._resolve_member_id(session, base, href)
+                        if uid:
+                            break
+                    except Exception as e:
+                        log.debug("Backfill attempt %d failed for %s: %s", attempt, href, e)
+                        uid = None
+                if uid:
+                    async with aiosqlite.connect(self.db_path) as db2:
+                        await db2.execute("UPDATE members_current SET user_id=? WHERE rowid=?", (uid, row["rowid"]))
+                        await db2.commit()
+                    updated += 1
+
+        await asyncio.gather(*(worker(r) for r in rows), return_exceptions=True)
+        return updated
+
+    async def _scrape_members(self) -> int:
+        """Scrape all member pages and store in database."""
+        base = await self.config.base_url()
+        alliance_id = int(await self.config.alliance_id())
+        tpl = await self.config.members_path_template()
+        pages_per_minute = int(await self.config.pages_per_minute())
+        delay = max(0.0, 60.0 / max(1, pages_per_minute))
+
+        session, own = await self._get_auth_session()
+        try:
+            page1_url = f"{base}{tpl.format(alliance_id=alliance_id, page=1)}"
+            html1, _ = await self._fetch(session, page1_url)
+            soup1 = BeautifulSoup(html1, "html.parser")
+            last_page = 1
+            for a in soup1.find_all("a", href=True):
+                if "page=" in a["href"]:
+                    try:
+                        match = re.search(r"page=(\d+)", a["href"])
+                        if match:
+                            p = int(match.group(1))
+                            if p > last_page:
+                                last_page = p
+                    except (AttributeError, ValueError):
+                        pass
+
+            all_rows: List[Dict[str, Any]] = []
+            failed_requests = 0
             
-            before_previous_time = before_previous_dt.isoformat()
-            
-            cur = await db.execute("""
-                SELECT DISTINCT scraped_at
-                FROM members_history
-                WHERE scraped_at <= ?
-                ORDER BY scraped_at DESC
-                LIMIT 1
-            """, (before_previous_time,))
-            before_prev_row = await cur.fetchone()
-            
-            previous = []
-            if before_prev_row:
-                # Get data from before previous period
-                query_before = f"""
-                    SELECT user_id, name, earned_credits, scraped_at
-                    FROM members_history
-                    WHERE scraped_at = ? AND user_id IN ({placeholders})
-                """
-                cur = await db.execute(query_before, [before_prev_row['scraped_at']] + current_member_ids)
-                before_previous_data = {row['user_id']: dict(row) for row in await cur.fetchall()}
+            for p in range(1, last_page + 1):
+                url = f"{base}{tpl.format(alliance_id=alliance_id, page=p)}"
+                try:
+                    html, _ = await self._fetch(session, url)
+                    all_rows.extend(self._extract_member_rows(html))
+                    failed_requests = 0
+                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                    failed_requests += 1
+                    log.warning("Failed to fetch members page %s (failure #%d): %s", p, failed_requests, e)
+                    if failed_requests >= 3:
+                        log.error("Too many consecutive failures, stopping scrape")
+                        break
                 
-                # Calculate deltas for previous period
-                prev_deltas = []
-                for user_id, prev_entry in previous_data.items():
-                    prev_credits = prev_entry['earned_credits']
+                actual_delay = delay * (1.5 ** failed_requests) if failed_requests > 0 else delay
+                await asyncio.sleep(actual_delay)
+
+            await self._save_members(all_rows)
+            if await self.config.backfill_auto():
+                updated = await self._backfill_missing_ids(session, base)
+                log.info("Backfill updated %s member IDs", updated)
+            return len(all_rows)
+        finally:
+            if own:
+                await session.close()
+
+    def _parse_logs_page(self, html: str, base: str) -> List[Dict[str, Any]]:
+        """Parse alliance log entries from HTML."""
+        soup = BeautifulSoup(html, "html.parser")
+        results: List[Dict[str, Any]] = []
+        for tr in soup.find_all("tr"):
+            tds = tr.find_all("td")
+            if len(tds) < 3:
+                continue
+            dt_text = tds[0].get_text(" ", strip=True)
+            exec_a = tds[1].find("a", href=True)
+            executed_name = exec_a.get_text(strip=True) if exec_a else tds[1].get_text(" ", strip=True)
+            executed_url = (exec_a["href"] if exec_a else "")
+            if executed_url and not executed_url.startswith("http"):
+                executed_url = f"{base}{executed_url}"
+            executed_mc_id = _extract_any_id(executed_url) or ""
+            desc_text = tds[2].get_text(" ", strip=True)
+            action_key, action_text = _norm_action(desc_text)
+            
+            contribution_amount = 0
+            if "contributed" in desc_text.lower() and "coins" in desc_text.lower():
+                match = re.search(r'contributed\s+([\d,.]+)\s+coins', desc_text, re.I)
+                if match:
+                    contribution_amount = parse_int64_from_text(match.group(1))
+            
+            affected_name, affected_url, affected_type, affected_mc_id = "", "", "", ""
+            if len(tds) >= 4:
+                aff_a = tds[3].find("a", href=True)
+                affected_name = aff_a.get_text(strip=True) if aff_a else tds[3].get_text(" ", strip=True)
+                affected_url = (aff_a["href"] if aff_a else "")
+                if affected_url and not affected_url.startswith("http"):
+                    affected_url = f"{base}{affected_url}"
+                if "/buildings/" in affected_url:
+                    affected_type = "building"
+                elif "/users/" in affected_url or "/profile/" in affected_url:
+                    affected_type = "user"
+                affected_mc_id = _extract_any_id(affected_url) or ""
+            
+            h = _hash_key(dt_text, executed_name, action_text, affected_name, desc_text)
+            results.append({
+                "hash": h, "ts": dt_text, "action_key": action_key, "action_text": action_text,
+                "executed_name": executed_name, "executed_mc_id": executed_mc_id, "executed_url": executed_url,
+                "affected_name": affected_name, "affected_type": affected_type, "affected_mc_id": affected_mc_id,
+                "affected_url": affected_url, "description": desc_text, "contribution_amount": contribution_amount,
+            })
+        return results
+
+    async def _insert_logs(self, rows: List[Dict[str, Any]]) -> int:
+        """Insert log entries into database."""
+        inserted = 0
+        async with aiosqlite.connect(self.db_path) as db:
+            for row in rows:
+                try:
+                    await db.execute("""
+                    INSERT INTO logs(hash, ts, action_key, action_text, executed_name, executed_mc_id, executed_url,
+                                     affected_name, affected_type, affected_mc_id, affected_url, description, 
+                                     contribution_amount, scraped_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """, (row["hash"], row["ts"], row["action_key"], row["action_text"],
+                          row["executed_name"], row["executed_mc_id"], row["executed_url"],
+                          row["affected_name"], row["affected_type"], row["affected_mc_id"], row["affected_url"],
+                          row["description"], row["contribution_amount"], now_utc()))
+                    inserted += 1
+                except aiosqlite.IntegrityError:
+                    continue
+            await db.commit()
+        return inserted
+
+    async def _scrape_logs_once(self, backfill_pages: Optional[int] = None) -> int:
+        """Scrape alliance logs, optionally limiting to specific number of pages."""
+        base = await self.config.base_url()
+        session, own = await self._get_auth_session()
+        try:
+            page = 1
+            total_seen = 0
+            failed_requests = 0
+            
+            while True:
+                url = f"{base}/alliance_logfiles?page={page}"
+                try:
+                    html, _ = await self._fetch(session, url)
+                    rows = self._parse_logs_page(html, base)
+                    if not rows:
+                        break
+                    ins = await self._insert_logs(rows)
+                    total_seen += len(rows)
+                    failed_requests = 0
                     
-                    before_credits = 0
-                    if user_id in before_previous_data:
-                        before_credits = before_previous_data[user_id]['earned_credits']
+                    if backfill_pages is not None and page >= backfill_pages:
+                        break
+                    if ins == 0:
+                        break
+                    page += 1
+                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                    failed_requests += 1
+                    log.warning("Failed to fetch logs page %s (failure #%d): %s", page, failed_requests, e)
+                    if failed_requests >= 3:
+                        log.error("Too many consecutive failures, stopping logs scrape")
+                        break
+                
+                actual_delay = 0.8 * (1.5 ** failed_requests) if failed_requests > 0 else 0.8
+                await asyncio.sleep(actual_delay)
+                
+            return total_seen
+        finally:
+            if own:
+                await session.close()
+
+    def _parse_treasury_page(self, html: str) -> Tuple[int, List[Dict[str, Any]]]:
+        """Parse treasury balance and income from HTML page."""
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Find total funds/balance
+        total_funds = 0
+        for elem in soup.find_all(["div", "span", "strong", "p", "h1", "h2", "h3"]):
+            text = elem.get_text(strip=True)
+            if any(word in text.lower() for word in ["fund", "balance", "coin", "treasury"]):
+                val = parse_int64_from_text(text)
+                if val > 1000000:
+                    total_funds = val
+                    break
+        
+        if total_funds == 0:
+            for elem in soup.find_all(text=True):
+                text = elem.strip()
+                if text and any(c.isdigit() for c in text):
+                    val = parse_int64_from_text(text)
+                    if val > total_funds:
+                        total_funds = val
+        
+        # Parse income table
+        income_rows = []
+        tables = soup.find_all("table")
+        
+        if len(tables) >= 1:
+            income_table = tables[0]
+            headers = [th.get_text(strip=True).lower() for th in income_table.find_all("th")]
+            
+            if "name" in headers and "credits" in headers:
+                period = "daily"
+                prev = income_table.find_previous(["h1", "h2", "h3", "h4", "strong"])
+                if prev:
+                    heading = prev.get_text(strip=True).lower()
+                    if "month" in heading:
+                        period = "monthly"
+                
+                for tr in income_table.find_all("tr"):
+                    tds = tr.find_all("td")
+                    if len(tds) < 2:
+                        continue
                     
-                    delta = prev_credits - before_credits
+                    a = tds[0].find("a", href=True)
+                    if not a:
+                        continue
                     
-                    if delta > 0:
-                        prev_deltas.append({
-                            'user_id': user_id,
-                            'name': prev_entry['name'],
-                            'earned_credits': delta,
-                            'scraped_at': prev_entry['scraped_at']
+                    name = a.get_text(strip=True)
+                    href = a["href"]
+                    user_id = _extract_id_from_href(href) or ""
+                    credits = parse_int64_from_text(tds[1].get_text(strip=True))
+                    
+                    if credits > 0:
+                        income_rows.append({
+                            "period": period,
+                            "user_name": name,
+                            "user_id": user_id,
+                            "credits": credits,
                         })
-                
-                prev_deltas.sort(key=lambda x: x['earned_credits'], reverse=True)
-                previous_raw = prev_deltas[:30]
-                previous = self._filter_invalid_entries(previous_raw, 'earned_credits')[:20]
+        
+        return total_funds, income_rows
+    
+    def _parse_treasury_expenses_page(self, html: str) -> List[Dict[str, Any]]:
+        """Parse treasury expenses from HTML page."""
+        soup = BeautifulSoup(html, "html.parser")
+        expenses = []
+        
+        tables = soup.find_all("table")
+        
+        # Find the expenses table (usually has date/description columns)
+        for table in tables:
+            headers = [th.get_text(strip=True).lower() for th in table.find_all("th")]
             
-            return {
-                'current': current,
-                'previous': previous
-            }
-
-    async def _get_treasury_rankings(self, period: str) -> Optional[Dict]:
-        """
-        Get treasury contribution rankings for current and previous period.
-        Returns dict with 'current' and 'previous' rankings.
-        """
-        if not self.db_path.exists():
-            log.error(f"Database not found at {self.db_path}")
-            return None
-
+            # Look for expense-related headers
+            if any(word in " ".join(headers) for word in ["date", "expense", "description", "cost"]):
+                for tr in table.find_all("tr"):
+                    tds = tr.find_all("td")
+                    if len(tds) < 3:
+                        continue
+                    
+                    # Extract date (first column typically)
+                    expense_date = tds[0].get_text(strip=True)
+                    
+                    # Extract credits (look for numeric value)
+                    credits = 0
+                    name = ""
+                    description = ""
+                    
+                    for idx, td in enumerate(tds[1:], 1):
+                        txt = td.get_text(strip=True)
+                        
+                        # Try to parse as credits
+                        val = parse_int64_from_text(txt)
+                        if val != 0 and credits == 0:
+                            credits = val
+                        elif not name and txt and not any(c.isdigit() for c in txt):
+                            name = txt
+                        elif txt and txt != name:
+                            description = txt
+                    
+                    # If we couldn't identify columns clearly, use positional parsing
+                    if not name and len(tds) >= 3:
+                        expense_date = tds[0].get_text(strip=True)
+                        credits = parse_int64_from_text(tds[1].get_text(strip=True))
+                        name = tds[2].get_text(strip=True) if len(tds) > 2 else ""
+                        description = tds[3].get_text(strip=True) if len(tds) > 3 else ""
+                    
+                    if expense_date and credits != 0:
+                        h = _hash_expense(expense_date, str(credits), name, description)
+                        expenses.append({
+                            "hash": h,
+                            "expense_date": expense_date,
+                            "credits": credits,
+                            "name": name,
+                            "description": description,
+                        })
+        
+        return expenses
+    
+    async def _insert_treasury_data(self, balance: int, income: List[Dict[str, Any]], 
+                                   expenses: List[Dict[str, Any]]) -> Tuple[int, int, int]:
+        """Insert treasury data into database."""
+        inserted_income = 0
+        inserted_expenses = 0
+        timestamp = now_utc()
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            # Insert balance
+            if balance > 0:
+                await db.execute("""
+                INSERT INTO treasury_balance(total_funds, scraped_at)
+                VALUES(?,?)
+                """, (balance, timestamp))
+            
+            # Insert income records (with unique constraint handling)
+            for record in income:
+                try:
+                    await db.execute("""
+                    INSERT INTO treasury_income(period, user_name, user_id, credits, scraped_at)
+                    VALUES(?,?,?,?,?)
+                    """, (record["period"], record["user_name"], record["user_id"], 
+                          record["credits"], timestamp))
+                    inserted_income += 1
+                except aiosqlite.IntegrityError:
+                    # Duplicate entry, skip
+                    continue
+            
+            # Insert expense records
+            for expense in expenses:
+                try:
+                    await db.execute("""
+                    INSERT INTO treasury_expenses(hash, expense_date, credits, name, description, scraped_at)
+                    VALUES(?,?,?,?,?,?)
+                    """, (expense["hash"], expense["expense_date"], expense["credits"],
+                          expense["name"], expense["description"], timestamp))
+                    inserted_expenses += 1
+                except aiosqlite.IntegrityError:
+                    continue
+            
+            await db.commit()
+        
+        return 1 if balance > 0 else 0, inserted_income, inserted_expenses
+    
+    async def _scrape_treasury_once(self) -> Tuple[int, int, int]:
+        """Scrape treasury data once and return counts of inserted records."""
+        base = await self.config.base_url()
+        session, own = await self._get_auth_session()
+        
+        try:
+            # Fetch main treasury page
+            treasury_url = f"{base}/alliance_finances"
+            html, _ = await self._fetch(session, treasury_url)
+            
+            balance, income = self._parse_treasury_page(html)
+            
+            # Fetch expenses page if it exists
+            expenses = []
+            try:
+                expenses_url = f"{base}/alliance_finances/expenses"
+                expenses_html, _ = await self._fetch(session, expenses_url)
+                expenses = self._parse_treasury_expenses_page(expenses_html)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                log.debug("Could not fetch expenses page: %s", e)
+            
+            balance_count, income_count, expense_count = await self._insert_treasury_data(
+                balance, income, expenses
+            )
+            
+            log.info("Treasury scrape complete: balance=%d, income=%d, expenses=%d", 
+                    balance_count, income_count, expense_count)
+            
+            return balance_count, income_count, expense_count
+            
+        finally:
+            if own:
+                await session.close()
+    
+    async def _maybe_start_background(self):
+        """Start background tasks if enabled in configuration."""
+        async with self._task_lock:
+            members_refresh = await self.config.members_refresh_minutes()
+            logs_refresh = await self.config.logs_refresh_minutes()
+            treasury_refresh = await self.config.treasury_refresh_minutes()
+            
+            if members_refresh > 0 and (not self._bg_members or self._bg_members.done()):
+                self._bg_members = asyncio.create_task(self._background_scrape_members())
+                log.info("Started background member scraping task")
+            
+            if logs_refresh > 0 and (not self._bg_logs or self._bg_logs.done()):
+                self._bg_logs = asyncio.create_task(self._background_scrape_logs())
+                log.info("Started background logs scraping task")
+            
+            if treasury_refresh > 0 and (not self._bg_treasury or self._bg_treasury.done()):
+                self._bg_treasury = asyncio.create_task(self._background_scrape_treasury())
+                log.info("Started background treasury scraping task")
+    
+    async def _background_scrape_members(self):
+        """Background task to periodically scrape members."""
+        await self.bot.wait_until_ready()
+        
+        # Initial scrape immediately
+        try:
+            count = await self._scrape_members()
+            log.info("Initial background member scrape completed: %d members", count)
+        except Exception as e:
+            log.exception("Error in initial member scrape")
+        
+        while True:
+            try:
+                minutes = await self.config.members_refresh_minutes()
+                if minutes <= 0:
+                    break
+                await asyncio.sleep(minutes * 60)
+                count = await self._scrape_members()
+                log.info("Background member scrape completed: %d members", count)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                log.exception("Error in background member scrape")
+                await asyncio.sleep(300)  # Wait 5 minutes on error
+    
+    async def _background_scrape_logs(self):
+        """Background task to periodically scrape logs."""
+        await self.bot.wait_until_ready()
+        
+        # Initial scrape immediately
+        try:
+            count = await self._scrape_logs_once()
+            log.info("Initial background logs scrape completed: %d entries", count)
+        except Exception as e:
+            log.exception("Error in initial logs scrape")
+        
+        while True:
+            try:
+                minutes = await self.config.logs_refresh_minutes()
+                if minutes <= 0:
+                    break
+                await asyncio.sleep(minutes * 60)
+                count = await self._scrape_logs_once()
+                log.info("Background logs scrape completed: %d entries", count)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                log.exception("Error in background logs scrape")
+                await asyncio.sleep(300)  # Wait 5 minutes on error
+    
+    async def _background_scrape_treasury(self):
+        """Background task to periodically scrape treasury."""
+        await self.bot.wait_until_ready()
+        
+        # Initial scrape immediately
+        try:
+            balance, income, expenses = await self._scrape_treasury_once()
+            log.info("Initial background treasury scrape completed: balance=%d, income=%d, expenses=%d",
+                    balance, income, expenses)
+        except Exception as e:
+            log.exception("Error in initial treasury scrape")
+        
+        while True:
+            try:
+                minutes = await self.config.treasury_refresh_minutes()
+                if minutes <= 0:
+                    break
+                await asyncio.sleep(minutes * 60)
+                balance, income, expenses = await self._scrape_treasury_once()
+                log.info("Background treasury scrape completed: balance=%d, income=%d, expenses=%d",
+                        balance, income, expenses)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                log.exception("Error in background treasury scrape")
+                await asyncio.sleep(300)  # Wait 5 minutes on error
+    
+    # Public API methods for other cogs
+    
+    async def get_logs(self, action_key: Optional[str] = None, 
+                      limit: int = 100) -> List[Dict[str, Any]]:
+        """Get alliance logs, optionally filtered by action key."""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             
-            period_type = 'daily' if period == 'daily' else 'monthly'
+            if action_key:
+                sql = """
+                SELECT id, ts, action_key, action_text, executed_name, executed_mc_id,
+                       affected_name, affected_type, affected_mc_id, description, 
+                       contribution_amount, executed_url, affected_url
+                FROM logs 
+                WHERE action_key = ?
+                ORDER BY ts DESC 
+                LIMIT ?
+                """
+                cur = await db.execute(sql, (action_key, limit))
+            else:
+                sql = """
+                SELECT id, ts, action_key, action_text, executed_name, executed_mc_id,
+                       affected_name, affected_type, affected_mc_id, description,
+                       contribution_amount, executed_url, affected_url
+                FROM logs 
+                ORDER BY ts DESC 
+                LIMIT ?
+                """
+                cur = await db.execute(sql, (limit,))
             
-            # Get most recent scrape for this period
+            return [dict(r) for r in await cur.fetchall()]
+    
+    async def get_logs_after(self, last_id: int, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get logs with ID greater than last_id, ordered by ID ascending (oldest first)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            sql = """
+            SELECT id, ts, action_key, action_text, executed_name, executed_mc_id,
+                   affected_name, affected_type, affected_mc_id, description,
+                   contribution_amount, executed_url, affected_url
+            FROM logs 
+            WHERE id > ?
+            ORDER BY id ASC
+            LIMIT ?
+            """
+            cur = await db.execute(sql, (int(last_id), int(limit)))
+            return [dict(r) for r in await cur.fetchall()]
+    
+    async def get_treasury_balance(self) -> Optional[int]:
+        """Get the most recent treasury balance."""
+        async with aiosqlite.connect(self.db_path) as db:
             cur = await db.execute("""
-                SELECT MAX(scraped_at) as latest 
-                FROM treasury_income 
-                WHERE period = ?
-            """, (period_type,))
+            SELECT total_funds 
+            FROM treasury_balance 
+            ORDER BY scraped_at DESC 
+            LIMIT 1
+            """)
             row = await cur.fetchone()
-            if not row or not row['latest']:
-                return None
-            
-            current_time = row['latest']
-            
-            # Get current rankings
+            return row[0] if row else None
+    
+    async def get_treasury_income(self, period: str = "daily") -> List[Dict[str, Any]]:
+        """Get treasury income records for specified period (latest scrape only)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            # Get the most recent scrape time for this period
             cur = await db.execute("""
-                SELECT user_id, user_name as name, credits, scraped_at
-                FROM treasury_income
-                WHERE period = ? AND scraped_at = ? AND credits > 0
-                ORDER BY credits DESC
-                LIMIT 20
-            """, (period_type, current_time))
-            current_raw = [dict(row) for row in await cur.fetchall()]
-            current = self._filter_invalid_entries(current_raw, 'contributions')[:10]
+            SELECT MAX(scraped_at) FROM treasury_income WHERE period = ?
+            """, (period,))
+            latest_scrape = await cur.fetchone()
             
-            # Get previous period rankings
-            # For treasury, we need to go back to previous scrape
-            if period == 'daily':
-                # Get scrapes from yesterday
-                dt = datetime.fromisoformat(current_time.replace('Z', '+00:00'))
-                previous_dt = dt - timedelta(days=1)
-                previous_time = previous_dt.isoformat()
-            else:
-                # Get scrapes from previous month
-                dt = datetime.fromisoformat(current_time.replace('Z', '+00:00'))
-                previous_dt = dt - timedelta(days=30)
-                previous_time = previous_dt.isoformat()
+            if not latest_scrape or not latest_scrape[0]:
+                return []
             
+            # Get all records from that scrape
             cur = await db.execute("""
-                SELECT DISTINCT scraped_at
-                FROM treasury_income
-                WHERE period = ? AND scraped_at <= ?
-                ORDER BY scraped_at DESC
-                LIMIT 1
-            """, (period_type, previous_time))
-            prev_time_row = await cur.fetchone()
-            
-            previous = []
-            if prev_time_row:
-                cur = await db.execute("""
-                    SELECT user_id, user_name as name, credits, scraped_at
-                    FROM treasury_income
-                    WHERE period = ? AND scraped_at = ? AND credits > 0
-                    ORDER BY credits DESC
-                    LIMIT 30
-                """, (period_type, prev_time_row['scraped_at']))
-                previous_raw = [dict(row) for row in await cur.fetchall()]
-                previous = self._filter_invalid_entries(previous_raw, 'contributions')[:20]
-            
-            return {
-                'current': current,
-                'previous': previous
-            }
-
-    # ==================== EMBED CREATION ====================
-
-    def _create_leaderboard_embed(
-        self,
-        title: str,
-        current_rankings: List[Dict],
-        previous_rankings: List[Dict],
-        period: str,
-        metric: str
-    ) -> discord.Embed:
-        """Create a formatted leaderboard embed with position changes."""
-        
-        embed = discord.Embed(
-            title=title,
-            color=discord.Color.gold(),
-            timestamp=datetime.utcnow()
-        )
-        
-        # Create previous rankings lookup by user_id
-        prev_lookup = {}
-        for idx, player in enumerate(previous_rankings, 1):
-            prev_lookup[player['user_id']] = idx
-        
-        # Build leaderboard text
-        lines = []
-        for idx, player in enumerate(current_rankings, 1):
-            medal = MEDALS.get(idx, f"`#{idx:02d}`")
-            name = player['name'][:20]  # Truncate long names
-            
-            # Determine value based on metric
-            if metric == 'earned_credits':
-                value = player.get('earned_credits', 0)
-            else:  # contributions
-                value = player.get('credits', 0)
-            
-            value_str = f"{value:,}"
-            
-            # Calculate position change
-            user_id = player['user_id']
-            prev_pos = prev_lookup.get(user_id)
-            
-            if prev_pos is None:
-                change = "🆕"
-            else:
-                diff = prev_pos - idx
-                if diff > 0:
-                    change = f"▲ +{diff}"
-                elif diff < 0:
-                    change = f"▼ {diff}"
-                else:
-                    change = "━"
-            
-            # Format line
-            line = f"{medal} **{name}** - {value_str} credits `{change}`"
-            lines.append(line)
-        
-        # Add all lines to embed
-        if lines:
-            embed.description = "\n".join(lines)
-        else:
-            embed.description = "No data available for this period."
-        
-        # Add footer
-        period_text = "last 24 hours" if period == 'daily' else "this month"
-        embed.set_footer(text=f"Rankings based on {period_text}")
-        
-        return embed
-
-    # ==================== COMMANDS ====================
-
-    @commands.group(name="topplayers")
-    @checks.admin_or_permissions(manage_guild=True)
-    async def topplayers(self, ctx):
-        """Top players leaderboard configuration commands."""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
-
-    @topplayers.command(name="dailyearnedchannel")
-    async def set_daily_earned_channel(self, ctx, channel: discord.TextChannel):
-        """Set channel for daily earned credits leaderboard."""
-        await self.config.daily_earned_channel.set(channel.id)
-        await ctx.send(f"✅ Daily earned credits leaderboard will be posted in {channel.mention}")
-
-    @topplayers.command(name="dailycontribchannel")
-    async def set_daily_contrib_channel(self, ctx, channel: discord.TextChannel):
-        """Set channel for daily treasury contributions leaderboard."""
-        await self.config.daily_contrib_channel.set(channel.id)
-        await ctx.send(f"✅ Daily treasury contributions leaderboard will be posted in {channel.mention}")
-
-    @topplayers.command(name="monthlyearnedchannel")
-    async def set_monthly_earned_channel(self, ctx, channel: discord.TextChannel):
-        """Set channel for monthly earned credits leaderboard."""
-        await self.config.monthly_earned_channel.set(channel.id)
-        await ctx.send(f"✅ Monthly earned credits leaderboard will be posted in {channel.mention}")
-
-    @topplayers.command(name="monthlycontribchannel")
-    async def set_monthly_contrib_channel(self, ctx, channel: discord.TextChannel):
-        """Set channel for monthly treasury contributions leaderboard."""
-        await self.config.monthly_contrib_channel.set(channel.id)
-        await ctx.send(f"✅ Monthly treasury contributions leaderboard will be posted in {channel.mention}")
-
-    @topplayers.command(name="settings")
-    async def show_settings(self, ctx):
-        """Show current top players leaderboard settings."""
-        daily_earned = await self.config.daily_earned_channel()
-        daily_contrib = await self.config.daily_contrib_channel()
-        monthly_earned = await self.config.monthly_earned_channel()
-        monthly_contrib = await self.config.monthly_contrib_channel()
-        
-        embed = discord.Embed(
-            title="Top Players Leaderboard Settings",
-            color=discord.Color.blue()
-        )
-        
-        embed.add_field(
-            name="Daily Earned Credits",
-            value=f"<#{daily_earned}>" if daily_earned else "Not set",
-            inline=False
-        )
-        embed.add_field(
-            name="Daily Contributions",
-            value=f"<#{daily_contrib}>" if daily_contrib else "Not set",
-            inline=False
-        )
-        embed.add_field(
-            name="Monthly Earned Credits",
-            value=f"<#{monthly_earned}>" if monthly_earned else "Not set",
-            inline=False
-        )
-        embed.add_field(
-            name="Monthly Contributions",
-            value=f"<#{monthly_contrib}>" if monthly_contrib else "Not set",
-            inline=False
-        )
-        
-        embed.set_footer(text="Posts daily at 06:00 Amsterdam time | Monthly on last day of month at 06:00")
-        
-        await ctx.send(embed=embed)
-
-    @topplayers.command(name="testnow")
+            SELECT user_name, user_id, credits, scraped_at
+            FROM treasury_income
+            WHERE period = ? AND scraped_at = ?
+            ORDER BY credits DESC
+            """, (period, latest_scrape[0]))
+            return [dict(r) for r in await cur.fetchall()]
+    
+    async def get_treasury_expenses(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get recent treasury expenses."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("""
+            SELECT expense_date, credits, name, description
+            FROM treasury_expenses
+            ORDER BY expense_date DESC
+            LIMIT ?
+            """, (limit,))
+            return [dict(r) for r in await cur.fetchall()]
+    
+    async def get_member_history(self, user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get historical snapshots for a specific member."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("""
+            SELECT name, role, earned_credits, contribution_rate, scraped_at
+            FROM members_history
+            WHERE user_id = ?
+            ORDER BY scraped_at DESC
+            LIMIT ?
+            """, (user_id, limit))
+            return [dict(r) for r in await cur.fetchall()]
+    
+    # Discord commands
+    
+    @commands.group()
     @checks.is_owner()
-    async def test_now(self, ctx, leaderboard_type: str):
-        """
-        Manually trigger a leaderboard post for testing.
-        Types: daily_earned, daily_contrib, monthly_earned, monthly_contrib
-        """
+    async def alliance(self, ctx):
+        """Alliance scraper commands."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help()
+    
+    @alliance.command(name="scrape_members")
+    async def scrape_members_cmd(self, ctx):
+        """Manually trigger a member scrape."""
         async with ctx.typing():
             try:
-                if leaderboard_type == "daily_earned":
-                    data = await self._get_earned_credits_rankings(period='daily')
-                    if data:
-                        embed = self._create_leaderboard_embed(
-                            title="🏆 Daily Top 10 - Earned Credits (TEST)",
-                            current_rankings=data['current'],
-                            previous_rankings=data['previous'],
-                            period='daily',
-                            metric='earned_credits'
-                        )
-                        await ctx.send(embed=embed)
-                    else:
-                        await ctx.send("❌ No data available")
-                
-                elif leaderboard_type == "daily_contrib":
-                    data = await self._get_treasury_rankings(period='daily')
-                    if data:
-                        embed = self._create_leaderboard_embed(
-                            title="💰 Daily Top 10 - Treasury Contributions (TEST)",
-                            current_rankings=data['current'],
-                            previous_rankings=data['previous'],
-                            period='daily',
-                            metric='contributions'
-                        )
-                        await ctx.send(embed=embed)
-                    else:
-                        await ctx.send("❌ No data available")
-                
-                elif leaderboard_type == "monthly_earned":
-                    data = await self._get_earned_credits_rankings(period='monthly')
-                    if data:
-                        embed = self._create_leaderboard_embed(
-                            title="🏆 Monthly Top 10 - Earned Credits (TEST)",
-                            current_rankings=data['current'],
-                            previous_rankings=data['previous'],
-                            period='monthly',
-                            metric='earned_credits'
-                        )
-                        await ctx.send(embed=embed)
-                    else:
-                        await ctx.send("❌ No data available")
-                
-                elif leaderboard_type == "monthly_contrib":
-                    data = await self._get_treasury_rankings(period='monthly')
-                    if data:
-                        embed = self._create_leaderboard_embed(
-                            title="💰 Monthly Top 10 - Treasury Contributions (TEST)",
-                            current_rankings=data['current'],
-                            previous_rankings=data['previous'],
-                            period='monthly',
-                            metric='contributions'
-                        )
-                        await ctx.send(embed=embed)
-                    else:
-                        await ctx.send("❌ No data available")
-                
-                else:
-                    await ctx.send("❌ Invalid type. Use: daily_earned, daily_contrib, monthly_earned, monthly_contrib")
-                    
+                count = await self._scrape_members()
+                await ctx.send(f"\u2705 Scraped {count} members successfully.")
             except Exception as e:
-                log.exception(f"Error in test command: {e}")
-                await ctx.send(f"❌ Error: {str(e)}")
+                log.exception("Error scraping members")
+                await ctx.send(f"\u274c Error scraping members: {type(e).__name__}")
+    
+    @alliance.command(name="scrape_logs")
+    async def scrape_logs_cmd(self, ctx, pages: int = 5):
+        """Manually trigger a logs scrape."""
+        async with ctx.typing():
+            try:
+                count = await self._scrape_logs_once(backfill_pages=pages)
+                await ctx.send(f"\u2705 Scraped {count} log entries from {pages} pages.")
+            except Exception as e:
+                log.exception("Error scraping logs")
+                await ctx.send(f"\u274c Error scraping logs: {type(e).__name__}")
+    
+    @alliance.command(name="scrape_treasury")
+    async def scrape_treasury_cmd(self, ctx):
+        """Manually trigger a treasury scrape."""
+        async with ctx.typing():
+            try:
+                balance, income, expenses = await self._scrape_treasury_once()
+                await ctx.send(
+                    f"\u2705 Treasury scrape complete:\n"
+                    f"- Balance records: {balance}\n"
+                    f"- Income records: {income}\n"
+                    f"- Expense records: {expenses}"
+                )
+            except Exception as e:
+                log.exception("Error scraping treasury")
+                await ctx.send(f"\u274c Error scraping treasury: {type(e).__name__}")
+    
+    @alliance.command(name="stats")
+    async def stats_cmd(self, ctx):
+        """Show database statistics."""
+        async with ctx.typing():
+            try:
+                async with aiosqlite.connect(self.db_path) as db:
+                    # Get member count
+                    cur = await db.execute("SELECT COUNT(*) FROM members_current")
+                    member_count = (await cur.fetchone())[0]
+                    
+                    # Get log count
+                    cur = await db.execute("SELECT COUNT(*) FROM logs")
+                    log_count = (await cur.fetchone())[0]
+                    
+                    # Get treasury balance
+                    cur = await db.execute("""
+                    SELECT total_funds FROM treasury_balance 
+                    ORDER BY scraped_at DESC LIMIT 1
+                    """)
+                    balance_row = await cur.fetchone()
+                    balance = balance_row[0] if balance_row else 0
+                    
+                    # Get latest scrape times
+                    cur = await db.execute("""
+                    SELECT scraped_at FROM members_current 
+                    ORDER BY scraped_at DESC LIMIT 1
+                    """)
+                    last_member_scrape = await cur.fetchone()
+                    
+                    cur = await db.execute("""
+                    SELECT scraped_at FROM logs 
+                    ORDER BY scraped_at DESC LIMIT 1
+                    """)
+                    last_log_scrape = await cur.fetchone()
+                
+                embed = discord.Embed(
+                    title="Alliance Scraper Statistics",
+                    color=discord.Color.blue()
+                )
+                embed.add_field(name="Members", value=str(member_count), inline=True)
+                embed.add_field(name="Log Entries", value=str(log_count), inline=True)
+                embed.add_field(name="Treasury Balance", value=f"{balance:,}", inline=True)
+                
+                if last_member_scrape:
+                    embed.add_field(name="Last Member Scrape", value=last_member_scrape[0], inline=False)
+                if last_log_scrape:
+                    embed.add_field(name="Last Log Scrape", value=last_log_scrape[0], inline=False)
+                
+                await ctx.send(embed=embed)
+            except Exception:
+                log.exception("Error fetching stats")
+                await ctx.send("\u274c Error fetching statistics")
 
 
-async def setup(bot: Red):
-    """Add cog to bot."""
-    await bot.add_cog(Leaderboard(bot))
+async def setup(bot):
+    """Load the AllianceScraper cog."""
+    await bot.add_cog(AllianceScraper(bot))
