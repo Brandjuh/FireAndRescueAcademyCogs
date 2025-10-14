@@ -52,10 +52,12 @@ class AllianceReports(commands.Cog):
         """Called when cog is loaded."""
         log.info(f"AllianceReports v{__version__} loading...")
         
+        # Detect database paths
         db_paths = await self.config_manager.detect_database_paths()
         if db_paths:
             log.info(f"Detected {len(db_paths)} database(s)")
             
+            # Save detected paths to config
             for key, path in db_paths.items():
                 current = await self.config.get_raw(key, default=None)
                 if not current and path:
@@ -64,6 +66,7 @@ class AllianceReports(commands.Cog):
         else:
             log.warning("No databases detected - reports may not work")
         
+        # Start scheduler after a delay
         asyncio.create_task(self._delayed_start())
         
         self._ready = True
@@ -72,7 +75,7 @@ class AllianceReports(commands.Cog):
     async def _delayed_start(self):
         """Start scheduler after bot is ready."""
         await self.bot.wait_until_ready()
-        await asyncio.sleep(5)
+        await asyncio.sleep(5)  # Wait 5 seconds after bot ready
         await self.scheduler.start()
     
     async def cog_unload(self):
@@ -83,9 +86,11 @@ class AllianceReports(commands.Cog):
     
     async def _is_authorized(self, ctx: commands.Context) -> bool:
         """Check if user is authorized to use reportset commands."""
+        # Bot owner always authorized
         if await self.bot.is_owner(ctx.author):
             return True
         
+        # Check admin role
         if not ctx.guild:
             return False
         
@@ -98,6 +103,8 @@ class AllianceReports(commands.Cog):
             return False
         
         return admin_role in ctx.author.roles
+    
+    # ==================== REPORTSET COMMANDS ====================
     
     @commands.group(name="reportset", aliases=["areportset"])
     async def reportset(self, ctx: commands.Context):
@@ -116,6 +123,7 @@ class AllianceReports(commands.Cog):
             settings = await self.config_manager.get_all_settings()
             formatted = self.config_manager.format_settings_display(settings)
             
+            # Add scheduler status
             next_runs = await self.scheduler.get_next_run_times()
             scheduler_status = f"\n⏰ NEXT SCHEDULED RUNS\n"
             
@@ -135,6 +143,7 @@ class AllianceReports(commands.Cog):
             
             full_output = formatted + "\n" + scheduler_status
             
+            # Pagify for long output
             for page in pagify(full_output, delims=["\n"], page_length=1900):
                 await ctx.send(box(page, lang="ini"))
         
@@ -206,7 +215,10 @@ class AllianceReports(commands.Cog):
     
     @reportset_time.command(name="daily")
     async def time_daily(self, ctx: commands.Context, time_str: str):
-        """Set daily report generation time (HH:MM format, 24-hour)."""
+        """Set daily report generation time (HH:MM format, 24-hour).
+        
+        Example: [p]reportset time daily 06:00
+        """
         if not await self._is_authorized(ctx):
             await ctx.send("❌ You don't have permission to use this command.")
             return
@@ -219,13 +231,17 @@ class AllianceReports(commands.Cog):
         tz = await self.config.timezone()
         await ctx.send(f"✅ Daily reports will generate at {time_str} {tz}")
         
+        # Restart scheduler to apply changes
         await self.scheduler.stop()
         await asyncio.sleep(1)
         await self.scheduler.start()
     
     @reportset_time.command(name="monthly")
     async def time_monthly(self, ctx: commands.Context, day: int, time_str: str):
-        """Set monthly report generation day and time."""
+        """Set monthly report generation day and time.
+        
+        Example: [p]reportset time monthly 1 06:00
+        """
         if not await self._is_authorized(ctx):
             await ctx.send("❌ You don't have permission to use this command.")
             return
@@ -243,22 +259,28 @@ class AllianceReports(commands.Cog):
         tz = await self.config.timezone()
         await ctx.send(f"✅ Monthly reports will generate on day {day} at {time_str} {tz}")
         
+        # Restart scheduler
         await self.scheduler.stop()
         await asyncio.sleep(1)
         await self.scheduler.start()
     
     @reportset_time.command(name="timezone")
     async def time_timezone(self, ctx: commands.Context, timezone: str):
-        """Set timezone for report generation."""
+        """Set timezone for report generation.
+        
+        Example: [p]reportset time timezone Europe/Amsterdam
+        """
         if not await self._is_authorized(ctx):
             await ctx.send("❌ You don't have permission to use this command.")
             return
         
         try:
+            # Test if timezone is valid
             ZoneInfo(timezone)
             await self.config.timezone.set(timezone)
             await ctx.send(f"✅ Timezone set to {timezone}")
             
+            # Restart scheduler
             await self.scheduler.stop()
             await asyncio.sleep(1)
             await self.scheduler.start()
@@ -277,7 +299,7 @@ class AllianceReports(commands.Cog):
     
     @reportset.command(name="testmode")
     async def reportset_testmode(self, ctx: commands.Context, enabled: bool):
-        """Enable/disable test mode."""
+        """Enable/disable test mode (generate without posting)."""
         if not await self._is_authorized(ctx):
             await ctx.send("❌ You don't have permission to use this command.")
             return
@@ -302,13 +324,17 @@ class AllianceReports(commands.Cog):
         await ctx.send("🔍 Detecting database paths...")
         
         try:
+            # Clear cache
             self.config_manager._db_cache = {}
+            
+            # Detect
             db_paths = await self.config_manager.detect_database_paths()
             
             if not db_paths:
                 await ctx.send("❌ No databases found")
                 return
             
+            # Save to config
             found = 0
             for key, path in db_paths.items():
                 if path:
@@ -316,6 +342,8 @@ class AllianceReports(commands.Cog):
                     found += 1
             
             await ctx.send(f"✅ Found {found}/{len(db_paths)} databases")
+            
+            # Show status
             await self.reportset_status(ctx)
         
         except Exception as e:
@@ -325,7 +353,9 @@ class AllianceReports(commands.Cog):
     @reportset.command(name="version")
     async def reportset_version(self, ctx: commands.Context):
         """Show cog version."""
-        await ctx.send(f"**AllianceReports** version `{__version__}` - Phase 2 Complete")
+        await ctx.send(f"**AllianceReports** version `{__version__}` - Phase 3 Complete")
+    
+    # ==================== REPORT COMMANDS ====================
     
     @commands.group(name="report")
     async def report_group(self, ctx: commands.Context):
@@ -341,7 +371,7 @@ class AllianceReports(commands.Cog):
             return
         
         await ctx.send("🔄 Test mode - reports will be generated but not posted...")
-        await ctx.send("✅ Use [p]report dailymember to test daily member report")
+        await ctx.send("✅ Use [p]report dailymember or [p]report dailyadmin to test specific reports")
     
     @report_group.command(name="dailymember")
     async def report_daily_member(self, ctx: commands.Context):
@@ -391,3 +421,75 @@ class AllianceReports(commands.Cog):
         except Exception as e:
             log.exception(f"Error generating daily member report: {e}")
             await ctx.send(f"❌ Error: {e}")
+    
+    @report_group.command(name="dailyadmin")
+    async def report_daily_admin(self, ctx: commands.Context):
+        """Generate daily admin report now."""
+        if not await self._is_authorized(ctx):
+            await ctx.send("❌ You don't have permission to use this command.")
+            return
+        
+        await ctx.send("🔄 Generating daily admin report...")
+        
+        try:
+            from .templates.daily_admin import DailyAdminReport
+            
+            # Create report generator
+            report_gen = DailyAdminReport(self.bot, self.config_manager)
+            
+            # Generate embed
+            embed = await report_gen.generate()
+            
+            if not embed:
+                await ctx.send("❌ Failed to generate report")
+                return
+            
+            # Check if channel is configured
+            channel_id = await self.config.daily_admin_channel()
+            if not channel_id:
+                # Post in current channel as test
+                await ctx.send("ℹ️ No channel configured, posting here:")
+                await ctx.send(embed=embed)
+                await ctx.send("✅ Set channel with `[p]reportset channel dailyadmin #channel`")
+                return
+            
+            # Get configured channel
+            channel = self.bot.get_channel(int(channel_id))
+            if not channel:
+                await ctx.send(f"❌ Configured channel not found (ID: {channel_id})")
+                return
+            
+            # Post to configured channel
+            success = await report_gen.post(channel)
+            
+            if success:
+                await ctx.send(f"✅ Daily admin report posted to {channel.mention}")
+            else:
+                await ctx.send("❌ Failed to post report (check logs)")
+        
+        except Exception as e:
+            log.exception(f"Error generating daily admin report: {e}")
+            await ctx.send(f"❌ Error: {e}")
+    
+    @report_group.command(name="monthlymember")
+    async def report_monthly_member(self, ctx: commands.Context):
+        """Generate monthly member report now (placeholder)."""
+        if not await self._is_authorized(ctx):
+            await ctx.send("❌ You don't have permission to use this command.")
+            return
+        
+        await ctx.send("⏳ Monthly member reports coming in Phase 4...")
+    
+    @report_group.command(name="monthlyadmin")
+    async def report_monthly_admin(self, ctx: commands.Context):
+        """Generate monthly admin report now (placeholder)."""
+        if not await self._is_authorized(ctx):
+            await ctx.send("❌ You don't have permission to use this command.")
+            return
+        
+        await ctx.send("⏳ Monthly admin reports coming in Phase 5...")
+
+
+async def setup(bot: Red):
+    """Load the AllianceReports cog."""
+    await bot.add_cog(AllianceReports(bot))
