@@ -439,6 +439,14 @@ class MemberManager(ConfigCommands, commands.Cog):
                 data.discord_username = str(member)
                 data.discord_roles = [r.name for r in member.roles if r.name != "@everyone"]
                 data.discord_joined = member.joined_at
+                
+                # Check for verified role from MemberSync config
+                if self.membersync:
+                    verified_role_id = await self.membersync.config.verified_role_id()
+                    if verified_role_id:
+                        verified_role = guild.get_role(verified_role_id)
+                        if verified_role and verified_role in member.roles:
+                            data.is_verified = True
         
         # Get MC data from MemberSync link
         if self.membersync:
@@ -446,10 +454,12 @@ class MemberManager(ConfigCommands, commands.Cog):
                 link = await self.membersync.get_link_for_discord(discord_id)
                 if link:
                     data.mc_user_id = link.get("mc_user_id")
+                    data.link_status = link.get("status", "unknown")
             elif mc_user_id and not discord_id:
                 link = await self.membersync.get_link_for_mc(mc_user_id)
                 if link:
                     data.discord_id = link.get("discord_id")
+                    data.link_status = link.get("status", "unknown")
         
         # Get MC data from AllianceScraper
         if data.mc_user_id and self.alliance_scraper:
