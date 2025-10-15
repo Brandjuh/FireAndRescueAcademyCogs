@@ -272,32 +272,33 @@ class DataAggregator:
             log.exception(f"Error getting daily training data: {e}")
             return {}
     
-    async def _get_buildings_data_daily(self) -> Dict:
-        """Get building metrics for last 24 hours."""
+    async def _get_buildings_data_daily(self, game_day_start: datetime, game_day_end: datetime) -> Dict:
+        """Get building metrics for last game day (EDT)."""
         try:
             conn = self._get_db_connection("building")
             if not conn:
                 return {}
             
             cursor = conn.cursor()
-            now = datetime.now()
-            yesterday = now - timedelta(days=1)
-            yesterday_ts = int(yesterday.timestamp())
+            game_day_start_ts = int(game_day_start.timestamp())
+            game_day_end_ts = int(game_day_end.timestamp())
             
-            # Approved in last 24h
+            # Approved in game day
             cursor.execute("""
                 SELECT COUNT(*) FROM building_requests 
                 WHERE status = 'approved' 
                 AND updated_at >= ?
-            """, (yesterday_ts,))
+                AND updated_at < ?
+            """, (game_day_start_ts, game_day_end_ts))
             approved = cursor.fetchone()[0]
             
-            # Denied in last 24h
+            # Denied in game day
             cursor.execute("""
                 SELECT COUNT(*) FROM building_requests 
                 WHERE status = 'denied' 
                 AND updated_at >= ?
-            """, (yesterday_ts,))
+                AND updated_at < ?
+            """, (game_day_start_ts, game_day_end_ts))
             denied = cursor.fetchone()[0]
             
             # Pending
@@ -307,14 +308,15 @@ class DataAggregator:
             """)
             pending = cursor.fetchone()[0]
             
-            # By type (last 24h approved)
+            # By type (game day approved)
             cursor.execute("""
                 SELECT building_type, COUNT(*) 
                 FROM building_requests 
                 WHERE status = 'approved' 
                 AND updated_at >= ?
+                AND updated_at < ?
                 GROUP BY building_type
-            """, (yesterday_ts,))
+            """, (game_day_start_ts, game_day_end_ts))
             by_type = dict(cursor.fetchall())
             
             conn.close()
@@ -332,7 +334,8 @@ class DataAggregator:
                     SELECT COUNT(*) FROM logs 
                     WHERE action_key = 'extension_started' 
                     AND datetime(scraped_at) >= datetime(?)
-                """, (yesterday.isoformat(),))
+                    AND datetime(scraped_at) < datetime(?)
+                """, (game_day_start.isoformat(), game_day_end.isoformat()))
                 ext_started = cursor_al.fetchone()[0]
                 
                 # Extensions completed
@@ -340,7 +343,8 @@ class DataAggregator:
                     SELECT COUNT(*) FROM logs 
                     WHERE action_key = 'expansion_finished' 
                     AND datetime(scraped_at) >= datetime(?)
-                """, (yesterday.isoformat(),))
+                    AND datetime(scraped_at) < datetime(?)
+                """, (game_day_start.isoformat(), game_day_end.isoformat()))
                 ext_completed = cursor_al.fetchone()[0]
                 
                 conn_al.close()
@@ -363,23 +367,22 @@ class DataAggregator:
             log.exception(f"Error getting daily buildings data: {e}")
             return {}
     
-    async def _get_operations_data_daily(self) -> Dict:
-        """Get operations metrics for last 24 hours."""
+    async def _get_operations_data_daily(self, game_day_start: datetime, game_day_end: datetime) -> Dict:
+        """Get operations metrics for last game day (EDT)."""
         try:
             conn = self._get_db_connection("alliance")
             if not conn:
                 return {}
             
             cursor = conn.cursor()
-            now = datetime.now()
-            yesterday = now - timedelta(days=1)
             
             # Large missions started
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'large_mission_started' 
                 AND datetime(scraped_at) >= datetime(?)
-            """, (yesterday.isoformat(),))
+                AND datetime(scraped_at) < datetime(?)
+            """, (game_day_start.isoformat(), game_day_end.isoformat()))
             large_missions = cursor.fetchone()[0]
             
             # Alliance events
@@ -387,7 +390,8 @@ class DataAggregator:
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'alliance_event_started' 
                 AND datetime(scraped_at) >= datetime(?)
-            """, (yesterday.isoformat(),))
+                AND datetime(scraped_at) < datetime(?)
+            """, (game_day_start.isoformat(), game_day_end.isoformat()))
             events = cursor.fetchone()[0]
             
             conn.close()
@@ -403,8 +407,8 @@ class DataAggregator:
             log.exception(f"Error getting daily operations data: {e}")
             return {}
     
-    async def _get_treasury_data_daily(self) -> Dict:
-        """Get treasury metrics for last 24 hours."""
+    async def _get_treasury_data_daily(self, game_day_start: datetime, game_day_end: datetime) -> Dict:
+        """Get treasury metrics for last game day (EDT)."""
         try:
             conn = self._get_db_connection("alliance")
             if not conn:
@@ -420,13 +424,12 @@ class DataAggregator:
             result = cursor.fetchone()
             current_balance = result[0] if result else 0
             
-            # Balance 24h ago
-            yesterday = datetime.now() - timedelta(days=1)
+            # Balance at game day start
             cursor.execute("""
                 SELECT total_funds FROM treasury_balance 
                 WHERE datetime(scraped_at) <= datetime(?)
                 ORDER BY scraped_at DESC LIMIT 1
-            """, (yesterday.isoformat(),))
+            """, (game_day_start.isoformat(),))
             result = cursor.fetchone()
             balance_24h_ago = result[0] if result else current_balance
             
@@ -449,11 +452,12 @@ class DataAggregator:
             result = cursor.fetchone()
             contributors = result[0] if result else 0
             
-            # Expenses last 24h
+            # Expenses in game day
             cursor.execute("""
                 SELECT SUM(credits) FROM treasury_expenses 
                 WHERE datetime(scraped_at) >= datetime(?)
-            """, (yesterday.isoformat(),))
+                AND datetime(scraped_at) < datetime(?)
+            """, (game_day_start.isoformat(), game_day_end.isoformat()))
             result = cursor.fetchone()
             expenses_24h = result[0] if result and result[0] else 0
             
@@ -461,7 +465,8 @@ class DataAggregator:
             cursor.execute("""
                 SELECT MAX(credits) FROM treasury_expenses 
                 WHERE datetime(scraped_at) >= datetime(?)
-            """, (yesterday.isoformat(),))
+                AND datetime(scraped_at) < datetime(?)
+            """, (game_day_start.isoformat(), game_day_end.isoformat()))
             result = cursor.fetchone()
             largest_expense = result[0] if result and result[0] else 0
             
@@ -482,23 +487,23 @@ class DataAggregator:
             log.exception(f"Error getting daily treasury data: {e}")
             return {}
     
-    async def _get_sanctions_data_daily(self) -> Dict:
-        """Get sanctions metrics for last 24 hours."""
+    async def _get_sanctions_data_daily(self, game_day_start: datetime, game_day_end: datetime) -> Dict:
+        """Get sanctions metrics for last game day (EDT)."""
         try:
             conn = self._get_db_connection("sanctions")
             if not conn:
                 return {}
             
             cursor = conn.cursor()
-            now = datetime.now()
-            yesterday = now - timedelta(days=1)
-            yesterday_ts = int(yesterday.timestamp())
+            game_day_start_ts = int(game_day_start.timestamp())
+            game_day_end_ts = int(game_day_end.timestamp())
             
-            # Sanctions issued in last 24h
+            # Sanctions issued in game day
             cursor.execute("""
                 SELECT COUNT(*) FROM sanctions 
                 WHERE created_at >= ?
-            """, (yesterday_ts,))
+                AND created_at < ?
+            """, (game_day_start_ts, game_day_end_ts))
             issued = cursor.fetchone()[0]
             
             # Active warnings by level
@@ -528,23 +533,23 @@ class DataAggregator:
             log.exception(f"Error getting daily sanctions data: {e}")
             return {}
     
-    async def _get_admin_activity_daily(self) -> Dict:
-        """Get admin activity metrics for last 24 hours."""
+    async def _get_admin_activity_daily(self, game_day_start: datetime, game_day_end: datetime) -> Dict:
+        """Get admin activity metrics for last game day (EDT)."""
         try:
             conn = self._get_db_connection("building")
             if not conn:
                 return {}
             
             cursor = conn.cursor()
-            now = datetime.now()
-            yesterday = now - timedelta(days=1)
-            yesterday_ts = int(yesterday.timestamp())
+            game_day_start_ts = int(game_day_start.timestamp())
+            game_day_end_ts = int(game_day_end.timestamp())
             
             # Building reviews
             cursor.execute("""
                 SELECT COUNT(*) FROM building_actions 
                 WHERE timestamp >= ?
-            """, (yesterday_ts,))
+                AND timestamp < ?
+            """, (game_day_start_ts, game_day_end_ts))
             building_reviews = cursor.fetchone()[0]
             
             # Most active admin
@@ -552,10 +557,11 @@ class DataAggregator:
                 SELECT admin_username, COUNT(*) as count 
                 FROM building_actions 
                 WHERE timestamp >= ?
+                AND timestamp < ?
                 GROUP BY admin_username 
                 ORDER BY count DESC 
                 LIMIT 1
-            """, (yesterday_ts,))
+            """, (game_day_start_ts, game_day_end_ts))
             result = cursor.fetchone()
             most_active = result[0] if result else "N/A"
             most_active_count = result[1] if result else 0
@@ -570,7 +576,8 @@ class DataAggregator:
                 cursor_ms.execute("""
                     SELECT COUNT(*) FROM audit 
                     WHERE datetime(ts) >= datetime(?)
-                """, (yesterday.isoformat(),))
+                    AND datetime(ts) < datetime(?)
+                """, (game_day_start.isoformat(), game_day_end.isoformat()))
                 verif_actions = cursor_ms.fetchone()[0]
                 conn_ms.close()
             
@@ -582,7 +589,8 @@ class DataAggregator:
                 cursor_s.execute("""
                     SELECT COUNT(*) FROM sanctions 
                     WHERE created_at >= ?
-                """, (yesterday_ts,))
+                    AND created_at < ?
+                """, (game_day_start_ts, game_day_end_ts))
                 sanction_actions = cursor_s.fetchone()[0]
                 conn_s.close()
             
