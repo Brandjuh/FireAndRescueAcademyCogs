@@ -151,18 +151,18 @@ class DataAggregator:
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'added_to_alliance' 
-                AND datetime(scraped_at) >= datetime(?)
-                AND datetime(scraped_at) < datetime(?)
-            """, (game_day_start.isoformat(), game_day_end.isoformat()))
+                AND datetime(substr(scraped_at, 1, 19)) >= datetime(?)
+                AND datetime(substr(scraped_at, 1, 19)) < datetime(?)
+            """, (game_day_start.strftime('%Y-%m-%d %H:%M:%S'), game_day_end.strftime('%Y-%m-%d %H:%M:%S')))
             new_joins = cursor.fetchone()[0]
             
             # Leaves in game day
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'left_alliance' 
-                AND datetime(scraped_at) >= datetime(?)
-                AND datetime(scraped_at) < datetime(?)
-            """, (game_day_start.isoformat(), game_day_end.isoformat()))
+                AND datetime(substr(scraped_at, 1, 19)) >= datetime(?)
+                AND datetime(substr(scraped_at, 1, 19)) < datetime(?)
+            """, (game_day_start.strftime('%Y-%m-%d %H:%M:%S'), game_day_end.strftime('%Y-%m-%d %H:%M:%S')))
             left = cursor.fetchone()[0]
             
             # Kicks in game day - Track via sanctions.db
@@ -238,21 +238,22 @@ class DataAggregator:
             cursor = conn.cursor()
             
             # Courses started (created) in game day
+            # Note: scraped_at has timezone (+00:00), so we need to handle it
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'created_course' 
-                AND datetime(scraped_at) >= datetime(?)
-                AND datetime(scraped_at) < datetime(?)
-            """, (game_day_start.isoformat(), game_day_end.isoformat()))
+                AND datetime(substr(scraped_at, 1, 19)) >= datetime(?)
+                AND datetime(substr(scraped_at, 1, 19)) < datetime(?)
+            """, (game_day_start.strftime('%Y-%m-%d %H:%M:%S'), game_day_end.strftime('%Y-%m-%d %H:%M:%S')))
             started = cursor.fetchone()[0]
             
             # Courses completed in game day
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'course_completed' 
-                AND datetime(scraped_at) >= datetime(?)
-                AND datetime(scraped_at) < datetime(?)
-            """, (game_day_start.isoformat(), game_day_end.isoformat()))
+                AND datetime(substr(scraped_at, 1, 19)) >= datetime(?)
+                AND datetime(substr(scraped_at, 1, 19)) < datetime(?)
+            """, (game_day_start.strftime('%Y-%m-%d %H:%M:%S'), game_day_end.strftime('%Y-%m-%d %H:%M:%S')))
             completed = cursor.fetchone()[0]
             
             conn.close()
@@ -333,18 +334,18 @@ class DataAggregator:
                 cursor_al.execute("""
                     SELECT COUNT(*) FROM logs 
                     WHERE action_key = 'extension_started' 
-                    AND datetime(scraped_at) >= datetime(?)
-                    AND datetime(scraped_at) < datetime(?)
-                """, (game_day_start.isoformat(), game_day_end.isoformat()))
+                    AND datetime(substr(scraped_at, 1, 19)) >= datetime(?)
+                    AND datetime(substr(scraped_at, 1, 19)) < datetime(?)
+                """, (game_day_start.strftime('%Y-%m-%d %H:%M:%S'), game_day_end.strftime('%Y-%m-%d %H:%M:%S')))
                 ext_started = cursor_al.fetchone()[0]
                 
                 # Extensions completed
                 cursor_al.execute("""
                     SELECT COUNT(*) FROM logs 
                     WHERE action_key = 'expansion_finished' 
-                    AND datetime(scraped_at) >= datetime(?)
-                    AND datetime(scraped_at) < datetime(?)
-                """, (game_day_start.isoformat(), game_day_end.isoformat()))
+                    AND datetime(substr(scraped_at, 1, 19)) >= datetime(?)
+                    AND datetime(substr(scraped_at, 1, 19)) < datetime(?)
+                """, (game_day_start.strftime('%Y-%m-%d %H:%M:%S'), game_day_end.strftime('%Y-%m-%d %H:%M:%S')))
                 ext_completed = cursor_al.fetchone()[0]
                 
                 conn_al.close()
@@ -380,18 +381,18 @@ class DataAggregator:
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'large_mission_started' 
-                AND datetime(scraped_at) >= datetime(?)
-                AND datetime(scraped_at) < datetime(?)
-            """, (game_day_start.isoformat(), game_day_end.isoformat()))
+                AND datetime(substr(scraped_at, 1, 19)) >= datetime(?)
+                AND datetime(substr(scraped_at, 1, 19)) < datetime(?)
+            """, (game_day_start.strftime('%Y-%m-%d %H:%M:%S'), game_day_end.strftime('%Y-%m-%d %H:%M:%S')))
             large_missions = cursor.fetchone()[0]
             
             # Alliance events
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'alliance_event_started' 
-                AND datetime(scraped_at) >= datetime(?)
-                AND datetime(scraped_at) < datetime(?)
-            """, (game_day_start.isoformat(), game_day_end.isoformat()))
+                AND datetime(substr(scraped_at, 1, 19)) >= datetime(?)
+                AND datetime(substr(scraped_at, 1, 19)) < datetime(?)
+            """, (game_day_start.strftime('%Y-%m-%d %H:%M:%S'), game_day_end.strftime('%Y-%m-%d %H:%M:%S')))
             events = cursor.fetchone()[0]
             
             conn.close()
@@ -627,15 +628,17 @@ class DataAggregator:
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'added_to_alliance' 
-                AND datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
-            """, (start.isoformat(), end.isoformat()))
+                AND datetime(substr(scraped_at, 1, 19)) >= datetime(?)
+                AND datetime(substr(scraped_at, 1, 19)) <= datetime(?)
+            """, (start.strftime('%Y-%m-%d %H:%M:%S'), end.strftime('%Y-%m-%d %H:%M:%S')))
             new_joins = cursor.fetchone()[0]
             
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'left_alliance' 
-                AND datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
-            """, (start.isoformat(), end.isoformat()))
+                AND datetime(substr(scraped_at, 1, 19)) >= datetime(?)
+                AND datetime(substr(scraped_at, 1, 19)) <= datetime(?)
+            """, (start.strftime('%Y-%m-%d %H:%M:%S'), end.strftime('%Y-%m-%d %H:%M:%S')))
             left = cursor.fetchone()[0]
             
             # Kicks via sanctions
@@ -688,16 +691,18 @@ class DataAggregator:
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'created_course' 
-                AND datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
-            """, (start.isoformat(), end.isoformat()))
+                AND datetime(substr(scraped_at, 1, 19)) >= datetime(?)
+                AND datetime(substr(scraped_at, 1, 19)) <= datetime(?)
+            """, (start.strftime('%Y-%m-%d %H:%M:%S'), end.strftime('%Y-%m-%d %H:%M:%S')))
             started = cursor.fetchone()[0]
             
             # Courses completed
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'course_completed' 
-                AND datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
-            """, (start.isoformat(), end.isoformat()))
+                AND datetime(substr(scraped_at, 1, 19)) >= datetime(?)
+                AND datetime(substr(scraped_at, 1, 19)) <= datetime(?)
+            """, (start.strftime('%Y-%m-%d %H:%M:%S'), end.strftime('%Y-%m-%d %H:%M:%S')))
             completed = cursor.fetchone()[0]
             
             success_rate = (completed / started * 100) if started > 0 else 0
