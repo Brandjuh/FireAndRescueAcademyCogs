@@ -353,7 +353,7 @@ class AllianceReports(commands.Cog):
     @reportset.command(name="version")
     async def reportset_version(self, ctx: commands.Context):
         """Show cog version."""
-        await ctx.send(f"**AllianceReports** version `{__version__}` - Phase 3 Complete")
+        await ctx.send(f"**AllianceReports** version `{__version__}` - Phase 5 Complete (All Reports Ready!)")
     
     # ==================== REPORT COMMANDS ====================
     
@@ -521,7 +521,56 @@ class AllianceReports(commands.Cog):
             log.exception(f"Error generating monthly member report: {e}")
             await ctx.send(f"❌ Error: {e}")
     
-    @report_group.command(name="monthlyadmin")
+    @report_group.command(name="debug")
+    async def report_debug(self, ctx: commands.Context):
+        """Debug data aggregation."""
+        if not await self._is_authorized(ctx):
+            await ctx.send("❌ You don't have permission to use this command.")
+            return
+        
+        await ctx.send("🔍 Testing data aggregation...")
+        
+        try:
+            from .data_aggregator import DataAggregator
+            
+            aggregator = DataAggregator(self.config_manager)
+            
+            # Test daily data
+            await ctx.send("📊 Getting daily data...")
+            data = await aggregator.get_daily_data()
+            
+            if not data:
+                await ctx.send("❌ No data returned!")
+                return
+            
+            # Show summary
+            summary = "**Data Retrieved:**\n"
+            for key, value in data.items():
+                if isinstance(value, dict):
+                    summary += f"• {key}: {len(value)} fields\n"
+                else:
+                    summary += f"• {key}: {value}\n"
+            
+            await ctx.send(summary)
+            
+            # Show membership details
+            membership = data.get("membership", {})
+            mem_details = "**Membership Details:**\n```\n"
+            for key, value in membership.items():
+                mem_details += f"{key}: {value}\n"
+            mem_details += "```"
+            await ctx.send(mem_details)
+            
+            await ctx.send("✅ Data aggregation test complete!")
+            
+        except Exception as e:
+            log.exception(f"Error in debug: {e}")
+            await ctx.send(f"❌ Error: {str(e)}\n\nCheck console for full traceback")
+    
+    @report_group.command(name="testdata")
+    async def report_testdata(self, ctx: commands.Context):
+        """Test data aggregation (old command kept for compatibility)."""
+        await self.report_debug(ctx)
     async def report_monthly_admin(self, ctx: commands.Context):
         """Generate monthly admin report now."""
         if not await self._is_authorized(ctx):
