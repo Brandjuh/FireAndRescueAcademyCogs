@@ -141,8 +141,18 @@ class DataAggregator:
             """, (yesterday.isoformat(),))
             left = cursor.fetchone()[0]
             
-            # Kicks in last 24h - NOTE: No kick action_key found, using 0
+            # Kicks in last 24h - Track via sanctions.db
+            conn_s = self._get_db_connection("sanctions")
             kicked = 0
+            if conn_s:
+                cursor_s = conn_s.cursor()
+                cursor_s.execute("""
+                    SELECT COUNT(*) FROM sanctions 
+                    WHERE sanction_type = 'Kick' 
+                    AND created_at >= ?
+                """, (int(yesterday.timestamp()),))
+                kicked = cursor_s.fetchone()[0]
+                conn_s.close()
             
             conn.close()
             
@@ -594,8 +604,18 @@ class DataAggregator:
             """, (start.isoformat(), end.isoformat()))
             left = cursor.fetchone()[0]
             
-            # No kick action_key found
+            # Kicks via sanctions
+            conn_s = self._get_db_connection("sanctions")
             kicked = 0
+            if conn_s:
+                cursor_s = conn_s.cursor()
+                cursor_s.execute("""
+                    SELECT COUNT(*) FROM sanctions 
+                    WHERE sanction_type = 'Kick' 
+                    AND created_at BETWEEN ? AND ?
+                """, (int(start.timestamp()), int(end.timestamp())))
+                kicked = cursor_s.fetchone()[0]
+                conn_s.close()
             
             net_growth = new_joins - left - kicked
             starting_members = ending_members - net_growth
