@@ -528,23 +528,104 @@ class AllianceReports(commands.Cog):
             await ctx.send("❌ You don't have permission to use this command.")
             return
         
-        await ctx.send("🔍 Testing data aggregation...")
+        await ctx.send("🔍 Testing data aggregation step by step...")
         
         try:
             from .data_aggregator import DataAggregator
+            from datetime import datetime, timedelta
+            from zoneinfo import ZoneInfo
             
             aggregator = DataAggregator(self.config_manager)
             
-            # Test daily data
-            await ctx.send("📊 Getting daily data...")
+            # Test timezone calculation
+            await ctx.send("⏰ Testing game day calculation...")
+            utc_now = datetime.now(ZoneInfo("UTC"))
+            await ctx.send(f"UTC Now: {utc_now.isoformat()}")
+            
+            # Calculate game day
+            if utc_now.hour >= 4:
+                game_day_end = utc_now.replace(hour=4, minute=0, second=0, microsecond=0)
+            else:
+                game_day_end = (utc_now - timedelta(days=1)).replace(hour=4, minute=0, second=0, microsecond=0)
+            
+            game_day_start = game_day_end - timedelta(days=1)
+            
+            await ctx.send(f"Game Day Start: {game_day_start.isoformat()}")
+            await ctx.send(f"Game Day End: {game_day_end.isoformat()}")
+            
+            # Test database connections
+            await ctx.send("\n🔌 Testing database connections...")
+            
+            conn_alliance = aggregator._get_db_connection("alliance")
+            if conn_alliance:
+                await ctx.send("✅ Alliance DB connected")
+                conn_alliance.close()
+            else:
+                await ctx.send("❌ Alliance DB connection failed!")
+                return
+            
+            conn_ms = aggregator._get_db_connection("membersync")
+            if conn_ms:
+                await ctx.send("✅ MemberSync DB connected")
+                conn_ms.close()
+            else:
+                await ctx.send("⚠️ MemberSync DB connection failed")
+            
+            conn_bm = aggregator._get_db_connection("building")
+            if conn_bm:
+                await ctx.send("✅ Building DB connected")
+                conn_bm.close()
+            else:
+                await ctx.send("⚠️ Building DB connection failed")
+            
+            conn_s = aggregator._get_db_connection("sanctions")
+            if conn_s:
+                await ctx.send("✅ Sanctions DB connected")
+                conn_s.close()
+            else:
+                await ctx.send("⚠️ Sanctions DB connection failed")
+            
+            # Test individual data methods
+            await ctx.send("\n📊 Testing individual data methods...")
+            
+            try:
+                await ctx.send("Testing membership...")
+                membership = await aggregator._get_membership_data_daily(game_day_start, game_day_end)
+                await ctx.send(f"✅ Membership: {len(membership)} fields")
+            except Exception as e:
+                await ctx.send(f"❌ Membership failed: {str(e)}")
+            
+            try:
+                await ctx.send("Testing training...")
+                training = await aggregator._get_training_data_daily(game_day_start, game_day_end)
+                await ctx.send(f"✅ Training: {len(training)} fields")
+            except Exception as e:
+                await ctx.send(f"❌ Training failed: {str(e)}")
+            
+            try:
+                await ctx.send("Testing buildings...")
+                buildings = await aggregator._get_buildings_data_daily(game_day_start, game_day_end)
+                await ctx.send(f"✅ Buildings: {len(buildings)} fields")
+            except Exception as e:
+                await ctx.send(f"❌ Buildings failed: {str(e)}")
+            
+            try:
+                await ctx.send("Testing treasury...")
+                treasury = await aggregator._get_treasury_data_daily(game_day_start, game_day_end)
+                await ctx.send(f"✅ Treasury: {len(treasury)} fields")
+            except Exception as e:
+                await ctx.send(f"❌ Treasury failed: {str(e)}")
+            
+            # Now test full daily data
+            await ctx.send("\n🔄 Testing full get_daily_data()...")
             data = await aggregator.get_daily_data()
             
             if not data:
-                await ctx.send("❌ No data returned!")
+                await ctx.send("❌ Full data aggregation returned empty dict!")
                 return
             
             # Show summary
-            summary = "**Data Retrieved:**\n"
+            summary = "**✅ Data Retrieved:**\n"
             for key, value in data.items():
                 if isinstance(value, dict):
                     summary += f"• {key}: {len(value)} fields\n"
@@ -553,24 +634,14 @@ class AllianceReports(commands.Cog):
             
             await ctx.send(summary)
             
-            # Show membership details
-            membership = data.get("membership", {})
-            mem_details = "**Membership Details:**\n```\n"
-            for key, value in membership.items():
-                mem_details += f"{key}: {value}\n"
-            mem_details += "```"
-            await ctx.send(mem_details)
-            
-            await ctx.send("✅ Data aggregation test complete!")
-            
         except Exception as e:
             log.exception(f"Error in debug: {e}")
-            await ctx.send(f"❌ Error: {str(e)}\n\nCheck console for full traceback")
-    
-    @report_group.command(name="testdata")
-    async def report_testdata(self, ctx: commands.Context):
-        """Test data aggregation (old command kept for compatibility)."""
-        await self.report_debug(ctx)
+            await ctx.send(f"❌ Error: {str(e)}")
+            import traceback
+            tb = traceback.format_exc()
+            # Send in chunks if too long
+            for chunk in [tb[i:i+1900] for i in range(0, len(tb), 1900)]:
+                await ctx.send(f"```\n{chunk}\n```")
     async def report_monthly_admin(self, ctx: commands.Context):
         """Generate monthly admin report now."""
         if not await self._is_authorized(ctx):
