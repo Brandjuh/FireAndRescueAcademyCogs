@@ -6,6 +6,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from pathlib import Path
+import re  # ADD THIS!
 
 class MembersScraper(commands.Cog):
     """Scrapes alliance members data from MissionChief"""
@@ -131,56 +132,77 @@ class MembersScraper(commands.Cog):
                     members_data = []
                     timestamp = datetime.utcnow().isoformat()
                     
-                    # Find members table - try different selectors
-                    table = soup.find('table', class_='table')
-                    if not table:
-                        await self._debug_log(f"⚠️ No table with class='table' found", ctx)
-                        # Try alternative
-                        table = soup.find('table')
-                        if table:
-                            await self._debug_log(f"✅ Found table without class", ctx)
-                        else:
-                            await self._debug_log(f"❌ No table found at all on page {page_num}", ctx)
-                            # Debug: show what we DO have
-                            tables = soup.find_all('table')
-                            await self._debug_log(f"Total tables on page: {len(tables)}", ctx)
-                            return []
+                    # USE SAME METHOD AS WORKING ALLIANCE SCRAPER
+                    # Just find ALL <tr> tags with links in them
+                    await self._debug_log(f"🔍 Searching for all <tr> tags with links...", ctx)
                     
-                    rows = table.find('tbody').find_all('tr') if table.find('tbody') else table.find_all('tr')
-                    await self._debug_log(f"📊 Found {len(rows)} rows on page {page_num}", ctx)
-                    
-                    for idx, row in enumerate(rows):
-                        cols = row.find_all('td')
-                        await self._debug_log(f"Row {idx}: {len(cols)} columns", ctx)
+                    for tr in soup.find_all("tr"):
+                        a = tr.find("a", href=True)
+                        if not a:
+                            continue
                         
-                        if len(cols) >= 3:  # Changed from 4 to 3 - more lenient
-                            # Extract member data
-                            member_link = cols[0].find('a')
-                            if member_link:
-                                member_id = member_link.get('href', '').split('/')[-1]
-                                username = member_link.text.strip()
-                                await self._debug_log(f"👤 Found member: {username} (ID: {member_id})", ctx)
-                            else:
-                                await self._debug_log(f"⚠️ No link in first column", ctx)
-                                continue
+                        name = a.get_text(strip=True)
+                        if not name:
+                            continue
+                        
+                        href = a["href"]
+                        # Extract user ID from href
+                        user_id = ""
+                        for pattern in [r"/users/(\d+)", r"/profile/(\d+)"]:
+                            match = re.search(pattern, href)
+                            if match:
+                                user_id = match.group(1)
+                                break
+                        
+                        # Get all <td> elements
+                        tds = tr.find_all("td")
+                        
+                        role = ""
+                        credits = 0
+                        rate = 0.0
+                        
+                        # Parse role, credits, and contribution rate from td elements
+                        for td in tds:
+                            txt = td.get_text(" ", strip=True)
                             
-                            rank = cols[1].text.strip() if len(cols) > 1 else ""
-                            earned_credits = cols[2].text.strip().replace(',', '').replace('$', '') if len(cols) > 2 else "0"
-                            online_status = "online" if cols[0].find('span', class_='label-success') else "offline"
+                            # Role: text without digits, not the name itself
+                            if not role and txt and not any(ch.isdigit() for ch in txt) and name not in txt:
+                                role = txt
                             
-                            try:
-                                earned_credits = int(earned_credits)
-                            except:
-                                earned_credits = 0
+                            # Credits: first number we find
+                            if credits == 0:
+                                # Remove formatting and parse
+                                cleaned = re.sub(r'[^\d]', '', txt)
+                                if cleaned:
+                                    try:
+                                        val = int(cleaned)
+                                        if val > 0:
+                                            credits = val
+                                    except:
+                                        pass
                             
-                            members_data.append({
-                                'member_id': int(member_id) if member_id.isdigit() else 0,
-                                'username': username,
-                                'rank': rank,
-                                'earned_credits': earned_credits,
-                                'online_status': online_status,
-                                'timestamp': timestamp
-                            })
+                            # Contribution rate: percentage
+                            if "%" in txt and rate == 0.0:
+                                match = re.search(r'(\d+(?:\.\d+)?)\s*%', txt)
+                                if match:
+                                    try:
+                                        rate = float(match.group(1))
+                                    except:
+                                        pass
+                        
+                        # Determine online status
+                        online_status = "online" if tr.find('span', class_='label-success') else "offline"
+                        
+                        members_data.append({
+                            'member_id': int(user_id) if user_id else 0,
+                            'username': name,
+                            'rank': role,
+                            'earned_credits': credits,
+                            'online_status': online_status,
+                            'timestamp': timestamp
+                        })
+                        
+                        await self._debug_log(f"👤 Found: {name} (ID: {user_id}, Credits: {credits}, Role: {role})", ctx)
                     
                     await self._debug_log(f"✅ Parsed {len(members_data)} members from page {page_num}", ctx)
                     return members_data
