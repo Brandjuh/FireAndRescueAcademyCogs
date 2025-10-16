@@ -1,9 +1,20 @@
 {
-    "author": ["Brandjuh"],
-    "description": "Scrapes alliance member data from MissionChief with historical tracking",
-    "install_msg": "Members Scraper installed! Use [p]load membersscraper to enable.\nCommand: [p]scrape_members (owner only)",
-    "short": "Alliance members scraper",
-    "tags": ["missionchief", "scraper", "members"],
+    "author": [
+        "Brandjuh"
+    ],
+    "description": "Scrapes alliance member data from MissionChief USA with historical tracking. Monitors player credits, ranks, and online status across all pages with automated hourly updates.",
+    "install_msg": "✅ Members Scraper installed!\n\nUse `[p]load membersscraper` to enable.\n\nCommands (owner only):\n• `[p]scrape_members` - Manual scrape\n\nAutomatic scraping runs every hour at :00\n\nDatabase: scraper_databases/members.db\nFields: member_id, username, rank, earned_credits, online_status, timestamp",
+    "short": "Alliance members scraper with historical credit tracking",
+    "tags": [
+        "missionchief",
+        "scraper",
+        "members",
+        "alliance",
+        "tracking"
+    ],
     "type": "COG",
-    "end_user_data_statement": "This cog stores scraped MissionChief data in local SQLite databases."
+    "end_user_data_statement": "This cog stores scraped MissionChief member data in a local SQLite database. No personal data is collected beyond what's publicly visible on MissionChief.",
+    "required_cogs": {
+        "CookieManager": "Handles MissionChief authentication"
+    }
 }
