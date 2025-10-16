@@ -1,16 +1,11 @@
 import discord
-from redbot.core import commands, Config
+from redbot.core import commands, Config, data_manager
 import aiohttp
 import asyncio
 import sqlite3
 from datetime import datetime
 from bs4 import BeautifulSoup
-import sys
-import os
-
-# Import cookie manager
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from cookie_manager import CookieManager
+from pathlib import Path
 
 class MembersScraper(commands.Cog):
     """Scrapes alliance members data from MissionChief"""
@@ -18,10 +13,14 @@ class MembersScraper(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=1621001, force_registration=True)
-        self.db_path = "members.db"
+        
+        # Setup database path in shared location
+        base_path = data_manager.cog_data_path(raw_name="scraper_databases")
+        base_path.mkdir(parents=True, exist_ok=True)
+        self.db_path = str(base_path / "members.db")
+        
         self.base_url = "https://www.missionchief.com"
         self.members_url = f"{self.base_url}/verband/mitglieder/1621"
-        self.cookie_manager = CookieManager()
         self.scraping_task = None
         self._init_database()
         
@@ -54,10 +53,19 @@ class MembersScraper(commands.Cog):
         conn.commit()
         conn.close()
     
+    async def _get_cookie_manager(self):
+        """Get CookieManager cog instance"""
+        return self.bot.get_cog("CookieManager")
+    
     async def _get_session(self):
-        """Get authenticated session from cookie manager"""
+        """Get authenticated session from CookieManager cog"""
+        cookie_manager = await self._get_cookie_manager()
+        if not cookie_manager:
+            print("[MembersScraper] CookieManager cog not loaded!")
+            return None
+        
         try:
-            session = await self.cookie_manager.get_session()
+            session = await cookie_manager.get_session()
             return session
         except Exception as e:
             print(f"[MembersScraper] Failed to get session: {e}")
@@ -66,7 +74,6 @@ class MembersScraper(commands.Cog):
     async def _check_logged_in(self, html_content):
         """Check if still logged in by looking for logout button or user menu"""
         soup = BeautifulSoup(html_content, 'html.parser')
-        # Check for common logged-in indicators
         logout_button = soup.find('a', href='/users/sign_out')
         user_menu = soup.find('li', class_='dropdown user-menu')
         return logout_button is not None or user_menu is not None
@@ -88,11 +95,8 @@ class MembersScraper(commands.Cog):
                     
                     # Check if still logged in
                     if not await self._check_logged_in(html):
-                        print(f"[MembersScraper] Session expired, re-authenticating...")
-                        session = await self._get_session()
-                        if not session:
-                            return []
-                        continue
+                        print(f"[MembersScraper] Session expired, will retry on next run")
+                        return []
                     
                     soup = BeautifulSoup(html, 'html.parser')
                     members_data = []
@@ -104,7 +108,7 @@ class MembersScraper(commands.Cog):
                         print(f"[MembersScraper] No table found on page {page_num}")
                         return []
                     
-                    rows = table.find('tbody').find_all('tr')
+                    rows = table.find('tbody').find_all('tr') if table.find('tbody') else table.find_all('tr')
                     
                     for row in rows:
                         cols = row.find_all('td')
@@ -153,7 +157,7 @@ class MembersScraper(commands.Cog):
         session = await self._get_session()
         if not session:
             if ctx:
-                await ctx.send("❌ Failed to authenticate with MissionChief")
+                await ctx.send("❌ Failed to get session. Is CookieManager loaded and logged in?")
             return False
         
         all_members = []
@@ -164,7 +168,6 @@ class MembersScraper(commands.Cog):
             members = await self._scrape_members_page(session, page)
             
             if not members:
-                # No more members found, end pagination
                 break
             
             all_members.extend(members)
@@ -212,8 +215,6 @@ class MembersScraper(commands.Cog):
                 print(f"[MembersScraper] Automatic scrape completed")
             except Exception as e:
                 print(f"[MembersScraper] Background task error: {e}")
-                # Optionally send error to Discord channel
-                # You can add channel notification here if needed
             
             await asyncio.sleep(3600)  # Wait 1 hour
     
@@ -226,5 +227,5 @@ class MembersScraper(commands.Cog):
         if success:
             await ctx.send("✅ Members scrape completed successfully")
 
-def setup(bot):
-    bot.add_cog(MembersScraper(bot))
+async def setup(bot):
+    await bot.add_cog(MembersScraper(bot))
