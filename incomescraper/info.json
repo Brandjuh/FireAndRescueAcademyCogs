@@ -1,0 +1,20 @@
+{
+    "author": [
+        "Brandjuh"
+    ],
+    "description": "Scrapes alliance income and expense data from MissionChief USA. Tracks both daily and monthly financial data for trend analysis.",
+    "install_msg": "✅ Income Scraper installed!\n\nUse `[p]load incomescraper` to enable.\n\nCommands (owner only):\n• `[p]scrape_income` - Manual scrape\n\nAutomatic scraping runs every hour at :30\n\nDatabase: scraper_databases/income.db\nTabs: daily and monthly income/expenses",
+    "short": "Alliance income/expense tracker with daily and monthly data",
+    "tags": [
+        "missionchief",
+        "scraper",
+        "income",
+        "expenses",
+        "finance"
+    ],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores scraped MissionChief financial data in a local SQLite database.",
+    "required_cogs": {
+        "CookieManager": "Handles MissionChief authentication"
+    }
+}
