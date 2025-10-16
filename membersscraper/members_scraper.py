@@ -240,23 +240,34 @@ class MembersScraper(commands.Cog):
         
         all_members = []
         page = 1
-        max_pages = 50  # Safety limit
+        max_pages = 100  # Increased from 50 to 100 for larger alliances
         
         await self._debug_log(f"🚀 Starting member scrape (max {max_pages} pages)", ctx)
+        
+        empty_page_count = 0  # Track consecutive empty pages
         
         while page <= max_pages:
             members = await self._scrape_members_page(session, page, ctx)
             
             if not members:
-                await self._debug_log(f"⛔ No members found on page {page}, stopping pagination", ctx)
-                break
+                empty_page_count += 1
+                await self._debug_log(f"⚠️ Page {page} returned 0 members (empty count: {empty_page_count})", ctx)
+                
+                # Stop if we get 3 consecutive empty pages
+                if empty_page_count >= 3:
+                    await self._debug_log(f"⛔ Stopped after {empty_page_count} consecutive empty pages", ctx)
+                    break
+            else:
+                empty_page_count = 0  # Reset counter if we find members
+                
+                # Override timestamp if provided (for back-filling)
+                if custom_timestamp:
+                    for member in members:
+                        member['timestamp'] = custom_timestamp
+                
+                all_members.extend(members)
+                await self._debug_log(f"✅ Page {page}: {len(members)} members (total so far: {len(all_members)})", ctx)
             
-            # Override timestamp if provided (for back-filling)
-            if custom_timestamp:
-                for member in members:
-                    member['timestamp'] = custom_timestamp
-            
-            all_members.extend(members)
             page += 1
         
         await self._debug_log(f"📊 Total members scraped: {len(all_members)} across {page - 1} pages", ctx)
