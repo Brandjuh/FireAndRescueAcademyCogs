@@ -1,0 +1,20 @@
+{
+    "author": [
+        "Brandjuh"
+    ],
+    "description": "Scrapes alliance building data from MissionChief USA. Tracks all stations with classroom counts, building types, and ownership for growth analysis.",
+    "install_msg": "✅ Buildings Scraper installed!\n\nUse `[p]load buildingsscraper` to enable.\n\nCommands (owner only):\n• `[p]scrape_buildings` - Manual scrape\n\nAutomatic scraping runs every hour at :45\n\nDatabase: scraper_databases/buildings.db\nFields: building_id, owner, type, location, classrooms, status, level, timestamp",
+    "short": "Alliance buildings tracker with classroom and growth monitoring",
+    "tags": [
+        "missionchief",
+        "scraper",
+        "buildings",
+        "stations",
+        "classrooms"
+    ],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores scraped MissionChief building data in a local SQLite database.",
+    "required_cogs": {
+        "CookieManager": "Handles MissionChief authentication"
+    }
+}
