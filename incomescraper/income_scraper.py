@@ -23,6 +23,7 @@ class IncomeScraper(commands.Cog):
         self.base_url = "https://www.missionchief.com"
         self.income_url = f"{self.base_url}/verband/kasse"
         self.scraping_task = None
+        self.debug_mode = False
         self._init_database()
         
     def cog_load(self):
