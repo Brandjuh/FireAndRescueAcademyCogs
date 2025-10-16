@@ -6,7 +6,11 @@ import sqlite3
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from pathlib import Path
-import re  # ADD THIS!
+import re
+
+# SQLite INTEGER limits
+INT64_MAX = 9223372036854775807
+INT64_MIN = -9223372036854775808
 
 class MembersScraper(commands.Cog):
     """Scrapes alliance members data from MissionChief"""
@@ -53,6 +57,21 @@ class MembersScraper(commands.Cog):
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON members(timestamp)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_member_id ON members(member_id)')
+        
+        # New table for suspicious entries
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS suspicious_members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                member_id INTEGER,
+                username TEXT,
+                rank TEXT,
+                parsed_credits INTEGER,
+                raw_html TEXT,
+                reason TEXT,
+                timestamp TEXT
+            )
+        ''')
+        
         conn.commit()
         conn.close()
     
@@ -171,6 +190,7 @@ class MembersScraper(commands.Cog):
                         
                         role = ""
                         credits = 0
+                        credits_raw = ""
                         rate = 0.0
                         
                         # Parse role, credits, and contribution rate from td elements
@@ -181,17 +201,23 @@ class MembersScraper(commands.Cog):
                             if not role and txt and not any(ch.isdigit() for ch in txt) and name not in txt:
                                 role = txt
                             
-                            # Credits: first number we find
+                            # Credits: ONLY accept "X,XXX Credits" format (case insensitive)
                             if credits == 0:
-                                # Remove formatting and parse
-                                cleaned = re.sub(r'[^\d]', '', txt)
-                                if cleaned:
+                                # Match: "4,844,886 Credits" or "2,549 Credits"
+                                credits_match = re.search(r'([\d,]+)\s+Credits?\b', txt, re.I)
+                                if credits_match:
+                                    credits_raw = credits_match.group(0)  # Save raw for debugging
+                                    cleaned = credits_match.group(1).replace(',', '')
                                     try:
                                         val = int(cleaned)
-                                        if val > 0:
+                                        # Sanity check: reasonable range
+                                        if 0 <= val <= 50000000000:  # Max 50 billion
                                             credits = val
+                                        else:
+                                            # Suspicious!
+                                            credits = -1  # Flag as suspicious
                                     except:
-                                        pass
+                                        credits = -1  # Flag as suspicious
                             
                             # Contribution rate: percentage
                             if "%" in txt and rate == 0.0:
@@ -205,16 +231,49 @@ class MembersScraper(commands.Cog):
                         # Determine online status
                         online_status = "online" if tr.find('span', class_='label-success') else "offline"
                         
-                        members_data.append({
-                            'member_id': int(user_id) if user_id else 0,
-                            'username': name,
-                            'rank': role,
-                            'earned_credits': credits,
-                            'online_status': online_status,
-                            'timestamp': timestamp
-                        })
+                        # Check if suspicious
+                        is_suspicious = False
+                        reason = ""
                         
-                        await self._debug_log(f"👤 Found: {name} (ID: {user_id}, Credits: {credits}, Role: {role})", ctx)
+                        if credits == -1:
+                            is_suspicious = True
+                            reason = f"Credits out of range: {credits_raw}"
+                        elif credits == 0 and not credits_raw:
+                            is_suspicious = True
+                            reason = "No credits found in expected format"
+                        elif credits > 10000000000:  # 10 billion
+                            is_suspicious = True
+                            reason = f"Unusually high credits: {credits:,}"
+                        
+                        if is_suspicious:
+                            # Log suspicious entry
+                            await self._debug_log(f"🚨 SUSPICIOUS: {name} - {reason}", ctx)
+                            
+                            # Store in suspicious table
+                            members_data.append({
+                                'member_id': int(user_id) if user_id else 0,
+                                'username': name,
+                                'rank': role,
+                                'earned_credits': credits if credits > 0 else 0,
+                                'online_status': online_status,
+                                'timestamp': timestamp,
+                                'suspicious': True,
+                                'reason': reason,
+                                'raw_html': str(tr)[:500]  # First 500 chars of HTML
+                            })
+                        else:
+                            # Normal entry
+                            members_data.append({
+                                'member_id': int(user_id) if user_id else 0,
+                                'username': name,
+                                'rank': role,
+                                'earned_credits': credits,
+                                'online_status': online_status,
+                                'timestamp': timestamp,
+                                'suspicious': False
+                            })
+                            
+                            await self._debug_log(f"👤 Found: {name} (ID: {user_id}, Credits: {credits:,}, Role: {role})", ctx)
                     
                     await self._debug_log(f"✅ Parsed {len(members_data)} members from page {page_num}", ctx)
                     return members_data
@@ -279,34 +338,61 @@ class MembersScraper(commands.Cog):
             
             inserted = 0
             duplicates = 0
+            suspicious_count = 0
             
             for member in all_members:
                 try:
-                    cursor.execute('''
-                        INSERT OR REPLACE INTO members 
-                        (member_id, username, rank, earned_credits, online_status, timestamp)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    ''', (
-                        member['member_id'],
-                        member['username'],
-                        member['rank'],
-                        member['earned_credits'],
-                        member['online_status'],
-                        member['timestamp']
-                    ))
-                    if cursor.rowcount > 0:
-                        inserted += 1
+                    if member.get('suspicious', False):
+                        # Store in suspicious table
+                        cursor.execute('''
+                            INSERT INTO suspicious_members 
+                            (member_id, username, rank, parsed_credits, raw_html, reason, timestamp)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ''', (
+                            member['member_id'],
+                            member['username'],
+                            member['rank'],
+                            member['earned_credits'],
+                            member.get('raw_html', ''),
+                            member.get('reason', ''),
+                            member['timestamp']
+                        ))
+                        suspicious_count += 1
+                    else:
+                        # Normal insert
+                        credits = max(0, min(INT64_MAX, int(member['earned_credits'])))
+                        
+                        cursor.execute('''
+                            INSERT OR REPLACE INTO members 
+                            (member_id, username, rank, earned_credits, online_status, timestamp)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        ''', (
+                            member['member_id'],
+                            member['username'],
+                            member['rank'],
+                            credits,
+                            member['online_status'],
+                            member['timestamp']
+                        ))
+                        if cursor.rowcount > 0:
+                            inserted += 1
                 except sqlite3.IntegrityError:
+                    duplicates += 1
+                except Exception as e:
+                    await self._debug_log(f"⚠️ DB Error for {member['username']}: {e}", ctx)
                     duplicates += 1
             
             conn.commit()
             conn.close()
             
-            await self._debug_log(f"💾 Database: {inserted} inserted, {duplicates} duplicates skipped", ctx)
+            await self._debug_log(f"💾 Database: {inserted} inserted, {duplicates} duplicates, {suspicious_count} suspicious", ctx)
             
             if ctx:
-                await ctx.send(f"✅ Scraped {len(all_members)} members across {page - 1} pages\n"
-                             f"💾 Database: {inserted} new records, {duplicates} duplicates")
+                msg = f"✅ Scraped {len(all_members)} members across {page - 1} pages\n"
+                msg += f"💾 Database: {inserted} new records, {duplicates} duplicates"
+                if suspicious_count > 0:
+                    msg += f"\n🚨 **WARNING**: {suspicious_count} suspicious entries detected! Check `suspicious_members` table."
+                await ctx.send(msg)
             return True
         else:
             if ctx:
