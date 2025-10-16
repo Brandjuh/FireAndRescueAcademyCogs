@@ -1,0 +1,20 @@
+{
+    "author": [
+        "Brandjuh"
+    ],
+    "description": "Scrapes alliance log data from MissionChief USA with special handling for training courses. Tracks all alliance activity including promotions, building expansions, and training starts.",
+    "install_msg": "✅ Logs Scraper installed!\n\nUse `[p]load logsscraper` to enable.\n\nCommands (owner only):\n• `[p]scrape_logs` - Manual scrape\n\nAutomatic scraping runs every hour at :15\n\nDatabase: scraper_databases/logs.db\nTables: logs (general), training_courses (up to 4 duplicates per timestamp)",
+    "short": "Alliance activity logs scraper with training course tracking",
+    "tags": [
+        "missionchief",
+        "scraper",
+        "logs",
+        "alliance",
+        "training"
+    ],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores scraped MissionChief alliance log data in a local SQLite database.",
+    "required_cogs": {
+        "CookieManager": "Handles MissionChief authentication"
+    }
+}
