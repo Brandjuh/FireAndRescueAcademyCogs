@@ -91,16 +91,28 @@ class MembersScraper(commands.Cog):
     async def _check_logged_in(self, html_content, ctx=None):
         """Check if still logged in by looking for logout button or user menu"""
         soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Check multiple indicators
         logout_button = soup.find('a', href='/users/sign_out')
         user_menu = soup.find('li', class_='dropdown user-menu')
-        is_logged_in = logout_button is not None or user_menu is not None
+        profile_link = soup.find('a', href=lambda x: x and '/profile' in str(x))
+        settings_link = soup.find('a', href='/settings')
+        
+        # ALSO: Check if we have member data (if we can see members, we're logged in!)
+        has_member_links = bool(soup.find('a', href=lambda x: x and '/users/' in str(x)))
+        
+        is_logged_in = (logout_button is not None or 
+                        user_menu is not None or 
+                        profile_link is not None or
+                        settings_link is not None or
+                        has_member_links)  # <-- KEY FIX!
         
         await self._debug_log(f"Login check: {'✅ Logged in' if is_logged_in else '❌ NOT logged in'}", ctx)
-        
-        # Extra debug: show what we found
-        if not is_logged_in:
-            await self._debug_log(f"Logout button found: {logout_button is not None}", ctx)
-            await self._debug_log(f"User menu found: {user_menu is not None}", ctx)
+        await self._debug_log(f"Logout button: {logout_button is not None}", ctx)
+        await self._debug_log(f"User menu: {user_menu is not None}", ctx)
+        await self._debug_log(f"Profile link: {profile_link is not None}", ctx)
+        await self._debug_log(f"Settings link: {settings_link is not None}", ctx)
+        await self._debug_log(f"Has member links: {has_member_links}", ctx)
         
         return is_logged_in
     
