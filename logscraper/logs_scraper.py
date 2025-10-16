@@ -22,6 +22,7 @@ class LogsScraper(commands.Cog):
         self.base_url = "https://www.missionchief.com"
         self.logs_url = f"{self.base_url}/alliance_logfiles"
         self.scraping_task = None
+        self.debug_mode = False
         self._init_database()
         
     def cog_load(self):
@@ -72,6 +73,10 @@ class LogsScraper(commands.Cog):
         conn.commit()
         conn.close()
     
+    def _debug_log(self, message):
+        """Log debug messages"""
+        print(f"[LogsScraper DEBUG] {message}")
+    
     async def _get_cookie_manager(self):
         """Get CookieManager cog instance"""
         return self.bot.get_cog("CookieManager")
@@ -80,14 +85,15 @@ class LogsScraper(commands.Cog):
         """Get authenticated session from CookieManager cog"""
         cookie_manager = await self._get_cookie_manager()
         if not cookie_manager:
-            print("[LogsScraper] CookieManager cog not loaded!")
+            self._debug_log("CookieManager cog not loaded!")
             return None
         
         try:
             session = await cookie_manager.get_session()
+            self._debug_log("Session obtained successfully")
             return session
         except Exception as e:
-            print(f"[LogsScraper] Failed to get session: {e}")
+            self._debug_log(f"Failed to get session: {e}")
             return None
     
     async def _check_logged_in(self, html_content):
@@ -95,7 +101,9 @@ class LogsScraper(commands.Cog):
         soup = BeautifulSoup(html_content, 'html.parser')
         logout_button = soup.find('a', href='/users/sign_out')
         user_menu = soup.find('li', class_='dropdown user-menu')
-        return logout_button is not None or user_menu is not None
+        is_logged_in = logout_button is not None or user_menu is not None
+        self._debug_log(f"Login check: {'✓ Logged in' if is_logged_in else '✗ Not logged in'}")
+        return is_logged_in
     
     def _parse_log_entry(self, row, scrape_timestamp):
         """Parse a single log entry row"""
@@ -103,7 +111,7 @@ class LogsScraper(commands.Cog):
         if len(cols) < 2:
             return None
         
-        # Timestamp column
+        # Timestamp column (this is the ACTUAL log timestamp from MissionChief)
         timestamp_col = cols[0].text.strip()
         
         # Action column
@@ -119,7 +127,6 @@ class LogsScraper(commands.Cog):
         # Training course detection
         if "started" in action_text.lower() and "education" in action_text.lower():
             log_type = "training_course"
-            # Parse: "Username started education Course Name"
             parts = action_text.split("started education")
             if len(parts) == 2:
                 username = parts[0].strip()
@@ -139,15 +146,16 @@ class LogsScraper(commands.Cog):
         return {
             'log_type': log_type,
             'username': username,
-            'action': action_text[:200],  # Limit length
+            'action': action_text[:200],
             'details': details[:500],
-            'log_timestamp': timestamp_col,
-            'scrape_timestamp': scrape_timestamp
+            'log_timestamp': timestamp_col,  # ORIGINAL timestamp from MissionChief
+            'scrape_timestamp': scrape_timestamp  # When WE scraped it
         }
     
     async def _scrape_logs_page(self, session, page_num):
         """Scrape a single page of logs"""
         url = f"{self.logs_url}?page={page_num}"
+        self._debug_log(f"Scraping logs page {page_num}: {url}")
         
         for attempt in range(3):
             try:
@@ -155,13 +163,13 @@ class LogsScraper(commands.Cog):
                 
                 async with session.get(url) as response:
                     if response.status != 200:
-                        print(f"[LogsScraper] Page {page_num} returned status {response.status}")
+                        self._debug_log(f"Page {page_num} returned status {response.status}")
                         return []
                     
                     html = await response.text()
                     
                     if not await self._check_logged_in(html):
-                        print(f"[LogsScraper] Session expired, will retry on next run")
+                        self._debug_log(f"Session expired on page {page_num}")
                         return []
                     
                     soup = BeautifulSoup(html, 'html.parser')
@@ -171,30 +179,32 @@ class LogsScraper(commands.Cog):
                     # Find logs table
                     table = soup.find('table', class_='table')
                     if not table:
-                        print(f"[LogsScraper] No table found on page {page_num}")
+                        self._debug_log(f"No table found on page {page_num}")
                         return []
                     
                     rows = table.find('tbody').find_all('tr') if table.find('tbody') else table.find_all('tr')
+                    self._debug_log(f"Found {len(rows)} log entries on page {page_num}")
                     
                     for row in rows:
                         log_entry = self._parse_log_entry(row, scrape_timestamp)
                         if log_entry:
                             logs_data.append(log_entry)
                     
+                    self._debug_log(f"Parsed {len(logs_data)} valid log entries from page {page_num}")
                     return logs_data
                     
             except asyncio.TimeoutError:
-                print(f"[LogsScraper] Timeout on page {page_num}, attempt {attempt + 1}")
+                self._debug_log(f"Timeout on page {page_num}, attempt {attempt + 1}/3")
                 if attempt == 2:
                     return []
             except Exception as e:
-                print(f"[LogsScraper] Error scraping page {page_num}: {e}")
+                self._debug_log(f"Error scraping page {page_num}: {e}")
                 if attempt == 2:
                     return []
         
         return []
     
-    async def _scrape_all_logs(self, ctx=None):
+    async def _scrape_all_logs(self, ctx=None, max_pages=100):
         """Scrape all pages of logs"""
         session = await self._get_session()
         if not session:
@@ -204,16 +214,24 @@ class LogsScraper(commands.Cog):
         
         all_logs = []
         page = 1
-        max_pages = 100  # Logs can have many pages
+        
+        self._debug_log(f"Starting logs scrape (max {max_pages} pages)")
         
         while page <= max_pages:
             logs = await self._scrape_logs_page(session, page)
             
             if not logs:
+                self._debug_log(f"No logs found on page {page}, stopping pagination")
                 break
             
             all_logs.extend(logs)
             page += 1
+            
+            # Progress update for backfill
+            if ctx and page % 10 == 0:
+                await ctx.send(f"⏳ Progress: {page} pages scraped, {len(all_logs)} log entries collected...")
+        
+        self._debug_log(f"Total logs scraped: {len(all_logs)} across {page - 1} pages")
         
         # Save to database
         if all_logs:
@@ -221,6 +239,8 @@ class LogsScraper(commands.Cog):
             cursor = conn.cursor()
             
             training_count = 0
+            general_count = 0
+            duplicates = 0
             
             for log in all_logs:
                 if log['log_type'] == 'training_course':
@@ -247,7 +267,7 @@ class LogsScraper(commands.Cog):
                             ))
                             training_count += 1
                         except sqlite3.IntegrityError:
-                            pass  # Already exists
+                            duplicates += 1
                 else:
                     # Regular logs - insert or ignore
                     try:
@@ -263,14 +283,19 @@ class LogsScraper(commands.Cog):
                             log['log_timestamp'],
                             log['scrape_timestamp']
                         ))
+                        if cursor.rowcount > 0:
+                            general_count += 1
                     except sqlite3.IntegrityError:
-                        pass  # Duplicate
+                        duplicates += 1
             
             conn.commit()
             conn.close()
             
+            self._debug_log(f"Database: {general_count} general logs, {training_count} trainings, {duplicates} duplicates")
+            
             if ctx:
-                await ctx.send(f"✅ Scraped {len(all_logs)} log entries ({training_count} training courses) across {page - 1} pages")
+                await ctx.send(f"✅ Scraped {len(all_logs)} log entries across {page - 1} pages\n"
+                             f"💾 Database: {general_count} general logs, {training_count} training courses, {duplicates} duplicates")
             return True
         else:
             if ctx:
@@ -284,22 +309,111 @@ class LogsScraper(commands.Cog):
         
         while not self.bot.is_closed():
             try:
-                print(f"[LogsScraper] Starting automatic scrape at {datetime.utcnow()}")
-                await self._scrape_all_logs()
-                print(f"[LogsScraper] Automatic scrape completed")
+                self._debug_log(f"Starting automatic scrape at {datetime.utcnow()}")
+                # Only scrape first 10 pages on automatic runs
+                await self._scrape_all_logs(max_pages=10)
+                self._debug_log(f"Automatic scrape completed")
             except Exception as e:
-                print(f"[LogsScraper] Background task error: {e}")
+                self._debug_log(f"Background task error: {e}")
             
             await asyncio.sleep(3600)
     
-    @commands.command(name="scrape_logs")
+    @commands.group(name="logs")
     @commands.is_owner()
-    async def scrape_logs(self, ctx):
-        """Manually trigger logs scraping (Owner only)"""
-        await ctx.send("🔄 Starting logs scrape...")
-        success = await self._scrape_all_logs(ctx)
+    async def logs_group(self, ctx):
+        """Logs scraper commands"""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+    
+    @logs_group.command(name="scrape")
+    async def scrape_logs(self, ctx, max_pages: int = 10):
+        """
+        Manually trigger logs scraping
+        
+        Usage: [p]logs scrape [max_pages]
+        Example: [p]logs scrape 50
+        """
+        await ctx.send(f"🔄 Starting logs scrape (max {max_pages} pages)...")
+        success = await self._scrape_all_logs(ctx, max_pages=max_pages)
         if success:
             await ctx.send("✅ Logs scrape completed successfully")
+    
+    @logs_group.command(name="backfill")
+    async def backfill_logs(self, ctx, max_pages: int = 200):
+        """
+        Back-fill ALL historical logs from MissionChief.
+        This scrapes ALL available log pages to get complete history.
+        
+        Usage: [p]logs backfill [max_pages]
+        Example: [p]logs backfill 500
+        
+        Note: This preserves the original timestamps from MissionChief logs!
+        """
+        if max_pages < 1 or max_pages > 1000:
+            await ctx.send("❌ Max pages must be between 1 and 1000")
+            return
+        
+        await ctx.send(f"🔄 Starting back-fill of ALL historical logs (up to {max_pages} pages)...")
+        await ctx.send(f"💡 This will preserve original timestamps from MissionChief")
+        await ctx.send(f"⚠️ This may take several minutes depending on alliance activity...")
+        
+        success = await self._scrape_all_logs(ctx, max_pages=max_pages)
+        
+        if success:
+            await ctx.send(f"✅ Back-fill completed! All historical logs are now in the database.")
+    
+    @logs_group.command(name="debug")
+    async def debug_logs(self, ctx, enable: bool = True):
+        """Enable or disable debug logging"""
+        self.debug_mode = enable
+        await ctx.send(f"🐛 Debug mode: {'**ENABLED**' if enable else '**DISABLED**'}")
+    
+    @logs_group.command(name="stats")
+    async def stats_logs(self, ctx):
+        """Show database statistics"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Total general logs
+        cursor.execute("SELECT COUNT(*) FROM logs")
+        total_logs = cursor.fetchone()[0]
+        
+        # Total training courses
+        cursor.execute("SELECT COUNT(*) FROM training_courses")
+        total_training = cursor.fetchone()[0]
+        
+        # Log types breakdown
+        cursor.execute("SELECT log_type, COUNT(*) FROM logs GROUP BY log_type")
+        log_types = cursor.fetchall()
+        
+        # Date range
+        cursor.execute("SELECT MIN(log_timestamp), MAX(log_timestamp) FROM logs")
+        date_range = cursor.fetchone()
+        
+        # Recent activity (last 24h)
+        cursor.execute("""
+            SELECT COUNT(*) FROM logs 
+            WHERE datetime(scrape_timestamp) > datetime('now', '-1 day')
+        """)
+        recent = cursor.fetchone()[0]
+        
+        conn.close()
+        
+        embed = discord.Embed(title="📊 Logs Database Statistics", color=discord.Color.green())
+        embed.add_field(name="Total Logs", value=f"{total_logs:,}", inline=True)
+        embed.add_field(name="Training Courses", value=f"{total_training:,}", inline=True)
+        embed.add_field(name="Last 24h", value=f"{recent:,}", inline=True)
+        
+        if log_types:
+            types_str = "\n".join([f"{t[0]}: {t[1]:,}" for t in log_types[:5]])
+            embed.add_field(name="Log Types", value=types_str, inline=False)
+        
+        if date_range[0]:
+            embed.add_field(name="Oldest Log", value=date_range[0][:16], inline=True)
+            embed.add_field(name="Newest Log", value=date_range[1][:16], inline=True)
+        
+        embed.set_footer(text=f"Database: {self.db_path}")
+        await ctx.send(embed=embed)
 
 async def setup(bot):
     await bot.add_cog(LogsScraper(bot))
