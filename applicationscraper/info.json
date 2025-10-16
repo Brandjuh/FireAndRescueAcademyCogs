@@ -1,0 +1,20 @@
+{
+    "author": [
+        "Brandjuh"
+    ],
+    "description": "Scrapes alliance application data from MissionChief USA. Tracks new member applications with status, credits, and buildings information.",
+    "install_msg": "✅ Applications Scraper installed!\n\nUse `[p]load applicationsscraper` to enable.\n\nCommands (owner only):\n• `[p]scrape_applications` - Manual scrape\n\nAutomatic scraping runs every hour at :55\n\nDatabase: scraper_databases/applications.db\nFields: applicant info, status, credits, buildings, timestamp",
+    "short": "Alliance applications tracker with applicant statistics",
+    "tags": [
+        "missionchief",
+        "scraper",
+        "applications",
+        "recruitment",
+        "alliance"
+    ],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores scraped MissionChief application data in a local SQLite database.",
+    "required_cogs": {
+        "CookieManager": "Handles MissionChief authentication"
+    }
+}
