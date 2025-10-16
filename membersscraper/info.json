@@ -1,0 +1,9 @@
+{
+    "author": ["Brandjuh"],
+    "description": "Scrapes alliance member data from MissionChief with historical tracking",
+    "install_msg": "Members Scraper installed! Use [p]load membersscraper to enable.\nCommand: [p]scrape_members (owner only)",
+    "short": "Alliance members scraper",
+    "tags": ["missionchief", "scraper", "members"],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores scraped MissionChief data in local SQLite databases."
+}
