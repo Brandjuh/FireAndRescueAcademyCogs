@@ -95,15 +95,25 @@ class IncomeScraper(commands.Cog):
         cookie_manager = self.bot.get_cog("CookieManager")
         if not cookie_manager:
             await self._debug_log("❌ CookieManager cog not loaded!", ctx)
+            if ctx:
+                await ctx.send("❌ CookieManager cog not loaded! Load it with: `!load cookiemanager`")
             return None
         
-        session = await cookie_manager.get_session()
-        if not session:
-            await self._debug_log("❌ Failed to get session from CookieManager", ctx)
+        try:
+            session = await cookie_manager.get_session()
+            if not session:
+                await self._debug_log("❌ Failed to get session from CookieManager", ctx)
+                if ctx:
+                    await ctx.send("❌ Failed to get session. Try: `!cookie status` and `!cookie login`")
+                return None
+            
+            await self._debug_log("✅ Session obtained successfully", ctx)
+            return session
+        except Exception as e:
+            await self._debug_log(f"❌ Error getting session: {str(e)}", ctx)
+            if ctx:
+                await ctx.send(f"❌ Error getting session: {str(e)}\nTry: `!cookie status`")
             return None
-        
-        await self._debug_log("✅ Session obtained successfully", ctx)
-        return session
     
     async def _debug_log(self, message, ctx=None):
         """Log debug messages to Discord if debug mode is on"""
