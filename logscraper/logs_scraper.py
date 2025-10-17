@@ -241,10 +241,10 @@ class LogsScraper(commands.Cog):
         for log in all_logs:
             try:
                 cursor.execute('''
-                    INSERT INTO logs (log_id, log_type, username, action, description, log_timestamp)
+                    INSERT INTO logs (log_id, log_type, username, action, details, log_timestamp)
                     VALUES (?, ?, ?, ?, ?, ?)
                 ''', (log['log_id'], log['log_type'], log['username'], 
-                      log['action'], log['description'], log['log_timestamp']))
+                      log['action'], log['details'], log['log_timestamp']))
                 inserted += 1
                 
                 # If it's a training course, also store in training_courses table
@@ -369,15 +369,15 @@ class LogsScraper(commands.Cog):
         
         cursor.execute('''
             SELECT 
-                log_id as id,
+                rowid as id,
                 log_type as action_key,
                 username as executed_name,
                 action,
-                description,
+                details as description,
                 log_timestamp as ts
             FROM logs
-            WHERE log_id > ?
-            ORDER BY log_id ASC
+            WHERE rowid > ?
+            ORDER BY rowid ASC
             LIMIT ?
         ''', (last_id, limit))
         
