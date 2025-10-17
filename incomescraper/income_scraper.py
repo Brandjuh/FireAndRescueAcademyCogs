@@ -260,118 +260,89 @@ class IncomeScraper(commands.Cog):
             return []
     
     async def _scrape_expenses_pages(self, session, ctx=None, max_pages=100):
-        """Scrape expenses with pagination from the treasury page"""
-        await self._debug_log(f"💸 Starting EXPENSES scrape with pagination (max {max_pages} pages)", ctx)
+        """Scrape expenses with pagination - page param changes the expense table only"""
+        await self._debug_log(f"💸 Starting EXPENSES scrape (max {max_pages} pages)", ctx)
         
         all_entries = []
         page = 1
         empty_count = 0
         
         while page <= max_pages:
-            # Expenses pagination: ?page= parameter changes only the expense table
-            url = f"{self.income_url}?page={page}"
-            await self._debug_log(f"🌐 Scraping expenses page {page}: {url}", ctx)
+            url = f"{self.income_url}" if page == 1 else f"{self.income_url}?page={page}"
+            await self._debug_log(f"🌐 Page {page}: {url}", ctx)
             
             try:
                 async with session.get(url) as resp:
-                    await self._debug_log(f"📡 Response status: {resp.status}", ctx)
-                    
                     if resp.status != 200:
-                        await self._debug_log(f"❌ Expenses page {page} returned status {resp.status}", ctx)
                         empty_count += 1
-                        if empty_count >= 3:
-                            await self._debug_log(f"⛔ Stopped expenses after 3 consecutive bad responses", ctx)
-                            break
+                        if empty_count >= 3: break
                         page += 1
                         continue
                     
-                    html_content = await resp.text()
+                    html = await resp.text()
+                    if not await self._check_logged_in(html, ctx): break
                     
-                    # Check login
-                    if not await self._check_logged_in(html_content, ctx):
-                        await self._debug_log(f"❌ Session expired on expenses page {page}", ctx)
-                        break
+                    soup = BeautifulSoup(html, 'html.parser')
                     
-                    # Parse expense table
-                    soup = BeautifulSoup(html_content, 'html.parser')
-                    tables = soup.find_all('table')
-                    
-                    # Look for the expense table (usually the one with pagination)
+                    # Find expense table by structure: 4 columns (Credits, Name, Description, Date)
                     page_entries = []
-                    for table in tables:
-                        # Look for expense indicators
-                        table_text = table.get_text().lower()
-                        if 'expense' in table_text or 'cost' in table_text:
-                            await self._debug_log(f"📋 Found expenses table on page {page}", ctx)
+                    for table in soup.find_all('table'):
+                        rows = table.find_all('tr')
+                        if len(rows) < 2: continue
+                        
+                        # Check header row for expense table signature
+                        headers = [th.get_text(strip=True).lower() for th in rows[0].find_all('th')]
+                        
+                        # Parse data rows
+                        for row in rows[1:]:
+                            cols = row.find_all('td')
+                            if len(cols) < 3: continue
                             
-                            for row in table.find_all('tr')[1:]:  # Skip header
-                                cols = row.find_all('td')
-                                if len(cols) < 2:
-                                    continue
-                                
-                                username = ""
-                                amount = 0
-                                description = ""
-                                
-                                # Extract data similar to income scraping
-                                for col in cols:
-                                    link = col.find('a', href=True)
-                                    if link and '/users/' in link['href']:
-                                        username = link.get_text(strip=True)
-                                        break
-                                
-                                if not username and cols:
-                                    username = cols[0].get_text(strip=True)
-                                
-                                for col in cols:
-                                    text = col.get_text(strip=True)
-                                    match = re.search(r'([\d,]+)', text)
-                                    if match:
-                                        amount_str = match.group(1).replace(',', '')
-                                        try:
-                                            amount = int(amount_str)
-                                            if amount > 100:
-                                                amount = max(INT64_MIN, min(INT64_MAX, amount))
-                                                break
-                                        except ValueError:
-                                            continue
-                                
-                                for col in cols:
-                                    text = col.get_text(strip=True)
-                                    if len(text) > len(description) and not re.match(r'^[\d,]+$', text):
-                                        description = text
-                                
-                                if username and amount > 0:
-                                    await self._debug_log(f"💸 Expense: {username[:20]}... = {amount:,}", ctx)
-                                    
-                                    page_entries.append({
-                                        'entry_type': 'expense',
-                                        'period': 'paginated',
-                                        'username': username,
-                                        'amount': amount,
-                                        'description': description
-                                    })
+                            # Column order: Credits, Name, Description, Date
+                            credits_col = cols[0].get_text(strip=True)
+                            name_col = cols[1].get_text(strip=True) if len(cols) > 1 else ""
+                            desc_col = cols[2].get_text(strip=True) if len(cols) > 2 else ""
+                            
+                            # Parse credits
+                            credits_match = re.search(r'([\d,]+)', credits_col)
+                            if not credits_match: continue
+                            
+                            amount = int(credits_match.group(1).replace(',', ''))
+                            if amount < 100: continue  # Skip invalid
+                            amount = min(amount, INT64_MAX)
+                            
+                            # Get username (might have link)
+                            username = name_col
+                            link = cols[1].find('a') if len(cols) > 1 else None
+                            if link:
+                                username = link.get_text(strip=True)
+                            
+                            page_entries.append({
+                                'entry_type': 'expense',
+                                'period': 'paginated',
+                                'username': username,
+                                'amount': amount,
+                                'description': desc_col
+                            })
                     
                     if not page_entries:
-                        await self._debug_log(f"⚠️ Expenses page {page} returned 0 entries (empty count: {empty_count + 1})", ctx)
                         empty_count += 1
                         if empty_count >= 3:
-                            await self._debug_log(f"⛔ Stopped expenses after 3 consecutive empty pages", ctx)
+                            await self._debug_log(f"⛔ Stopped after 3 empty pages", ctx)
                             break
                     else:
-                        await self._debug_log(f"✅ Page {page}: {len(page_entries)} expenses (total so far: {len(all_entries) + len(page_entries)})", ctx)
+                        await self._debug_log(f"✅ Page {page}: {len(page_entries)} expenses", ctx)
                         all_entries.extend(page_entries)
                         empty_count = 0
                     
                     page += 1
-                    await asyncio.sleep(1.5)  # Rate limiting
+                    await asyncio.sleep(1.5)
                     
             except Exception as e:
-                await self._debug_log(f"❌ Error on expenses page {page}: {str(e)}", ctx)
+                await self._debug_log(f"❌ Error page {page}: {str(e)}", ctx)
                 page += 1
-                await asyncio.sleep(2)
         
-        await self._debug_log(f"📊 Total expenses scraped: {len(all_entries)} across {page - 1} pages", ctx)
+        await self._debug_log(f"📊 Total: {len(all_entries)} expenses", ctx)
         return all_entries
     
     async def _scrape_all_income(self, ctx=None, include_expenses=True, max_expense_pages=100):
