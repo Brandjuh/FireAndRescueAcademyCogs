@@ -349,24 +349,33 @@ class IncomeScraper(commands.Cog):
         await self._debug_log(f"📊 Total expenses scraped: {len(all_expenses)} across {page - 1} pages", ctx)
         return all_expenses
     
-    async def _scrape_all_income(self, ctx=None):
-        """Scrape both daily and monthly income/expense tabs"""
+    async def _scrape_all_income(self, ctx=None, include_expenses=True, max_expense_pages=100):
+        """Scrape daily income, monthly income, and all expense pages"""
         session = await self._get_session(ctx)
         if not session:
             if ctx:
                 await ctx.send("❌ Failed to get session. Is CookieManager loaded and logged in?")
             return False
         
-        await self._debug_log("🚀 Starting income/expense scrape", ctx)
+        await self._debug_log("🚀 Starting complete income/expense scrape", ctx)
         
         all_data = []
         
-        # Scrape daily tab (or main page - adjust based on actual site structure)
+        # 1. Scrape daily income tab
+        await self._debug_log("📅 Scraping DAILY income...", ctx)
         daily_data = await self._scrape_income_tab(session, 'daily', ctx)
         all_data.extend(daily_data)
         
-        # Note: If there are separate tabs/pages for monthly, add here
-        # For now, we'll just scrape the main page
+        # 2. Scrape monthly income tab
+        await self._debug_log("📆 Scraping MONTHLY income...", ctx)
+        monthly_data = await self._scrape_income_tab(session, 'monthly', ctx)
+        all_data.extend(monthly_data)
+        
+        # 3. Scrape all expense pages (with pagination)
+        if include_expenses:
+            await self._debug_log("💸 Scraping EXPENSES (paginated)...", ctx)
+            expense_data = await self._scrape_all_expenses(session, ctx, max_expense_pages)
+            all_data.extend(expense_data)
         
         # Save to database
         if all_data:
@@ -403,8 +412,16 @@ class IncomeScraper(commands.Cog):
             await self._debug_log(f"💾 Database: {inserted} inserted, {duplicates} duplicates", ctx)
             
             if ctx:
-                await ctx.send(f"✅ Scraped {len(all_data)} income/expense entries\n"
-                             f"💾 Database: {inserted} new records, {duplicates} duplicates")
+                daily_count = len(daily_data)
+                monthly_count = len(monthly_data)
+                expense_count = len(all_data) - daily_count - monthly_count
+                
+                msg = f"✅ Scraped {len(all_data)} total entries:\n"
+                msg += f"  📅 Daily: {daily_count}\n"
+                msg += f"  📆 Monthly: {monthly_count}\n"
+                msg += f"  💸 Expenses: {expense_count}\n"
+                msg += f"💾 Database: {inserted} new records, {duplicates} duplicates"
+                await ctx.send(msg)
             return True
         else:
             if ctx:
@@ -434,12 +451,42 @@ class IncomeScraper(commands.Cog):
             await ctx.send_help(ctx.command)
     
     @income_group.command(name="scrape")
-    async def scrape_income(self, ctx):
-        """Manually trigger income/expenses scraping"""
-        await ctx.send("🔄 Starting income/expenses scrape...")
-        success = await self._scrape_all_income(ctx)
+    async def scrape_income(self, ctx, max_expense_pages: int = 100):
+        """
+        Manually trigger income/expenses scraping
+        
+        Scrapes:
+        - Daily income tab
+        - Monthly income tab
+        - All expense pages (with pagination)
+        
+        Usage: [p]income scrape [max_expense_pages]
+        Example: [p]income scrape 200
+        """
+        await ctx.send(f"🔄 Starting complete income/expenses scrape (up to {max_expense_pages} expense pages)...")
+        success = await self._scrape_all_income(ctx, include_expenses=True, max_expense_pages=max_expense_pages)
         if success:
             await ctx.send("✅ Income/expenses scrape completed successfully")
+    
+    @income_group.command(name="backfill")
+    async def backfill_income(self, ctx, max_expense_pages: int = 500):
+        """
+        Back-fill all expense history from MissionChief
+        
+        Usage: [p]income backfill [max_expense_pages]
+        Example: [p]income backfill 1000
+        """
+        if max_expense_pages < 1 or max_expense_pages > 2000:
+            await ctx.send("❌ Max pages must be between 1 and 2000")
+            return
+        
+        await ctx.send(f"🔄 Starting expense back-fill (up to {max_expense_pages} pages)...")
+        await ctx.send(f"⚠️ This may take **{max_expense_pages * 2 // 60} to {max_expense_pages * 3 // 60} minutes**...")
+        
+        success = await self._scrape_all_income(ctx, include_expenses=True, max_expense_pages=max_expense_pages)
+        
+        if success:
+            await ctx.send(f"✅ Back-fill completed!")
     
     @income_group.command(name="debug")
     async def debug_income(self, ctx, enable: bool = True):
