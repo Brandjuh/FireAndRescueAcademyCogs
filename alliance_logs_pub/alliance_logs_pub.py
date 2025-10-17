@@ -223,9 +223,16 @@ class AllianceLogsPub(commands.Cog):
         try:
             await main_ch.send(embed=e)
             
+            # Post to mirrors with action filtering
             for mirror_key, mirror_cfg in mirrors.items():
                 if not mirror_cfg.get("enabled"):
                     continue
+                
+                # Check if this action should go to this mirror
+                mirror_actions = mirror_cfg.get("actions", [])
+                if mirror_actions and key not in mirror_actions:
+                    continue  # Skip this mirror for this action
+                
                 for ch_id_str in mirror_cfg.get("channels", []):
                     try:
                         ch = main_ch.guild.get_channel(int(ch_id_str))
@@ -404,6 +411,79 @@ class AllianceLogsPub(commands.Cog):
             return
         await self.config.style.set(style)
         await ctx.send(f"✅ Style set to: {style}")
+    
+    @alog_group.command(name="mirrors")
+    async def list_mirrors(self, ctx: commands.Context):
+        """List all configured mirrors"""
+        mirrors = await self.config.mirrors()
+        if not mirrors:
+            await ctx.send("No mirrors configured")
+            return
+        
+        lines = ["**Configured Mirrors:**"]
+        for key, cfg in mirrors.items():
+            enabled = "✅" if cfg.get("enabled") else "❌"
+            channels = ", ".join([f"<#{ch}>" for ch in cfg.get("channels", [])])
+            actions = cfg.get("actions", [])
+            action_str = ", ".join(actions) if actions else "all actions"
+            lines.append(f"\n**{key}** {enabled}")
+            lines.append(f"  Channels: {channels or 'none'}")
+            lines.append(f"  Actions: {action_str}")
+        
+        await ctx.send("\n".join(lines))
+    
+    @alog_group.command(name="addmirror")
+    async def add_mirror(self, ctx: commands.Context, name: str, channel: discord.TextChannel):
+        """Add a mirror channel"""
+        async with self.config.mirrors() as mirrors:
+            if name not in mirrors:
+                mirrors[name] = {"enabled": True, "channels": [], "actions": []}
+            if channel.id not in mirrors[name]["channels"]:
+                mirrors[name]["channels"].append(channel.id)
+        await ctx.send(f"✅ Added {channel.mention} to mirror '{name}'")
+    
+    @alog_group.command(name="removemirror")
+    async def remove_mirror(self, ctx: commands.Context, name: str):
+        """Remove a mirror entirely"""
+        async with self.config.mirrors() as mirrors:
+            if name in mirrors:
+                del mirrors[name]
+                await ctx.send(f"✅ Removed mirror '{name}'")
+            else:
+                await ctx.send(f"❌ Mirror '{name}' not found")
+    
+    @alog_group.command(name="setmirroractions")
+    async def set_mirror_actions(self, ctx: commands.Context, name: str, *actions: str):
+        """Set which actions go to a mirror (leave empty for all)"""
+        async with self.config.mirrors() as mirrors:
+            if name not in mirrors:
+                await ctx.send(f"❌ Mirror '{name}' not found")
+                return
+            
+            valid_actions = []
+            for action in actions:
+                key = _map_user_action_input(action)
+                if key:
+                    valid_actions.append(key)
+            
+            mirrors[name]["actions"] = valid_actions
+            
+            if valid_actions:
+                await ctx.send(f"✅ Mirror '{name}' will receive: {', '.join(valid_actions)}")
+            else:
+                await ctx.send(f"✅ Mirror '{name}' will receive all actions")
+    
+    @alog_group.command(name="togglemirror")
+    async def toggle_mirror(self, ctx: commands.Context, name: str):
+        """Enable/disable a mirror"""
+        async with self.config.mirrors() as mirrors:
+            if name not in mirrors:
+                await ctx.send(f"❌ Mirror '{name}' not found")
+                return
+            
+            mirrors[name]["enabled"] = not mirrors[name].get("enabled", True)
+            status = "enabled" if mirrors[name]["enabled"] else "disabled"
+            await ctx.send(f"✅ Mirror '{name}' {status}")
 
 
 async def setup(bot):
