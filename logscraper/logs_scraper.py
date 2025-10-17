@@ -367,11 +367,9 @@ class LogsScraper(commands.Cog):
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
-        # Old AllianceScraper column mapping:
-        # log_type = action type (e.g. "expansion_finished")
-        # action = username who did it
-        # username = description of what happened
-        # details = username (duplicate)
+        # Support both old (rowid-based) and new (hash-based) logs
+        # Old logs: rowid matches log_id (sequential)
+        # New logs: log_id is hash, use rowid for ordering
         cursor.execute('''
             SELECT 
                 rowid as id,
