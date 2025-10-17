@@ -367,13 +367,17 @@ class LogsScraper(commands.Cog):
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
+        # Old AllianceScraper column mapping:
+        # log_type = action type (e.g. "expansion_finished")
+        # action = username who did it
+        # username = description of what happened
+        # details = username (duplicate)
         cursor.execute('''
             SELECT 
                 rowid as id,
                 log_type as action_key,
-                username as executed_name,
-                action,
-                details as description,
+                COALESCE(NULLIF(action, ''), details, 'Unknown') as executed_name,
+                username as description,
                 log_timestamp as ts
             FROM logs
             WHERE rowid > ?
