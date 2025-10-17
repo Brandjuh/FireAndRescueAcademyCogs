@@ -42,38 +42,52 @@ class MembersScraper(commands.Cog):
     
     def _init_database(self):
         """Initialize SQLite database with schema"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS members (
-                member_id INTEGER,
-                username TEXT,
-                rank TEXT,
-                earned_credits INTEGER,
-                online_status TEXT,
-                timestamp TEXT,
-                PRIMARY KEY (member_id, timestamp)
-            )
-        ''')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON members(timestamp)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_member_id ON members(member_id)')
+        import time
         
-        # New table for suspicious entries
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS suspicious_members (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                member_id INTEGER,
-                username TEXT,
-                rank TEXT,
-                parsed_credits INTEGER,
-                raw_html TEXT,
-                reason TEXT,
-                timestamp TEXT
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
+        # Retry logic for locked database
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                conn = sqlite3.connect(self.db_path, timeout=10.0)
+                cursor = conn.cursor()
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS members (
+                        member_id INTEGER,
+                        username TEXT,
+                        rank TEXT,
+                        earned_credits INTEGER,
+                        online_status TEXT,
+                        timestamp TEXT,
+                        PRIMARY KEY (member_id, timestamp)
+                    )
+                ''')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON members(timestamp)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_member_id ON members(member_id)')
+                
+                # New table for suspicious entries
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS suspicious_members (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        member_id INTEGER,
+                        username TEXT,
+                        rank TEXT,
+                        parsed_credits INTEGER,
+                        raw_html TEXT,
+                        reason TEXT,
+                        timestamp TEXT
+                    )
+                ''')
+                
+                conn.commit()
+                conn.close()
+                break  # Success!
+            except sqlite3.OperationalError as e:
+                if attempt < max_retries - 1:
+                    print(f"[MembersScraper] Database locked, retrying... ({attempt + 1}/{max_retries})")
+                    time.sleep(0.5)
+                else:
+                    print(f"[MembersScraper] Failed to initialize database after {max_retries} attempts")
+                    raise
     
     async def _debug_log(self, message, ctx=None):
         """Log debug messages to console AND Discord"""
