@@ -262,12 +262,19 @@ class IncomeScraper(commands.Cog):
     async def _scrape_expenses_pages(self, session, ctx=None, max_pages=100):
         """Scrape expenses with pagination - page param changes the expense table only"""
         await self._debug_log(f"💸 Starting EXPENSES scrape (max {max_pages} pages)", ctx)
+        if ctx and max_pages > 50:
+            est_minutes = (max_pages * 1.5) / 60
+            await ctx.send(f"⏱️ Estimated time: ~{est_minutes:.0f} minutes")
         
         all_entries = []
         page = 1
         empty_count = 0
         
         while page <= max_pages:
+            # Progress update every 100 pages
+            if ctx and page % 100 == 0:
+                pct = (page / max_pages) * 100
+                await ctx.send(f"⏳ Progress: {page}/{max_pages} ({pct:.1f}%) - {len(all_entries)} expenses collected")
             url = f"{self.income_url}" if page == 1 else f"{self.income_url}?page={page}"
             await self._debug_log(f"🌐 Page {page}: {url}", ctx)
             
