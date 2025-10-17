@@ -58,6 +58,9 @@ DISPLAY = {
     "course_completed": ("Completed training course", "green", "🎓"),
     "promoted_to_event_manager": ("Promoted to Event Manager", "green", "🎟️"),
     "contributed_to_alliance": ("Contributed to the alliance", "gold", "💰"),
+    "extension_started": ("Extension started", "blue", "🏗️"),
+    "expansion_finished": ("Expansion finished", "green", "✅"),
+    "building_constructed": ("Building constructed", "green", "🏢"),
 }
 
 TITLE_TO_KEY = {v[0].lower(): k for k, v in DISPLAY.items()}
@@ -164,20 +167,83 @@ class AllianceLogsPub(commands.Cog):
             return dt.strftime('%d %b %H:%M')
         except:
             return ts_str
+    
+    async def _get_mc_user_id(self, username: str) -> Optional[str]:
+        """Get MissionChief user ID from verified members"""
+        verified_cog = self.bot.get_cog("VerifiedMembers")
+        if not verified_cog or not hasattr(verified_cog, "get_mc_id_by_name"):
+            return None
+        try:
+            return await verified_cog.get_mc_id_by_name(username)
+        except:
+            return None
+    
+    async def _get_discord_id(self, username: str) -> Optional[int]:
+        """Get Discord ID from verified members"""
+        verified_cog = self.bot.get_cog("VerifiedMembers")
+        if not verified_cog or not hasattr(verified_cog, "get_discord_id_by_name"):
+            return None
+        try:
+            return await verified_cog.get_discord_id_by_name(username)
+        except:
+            return None
+    
+    def _parse_description(self, desc: str) -> dict:
+        """Parse description to extract training/building details"""
+        result = {"raw": desc, "detail": "", "building": "", "building_id": None}
+        
+        # Format: "Extension started (General Surgeon) → North Ottawa Community Hospital"
+        # Or: "Building constructed → Fire Station 5"
+        
+        # Extract detail in parentheses
+        detail_match = re.search(r'\(([^)]+)\)', desc)
+        if detail_match:
+            result["detail"] = detail_match.group(1)
+        
+        # Extract building after arrow
+        building_match = re.search(r'→\s*(.+?)(?:\s*$|\s*\()', desc)
+        if building_match:
+            result["building"] = building_match.group(1).strip()
+        
+        return result
 
     async def _desc_minimal(self, row: Dict[str, Any]) -> str:
         ts = row.get("ts") or "-"
         formatted_ts = self._format_timestamp(ts)
         
-        by = row.get("executed_name") or "Unknown"
+        username = row.get("executed_name") or "Unknown"
         show_exec = await self.config.show_executor_minimal()
         
-        desc = f"`{formatted_ts}`"
-        if show_exec:
-            desc += f" — by {by}"
+        # Get MC and Discord IDs
+        mc_id = await self._get_mc_user_id(username)
+        discord_id = await self._get_discord_id(username)
         
-        if row.get("description"):
-            desc += f"\n{row['description']}"
+        # Format username with links
+        username_text = username
+        if mc_id:
+            username_text = f"[{username}](https://www.missionchief.com/profile/{mc_id})"
+        if discord_id:
+            username_text += f" [[D]](https://discord.com/users/{discord_id})"
+        
+        desc = f"`{formatted_ts}` — by {username_text}" if show_exec else f"`{formatted_ts}`"
+        
+        # Parse and format description
+        description = row.get("description", "")
+        if description:
+            parsed = self._parse_description(description)
+            
+            # Format with detail and building link
+            parts = []
+            if parsed["detail"]:
+                parts.append(f"({parsed['detail']})")
+            if parsed["building"]:
+                # Try to get building ID and make link (for now, just show name)
+                parts.append(f"→ {parsed['building']}")
+            
+            if parts:
+                desc += "\n" + " ".join(parts)
+            else:
+                desc += f"\n{description}"
         
         return desc
 
