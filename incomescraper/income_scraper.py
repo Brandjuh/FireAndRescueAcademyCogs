@@ -248,8 +248,8 @@ class IncomeScraper(commands.Cog):
         empty_page_count = 0
         
         while page <= max_pages:
-            # Expenses are on the main treasury page with ?expense_page= parameter
-            url = f"{self.income_url}?expense_page={page}"
+            # Expenses pagination: ?page= parameter changes only the expense table
+            url = f"{self.income_url}?page={page}"
             await self._debug_log(f"🌐 Scraping expenses page {page}: {url}", ctx)
             
             for attempt in range(3):
