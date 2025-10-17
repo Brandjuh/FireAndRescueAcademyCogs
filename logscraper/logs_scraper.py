@@ -15,375 +15,270 @@ class LogsScraper(commands.Cog):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=1621002, force_registration=True)
         
-        # Setup database path in shared location - use different name to avoid conflicts
-        base_path = data_manager.cog_data_path(raw_name="scraper_databases")
-        base_path.mkdir(parents=True, exist_ok=True)
-        self.db_path = str(base_path / "logs_v2.db")
+        base_path = data_manager.cog_data_path(self.bot.get_cog("CookieManager"))
+        db_dir = base_path.parent / "scraper_databases"
+        db_dir.mkdir(exist_ok=True)
+        self.db_path = db_dir / "logs_v2.db"
         
-        self.base_url = "https://www.missionchief.com"
-        self.logs_url = f"{self.base_url}/alliance_logfiles"
-        self.scraping_task = None
+        self.logs_url = "https://www.missionchief.com/alliance_logfiles"
         self.debug_mode = False
-        self.debug_channel = None
+        
         self._init_database()
-        
-    def cog_load(self):
-        """Start background task when cog loads"""
-        self.scraping_task = self.bot.loop.create_task(self._background_scraper())
-        
-    def cog_unload(self):
-        """Cancel background task when cog unloads"""
-        if self.scraping_task:
-            self.scraping_task.cancel()
+        self.scrape_task = self.bot.loop.create_task(self._background_scraper())
     
     def _init_database(self):
-        """Initialize SQLite database with schema for logs"""
-        import time
+        """Initialize SQLite database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
         
-        max_retries = 5
-        for attempt in range(max_retries):
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS logs (
+                log_id INTEGER,
+                log_type TEXT NOT NULL,
+                username TEXT NOT NULL,
+                action TEXT,
+                description TEXT,
+                log_timestamp TEXT NOT NULL,
+                PRIMARY KEY (log_id)
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS training_courses (
+                username TEXT NOT NULL,
+                course_name TEXT NOT NULL,
+                log_timestamp TEXT NOT NULL,
+                occurrence INTEGER DEFAULT 1,
+                PRIMARY KEY (username, course_name, log_timestamp, occurrence)
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+    
+    def cog_unload(self):
+        if hasattr(self, 'scrape_task'):
+            self.scrape_task.cancel()
+    
+    async def _background_scraper(self):
+        """Background task - scrapes every hour at :15"""
+        await self.bot.wait_until_ready()
+        
+        while True:
             try:
-                conn = sqlite3.connect(self.db_path, timeout=10.0)
-                cursor = conn.cursor()
+                now = datetime.now()
+                next_run = now.replace(minute=15, second=0, microsecond=0)
+                if now.minute >= 15:
+                    next_run = next_run.replace(hour=now.hour + 1)
+                wait_seconds = (next_run - now).total_seconds()
                 
-                # Main logs table
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS logs (
-                        log_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        log_type TEXT,
-                        username TEXT,
-                        action TEXT,
-                        details TEXT,
-                        log_timestamp TEXT,
-                        scrape_timestamp TEXT,
-                        UNIQUE(log_type, username, action, log_timestamp)
-                    )
-                ''')
+                await asyncio.sleep(wait_seconds)
+                await self._scrape_all_logs(ctx=None, max_pages=10)
                 
-                # Training courses can appear up to 4 times per timestamp
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS training_courses (
-                        course_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        username TEXT,
-                        course_name TEXT,
-                        log_timestamp TEXT,
-                        scrape_timestamp TEXT,
-                        occurrence INTEGER DEFAULT 1,
-                        UNIQUE(username, course_name, log_timestamp, occurrence)
-                    )
-                ''')
-                
-                # Suspicious logs that couldn't be parsed properly
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS suspicious_logs (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        raw_html TEXT,
-                        reason TEXT,
-                        scrape_timestamp TEXT
-                    )
-                ''')
-                
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_log_timestamp ON logs(log_timestamp)')
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_scrape_timestamp ON logs(scrape_timestamp)')
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_training_timestamp ON training_courses(log_timestamp)')
-                
-                conn.commit()
-                conn.close()
+            except asyncio.CancelledError:
                 break
-            except sqlite3.OperationalError as e:
-                if attempt < max_retries - 1:
-                    print(f"[LogsScraper] Database locked, retrying... ({attempt + 1}/{max_retries})")
-                    time.sleep(0.5)
-                else:
-                    print(f"[LogsScraper] Failed to initialize database after {max_retries} attempts")
-                    raise
-    
-    async def _debug_log(self, message, ctx=None):
-        """Log debug messages to console AND Discord"""
-        print(f"[LogsScraper DEBUG] {message}")
-        
-        if self.debug_mode and (ctx or self.debug_channel):
-            try:
-                channel = ctx.channel if ctx else self.debug_channel
-                if channel:
-                    await channel.send(f"🐛 `{message}`")
             except Exception as e:
-                print(f"[LogsScraper DEBUG] Failed to send to Discord: {e}")
-    
-    async def _get_cookie_manager(self):
-        """Get CookieManager cog instance"""
-        return self.bot.get_cog("CookieManager")
+                print(f"[LogsScraper] Background error: {e}")
+                await asyncio.sleep(3600)
     
     async def _get_session(self, ctx=None):
-        """Get authenticated session from CookieManager cog"""
-        cookie_manager = await self._get_cookie_manager()
+        """Get authenticated session from CookieManager"""
+        cookie_manager = self.bot.get_cog("CookieManager")
         if not cookie_manager:
-            await self._debug_log("❌ CookieManager cog not loaded!", ctx)
+            await self._debug_log("❌ CookieManager not loaded!", ctx)
             return None
         
         try:
             session = await cookie_manager.get_session()
-            await self._debug_log("✅ Session obtained successfully", ctx)
+            if not session:
+                await self._debug_log("❌ Failed to get session", ctx)
+                return None
+            
+            await self._debug_log("✅ Session obtained", ctx)
             return session
         except Exception as e:
-            await self._debug_log(f"❌ Failed to get session: {e}", ctx)
+            await self._debug_log(f"❌ Error: {str(e)}", ctx)
             return None
     
-    async def _check_logged_in(self, html_content, ctx=None):
-        """Check if still logged in"""
-        soup = BeautifulSoup(html_content, 'html.parser')
-        
-        logout_button = soup.find('a', href='/users/sign_out')
-        user_menu = soup.find('li', class_='dropdown user-menu')
-        profile_link = soup.find('a', href=lambda x: x and '/profile' in str(x))
-        
-        # Check if we can see log entries (means we're logged in)
-        has_log_entries = bool(soup.find_all('tr'))
-        
-        is_logged_in = (logout_button is not None or 
-                        user_menu is not None or 
-                        profile_link is not None or
-                        has_log_entries)
-        
-        await self._debug_log(f"Login check: {'✅ Logged in' if is_logged_in else '❌ NOT logged in'}", ctx)
-        return is_logged_in
-    
-    def _parse_log_entry(self, row, scrape_timestamp):
-        """Parse a single log entry row"""
-        cols = row.find_all('td')
-        if len(cols) < 2:
-            return None
-        
-        # Timestamp column (original log timestamp from MissionChief)
-        timestamp_col = cols[0].text.strip()
-        
-        # Action column
-        action_col = cols[1]
-        action_text = action_col.get_text(strip=True, separator=' ')
-        
-        # Detect log type based on keywords
-        log_type = "general"
-        username = ""
-        details = ""
-        
-        # Training course detection
-        if "started" in action_text.lower() and "education" in action_text.lower():
-            log_type = "training_course"
-            parts = action_text.split("started education")
-            if len(parts) == 2:
-                username = parts[0].strip()
-                details = parts[1].strip()
-        elif "promoted" in action_text.lower():
-            log_type = "promotion"
-            username = action_text.split("promoted")[0].strip() if "promoted" in action_text else ""
-            details = action_text
-        elif "built" in action_text.lower() or "expanded" in action_text.lower():
-            log_type = "building"
-            # Try to extract username (usually first word)
-            words = action_text.split()
-            if words:
-                username = words[0]
-            details = action_text
-        elif "added to" in action_text.lower() and "alliance" in action_text.lower():
-            log_type = "member_joined"
-            username = action_text.split("added to")[0].strip() if "added to" in action_text else ""
-            details = action_text
-        elif "left" in action_text.lower() and "alliance" in action_text.lower():
-            log_type = "member_left"
-            username = action_text.split("left")[0].strip() if "left" in action_text else ""
-            details = action_text
-        else:
-            log_type = "general"
-            details = action_text
-        
-        return {
-            'log_type': log_type,
-            'username': username,
-            'action': action_text[:200],
-            'details': details[:500],
-            'log_timestamp': timestamp_col,
-            'scrape_timestamp': scrape_timestamp
-        }
+    async def _debug_log(self, message, ctx=None):
+        """Log debug messages"""
+        print(f"[LogsScraper] {message}")
+        if self.debug_mode and ctx:
+            try:
+                await ctx.send(message)
+            except:
+                pass
     
     async def _scrape_logs_page(self, session, page_num, ctx=None):
         """Scrape a single page of logs"""
         url = f"{self.logs_url}?page={page_num}"
-        await self._debug_log(f"🌐 Scraping logs page {page_num}: {url}", ctx)
+        await self._debug_log(f"🌐 Page {page_num}: {url}", ctx)
         
-        for attempt in range(3):
-            try:
-                await asyncio.sleep(1.5)
+        try:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    await self._debug_log(f"❌ Bad status {resp.status}", ctx)
+                    return []
                 
-                async with session.get(url) as response:
-                    await self._debug_log(f"📡 Response status: {response.status}", ctx)
+                html = await resp.text()
+                
+                soup = BeautifulSoup(html, 'html.parser')
+                logs = []
+                
+                # Find all table rows with log data
+                for tr in soup.find_all("tr"):
+                    # Skip header rows
+                    if tr.find("th"):
+                        continue
                     
-                    if response.status != 200:
-                        await self._debug_log(f"❌ Page {page_num} returned status {response.status}", ctx)
-                        return []
+                    cols = tr.find_all("td")
+                    if len(cols) < 3:
+                        continue
                     
-                    html = await response.text()
-                    await self._debug_log(f"📄 HTML length: {len(html)} chars", ctx)
+                    # Extract log data
+                    timestamp_col = cols[0].get_text(strip=True)
+                    username_col = cols[1].get_text(strip=True) if len(cols) > 1 else ""
+                    action_col = cols[2].get_text(strip=True) if len(cols) > 2 else ""
                     
-                    if not await self._check_logged_in(html, ctx):
-                        await self._debug_log(f"❌ Session expired on page {page_num}", ctx)
-                        return []
+                    # Try to extract log ID from any links or data attributes
+                    log_id = None
+                    for link in tr.find_all('a', href=True):
+                        id_match = re.search(r'/(\d+)', link['href'])
+                        if id_match:
+                            log_id = int(id_match.group(1))
+                            break
                     
-                    soup = BeautifulSoup(html, 'html.parser')
-                    logs_data = []
-                    scrape_timestamp = datetime.utcnow().isoformat()
+                    # If no ID found, generate one from timestamp + username
+                    if not log_id:
+                        log_id = hash(f"{timestamp_col}{username_col}{action_col}") % (10**10)
                     
-                    # Find ALL <tr> tags (same method as members scraper)
-                    await self._debug_log(f"🔍 Searching for all <tr> tags...", ctx)
+                    # Extract username
+                    username_link = cols[1].find('a') if len(cols) > 1 else None
+                    username = username_link.get_text(strip=True) if username_link else username_col
                     
-                    rows = soup.find_all('tr')
-                    await self._debug_log(f"📊 Found {len(rows)} rows on page {page_num}", ctx)
+                    # Determine log type
+                    log_type = "unknown"
+                    action_lower = action_col.lower()
                     
-                    for row in rows:
-                        log_entry = self._parse_log_entry(row, scrape_timestamp)
-                        if log_entry:
-                            logs_data.append(log_entry)
-                            await self._debug_log(f"📝 Log: {log_entry['log_type']} - {log_entry['action'][:50]}...", ctx)
+                    if "added to" in action_lower or "joined" in action_lower:
+                        log_type = "added_to_alliance"
+                    elif "left" in action_lower:
+                        log_type = "left_alliance"
+                    elif "kicked" in action_lower:
+                        log_type = "kicked_from_alliance"
+                    elif "admin" in action_lower:
+                        log_type = "set_as_admin"
+                    elif "training" in action_lower or "course" in action_lower:
+                        log_type = "created_course"
+                    elif "completed" in action_lower:
+                        log_type = "course_completed"
+                    elif "contributed" in action_lower:
+                        log_type = "contributed_to_alliance"
                     
-                    await self._debug_log(f"✅ Parsed {len(logs_data)} valid log entries from page {page_num}", ctx)
-                    return logs_data
-                    
-            except asyncio.TimeoutError:
-                await self._debug_log(f"⏱️ Timeout on page {page_num}, attempt {attempt + 1}/3", ctx)
-                if attempt == 2:
-                    return []
-            except Exception as e:
-                await self._debug_log(f"❌ Error scraping page {page_num}: {e}", ctx)
-                if attempt == 2:
-                    return []
-        
-        return []
+                    logs.append({
+                        'log_id': log_id,
+                        'log_type': log_type,
+                        'username': username,
+                        'action': action_col,
+                        'description': action_col,
+                        'log_timestamp': timestamp_col
+                    })
+                
+                if self.debug_mode and logs:
+                    await self._debug_log(f"✅ Page {page_num}: {len(logs)} logs", ctx)
+                
+                return logs
+                
+        except Exception as e:
+            await self._debug_log(f"❌ Error page {page_num}: {str(e)}", ctx)
+            return []
     
     async def _scrape_all_logs(self, ctx=None, max_pages=100):
         """Scrape all pages of logs"""
         session = await self._get_session(ctx)
         if not session:
             if ctx:
-                await ctx.send("❌ Failed to get session. Is CookieManager loaded and logged in?")
+                await ctx.send("❌ Failed to get session")
             return False
-        
-        all_logs = []
-        page = 1
-        empty_page_count = 0
         
         await self._debug_log(f"🚀 Starting logs scrape (max {max_pages} pages)", ctx)
         
-        # Add progress tracking for large scrapes
-        last_progress_update = 0
+        all_logs = []
+        page = 1
+        empty_count = 0
         
         while page <= max_pages:
             logs = await self._scrape_logs_page(session, page, ctx)
             
             if not logs:
-                empty_page_count += 1
-                await self._debug_log(f"⚠️ Page {page} returned 0 logs (empty count: {empty_page_count})", ctx)
-                
-                if empty_page_count >= 3:
-                    await self._debug_log(f"⛔ Stopped after {empty_page_count} consecutive empty pages", ctx)
+                empty_count += 1
+                if empty_count >= 3:
+                    await self._debug_log(f"⛔ Stopped after 3 empty pages", ctx)
                     break
             else:
-                empty_page_count = 0
                 all_logs.extend(logs)
-                await self._debug_log(f"✅ Page {page}: {len(logs)} logs (total so far: {len(all_logs)})", ctx)
+                empty_count = 0
                 
-                # Progress update every 50 pages (not in debug mode to reduce spam)
-                if ctx and not self.debug_mode and page % 50 == 0:
-                    elapsed_pages = page - last_progress_update
-                    await ctx.send(f"⏳ Progress: {page}/{max_pages} pages ({(page/max_pages)*100:.1f}%), {len(all_logs):,} entries collected")
-                    last_progress_update = page
+                # Progress update every 50 pages
+                if page % 50 == 0 and ctx:
+                    await ctx.send(f"⏳ Progress: {page}/{max_pages} pages, {len(all_logs)} logs collected")
             
             page += 1
+            await asyncio.sleep(1.5)
         
-        await self._debug_log(f"📊 Total logs scraped: {len(all_logs)} across {page - 1} pages", ctx)
+        if not all_logs:
+            await self._debug_log("⚠️ No logs found", ctx)
+            return False
         
-        # Save to database
-        if all_logs:
-            conn = sqlite3.connect(self.db_path, timeout=10.0)
-            cursor = conn.cursor()
-            
-            training_count = 0
-            general_count = 0
-            duplicates = 0
-            
-            for log in all_logs:
-                if log['log_type'] == 'training_course':
-                    # Check how many times this training already exists
+        # Store in database
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        inserted = 0
+        duplicates = 0
+        training_inserted = 0
+        
+        for log in all_logs:
+            try:
+                cursor.execute('''
+                    INSERT INTO logs (log_id, log_type, username, action, description, log_timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (log['log_id'], log['log_type'], log['username'], 
+                      log['action'], log['description'], log['log_timestamp']))
+                inserted += 1
+                
+                # If it's a training course, also store in training_courses table
+                if log['log_type'] in ['created_course', 'course_completed']:
+                    # Count existing occurrences
                     cursor.execute('''
                         SELECT COUNT(*) FROM training_courses 
                         WHERE username = ? AND course_name = ? AND log_timestamp = ?
-                    ''', (log['username'], log['details'], log['log_timestamp']))
-                    
+                    ''', (log['username'], log['action'], log['log_timestamp']))
                     count = cursor.fetchone()[0]
                     
                     if count < 4:  # Allow up to 4 occurrences
                         try:
                             cursor.execute('''
-                                INSERT INTO training_courses 
-                                (username, course_name, log_timestamp, scrape_timestamp, occurrence)
-                                VALUES (?, ?, ?, ?, ?)
-                            ''', (
-                                log['username'],
-                                log['details'],
-                                log['log_timestamp'],
-                                log['scrape_timestamp'],
-                                count + 1
-                            ))
-                            training_count += 1
+                                INSERT INTO training_courses (username, course_name, log_timestamp, occurrence)
+                                VALUES (?, ?, ?, ?)
+                            ''', (log['username'], log['action'], log['log_timestamp'], count + 1))
+                            training_inserted += 1
                         except sqlite3.IntegrityError:
-                            duplicates += 1
-                else:
-                    # Regular logs
-                    try:
-                        cursor.execute('''
-                            INSERT INTO logs 
-                            (log_type, username, action, details, log_timestamp, scrape_timestamp)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                        ''', (
-                            log['log_type'],
-                            log['username'],
-                            log['action'],
-                            log['details'],
-                            log['log_timestamp'],
-                            log['scrape_timestamp']
-                        ))
-                        if cursor.rowcount > 0:
-                            general_count += 1
-                    except sqlite3.IntegrityError:
-                        duplicates += 1
-            
-            conn.commit()
-            conn.close()
-            
-            await self._debug_log(f"💾 Database: {general_count} general logs, {training_count} trainings, {duplicates} duplicates", ctx)
-            
-            if ctx:
-                msg = f"✅ Scraped {len(all_logs)} log entries across {page - 1} pages\n"
-                msg += f"💾 Database: {general_count} general logs, {training_count} training courses, {duplicates} duplicates"
-                await ctx.send(msg)
-            return True
-        else:
-            if ctx:
-                await ctx.send("⚠️ No logs data found")
-            return False
-    
-    async def _background_scraper(self):
-        """Background task that runs every hour"""
-        await self.bot.wait_until_ready()
-        await asyncio.sleep(900)  # Stagger: 15 minutes offset
+                            pass
+                
+            except sqlite3.IntegrityError:
+                duplicates += 1
         
-        while not self.bot.is_closed():
-            try:
-                print(f"[LogsScraper] Starting automatic scrape at {datetime.utcnow()}")
-                await self._scrape_all_logs(max_pages=10)  # Only first 10 pages on auto-run
-                print(f"[LogsScraper] Automatic scrape completed")
-            except Exception as e:
-                print(f"[LogsScraper] Background task error: {e}")
-            
-            await asyncio.sleep(3600)
+        conn.commit()
+        conn.close()
+        
+        await self._debug_log(f"💾 Database: {inserted} new logs, {training_inserted} training courses, {duplicates} duplicates", ctx)
+        
+        if ctx:
+            await ctx.send(f"✅ Scraped {len(all_logs)} logs\n"
+                          f"💾 {inserted} new logs, {training_inserted} training courses, {duplicates} duplicates")
+        
+        return True
     
     @commands.group(name="logs")
     @commands.is_owner()
@@ -394,53 +289,50 @@ class LogsScraper(commands.Cog):
     
     @logs_group.command(name="scrape")
     async def scrape_logs(self, ctx, max_pages: int = 10):
-        """
-        Manually trigger logs scraping
-        
-        Usage: [p]logs scrape [max_pages]
-        Example: [p]logs scrape 50
-        """
+        """Manually scrape logs"""
         await ctx.send(f"🔄 Starting logs scrape (max {max_pages} pages)...")
-        success = await self._scrape_all_logs(ctx, max_pages=max_pages)
+        success = await self._scrape_all_logs(ctx, max_pages)
+        
         if success:
-            await ctx.send("✅ Logs scrape completed successfully")
+            await ctx.send("✅ Logs scrape completed")
+        else:
+            await ctx.send("❌ Logs scrape failed")
     
     @logs_group.command(name="backfill")
     async def backfill_logs(self, ctx, max_pages: int = 200):
-        """
-        Back-fill ALL historical logs from MissionChief.
-        This scrapes ALL available log pages to get complete history.
-        
-        Usage: [p]logs backfill [max_pages]
-        Example: [p]logs backfill 1500
-        
-        Note: This preserves the original timestamps from MissionChief logs!
-        """
-        if max_pages < 1 or max_pages > 5000:  # Increased from 1000 to 5000
+        """Back-fill ALL historical logs"""
+        if max_pages < 1 or max_pages > 5000:
             await ctx.send("❌ Max pages must be between 1 and 5000")
             return
         
-        await ctx.send(f"🔄 Starting back-fill of ALL historical logs (up to {max_pages} pages)...")
-        await ctx.send(f"💡 This will preserve original timestamps from MissionChief")
-        await ctx.send(f"⚠️ This may take **{max_pages * 2 // 60} to {max_pages * 3 // 60} minutes** depending on alliance activity...")
+        await ctx.send(f"🔄 Starting back-fill (up to {max_pages} pages)...")
+        await ctx.send("⏳ This preserves original timestamps")
         
-        success = await self._scrape_all_logs(ctx, max_pages=max_pages)
+        success = await self._scrape_all_logs(ctx, max_pages)
         
         if success:
-            await ctx.send(f"✅ Back-fill completed! All historical logs are now in the database.")
+            await ctx.send("✅ Back-fill completed!")
+        else:
+            await ctx.send("❌ Back-fill failed")
     
     @logs_group.command(name="debug")
-    async def debug_logs(self, ctx, enable: bool = True):
-        """Enable or disable debug logging to Discord"""
-        self.debug_mode = enable
-        self.debug_channel = ctx.channel if enable else None
-        await ctx.send(f"🐛 Debug mode: {'**ENABLED**' if enable else '**DISABLED**'}\n"
-                      f"Debug messages will be sent to this channel.")
+    async def toggle_debug(self, ctx, mode: str = None):
+        """Toggle debug mode (on/off)"""
+        if mode is None:
+            await ctx.send(f"Debug: {'ON' if self.debug_mode else 'OFF'}")
+            return
+        
+        if mode.lower() in ['on', '1', 'true']:
+            self.debug_mode = True
+            await ctx.send("✅ Debug ON")
+        else:
+            self.debug_mode = False
+            await ctx.send("✅ Debug OFF")
     
     @logs_group.command(name="stats")
-    async def stats_logs(self, ctx):
-        """Show database statistics"""
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
+    async def show_stats(self, ctx):
+        """Show logs statistics"""
+        conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
         cursor.execute("SELECT COUNT(*) FROM logs")
@@ -449,35 +341,47 @@ class LogsScraper(commands.Cog):
         cursor.execute("SELECT COUNT(*) FROM training_courses")
         total_training = cursor.fetchone()[0]
         
-        cursor.execute("SELECT log_type, COUNT(*) FROM logs GROUP BY log_type ORDER BY COUNT(*) DESC LIMIT 5")
-        log_types = cursor.fetchall()
-        
         cursor.execute("SELECT MIN(log_timestamp), MAX(log_timestamp) FROM logs")
-        date_range = cursor.fetchone()
+        min_time, max_time = cursor.fetchone()
         
-        cursor.execute("""
-            SELECT COUNT(*) FROM logs 
-            WHERE datetime(scrape_timestamp) > datetime('now', '-1 day')
-        """)
-        recent = cursor.fetchone()[0]
+        cursor.execute("SELECT MAX(log_id) FROM logs")
+        max_id = cursor.fetchone()[0]
         
         conn.close()
         
-        embed = discord.Embed(title="📊 Logs Database Statistics", color=discord.Color.green())
+        embed = discord.Embed(title="📜 Logs Statistics", color=discord.Color.green())
         embed.add_field(name="Total Logs", value=f"{total_logs:,}", inline=True)
         embed.add_field(name="Training Courses", value=f"{total_training:,}", inline=True)
-        embed.add_field(name="Last 24h", value=f"{recent:,}", inline=True)
+        embed.add_field(name="Max Log ID", value=f"{max_id:,}" if max_id else "0", inline=True)
         
-        if log_types:
-            types_str = "\n".join([f"{t[0]}: {t[1]:,}" for t in log_types])
-            embed.add_field(name="Top Log Types", value=types_str, inline=False)
+        if min_time and max_time:
+            embed.add_field(name="Data Range", value=f"{min_time[:10]} to {max_time[:10]}", inline=False)
         
-        if date_range[0]:
-            embed.add_field(name="Oldest Log", value=date_range[0][:16], inline=True)
-            embed.add_field(name="Newest Log", value=date_range[1][:16], inline=True)
+        embed.set_footer(text=f"Database: {self.db_path.name}")
         
-        embed.set_footer(text=f"Database: {self.db_path}")
         await ctx.send(embed=embed)
-
-async def setup(bot):
-    await bot.add_cog(LogsScraper(bot))
+    
+    async def get_logs_after(self, last_id: int, limit: int = 50):
+        """Get logs after a specific ID - for alliance_logs_pub compatibility"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT 
+                log_id as id,
+                log_type as action_key,
+                username as executed_name,
+                action,
+                description,
+                log_timestamp as ts
+            FROM logs
+            WHERE log_id > ?
+            ORDER BY log_id ASC
+            LIMIT ?
+        ''', (last_id, limit))
+        
+        rows = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        
+        return rows
