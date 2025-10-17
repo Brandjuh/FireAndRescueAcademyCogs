@@ -239,118 +239,97 @@ class IncomeScraper(commands.Cog):
         
         return []
     
-    async def _scrape_expenses_page(self, session, page_num, ctx=None):
-        """Scrape a single page of expenses"""
-        url = f"{self.income_url}/expenses?page={page_num}"
-        await self._debug_log(f"🌐 Scraping expenses page {page_num}: {url}", ctx)
-        
-        for attempt in range(3):
-            try:
-                await asyncio.sleep(1.5)
-                
-                async with session.get(url) as response:
-                    await self._debug_log(f"📡 Response status: {response.status}", ctx)
-                    
-                    if response.status != 200:
-                        await self._debug_log(f"❌ Expenses page {page_num} returned status {response.status}", ctx)
-                        return []
-                    
-                    html = await response.text()
-                    
-                    if not await self._check_logged_in(html, ctx):
-                        await self._debug_log(f"❌ Session expired on expenses page {page_num}", ctx)
-                        return []
-                    
-                    soup = BeautifulSoup(html, 'html.parser')
-                    data = []
-                    scrape_timestamp = datetime.utcnow().isoformat()
-                    
-                    # Find expense tables
-                    tables = soup.find_all('table')
-                    
-                    for table in tables:
-                        rows = table.find('tbody').find_all('tr') if table.find('tbody') else table.find_all('tr')
-                        
-                        for row in rows:
-                            cols = row.find_all('td')
-                            if len(cols) < 2:
-                                continue
-                            
-                            # Typical expense format: Date | Amount | Description
-                            # Adjust based on actual table structure
-                            expense_date = cols[0].get_text(strip=True) if len(cols) > 0 else ""
-                            amount_str = cols[1].get_text(strip=True) if len(cols) > 1 else ""
-                            description = cols[2].get_text(strip=True) if len(cols) > 2 else ""
-                            
-                            # If structure is different, try alternative parsing
-                            if not description and len(cols) >= 2:
-                                description = cols[0].get_text(strip=True)
-                                amount_str = cols[-1].get_text(strip=True)
-                            
-                            amount = self._parse_amount(amount_str)
-                            
-                            if (expense_date or description) and amount != 0:
-                                # Extract period from date
-                                period_date = datetime.utcnow().strftime('%Y-%m')
-                                date_match = re.search(r'(\d{4}-\d{2})', expense_date)
-                                if date_match:
-                                    period_date = date_match.group(1)
-                                
-                                data.append({
-                                    'period_type': 'expense_detail',
-                                    'period_date': period_date,
-                                    'entry_type': 'expense',
-                                    'description': f"{expense_date} - {description}"[:500],
-                                    'amount': amount,
-                                    'scrape_timestamp': scrape_timestamp
-                                })
-                                
-                                await self._debug_log(f"💸 Expense: {description[:30]}... = {amount:,}", ctx)
-                    
-                    await self._debug_log(f"✅ Parsed {len(data)} expenses from page {page_num}", ctx)
-                    return data
-                    
-            except asyncio.TimeoutError:
-                await self._debug_log(f"⏱️ Timeout on expenses page {page_num}, attempt {attempt + 1}/3", ctx)
-                if attempt == 2:
-                    return []
-            except Exception as e:
-                await self._debug_log(f"❌ Error scraping expenses page {page_num}: {e}", ctx)
-                if attempt == 2:
-                    return []
-        
-        return []
-    
-    async def _scrape_all_expenses(self, session, ctx=None, max_pages=100):
-        """Scrape all pages of expenses with pagination"""
-        await self._debug_log(f"🚀 Starting expenses scrape (max {max_pages} pages)", ctx)
+    async def _scrape_expenses_pages(self, session, ctx=None, max_pages=100):
+        """Scrape expenses with pagination from the treasury page"""
+        await self._debug_log(f"💸 Starting expenses scrape (checking for pagination)", ctx)
         
         all_expenses = []
         page = 1
         empty_page_count = 0
         
         while page <= max_pages:
-            expenses = await self._scrape_expenses_page(session, page, ctx)
+            # Expenses are on the main treasury page with ?expense_page= parameter
+            url = f"{self.income_url}?expense_page={page}"
+            await self._debug_log(f"🌐 Scraping expenses page {page}: {url}", ctx)
             
-            if not expenses:
-                empty_page_count += 1
-                await self._debug_log(f"⚠️ Expenses page {page} returned 0 entries (empty count: {empty_page_count})", ctx)
-                
-                if empty_page_count >= 3:
-                    await self._debug_log(f"⛔ Stopped expenses after {empty_page_count} consecutive empty pages", ctx)
-                    break
-            else:
-                empty_page_count = 0
-                all_expenses.extend(expenses)
-                await self._debug_log(f"✅ Expenses page {page}: {len(expenses)} entries (total: {len(all_expenses)})", ctx)
-            
-            page += 1
-        
-        await self._debug_log(f"📊 Total expenses scraped: {len(all_expenses)} across {page - 1} pages", ctx)
-        return all_expenses
-    
+            for attempt in range(3):
+                try:
+                    await asyncio.sleep(1.5)
+                    
+                    async with session.get(url) as response:
+                        await self._debug_log(f"📡 Response status: {response.status}", ctx)
+                        
+                        if response.status != 200:
+                            await self._debug_log(f"❌ Expenses page {page} returned status {response.status}", ctx)
+                            break
+                        
+                        html = await response.text()
+                        
+                        if not await self._check_logged_in(html, ctx):
+                            await self._debug_log(f"❌ Session expired on expenses page {page}", ctx)
+                            return all_expenses
+                        
+                        soup = BeautifulSoup(html, 'html.parser')
+                        scrape_timestamp = datetime.utcnow().isoformat()
+                        page_expenses = []
+                        
+                        # Find all tables and look for expense table
+                        tables = soup.find_all('table')
+                        
+                        for table in tables:
+                            # Check if this is the expenses table (look for expense-related headers or previous heading)
+                            header = table.find_previous(['h2', 'h3', 'h4'])
+                            is_expense_table = False
+                            
+                            if header:
+                                header_text = header.text.lower()
+                                if any(word in header_text for word in ['expense', 'ausgaben', 'cost', 'spending']):
+                                    is_expense_table = True
+                            
+                            # If we can't determine from header, check table content
+                            if not is_expense_table:
+                                # Look for expense-like content (dates, amounts, descriptions)
+                                first_row = table.find('tr')
+                                if first_row:
+                                    cells = first_row.find_all('td')
+                                    # If first cell looks like a date, it might be expenses
+                                    if cells and re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}', cells[0].text):
+                                        is_expense_table = True
+                            
+                            if is_expense_table:
+                                await self._debug_log(f"📋 Found expenses table", ctx)
+                                rows = table.find('tbody').find_all('tr') if table.find('tbody') else table.find_all('tr')
+                                
+                                for row in rows:
+                                    cols = row.find_all('td')
+                                    if len(cols) < 2:
+                                        continue
+                                    
+                                    # Parse expense row (adjust based on actual structure)
+                                    # Typical: Date | Amount | Description or similar
+                                    description = ""
+                                    amount = 0
+                                    expense_date = ""
+                                    
+                                    # Try to extract date from first column
+                                    if len(cols) >= 1:
+                                        first_col = cols[0].get_text(strip=True)
+                                        if re.search(r'\d', first_col):
+                                            expense_date = first_col
+                                    
+                                    # Find amount (look for largest number)
+                                    for col in cols:
+                                        text = col.get_text(strip=True)
+                                        parsed = self._parse_amount(text)
+                                        if parsed > amount:
+                                            amount = parsed
+                                    
+                                    # Description is usually the longest text column
+                                    for col in cols:
+                                        text = col.get_text(strip=True)
+                                        if len(text) > len(description) and not re.match(r'^\d+[,.\d]*    
     async def _scrape_all_income(self, ctx=None, include_expenses=True, max_expense_pages=100):
-        """Scrape daily income, monthly income, and all expense pages"""
+        """Scrape daily income, monthly income, and expenses from the same treasury page"""
         session = await self._get_session(ctx)
         if not session:
             if ctx:
@@ -361,21 +340,267 @@ class IncomeScraper(commands.Cog):
         
         all_data = []
         
+        # Note: All data (daily income, monthly income, expenses) are on the same page
+        # with different tabs or sections
+        
         # 1. Scrape daily income tab
-        await self._debug_log("📅 Scraping DAILY income...", ctx)
+        await self._debug_log("📅 Scraping DAILY income tab...", ctx)
         daily_data = await self._scrape_income_tab(session, 'daily', ctx)
         all_data.extend(daily_data)
         
-        # 2. Scrape monthly income tab
-        await self._debug_log("📆 Scraping MONTHLY income...", ctx)
+        # 2. Scrape monthly income tab  
+        await self._debug_log("📆 Scraping MONTHLY income tab...", ctx)
         monthly_data = await self._scrape_income_tab(session, 'monthly', ctx)
         all_data.extend(monthly_data)
         
-        # 3. Scrape all expense pages (with pagination)
+        # 3. Scrape expenses with pagination (on same page but different table)
         if include_expenses:
-            await self._debug_log("💸 Scraping EXPENSES (paginated)...", ctx)
-            expense_data = await self._scrape_all_expenses(session, ctx, max_expense_pages)
+            await self._debug_log("💸 Scraping EXPENSES with pagination...", ctx)
+            expense_data = await self._scrape_expenses_pages(session, ctx, max_expense_pages)
             all_data.extend(expense_data)
+        
+        await self._debug_log(f"📊 Total entries collected: {len(all_data)}", ctx)
+        
+        # Save to database
+        if all_data:
+            conn = sqlite3.connect(self.db_path, timeout=10.0)
+            cursor = conn.cursor()
+            
+            inserted = 0
+            duplicates = 0
+            
+            for entry in all_data:
+                try:
+                    cursor.execute('''
+                        INSERT OR IGNORE INTO income_expenses 
+                        (period_type, period_date, entry_type, description, amount, scrape_timestamp)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    ''', (
+                        entry['period_type'],
+                        entry['period_date'],
+                        entry['entry_type'],
+                        entry['description'],
+                        entry['amount'],
+                        entry['scrape_timestamp']
+                    ))
+                    if cursor.rowcount > 0:
+                        inserted += 1
+                    else:
+                        duplicates += 1
+                except sqlite3.IntegrityError:
+                    duplicates += 1
+            
+            conn.commit()
+            conn.close()
+            
+            await self._debug_log(f"💾 Database: {inserted} inserted, {duplicates} duplicates", ctx)
+            
+            if ctx:
+                daily_count = len(daily_data)
+                monthly_count = len(monthly_data)
+                expense_count = len(all_data) - daily_count - monthly_count
+                
+                msg = f"✅ Scraped {len(all_data)} total entries:\n"
+                msg += f"  📅 Daily: {daily_count}\n"
+                msg += f"  📆 Monthly: {monthly_count}\n"
+                msg += f"  💸 Expenses: {expense_count}\n"
+                msg += f"💾 Database: {inserted} new records, {duplicates} duplicates"
+                await ctx.send(msg)
+            return True
+        else:
+            if ctx:
+                await ctx.send("⚠️ No income/expense data found")
+            return False
+    
+    async def _background_scraper(self):
+        """Background task that runs every hour"""
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(1800)  # Stagger: 30 minutes offset
+        
+        while not self.bot.is_closed():
+            try:
+                print(f"[IncomeScraper] Starting automatic scrape at {datetime.utcnow()}")
+                await self._scrape_all_income()
+                print(f"[IncomeScraper] Automatic scrape completed")
+            except Exception as e:
+                print(f"[IncomeScraper] Background task error: {e}")
+            
+            await asyncio.sleep(3600)
+    
+    @commands.group(name="income")
+    @commands.is_owner()
+    async def income_group(self, ctx):
+        """Income/expenses scraper commands"""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+    
+    @income_group.command(name="scrape")
+    async def scrape_income(self, ctx, max_expense_pages: int = 100):
+        """
+        Manually trigger income/expenses scraping
+        
+        Scrapes:
+        - Daily income tab
+        - Monthly income tab
+        - All expense pages (with pagination)
+        
+        Usage: [p]income scrape [max_expense_pages]
+        Example: [p]income scrape 200
+        """
+        await ctx.send(f"🔄 Starting complete income/expenses scrape (up to {max_expense_pages} expense pages)...")
+        success = await self._scrape_all_income(ctx, include_expenses=True, max_expense_pages=max_expense_pages)
+        if success:
+            await ctx.send("✅ Income/expenses scrape completed successfully")
+    
+    @income_group.command(name="backfill")
+    async def backfill_income(self, ctx, max_expense_pages: int = 500):
+        """
+        Back-fill all expense history from MissionChief
+        
+        Usage: [p]income backfill [max_expense_pages]
+        Example: [p]income backfill 1000
+        """
+        if max_expense_pages < 1 or max_expense_pages > 2000:
+            await ctx.send("❌ Max pages must be between 1 and 2000")
+            return
+        
+        await ctx.send(f"🔄 Starting expense back-fill (up to {max_expense_pages} pages)...")
+        await ctx.send(f"⚠️ This may take **{max_expense_pages * 2 // 60} to {max_expense_pages * 3 // 60} minutes**...")
+        
+        success = await self._scrape_all_income(ctx, include_expenses=True, max_expense_pages=max_expense_pages)
+        
+        if success:
+            await ctx.send(f"✅ Back-fill completed!")
+    
+    @income_group.command(name="debug")
+    async def debug_income(self, ctx, enable: bool = True):
+        """Enable or disable debug logging to Discord"""
+        self.debug_mode = enable
+        self.debug_channel = ctx.channel if enable else None
+        await ctx.send(f"🐛 Debug mode: {'**ENABLED**' if enable else '**DISABLED**'}\n"
+                      f"Debug messages will be sent to this channel.")
+    
+    @income_group.command(name="stats")
+    async def stats_income(self, ctx):
+        """Show database statistics"""
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COUNT(*) FROM income_expenses")
+        total = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM income_expenses WHERE entry_type='income'")
+        income_count = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM income_expenses WHERE entry_type='expense'")
+        expense_count = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT SUM(amount) FROM income_expenses WHERE entry_type='income'")
+        total_income = cursor.fetchone()[0] or 0
+        
+        cursor.execute("SELECT SUM(amount) FROM income_expenses WHERE entry_type='expense'")
+        total_expense = cursor.fetchone()[0] or 0
+        
+        cursor.execute("SELECT MIN(scrape_timestamp), MAX(scrape_timestamp) FROM income_expenses")
+        date_range = cursor.fetchone()
+        
+        conn.close()
+        
+        embed = discord.Embed(title="📊 Income/Expenses Database Statistics", color=discord.Color.gold())
+        embed.add_field(name="Total Records", value=f"{total:,}", inline=True)
+        embed.add_field(name="Income Entries", value=f"{income_count:,}", inline=True)
+        embed.add_field(name="Expense Entries", value=f"{expense_count:,}", inline=True)
+        embed.add_field(name="Total Income", value=f"${total_income:,}", inline=True)
+        embed.add_field(name="Total Expenses", value=f"${total_expense:,}", inline=True)
+        embed.add_field(name="Net", value=f"${total_income - total_expense:,}", inline=True)
+        
+        if date_range[0]:
+            embed.add_field(name="First Record", value=date_range[0][:10], inline=True)
+            embed.add_field(name="Last Record", value=date_range[1][:10], inline=True)
+        
+        embed.set_footer(text=f"Database: {self.db_path}")
+        await ctx.send(embed=embed)
+
+async def setup(bot):
+    await bot.add_cog(IncomeScraper(bot))
+, text):
+                                            description = text
+                                    
+                                    if amount > 0:
+                                        period_date = datetime.utcnow().strftime('%Y-%m')
+                                        date_match = re.search(r'(\d{4}-\d{2})', expense_date)
+                                        if date_match:
+                                            period_date = date_match.group(1)
+                                        
+                                        page_expenses.append({
+                                            'period_type': 'expense_detail',
+                                            'period_date': period_date,
+                                            'entry_type': 'expense',
+                                            'description': f"{expense_date} {description}"[:500],
+                                            'amount': amount,
+                                            'scrape_timestamp': scrape_timestamp
+                                        })
+                                        
+                                        await self._debug_log(f"💸 Expense: {description[:30]}... = {amount:,}", ctx)
+                        
+                        if not page_expenses:
+                            empty_page_count += 1
+                            await self._debug_log(f"⚠️ No expenses on page {page} (empty count: {empty_page_count})", ctx)
+                            
+                            if empty_page_count >= 3:
+                                await self._debug_log(f"⛔ Stopped after {empty_page_count} empty pages", ctx)
+                                return all_expenses
+                        else:
+                            empty_page_count = 0
+                            all_expenses.extend(page_expenses)
+                            await self._debug_log(f"✅ Page {page}: {len(page_expenses)} expenses (total: {len(all_expenses)})", ctx)
+                        
+                        break  # Success, move to next page
+                        
+                except asyncio.TimeoutError:
+                    await self._debug_log(f"⏱️ Timeout on expenses page {page}, attempt {attempt + 1}/3", ctx)
+                    if attempt == 2:
+                        return all_expenses
+                except Exception as e:
+                    await self._debug_log(f"❌ Error on expenses page {page}: {e}", ctx)
+                    if attempt == 2:
+                        return all_expenses
+            
+            page += 1
+        
+        await self._debug_log(f"📊 Total expenses: {len(all_expenses)} across {page - 1} pages", ctx)
+        return all_expenses
+    
+    async def _scrape_all_income(self, ctx=None, include_expenses=True, max_expense_pages=100):
+        """Scrape daily income, monthly income, and expenses from the same treasury page"""
+        session = await self._get_session(ctx)
+        if not session:
+            if ctx:
+                await ctx.send("❌ Failed to get session. Is CookieManager loaded and logged in?")
+            return False
+        
+        await self._debug_log("🚀 Starting complete income/expense scrape", ctx)
+        
+        all_data = []
+        
+        # Note: All data (daily income, monthly income, expenses) are on the same page
+        # with different tabs or sections
+        
+        # 1. Scrape daily income tab
+        await self._debug_log("📅 Scraping DAILY income tab...", ctx)
+        daily_data = await self._scrape_income_tab(session, 'daily', ctx)
+        all_data.extend(daily_data)
+        
+        # 2. Scrape monthly income tab  
+        await self._debug_log("📆 Scraping MONTHLY income tab...", ctx)
+        monthly_data = await self._scrape_income_tab(session, 'monthly', ctx)
+        all_data.extend(monthly_data)
+        
+        # 3. Expenses are also on the treasury page (not a separate URL)
+        # The treasury page shows both income AND expenses in different tables
+        # So daily_data and monthly_data should already include expenses if they're on the page
+        
+        await self._debug_log(f"📊 Total entries collected: {len(all_data)}", ctx)
         
         # Save to database
         if all_data:
