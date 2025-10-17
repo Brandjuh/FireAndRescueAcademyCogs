@@ -19,10 +19,10 @@ class MembersScraper(commands.Cog):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=1621001, force_registration=True)
         
-        # Setup database path in shared location
+        # Setup database path in shared location - USE DIFFERENT NAME!
         base_path = data_manager.cog_data_path(raw_name="scraper_databases")
         base_path.mkdir(parents=True, exist_ok=True)
-        self.db_path = str(base_path / "members.db")
+        self.db_path = str(base_path / "members_v2.db")  # Changed from members.db
         
         self.base_url = "https://www.missionchief.com"
         self.members_url = f"{self.base_url}/verband/mitglieder/1621"
