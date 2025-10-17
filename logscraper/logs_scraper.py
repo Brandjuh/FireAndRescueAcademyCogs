@@ -244,7 +244,7 @@ class LogsScraper(commands.Cog):
                     INSERT INTO logs (log_id, log_type, username, action, details, log_timestamp)
                     VALUES (?, ?, ?, ?, ?, ?)
                 ''', (log['log_id'], log['log_type'], log['username'], 
-                      log['action'], log['details'], log['log_timestamp']))
+                      log['action'], log.get('details', ''), log['log_timestamp']))
                 inserted += 1
                 
                 # If it's a training course, also store in training_courses table
