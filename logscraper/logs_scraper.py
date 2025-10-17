@@ -367,15 +367,22 @@ class LogsScraper(commands.Cog):
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
-        # Support both old (rowid-based) and new (hash-based) logs
-        # Old logs: rowid matches log_id (sequential)
-        # New logs: log_id is hash, use rowid for ordering
+        # Support both old and new log formats:
+        # OLD: action=username, username=description, details=username
+        # NEW: action=description, username=username, details=empty
+        # Detect format: if action contains username and username contains description, it's old format
         cursor.execute('''
             SELECT 
                 rowid as id,
                 log_type as action_key,
-                COALESCE(NULLIF(action, ''), details, 'Unknown') as executed_name,
-                username as description,
+                CASE 
+                    WHEN details != '' THEN COALESCE(NULLIF(action, ''), details, 'Unknown')
+                    ELSE COALESCE(NULLIF(username, ''), 'Unknown')
+                END as executed_name,
+                CASE 
+                    WHEN details != '' THEN username
+                    ELSE action
+                END as description,
                 log_timestamp as ts
             FROM logs
             WHERE rowid > ?
