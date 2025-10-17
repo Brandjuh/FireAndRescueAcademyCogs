@@ -272,6 +272,9 @@ class LogsScraper(commands.Cog):
         
         await self._debug_log(f"🚀 Starting logs scrape (max {max_pages} pages)", ctx)
         
+        # Add progress tracking for large scrapes
+        last_progress_update = 0
+        
         while page <= max_pages:
             logs = await self._scrape_logs_page(session, page, ctx)
             
@@ -287,9 +290,11 @@ class LogsScraper(commands.Cog):
                 all_logs.extend(logs)
                 await self._debug_log(f"✅ Page {page}: {len(logs)} logs (total so far: {len(all_logs)})", ctx)
                 
-                # Progress update for long scrapes
-                if ctx and page % 10 == 0:
-                    await ctx.send(f"⏳ Progress: {page} pages scraped, {len(all_logs)} log entries collected...")
+                # Progress update every 50 pages (not in debug mode to reduce spam)
+                if ctx and not self.debug_mode and page % 50 == 0:
+                    elapsed_pages = page - last_progress_update
+                    await ctx.send(f"⏳ Progress: {page}/{max_pages} pages ({(page/max_pages)*100:.1f}%), {len(all_logs):,} entries collected")
+                    last_progress_update = page
             
             page += 1
         
@@ -407,17 +412,17 @@ class LogsScraper(commands.Cog):
         This scrapes ALL available log pages to get complete history.
         
         Usage: [p]logs backfill [max_pages]
-        Example: [p]logs backfill 500
+        Example: [p]logs backfill 1500
         
         Note: This preserves the original timestamps from MissionChief logs!
         """
-        if max_pages < 1 or max_pages > 1000:
-            await ctx.send("❌ Max pages must be between 1 and 1000")
+        if max_pages < 1 or max_pages > 5000:  # Increased from 1000 to 5000
+            await ctx.send("❌ Max pages must be between 1 and 5000")
             return
         
         await ctx.send(f"🔄 Starting back-fill of ALL historical logs (up to {max_pages} pages)...")
         await ctx.send(f"💡 This will preserve original timestamps from MissionChief")
-        await ctx.send(f"⚠️ This may take several minutes depending on alliance activity...")
+        await ctx.send(f"⚠️ This may take **{max_pages * 2 // 60} to {max_pages * 3 // 60} minutes** depending on alliance activity...")
         
         success = await self._scrape_all_logs(ctx, max_pages=max_pages)
         
