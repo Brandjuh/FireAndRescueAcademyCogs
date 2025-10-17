@@ -15,279 +15,254 @@ class BuildingsScraper(commands.Cog):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=1621004, force_registration=True)
         
-        # Setup database path in shared location
-        base_path = data_manager.cog_data_path(raw_name="scraper_databases")
-        base_path.mkdir(parents=True, exist_ok=True)
-        self.db_path = str(base_path / "buildings.db")
+        base_path = data_manager.cog_data_path(self.bot.get_cog("CookieManager"))
+        db_dir = base_path.parent / "scraper_databases"
+        db_dir.mkdir(exist_ok=True)
+        self.db_path = db_dir / "buildings_v2.db"
         
-        self.base_url = "https://www.missionchief.com"
-        self.buildings_url = f"{self.base_url}/verband/gebauede"
-        self.scraping_task = None
+        self.buildings_url = "https://www.missionchief.com/verband/gebauede"
+        self.debug_mode = False
+        
         self._init_database()
-        
-    def cog_load(self):
-        """Start background task when cog loads"""
-        self.scraping_task = self.bot.loop.create_task(self._background_scraper())
-        
-    def cog_unload(self):
-        """Cancel background task when cog unloads"""
-        if self.scraping_task:
-            self.scraping_task.cancel()
+        self.scrape_task = self.bot.loop.create_task(self._background_scraper())
     
     def _init_database(self):
-        """Initialize SQLite database with schema"""
+        """Initialize SQLite database"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS buildings (
                 building_id INTEGER,
-                owner_username TEXT,
-                building_type TEXT,
-                building_name TEXT,
-                location TEXT,
-                classrooms INTEGER,
-                status TEXT,
-                level INTEGER,
-                scrape_timestamp TEXT,
-                PRIMARY KEY (building_id, scrape_timestamp)
+                owner_name TEXT NOT NULL,
+                building_type TEXT NOT NULL,
+                classrooms INTEGER DEFAULT 0,
+                timestamp TEXT NOT NULL,
+                PRIMARY KEY (building_id, timestamp)
             )
         ''')
-        
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON buildings(scrape_timestamp)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_building_id ON buildings(building_id)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_owner ON buildings(owner_username)')
-        
         conn.commit()
         conn.close()
     
-    async def _get_cookie_manager(self):
-        """Get CookieManager cog instance"""
-        return self.bot.get_cog("CookieManager")
+    def cog_unload(self):
+        if hasattr(self, 'scrape_task'):
+            self.scrape_task.cancel()
     
-    async def _get_session(self):
-        """Get authenticated session from CookieManager cog"""
-        cookie_manager = await self._get_cookie_manager()
+    async def _background_scraper(self):
+        """Background task - scrapes every hour at :45"""
+        await self.bot.wait_until_ready()
+        
+        while True:
+            try:
+                now = datetime.now()
+                next_run = now.replace(minute=45, second=0, microsecond=0)
+                if now.minute >= 45:
+                    next_run = next_run.replace(hour=now.hour + 1)
+                wait_seconds = (next_run - now).total_seconds()
+                
+                await asyncio.sleep(wait_seconds)
+                await self._scrape_all_buildings(ctx=None)
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"[BuildingsScraper] Background error: {e}")
+                await asyncio.sleep(3600)
+    
+    async def _get_session(self, ctx=None):
+        """Get authenticated session from CookieManager"""
+        cookie_manager = self.bot.get_cog("CookieManager")
         if not cookie_manager:
-            print("[BuildingsScraper] CookieManager cog not loaded!")
+            await self._debug_log("❌ CookieManager not loaded!", ctx)
             return None
         
         try:
             session = await cookie_manager.get_session()
+            if not session:
+                await self._debug_log("❌ Failed to get session", ctx)
+                return None
+            
+            await self._debug_log("✅ Session obtained", ctx)
             return session
         except Exception as e:
-            print(f"[BuildingsScraper] Failed to get session: {e}")
+            await self._debug_log(f"❌ Error: {str(e)}", ctx)
             return None
     
-    async def _check_logged_in(self, html_content):
-        """Check if still logged in"""
-        soup = BeautifulSoup(html_content, 'html.parser')
-        logout_button = soup.find('a', href='/users/sign_out')
-        user_menu = soup.find('li', class_='dropdown user-menu')
-        return logout_button is not None or user_menu is not None
-    
-    def _extract_number(self, text):
-        """Extract first number from text"""
-        match = re.search(r'\d+', str(text))
-        return int(match.group()) if match else 0
-    
-    async def _scrape_buildings(self, session):
-        """Scrape buildings data - handles scrollable lists"""
-        url = self.buildings_url
-        
-        for attempt in range(3):
+    async def _debug_log(self, message, ctx=None):
+        """Log debug messages"""
+        print(f"[BuildingsScraper] {message}")
+        if self.debug_mode and ctx:
             try:
-                await asyncio.sleep(2)
-                
-                async with session.get(url) as response:
-                    if response.status != 200:
-                        print(f"[BuildingsScraper] Page returned status {response.status}")
-                        return []
-                    
-                    html = await response.text()
-                    
-                    if not await self._check_logged_in(html):
-                        print(f"[BuildingsScraper] Session expired, will retry on next run")
-                        return []
-                    
-                    soup = BeautifulSoup(html, 'html.parser')
-                    buildings_data = []
-                    scrape_timestamp = datetime.utcnow().isoformat()
-                    
-                    # Method 1: Try to find table with buildings
-                    table = soup.find('table', class_='table')
-                    if table:
-                        rows = table.find('tbody').find_all('tr') if table.find('tbody') else table.find_all('tr')
-                        
-                        for row in rows:
-                            cols = row.find_all('td')
-                            if len(cols) >= 3:
-                                # Extract building ID from link or data attribute
-                                building_link = row.find('a', href=re.compile(r'/buildings/\d+'))
-                                building_id = 0
-                                if building_link:
-                                    match = re.search(r'/buildings/(\d+)', building_link.get('href', ''))
-                                    if match:
-                                        building_id = int(match.group(1))
-                                
-                                # Owner
-                                owner = cols[0].get_text(strip=True) if len(cols) > 0 else ""
-                                
-                                # Building name/type
-                                building_name = cols[1].get_text(strip=True) if len(cols) > 1 else ""
-                                
-                                # Location
-                                location = cols[2].get_text(strip=True) if len(cols) > 2 else ""
-                                
-                                # Classrooms (if available)
-                                classrooms = 0
-                                if len(cols) > 3:
-                                    classrooms = self._extract_number(cols[3].get_text(strip=True))
-                                
-                                # Status/Level
-                                status = "active"
-                                level = 1
-                                if len(cols) > 4:
-                                    status_text = cols[4].get_text(strip=True).lower()
-                                    if "building" in status_text or "constructing" in status_text:
-                                        status = "building"
-                                    level = self._extract_number(cols[4].get_text(strip=True))
-                                
-                                # Determine building type from name
-                                building_type = "unknown"
-                                name_lower = building_name.lower()
-                                if "fire" in name_lower or "station" in name_lower:
-                                    building_type = "fire_station"
-                                elif "police" in name_lower:
-                                    building_type = "police_station"
-                                elif "hospital" in name_lower or "rescue" in name_lower:
-                                    building_type = "hospital"
-                                elif "dispatch" in name_lower:
-                                    building_type = "dispatch"
-                                elif "school" in name_lower or "academy" in name_lower or "training" in name_lower:
-                                    building_type = "training_center"
-                                
-                                buildings_data.append({
-                                    'building_id': building_id,
-                                    'owner_username': owner,
-                                    'building_type': building_type,
-                                    'building_name': building_name,
-                                    'location': location,
-                                    'classrooms': classrooms,
-                                    'status': status,
-                                    'level': level,
-                                    'scrape_timestamp': scrape_timestamp
-                                })
-                    
-                    # Method 2: Try to find scrollable list or div-based layout
-                    building_divs = soup.find_all('div', class_=re.compile(r'building|gebaeude'))
-                    for div in building_divs:
-                        # Extract building data from div structure
-                        building_id_elem = div.get('data-building-id') or div.get('id')
-                        if building_id_elem:
-                            building_id = self._extract_number(building_id_elem)
-                            
-                            name_elem = div.find(class_=re.compile(r'name|title'))
-                            building_name = name_elem.get_text(strip=True) if name_elem else "Unknown"
-                            
-                            owner_elem = div.find(class_=re.compile(r'owner|user'))
-                            owner = owner_elem.get_text(strip=True) if owner_elem else "Unknown"
-                            
-                            buildings_data.append({
-                                'building_id': building_id,
-                                'owner_username': owner,
-                                'building_type': 'unknown',
-                                'building_name': building_name,
-                                'location': '',
-                                'classrooms': 0,
-                                'status': 'active',
-                                'level': 1,
-                                'scrape_timestamp': scrape_timestamp
-                            })
-                    
-                    return buildings_data
-                    
-            except asyncio.TimeoutError:
-                print(f"[BuildingsScraper] Timeout, attempt {attempt + 1}")
-                if attempt == 2:
-                    return []
-            except Exception as e:
-                print(f"[BuildingsScraper] Error scraping buildings: {e}")
-                if attempt == 2:
-                    return []
-        
-        return []
+                await ctx.send(message)
+            except:
+                pass
     
     async def _scrape_all_buildings(self, ctx=None):
-        """Scrape all buildings"""
-        session = await self._get_session()
+        """Scrape all buildings from the buildings page"""
+        session = await self._get_session(ctx)
         if not session:
             if ctx:
-                await ctx.send("❌ Failed to get session. Is CookieManager loaded and logged in?")
+                await ctx.send("❌ Failed to get session")
             return False
         
-        buildings = await self._scrape_buildings(session)
+        await self._debug_log("🏢 Starting buildings scrape", ctx)
         
-        # Save to database
-        if buildings:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            for building in buildings:
-                cursor.execute('''
-                    INSERT OR REPLACE INTO buildings 
-                    (building_id, owner_username, building_type, building_name, location, 
-                     classrooms, status, level, scrape_timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    building['building_id'],
-                    building['owner_username'],
-                    building['building_type'],
-                    building['building_name'],
-                    building['location'],
-                    building['classrooms'],
-                    building['status'],
-                    building['level'],
-                    building['scrape_timestamp']
-                ))
-            
-            conn.commit()
-            conn.close()
-            
-            # Count classrooms
-            total_classrooms = sum(b['classrooms'] for b in buildings)
-            
+        try:
+            async with session.get(self.buildings_url) as resp:
+                if resp.status != 200:
+                    await self._debug_log(f"❌ Bad status {resp.status}", ctx)
+                    return False
+                
+                html = await resp.text()
+                await self._debug_log(f"📄 HTML: {len(html)} chars", ctx)
+                
+                # Parse buildings
+                soup = BeautifulSoup(html, 'html.parser')
+                buildings = []
+                
+                # Find all building rows - look for links to /buildings/
+                for link in soup.find_all('a', href=lambda x: x and '/buildings/' in str(x)):
+                    # Extract building ID
+                    match = re.search(r'/buildings/(\d+)', link['href'])
+                    if not match:
+                        continue
+                    
+                    building_id = int(match.group(1))
+                    
+                    # Get parent row for more info
+                    row = link.find_parent('tr')
+                    if not row:
+                        continue
+                    
+                    # Extract data
+                    building_name = link.get_text(strip=True)
+                    
+                    # Find owner (usually in another column)
+                    cols = row.find_all('td')
+                    owner_name = "Unknown"
+                    classrooms = 0
+                    
+                    for col in cols:
+                        # Look for owner link
+                        owner_link = col.find('a', href=lambda x: x and '/users/' in str(x))
+                        if owner_link:
+                            owner_name = owner_link.get_text(strip=True)
+                        
+                        # Look for classroom count
+                        text = col.get_text(strip=True)
+                        classroom_match = re.search(r'(\d+)\s*classroom', text, re.IGNORECASE)
+                        if classroom_match:
+                            classrooms = int(classroom_match.group(1))
+                    
+                    buildings.append({
+                        'building_id': building_id,
+                        'owner_name': owner_name,
+                        'building_type': building_name,
+                        'classrooms': classrooms
+                    })
+                    
+                    if self.debug_mode:
+                        await self._debug_log(f"🏢 {owner_name}: {building_name} (ID: {building_id}, Classrooms: {classrooms})", ctx)
+                
+                if not buildings:
+                    await self._debug_log("⚠️ No buildings found", ctx)
+                    return False
+                
+                # Store in database
+                timestamp = datetime.now().isoformat()
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                
+                inserted = 0
+                duplicates = 0
+                
+                for building in buildings:
+                    try:
+                        cursor.execute('''
+                            INSERT INTO buildings (building_id, owner_name, building_type, classrooms, timestamp)
+                            VALUES (?, ?, ?, ?, ?)
+                        ''', (building['building_id'], building['owner_name'], 
+                              building['building_type'], building['classrooms'], timestamp))
+                        inserted += 1
+                    except sqlite3.IntegrityError:
+                        duplicates += 1
+                
+                conn.commit()
+                conn.close()
+                
+                await self._debug_log(f"💾 Database: {inserted} new, {duplicates} duplicates", ctx)
+                
+                if ctx:
+                    await ctx.send(f"✅ Scraped {len(buildings)} buildings\n"
+                                  f"💾 {inserted} new records, {duplicates} duplicates")
+                
+                return True
+                
+        except Exception as e:
+            await self._debug_log(f"❌ Error: {str(e)}", ctx)
             if ctx:
-                await ctx.send(f"✅ Scraped {len(buildings)} buildings ({total_classrooms} total classrooms)")
-            return True
-        else:
-            if ctx:
-                await ctx.send("⚠️ No buildings data found")
+                await ctx.send(f"❌ Scrape failed: {str(e)}")
             return False
     
-    async def _background_scraper(self):
-        """Background task that runs every hour"""
-        await self.bot.wait_until_ready()
-        await asyncio.sleep(2700)  # Stagger: 45 minutes offset
-        
-        while not self.bot.is_closed():
-            try:
-                print(f"[BuildingsScraper] Starting automatic scrape at {datetime.utcnow()}")
-                await self._scrape_all_buildings()
-                print(f"[BuildingsScraper] Automatic scrape completed")
-            except Exception as e:
-                print(f"[BuildingsScraper] Background task error: {e}")
-            
-            await asyncio.sleep(3600)
-    
-    @commands.command(name="scrape_buildings")
+    @commands.group(name="buildings")
     @commands.is_owner()
+    async def buildings_group(self, ctx):
+        """Buildings scraper commands"""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+    
+    @buildings_group.command(name="scrape")
     async def scrape_buildings(self, ctx):
-        """Manually trigger buildings scraping (Owner only)"""
+        """Manually scrape buildings"""
         await ctx.send("🔄 Starting buildings scrape...")
         success = await self._scrape_all_buildings(ctx)
+        
         if success:
-            await ctx.send("✅ Buildings scrape completed successfully")
-
-async def setup(bot):
-    await bot.add_cog(BuildingsScraper(bot))
+            await ctx.send("✅ Buildings scrape completed")
+        else:
+            await ctx.send("❌ Buildings scrape failed")
+    
+    @buildings_group.command(name="debug")
+    async def toggle_debug(self, ctx, mode: str = None):
+        """Toggle debug mode (on/off)"""
+        if mode is None:
+            await ctx.send(f"Debug: {'ON' if self.debug_mode else 'OFF'}")
+            return
+        
+        if mode.lower() in ['on', '1', 'true']:
+            self.debug_mode = True
+            await ctx.send("✅ Debug ON")
+        else:
+            self.debug_mode = False
+            await ctx.send("✅ Debug OFF")
+    
+    @buildings_group.command(name="stats")
+    async def show_stats(self, ctx):
+        """Show buildings statistics"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COUNT(DISTINCT building_id) FROM buildings")
+        total_buildings = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(DISTINCT owner_name) FROM buildings")
+        total_owners = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT SUM(classrooms) FROM buildings WHERE timestamp = (SELECT MAX(timestamp) FROM buildings)")
+        total_classrooms = cursor.fetchone()[0] or 0
+        
+        cursor.execute("SELECT MIN(timestamp), MAX(timestamp) FROM buildings")
+        min_time, max_time = cursor.fetchone()
+        
+        conn.close()
+        
+        embed = discord.Embed(title="🏢 Buildings Statistics", color=discord.Color.blue())
+        embed.add_field(name="Total Buildings", value=f"{total_buildings:,}", inline=True)
+        embed.add_field(name="Total Owners", value=f"{total_owners:,}", inline=True)
+        embed.add_field(name="Total Classrooms", value=f"{total_classrooms:,}", inline=True)
+        
+        if min_time and max_time:
+            embed.add_field(name="Data Range", value=f"{min_time[:10]} to {max_time[:10]}", inline=False)
+        
+        embed.set_footer(text=f"Database: {self.db_path.name}")
+        
+        await ctx.send(embed=embed)
