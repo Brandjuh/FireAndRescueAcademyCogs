@@ -34,9 +34,16 @@ class DataOverview(commands.Cog):
                 cursor.execute(f"SELECT COUNT(*) FROM {table}")
                 count = cursor.fetchone()[0]
                 
-                # Get date range
-                cursor.execute(f"SELECT MIN(timestamp), MAX(timestamp) FROM {table}")
-                min_time, max_time = cursor.fetchone()
+                # Get date range - try different timestamp column names
+                min_time, max_time = None, None
+                for col in ['timestamp', 'log_timestamp', 'scraped_at', 'created_at']:
+                    try:
+                        cursor.execute(f"SELECT MIN({col}), MAX({col}) FROM {table}")
+                        min_time, max_time = cursor.fetchone()
+                        if min_time:
+                            break
+                    except:
+                        continue
                 
                 stats[table] = {
                     'count': count,
