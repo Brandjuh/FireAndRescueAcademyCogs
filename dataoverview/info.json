@@ -1,0 +1,7 @@
+{
+    "author": ["Brandjuh"],
+    "description": "Shows overview of all scraped MissionChief data",
+    "install_msg": "Data Overview installed. Use `!dataoverview` to see all scraped data.",
+    "short": "Data overview dashboard",
+    "type": "COG"
+}
