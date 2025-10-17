@@ -125,17 +125,21 @@ class IncomeScraper(commands.Cog):
                 pass
     
     async def _check_logged_in(self, html_content, ctx=None):
-        """Check if still logged in"""
-        soup = BeautifulSoup(html_content, 'html.parser')
+        """Check if still logged in - simplified check"""
+        # Very simple check: if we got HTML content with tables, we're probably logged in
+        # The CookieManager handles the actual authentication
         
-        # Check for table rows with user links (indicates logged in)
-        has_member_links = bool(soup.find('a', href=lambda x: x and '/users/' in str(x)))
+        if len(html_content) < 1000:
+            await self._debug_log(f"⚠️ HTML too short ({len(html_content)} chars) - might be error page", ctx)
+            return False
         
-        is_logged_in = has_member_links
+        # Just check if there's any data-like content (tables, divs with data)
+        has_content = '<table' in html_content or 'class="table"' in html_content
         
-        await self._debug_log(f"Login check: {'✅ Logged in' if is_logged_in else '❌ NOT logged in'}", ctx)
+        if self.debug_mode:
+            await self._debug_log(f"Login check: {'✅ Logged in' if has_content else '❌ NOT logged in'}", ctx)
         
-        return is_logged_in
+        return has_content
     
     async def _scrape_income_tab(self, session, tab_type='daily', ctx=None):
         """Scrape income/expense data from a specific tab (daily or monthly)"""
