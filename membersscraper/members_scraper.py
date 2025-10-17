@@ -343,7 +343,13 @@ class MembersScraper(commands.Cog):
             for member in all_members:
                 try:
                     if member.get('suspicious', False):
-                        # Store in suspicious table
+                        # Store in suspicious table with clamped credits
+                        suspect_credits = member['earned_credits']
+                        if suspect_credits == -1:
+                            suspect_credits = 0  # Flag value, store as 0
+                        else:
+                            suspect_credits = max(0, min(INT64_MAX, int(suspect_credits)))
+                        
                         cursor.execute('''
                             INSERT INTO suspicious_members 
                             (member_id, username, rank, parsed_credits, raw_html, reason, timestamp)
@@ -352,7 +358,7 @@ class MembersScraper(commands.Cog):
                             member['member_id'],
                             member['username'],
                             member['rank'],
-                            member['earned_credits'],
+                            suspect_credits,  # Use clamped value
                             member.get('raw_html', ''),
                             member.get('reason', ''),
                             member['timestamp']
