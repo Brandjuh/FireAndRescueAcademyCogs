@@ -170,23 +170,33 @@ class AllianceLogsPub(commands.Cog):
     
     async def _get_mc_user_id(self, username: str) -> Optional[str]:
         """Get MissionChief user ID from verified members"""
-        verified_cog = self.bot.get_cog("VerifiedMembers")
-        if not verified_cog or not hasattr(verified_cog, "get_mc_id_by_name"):
-            return None
         try:
-            return await verified_cog.get_mc_id_by_name(username)
-        except:
-            return None
+            verified_cog = self.bot.get_cog("VerifiedMembers")
+            if not verified_cog:
+                return None
+            # Try different method names
+            if hasattr(verified_cog, "get_mc_id_by_name"):
+                return await verified_cog.get_mc_id_by_name(username)
+            elif hasattr(verified_cog, "get_mc_user_id"):
+                return await verified_cog.get_mc_user_id(username)
+        except Exception as e:
+            log.debug(f"Error getting MC ID for {username}: {e}")
+        return None
     
     async def _get_discord_id(self, username: str) -> Optional[int]:
         """Get Discord ID from verified members"""
-        verified_cog = self.bot.get_cog("VerifiedMembers")
-        if not verified_cog or not hasattr(verified_cog, "get_discord_id_by_name"):
-            return None
         try:
-            return await verified_cog.get_discord_id_by_name(username)
-        except:
-            return None
+            verified_cog = self.bot.get_cog("VerifiedMembers")
+            if not verified_cog:
+                return None
+            # Try different method names
+            if hasattr(verified_cog, "get_discord_id_by_name"):
+                return await verified_cog.get_discord_id_by_name(username)
+            elif hasattr(verified_cog, "get_discord_id"):
+                return await verified_cog.get_discord_id(username)
+        except Exception as e:
+            log.debug(f"Error getting Discord ID for {username}: {e}")
+        return None
     
     def _parse_description(self, desc: str) -> dict:
         """Parse description to extract training/building details"""
