@@ -231,6 +231,7 @@ class LogsScraper(commands.Cog):
             return False
         
         # Store in database
+        scraped_at = datetime.now().isoformat()
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
@@ -241,19 +242,23 @@ class LogsScraper(commands.Cog):
         for log in all_logs:
             try:
                 cursor.execute('''
-                    INSERT INTO logs (log_id, log_type, username, action, details, log_timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (log['log_id'], log['log_type'], log['username'], 
-                      log['action'], log.get('details', ''), log['log_timestamp']))
+                    INSERT INTO logs (hash, ts, action_key, action_text, executed_name, executed_mc_id, executed_url,
+                                     affected_name, affected_type, affected_mc_id, affected_url, description, 
+                                     scraped_at, contribution_amount)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (log['hash'], log['ts'], log['action_key'], log['action_text'], log['executed_name'],
+                      log['executed_mc_id'], log['executed_url'], log['affected_name'], log['affected_type'],
+                      log['affected_mc_id'], log['affected_url'], log['description'], scraped_at,
+                      log['contribution_amount']))
                 inserted += 1
                 
                 # If it's a training course, also store in training_courses table
-                if log['log_type'] in ['created_course', 'course_completed']:
+                if log['action_key'] in ['created_course', 'created_a_course', 'course_completed']:
                     # Count existing occurrences
                     cursor.execute('''
                         SELECT COUNT(*) FROM training_courses 
                         WHERE username = ? AND course_name = ? AND log_timestamp = ?
-                    ''', (log['username'], log['action'], log['log_timestamp']))
+                    ''', (log['executed_name'], log['action_text'], log['ts']))
                     count = cursor.fetchone()[0]
                     
                     if count < 4:  # Allow up to 4 occurrences
@@ -261,7 +266,7 @@ class LogsScraper(commands.Cog):
                             cursor.execute('''
                                 INSERT INTO training_courses (username, course_name, log_timestamp, occurrence)
                                 VALUES (?, ?, ?, ?)
-                            ''', (log['username'], log['action'], log['log_timestamp'], count + 1))
+                            ''', (log['executed_name'], log['action_text'], log['ts'], count + 1))
                             training_inserted += 1
                         except sqlite3.IntegrityError:
                             pass
@@ -362,31 +367,31 @@ class LogsScraper(commands.Cog):
         await ctx.send(embed=embed)
     
     async def get_logs_after(self, last_id: int, limit: int = 50):
-        """Get logs after a specific ID - for alliance_logs_pub compatibility"""
+        """Get logs after a specific ID - for alliance_logs_pub compatibility
+        Returns data in exact format that AllianceLogsPub expects"""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
-        # Support both old and new log formats:
-        # OLD: action=username, username=description, details=username
-        # NEW: action=description, username=username, details=empty
-        # Detect format: if action contains username and username contains description, it's old format
         cursor.execute('''
             SELECT 
-                rowid as id,
-                log_type as action_key,
-                CASE 
-                    WHEN details != '' THEN COALESCE(NULLIF(action, ''), details, 'Unknown')
-                    ELSE COALESCE(NULLIF(username, ''), 'Unknown')
-                END as executed_name,
-                CASE 
-                    WHEN details != '' THEN username
-                    ELSE action
-                END as description,
-                log_timestamp as ts
+                id,
+                hash,
+                ts,
+                action_key,
+                action_text,
+                executed_name,
+                executed_mc_id,
+                executed_url,
+                affected_name,
+                affected_type,
+                affected_mc_id,
+                affected_url,
+                description,
+                contribution_amount
             FROM logs
-            WHERE rowid > ?
-            ORDER BY rowid ASC
+            WHERE id > ?
+            ORDER BY id ASC
             LIMIT ?
         ''', (last_id, limit))
         
