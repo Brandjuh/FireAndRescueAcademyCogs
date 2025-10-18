@@ -174,11 +174,12 @@ class LogsScraper(commands.Cog):
                     executed_mc_id = ""
                     
                     if user_link and user_link.get('href'):
-                        executed_url = f"https://www.missionchief.com{user_link['href']}"
-                        # Extract MC ID from /users/123456
-                        match = re.search(r'/users/(\d+)', user_link['href'])
+                        href = user_link['href']
+                        executed_url = f"https://www.missionchief.com{href}"
+                        # Extract MC ID from /users/123456 OR /profile/123456
+                        match = re.search(r'/(users|profile)/(\d+)', href)
                         if match:
-                            executed_mc_id = match.group(1)
+                            executed_mc_id = match.group(2)
                     
                     # Column 2: Description + contribution amount
                     desc_col = cols[2]
@@ -288,11 +289,11 @@ class LogsScraper(commands.Cog):
                                 match = re.search(r'/buildings/(\d+)', affected_link['href'])
                                 if match:
                                     affected_mc_id = match.group(1)
-                            elif '/users/' in affected_link['href']:
+                            elif '/users/' in affected_link['href'] or '/profile/' in affected_link['href']:
                                 affected_type = "user"
-                                match = re.search(r'/users/(\d+)', affected_link['href'])
+                                match = re.search(r'/(users|profile)/(\d+)', affected_link['href'])
                                 if match:
-                                    affected_mc_id = match.group(1)
+                                    affected_mc_id = match.group(2)
                             elif '/missions/' in affected_link['href']:
                                 affected_type = "mission"
                                 match = re.search(r'/missions/(\d+)', affected_link['href'])
@@ -474,7 +475,7 @@ class LogsScraper(commands.Cog):
         cursor.execute("SELECT COUNT(*) FROM logs")
         total_logs = cursor.fetchone()[0]
         
-        cursor.execute("SELECT COUNT(*) FROM training_courses")
+        cursor.execute("SELECT COUNT(*) FROM logs WHERE action_key IN ('created_course', 'course_completed')")
         total_courses = cursor.fetchone()[0]
         
         cursor.execute("SELECT MAX(id) FROM logs")
