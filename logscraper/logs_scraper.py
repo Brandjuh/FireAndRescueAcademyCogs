@@ -10,25 +10,30 @@ import re
 import hashlib
 
 class LogsScraper(commands.Cog):
-    """Scrapes alliance logs from MissionChief with COMPLETE data"""
+    """Scrapes alliance logs from MissionChief with complete data extraction"""
     
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=1621002, force_registration=True)
+        self.config = Config.get_conf(self, identifier=0x4C4F47534352415045522056330A)
+        self.config.register_global(
+            debug_mode=False,
+            scrape_interval=3600,  # 1 hour
+            last_scrape=None
+        )
         
-        base_path = data_manager.cog_data_path(self.bot.get_cog("CookieManager"))
-        db_dir = base_path.parent / "scraper_databases"
-        db_dir.mkdir(exist_ok=True)
-        self.db_path = db_dir / "logs_v3.db"  # New database with full schema
+        # Database path
+        data_path = data_manager.cog_data_path(raw_name="scraper_databases")
+        data_path.mkdir(parents=True, exist_ok=True)
+        self.db_path = data_path / "logs_v3.db"
         
         self.logs_url = "https://www.missionchief.com/alliance_logfiles"
-        self.debug_mode = False
+        self.scrape_task = None
         
+        # Initialize database
         self._init_database()
-        self.scrape_task = self.bot.loop.create_task(self._background_scraper())
     
     def _init_database(self):
-        """Initialize SQLite database with complete schema"""
+        """Initialize SQLite database"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
@@ -55,72 +60,80 @@ class LogsScraper(commands.Cog):
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_hash ON logs(hash)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_action_key ON logs(action_key)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_executed_mc_id ON logs(executed_mc_id)')
         
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS training_courses (
-                username TEXT NOT NULL,
-                course_name TEXT NOT NULL,
-                log_timestamp TEXT NOT NULL,
-                occurrence INTEGER DEFAULT 1,
-                PRIMARY KEY (username, course_name, log_timestamp, occurrence)
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                log_id INTEGER,
+                course_name TEXT,
+                username TEXT,
+                timestamp TEXT,
+                FOREIGN KEY (log_id) REFERENCES logs(id)
             )
         ''')
         
         conn.commit()
         conn.close()
     
+    async def cog_load(self):
+        """Start background scraping task"""
+        self.scrape_task = self.bot.loop.create_task(self._background_scrape())
+        await self._debug_log("✅ LogsScraper loaded - background task started")
+    
     def cog_unload(self):
-        if hasattr(self, 'scrape_task'):
+        """Cancel background task on unload"""
+        if self.scrape_task:
             self.scrape_task.cancel()
     
-    async def _background_scraper(self):
+    async def _background_scrape(self):
         """Background task - scrapes every hour at :15"""
         await self.bot.wait_until_ready()
         
         while True:
             try:
+                # Wait until next :15 mark
                 now = datetime.now()
                 next_run = now.replace(minute=15, second=0, microsecond=0)
                 if now.minute >= 15:
-                    next_run = next_run.replace(hour=now.hour + 1)
-                wait_seconds = (next_run - now).total_seconds()
+                    next_run = next_run.replace(hour=(now.hour + 1) % 24)
                 
+                wait_seconds = (next_run - now).total_seconds()
+                await self._debug_log(f"⏰ Next auto-scrape: {next_run.strftime('%H:%M')}")
                 await asyncio.sleep(wait_seconds)
-                await self._scrape_all_logs(ctx=None, max_pages=10)
+                
+                # Run scrape
+                await self._debug_log("🔄 Auto-scraping logs...")
+                await self._scrape_all_logs(None, max_pages=5)
                 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                print(f"[LogsScraper] Background error: {e}")
-                await asyncio.sleep(3600)
+                await self._debug_log(f"❌ Background scrape error: {e}")
+                await asyncio.sleep(300)  # Wait 5 min on error
+    
+    async def _debug_log(self, message, ctx=None):
+        """Send debug message if debug mode is on"""
+        if await self.config.debug_mode():
+            if ctx:
+                await ctx.send(f"🔍 {message}")
+            else:
+                print(f"[LogsScraper] {message}")
     
     async def _get_session(self, ctx=None):
         """Get authenticated session from CookieManager"""
         cookie_manager = self.bot.get_cog("CookieManager")
         if not cookie_manager:
-            await self._debug_log("❌ CookieManager not loaded!", ctx)
+            await self._debug_log("❌ CookieManager cog not loaded!", ctx)
             return None
         
         try:
             session = await cookie_manager.get_session()
-            if not session:
-                await self._debug_log("❌ Failed to get session", ctx)
-                return None
-            
             await self._debug_log("✅ Session obtained", ctx)
             return session
         except Exception as e:
-            await self._debug_log(f"❌ Error: {str(e)}", ctx)
+            await self._debug_log(f"❌ Failed to get session: {e}", ctx)
             return None
-    
-    async def _debug_log(self, message, ctx=None):
-        """Log debug messages"""
-        print(f"[LogsScraper] {message}")
-        if self.debug_mode and ctx:
-            try:
-                await ctx.send(message)
-            except:
-                pass
     
     async def _scrape_logs_page(self, session, page_num, ctx=None):
         """Scrape a single page of logs with COMPLETE data extraction"""
@@ -128,108 +141,170 @@ class LogsScraper(commands.Cog):
         await self._debug_log(f"🌐 Page {page_num}: {url}", ctx)
         
         try:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    await self._debug_log(f"❌ Bad status {resp.status}", ctx)
-                    return []
-                
-                html = await resp.text()
+            async with session.get(url) as response:
+                html = await response.text()
                 soup = BeautifulSoup(html, 'html.parser')
-                logs = []
                 
                 # Find the logs table
                 table = soup.find('table', class_='table')
                 if not table:
+                    await self._debug_log(f"⚠️ No table found on page {page_num}", ctx)
                     return []
                 
                 tbody = table.find('tbody')
                 if not tbody:
+                    await self._debug_log(f"⚠️ No tbody found on page {page_num}", ctx)
                     return []
                 
-                # Process each row
-                for tr in tbody.find_all('tr'):
-                    cols = tr.find_all('td')
-                    if len(cols) < 4:
+                rows = tbody.find_all('tr')
+                logs = []
+                
+                for row in rows:
+                    cols = row.find_all('td')
+                    if len(cols) < 3:
                         continue
                     
-                    # Column 0: Date/Time
-                    timestamp = cols[0].get_text(strip=True).replace('\xa0', ' ')
+                    # Column 0: Timestamp
+                    timestamp = cols[0].get_text(strip=True)
                     
-                    # Column 1: Executed by (with user link)
-                    executed_name = ""
-                    executed_mc_id = ""
-                    executed_url = ""
-                    
+                    # Column 1: Executed by (username + MC ID)
                     user_link = cols[1].find('a', href=True)
-                    if user_link:
-                        executed_name = user_link.get_text(strip=True)
-                        href = user_link['href']
-                        user_id_match = re.search(r'/users/(\d+)', href)
-                        if user_id_match:
-                            executed_mc_id = user_id_match.group(1)
-                            executed_url = f"https://www.missionchief.com{href}"
+                    executed_name = user_link.get_text(strip=True) if user_link else ""
+                    executed_url = ""
+                    executed_mc_id = ""
                     
-                    # Determine action_key from icon
-                    action_key = "unknown"
-                    img = cols[1].find('img', src=True)
-                    if img:
-                        icon_match = re.search(r'/alliance_log/([^.]+)\.png', img['src'])
-                        if icon_match:
-                            action_key = icon_match.group(1)
+                    if user_link and user_link.get('href'):
+                        executed_url = f"https://www.missionchief.com{user_link['href']}"
+                        # Extract MC ID from /users/123456
+                        match = re.search(r'/users/(\d+)', user_link['href'])
+                        if match:
+                            executed_mc_id = match.group(1)
                     
                     # Column 2: Description + contribution amount
                     desc_col = cols[2]
-                    contribution_amount = 0
-                    
-                    # Extract contribution from <span class="label...">
-                    credit_span = desc_col.find('span', class_='label')
-                    if credit_span:
-                        credit_text = credit_span.get_text(strip=True)
-                        credit_span.decompose()  # Remove from tree
-                        
-                        # Parse credit amount (e.g., "-500 Credits" or "+1000 Credits")
-                        credit_match = re.search(r'([+-]?\d+)', credit_text)
-                        if credit_match:
-                            contribution_amount = int(credit_match.group(1))
-                    
                     description = desc_col.get_text(strip=True)
-                    action_text = description
                     
-                    # Column 3: Affected (building/mission/vehicle link)
+                    # Extract action key from description (NO icon in HTML!)
+                    description_text = desc_col.get_text(strip=True).lower()
+                    action_key = "unknown"
+                    
+                    # Map description to action_key
+                    if "added to the alliance" in description_text:
+                        action_key = "added_to_alliance"
+                    elif "application denied" in description_text:
+                        action_key = "application_denied"
+                    elif "left the alliance" in description_text:
+                        action_key = "left_alliance"
+                    elif "kicked from the alliance" in description_text:
+                        action_key = "kicked_from_alliance"
+                    elif "set as transport admin" in description_text or "transport admin set" in description_text:
+                        action_key = "set_transport_admin"
+                    elif "removed transport admin" in description_text:
+                        action_key = "removed_transport_admin"
+                    elif "removed admin" in description_text and "co-admin" not in description_text:
+                        action_key = "removed_admin"
+                    elif "set as admin" in description_text or "promoted to admin" in description_text:
+                        action_key = "set_admin"
+                    elif "removed education admin" in description_text:
+                        action_key = "removed_education_admin"
+                    elif "set as education admin" in description_text:
+                        action_key = "set_education_admin"
+                    elif "set as finance admin" in description_text:
+                        action_key = "set_finance_admin"
+                    elif "removed finance admin" in description_text:
+                        action_key = "removed_finance_admin"
+                    elif "set as co-admin" in description_text or "promoted to co-admin" in description_text:
+                        action_key = "set_co_admin"
+                    elif "removed co-admin" in description_text:
+                        action_key = "removed_co_admin"
+                    elif "set as mod action admin" in description_text:
+                        action_key = "set_mod_action_admin"
+                    elif "removed mod action admin" in description_text:
+                        action_key = "removed_mod_action_admin"
+                    elif "chat ban removed" in description_text:
+                        action_key = "chat_ban_removed"
+                    elif "chat ban set" in description_text:
+                        action_key = "chat_ban_set"
+                    elif "allowed to apply" in description_text:
+                        action_key = "allowed_to_apply"
+                    elif "not allowed to apply" in description_text:
+                        action_key = "not_allowed_to_apply"
+                    elif "created a course" in description_text or "created course" in description_text:
+                        action_key = "created_course"
+                    elif "course completed" in description_text or "completed a course" in description_text:
+                        action_key = "course_completed"
+                    elif "building destroyed" in description_text:
+                        action_key = "building_destroyed"
+                    elif "building constructed" in description_text:
+                        action_key = "building_constructed"
+                    elif "extension started" in description_text:
+                        action_key = "extension_started"
+                    elif "expansion finished" in description_text:
+                        action_key = "expansion_finished"
+                    elif "large scale mission started" in description_text or "large mission started" in description_text:
+                        action_key = "large_mission_started"
+                    elif "alliance event started" in description_text:
+                        action_key = "alliance_event_started"
+                    elif "set as staff" in description_text:
+                        action_key = "set_as_staff"
+                    elif "removed as staff" in description_text:
+                        action_key = "removed_as_staff"
+                    elif "removed event manager" in description_text:
+                        action_key = "removed_event_manager"
+                    elif "removed custom large scale mission" in description_text:
+                        action_key = "removed_custom_large_scale_mission"
+                    elif "promoted to event manager" in description_text:
+                        action_key = "promoted_to_event_manager"
+                    elif "contributed to the alliance" in description_text or "contribution" in description_text:
+                        action_key = "contributed_to_alliance"
+                    
+                    # Extract contribution amount from <span class="label">
+                    contribution_amount = 0
+                    label = desc_col.find('span', class_='label')
+                    if label:
+                        label_text = label.get_text(strip=True)
+                        # Extract number from "-500 Credits" or "+1000 Credits"
+                        match = re.search(r'([-+]?\d+)', label_text)
+                        if match:
+                            contribution_amount = int(match.group(1))
+                        # Remove label from description
+                        description = desc_col.get_text(strip=True).replace(label_text, '').strip()
+                    
+                    # Column 3: Affected (building/user/etc)
                     affected_name = ""
-                    affected_mc_id = ""
                     affected_url = ""
+                    affected_mc_id = ""
                     affected_type = ""
                     
-                    affected_link = cols[3].find('a', href=True)
-                    if affected_link:
-                        affected_name = affected_link.get_text(strip=True)
-                        href = affected_link['href']
-                        affected_url = f"https://www.missionchief.com{href}"
-                        
-                        # Determine type from URL
-                        if '/buildings/' in href:
-                            affected_type = 'building'
-                            id_match = re.search(r'/buildings/(\d+)', href)
-                            if id_match:
-                                affected_mc_id = id_match.group(1)
-                        elif '/missions/' in href:
-                            affected_type = 'mission'
-                            id_match = re.search(r'/missions/(\d+)', href)
-                            if id_match:
-                                affected_mc_id = id_match.group(1)
-                        elif '/vehicles/' in href:
-                            affected_type = 'vehicle'
-                            id_match = re.search(r'/vehicles/(\d+)', href)
-                            if id_match:
-                                affected_mc_id = id_match.group(1)
-                        elif '/users/' in href:
-                            affected_type = 'user'
-                            id_match = re.search(r'/users/(\d+)', href)
-                            if id_match:
-                                affected_mc_id = id_match.group(1)
+                    if len(cols) > 3:
+                        affected_link = cols[3].find('a', href=True)
+                        if affected_link:
+                            affected_name = affected_link.get_text(strip=True)
+                            affected_url = f"https://www.missionchief.com{affected_link['href']}"
+                            
+                            # Determine type from URL
+                            if '/buildings/' in affected_link['href']:
+                                affected_type = "building"
+                                match = re.search(r'/buildings/(\d+)', affected_link['href'])
+                                if match:
+                                    affected_mc_id = match.group(1)
+                            elif '/users/' in affected_link['href']:
+                                affected_type = "user"
+                                match = re.search(r'/users/(\d+)', affected_link['href'])
+                                if match:
+                                    affected_mc_id = match.group(1)
+                            elif '/missions/' in affected_link['href']:
+                                affected_type = "mission"
+                                match = re.search(r'/missions/(\d+)', affected_link['href'])
+                                if match:
+                                    affected_mc_id = match.group(1)
+                            elif '/vehicles/' in affected_link['href']:
+                                affected_type = "vehicle"
+                                match = re.search(r'/vehicles/(\d+)', affected_link['href'])
+                                if match:
+                                    affected_mc_id = match.group(1)
                     
-                    # Generate unique hash for deduplication
+                    # Generate unique hash for deduplication (like old scraper)
                     hash_string = f"{timestamp}{action_key}{executed_name}{affected_name}{description}"
                     log_hash = hashlib.sha256(hash_string.encode()).hexdigest()
                     
@@ -237,7 +312,7 @@ class LogsScraper(commands.Cog):
                         'hash': log_hash,
                         'ts': timestamp,
                         'action_key': action_key,
-                        'action_text': action_text,
+                        'action_text': description,
                         'executed_name': executed_name,
                         'executed_mc_id': executed_mc_id,
                         'executed_url': executed_url,
@@ -249,53 +324,31 @@ class LogsScraper(commands.Cog):
                         'contribution_amount': contribution_amount
                     })
                 
-                if self.debug_mode and logs:
-                    await self._debug_log(f"✅ Page {page_num}: {len(logs)} logs", ctx)
-                
+                await self._debug_log(f"✅ Page {page_num}: {len(logs)} logs", ctx)
                 return logs
                 
         except Exception as e:
-            await self._debug_log(f"❌ Error page {page_num}: {str(e)}", ctx)
-            import traceback
-            traceback.print_exc()
+            await self._debug_log(f"❌ Page {page_num} error: {e}", ctx)
             return []
     
-    async def _scrape_all_logs(self, ctx=None, max_pages=100):
-        """Scrape all pages of logs"""
+    async def _scrape_all_logs(self, ctx, max_pages=5):
+        """Scrape multiple pages of logs"""
         session = await self._get_session(ctx)
         if not session:
-            if ctx:
-                await ctx.send("❌ Failed to get session")
             return False
         
-        await self._debug_log(f"🚀 Starting logs scrape (max {max_pages} pages)", ctx)
+        await self._debug_log(f"🔄 Starting logs scrape (max {max_pages} pages)", ctx)
         
         all_logs = []
-        page = 1
-        empty_count = 0
-        
-        while page <= max_pages:
+        for page in range(1, max_pages + 1):
             logs = await self._scrape_logs_page(session, page, ctx)
+            all_logs.extend(logs)
             
-            if not logs:
-                empty_count += 1
-                if empty_count >= 3:
-                    await self._debug_log(f"⛔ Stopped after 3 empty pages", ctx)
-                    break
-            else:
-                all_logs.extend(logs)
-                empty_count = 0
-                
-                # Progress update every 50 pages
-                if page % 50 == 0 and ctx:
-                    await ctx.send(f"⏳ Progress: {page}/{max_pages} pages, {len(all_logs)} logs collected")
+            # Progress update every 10 pages
+            if page % 10 == 0:
+                await self._debug_log(f"📊 Progress: {page}/{max_pages} pages, {len(all_logs)} logs collected", ctx)
             
-            page += 1
-            await asyncio.sleep(1.5)
-        
-        if not all_logs:
-            await self._debug_log("⚠️ No logs found", ctx)
-            return False
+            await asyncio.sleep(1.5)  # Rate limiting
         
         # Store in database
         scraped_at = datetime.now().isoformat()
@@ -309,9 +362,9 @@ class LogsScraper(commands.Cog):
         for log in all_logs:
             try:
                 cursor.execute('''
-                    INSERT INTO logs (hash, ts, action_key, action_text, executed_name, executed_mc_id, executed_url,
-                                     affected_name, affected_type, affected_mc_id, affected_url, description, 
-                                     scraped_at, contribution_amount)
+                    INSERT INTO logs (hash, ts, action_key, action_text, executed_name,
+                                    executed_mc_id, executed_url, affected_name, affected_type,
+                                    affected_mc_id, affected_url, description, scraped_at, contribution_amount)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (log['hash'], log['ts'], log['action_key'], log['action_text'], log['executed_name'],
                       log['executed_mc_id'], log['executed_url'], log['affected_name'], log['affected_type'],
@@ -319,24 +372,14 @@ class LogsScraper(commands.Cog):
                       log['contribution_amount']))
                 inserted += 1
                 
-                # If it's a training course, also store in training_courses table
-                if log['action_key'] in ['created_course', 'created_a_course', 'course_completed']:
+                # Handle training courses
+                if log['action_key'] in ['created_course', 'course_completed']:
                     cursor.execute('''
-                        SELECT COUNT(*) FROM training_courses 
-                        WHERE username = ? AND course_name = ? AND log_timestamp = ?
-                    ''', (log['executed_name'], log['action_text'], log['ts']))
-                    count = cursor.fetchone()[0]
+                        INSERT INTO training_courses (log_id, course_name, username, timestamp)
+                        VALUES (last_insert_rowid(), ?, ?, ?)
+                    ''', (log['description'], log['executed_name'], log['ts']))
+                    training_inserted += 1
                     
-                    if count < 4:
-                        try:
-                            cursor.execute('''
-                                INSERT INTO training_courses (username, course_name, log_timestamp, occurrence)
-                                VALUES (?, ?, ?, ?)
-                            ''', (log['executed_name'], log['action_text'], log['ts'], count + 1))
-                            training_inserted += 1
-                        except sqlite3.IntegrityError:
-                            pass
-                
             except sqlite3.IntegrityError:
                 duplicates += 1
         
@@ -347,90 +390,11 @@ class LogsScraper(commands.Cog):
         
         if ctx:
             await ctx.send(f"✅ Scraped {len(all_logs)} logs\n"
-                          f"💾 {inserted} new logs, {training_inserted} training courses, {duplicates} duplicates")
+                          f"📊 {inserted} new logs, {training_inserted} training courses, {duplicates} duplicates")
+        
+        await self.config.last_scrape.set(datetime.now().isoformat())
         
         return True
-    
-    @commands.group(name="logs")
-    @commands.is_owner()
-    async def logs_group(self, ctx):
-        """Logs scraper commands"""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
-    
-    @logs_group.command(name="scrape")
-    async def scrape_logs(self, ctx, max_pages: int = 10):
-        """Manually scrape logs"""
-        await ctx.send(f"🔄 Starting logs scrape (max {max_pages} pages)...")
-        success = await self._scrape_all_logs(ctx, max_pages)
-        
-        if success:
-            await ctx.send("✅ Logs scrape completed")
-        else:
-            await ctx.send("❌ Logs scrape failed")
-    
-    @logs_group.command(name="backfill")
-    async def backfill_logs(self, ctx, max_pages: int = 200):
-        """Back-fill ALL historical logs"""
-        if max_pages < 1 or max_pages > 5000:
-            await ctx.send("❌ Max pages must be between 1 and 5000")
-            return
-        
-        await ctx.send(f"🔄 Starting back-fill (up to {max_pages} pages)...")
-        await ctx.send("⏳ This preserves original timestamps")
-        
-        success = await self._scrape_all_logs(ctx, max_pages)
-        
-        if success:
-            await ctx.send("✅ Back-fill completed!")
-        else:
-            await ctx.send("❌ Back-fill failed")
-    
-    @logs_group.command(name="debug")
-    async def toggle_debug(self, ctx, mode: str = None):
-        """Toggle debug mode (on/off)"""
-        if mode is None:
-            await ctx.send(f"Debug: {'ON' if self.debug_mode else 'OFF'}")
-            return
-        
-        if mode.lower() in ['on', '1', 'true']:
-            self.debug_mode = True
-            await ctx.send("✅ Debug ON")
-        else:
-            self.debug_mode = False
-            await ctx.send("✅ Debug OFF")
-    
-    @logs_group.command(name="stats")
-    async def show_stats(self, ctx):
-        """Show logs statistics"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT COUNT(*) FROM logs")
-        total_logs = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM training_courses")
-        total_training = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT MIN(ts), MAX(ts) FROM logs")
-        min_time, max_time = cursor.fetchone()
-        
-        cursor.execute("SELECT MAX(id) FROM logs")
-        max_id = cursor.fetchone()[0]
-        
-        conn.close()
-        
-        embed = discord.Embed(title="📜 Logs Statistics", color=discord.Color.green())
-        embed.add_field(name="Total Logs", value=f"{total_logs:,}", inline=True)
-        embed.add_field(name="Training Courses", value=f"{total_training:,}", inline=True)
-        embed.add_field(name="Max Log ID", value=f"{max_id:,}" if max_id else "0", inline=True)
-        
-        if min_time and max_time:
-            embed.add_field(name="Data Range", value=f"{min_time[:10]} to {max_time[:10]}", inline=False)
-        
-        embed.set_footer(text=f"Database: {self.db_path.name}")
-        
-        await ctx.send(embed=embed)
     
     async def get_logs_after(self, last_id: int, limit: int = 50):
         """Get logs after a specific ID - for alliance_logs_pub compatibility
@@ -465,3 +429,87 @@ class LogsScraper(commands.Cog):
         conn.close()
         
         return rows
+    
+    # ==================== COMMANDS ====================
+    
+    @commands.group(name="logs")
+    @commands.admin_or_permissions(administrator=True)
+    async def logs_group(self, ctx):
+        """Alliance logs scraper commands"""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+    
+    @logs_group.command(name="scrape")
+    async def scrape_logs(self, ctx, max_pages: int = 5):
+        """Manually scrape logs (max 100 pages)"""
+        if max_pages > 100:
+            await ctx.send("❌ Max 100 pages allowed")
+            return
+        
+        await ctx.send(f"🔄 Starting logs scrape (max {max_pages} pages)...")
+        success = await self._scrape_all_logs(ctx, max_pages)
+        
+        if success:
+            await ctx.send("✅ Logs scrape completed")
+        else:
+            await ctx.send("❌ Scrape failed - check CookieManager")
+    
+    @logs_group.command(name="backfill")
+    async def backfill_logs(self, ctx, max_pages: int = 100):
+        """Backfill historical logs (use with caution - can take a while!)"""
+        if max_pages > 500:
+            await ctx.send("❌ Max 500 pages allowed for backfill")
+            return
+        
+        await ctx.send(f"⚠️ Starting backfill of {max_pages} pages (~{max_pages * 1.5 / 60:.1f} minutes)...")
+        success = await self._scrape_all_logs(ctx, max_pages)
+        
+        if success:
+            await ctx.send(f"✅ Backfill completed!")
+        else:
+            await ctx.send("❌ Backfill failed")
+    
+    @logs_group.command(name="stats")
+    async def show_stats(self, ctx):
+        """Show logs statistics"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COUNT(*) FROM logs")
+        total_logs = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM training_courses")
+        total_courses = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT MAX(id) FROM logs")
+        max_id = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT MIN(ts), MAX(ts) FROM logs")
+        date_range = cursor.fetchone()
+        
+        conn.close()
+        
+        embed = discord.Embed(title="📊 Logs Statistics", color=discord.Color.blue())
+        embed.add_field(name="Total Logs", value=f"{total_logs:,}", inline=True)
+        embed.add_field(name="Training Courses", value=f"{total_courses:,}", inline=True)
+        embed.add_field(name="Max Log ID", value=f"{max_id:,}", inline=True)
+        embed.add_field(name="Data Range", value=f"{date_range[0]} to {date_range[1]}", inline=False)
+        embed.set_footer(text=f"Database: {self.db_path.name}")
+        
+        await ctx.send(embed=embed)
+    
+    @logs_group.command(name="debug")
+    async def toggle_debug(self, ctx, mode: str = None):
+        """Toggle debug mode (on/off)"""
+        if mode:
+            new_state = mode.lower() == "on"
+            await self.config.debug_mode.set(new_state)
+        else:
+            current = await self.config.debug_mode()
+            await self.config.debug_mode.set(not current)
+            new_state = not current
+        
+        await ctx.send(f"🔍 Debug mode: {'ON' if new_state else 'OFF'}")
+
+async def setup(bot):
+    await bot.add_cog(LogsScraper(bot))
