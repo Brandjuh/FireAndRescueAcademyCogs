@@ -10,7 +10,7 @@ import re
 import hashlib
 
 class LogsScraper(commands.Cog):
-    """Scrapes alliance logs from MissionChief"""
+    """Scrapes alliance logs from MissionChief with COMPLETE data"""
     
     def __init__(self, bot):
         self.bot = bot
@@ -19,7 +19,7 @@ class LogsScraper(commands.Cog):
         base_path = data_manager.cog_data_path(self.bot.get_cog("CookieManager"))
         db_dir = base_path.parent / "scraper_databases"
         db_dir.mkdir(exist_ok=True)
-        self.db_path = db_dir / "logs_v2.db"
+        self.db_path = db_dir / "logs_v3.db"  # New database with full schema
         
         self.logs_url = "https://www.missionchief.com/alliance_logfiles"
         self.debug_mode = False
@@ -28,21 +28,33 @@ class LogsScraper(commands.Cog):
         self.scrape_task = self.bot.loop.create_task(self._background_scraper())
     
     def _init_database(self):
-        """Initialize SQLite database"""
+        """Initialize SQLite database with complete schema"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS logs (
-                log_id INTEGER,
-                log_type TEXT NOT NULL,
-                username TEXT NOT NULL,
-                action TEXT,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hash TEXT UNIQUE,
+                ts TEXT,
+                action_key TEXT,
+                action_text TEXT,
+                executed_name TEXT,
+                executed_mc_id TEXT,
+                executed_url TEXT,
+                affected_name TEXT,
+                affected_type TEXT,
+                affected_mc_id TEXT,
+                affected_url TEXT,
                 description TEXT,
-                log_timestamp TEXT NOT NULL,
-                PRIMARY KEY (log_id)
+                scraped_at TEXT,
+                contribution_amount INTEGER DEFAULT 0
             )
         ''')
+        
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_hash ON logs(hash)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_action_key ON logs(action_key)')
         
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS training_courses (
@@ -111,7 +123,7 @@ class LogsScraper(commands.Cog):
                 pass
     
     async def _scrape_logs_page(self, session, page_num, ctx=None):
-        """Scrape a single page of logs"""
+        """Scrape a single page of logs with COMPLETE data extraction"""
         url = f"{self.logs_url}?page={page_num}"
         await self._debug_log(f"🌐 Page {page_num}: {url}", ctx)
         
@@ -122,67 +134,119 @@ class LogsScraper(commands.Cog):
                     return []
                 
                 html = await resp.text()
-                
                 soup = BeautifulSoup(html, 'html.parser')
                 logs = []
                 
-                # Find all table rows with log data
-                for tr in soup.find_all("tr"):
-                    # Skip header rows
-                    if tr.find("th"):
+                # Find the logs table
+                table = soup.find('table', class_='table')
+                if not table:
+                    return []
+                
+                tbody = table.find('tbody')
+                if not tbody:
+                    return []
+                
+                # Process each row
+                for tr in tbody.find_all('tr'):
+                    cols = tr.find_all('td')
+                    if len(cols) < 4:
                         continue
                     
-                    cols = tr.find_all("td")
-                    if len(cols) < 3:
-                        continue
+                    # Column 0: Date/Time
+                    timestamp = cols[0].get_text(strip=True).replace('\xa0', ' ')
                     
-                    # Extract log data
-                    timestamp_col = cols[0].get_text(strip=True)
-                    username_col = cols[1].get_text(strip=True) if len(cols) > 1 else ""
-                    action_col = cols[2].get_text(strip=True) if len(cols) > 2 else ""
+                    # Column 1: Executed by (with user link)
+                    executed_name = ""
+                    executed_mc_id = ""
+                    executed_url = ""
                     
-                    # Try to extract log ID from any links or data attributes
-                    log_id = None
-                    for link in tr.find_all('a', href=True):
-                        id_match = re.search(r'/(\d+)', link['href'])
-                        if id_match:
-                            log_id = int(id_match.group(1))
-                            break
+                    user_link = cols[1].find('a', href=True)
+                    if user_link:
+                        executed_name = user_link.get_text(strip=True)
+                        href = user_link['href']
+                        user_id_match = re.search(r'/users/(\d+)', href)
+                        if user_id_match:
+                            executed_mc_id = user_id_match.group(1)
+                            executed_url = f"https://www.missionchief.com{href}"
                     
-                    # If no ID found, generate one from timestamp + username
-                    if not log_id:
-                        log_id = hash(f"{timestamp_col}{username_col}{action_col}") % (10**10)
+                    # Determine action_key from icon
+                    action_key = "unknown"
+                    img = cols[1].find('img', src=True)
+                    if img:
+                        icon_match = re.search(r'/alliance_log/([^.]+)\.png', img['src'])
+                        if icon_match:
+                            action_key = icon_match.group(1)
                     
-                    # Extract username
-                    username_link = cols[1].find('a') if len(cols) > 1 else None
-                    username = username_link.get_text(strip=True) if username_link else username_col
+                    # Column 2: Description + contribution amount
+                    desc_col = cols[2]
+                    contribution_amount = 0
                     
-                    # Determine log type
-                    log_type = "unknown"
-                    action_lower = action_col.lower()
+                    # Extract contribution from <span class="label...">
+                    credit_span = desc_col.find('span', class_='label')
+                    if credit_span:
+                        credit_text = credit_span.get_text(strip=True)
+                        credit_span.decompose()  # Remove from tree
+                        
+                        # Parse credit amount (e.g., "-500 Credits" or "+1000 Credits")
+                        credit_match = re.search(r'([+-]?\d+)', credit_text)
+                        if credit_match:
+                            contribution_amount = int(credit_match.group(1))
                     
-                    if "added to" in action_lower or "joined" in action_lower:
-                        log_type = "added_to_alliance"
-                    elif "left" in action_lower:
-                        log_type = "left_alliance"
-                    elif "kicked" in action_lower:
-                        log_type = "kicked_from_alliance"
-                    elif "admin" in action_lower:
-                        log_type = "set_as_admin"
-                    elif "training" in action_lower or "course" in action_lower:
-                        log_type = "created_course"
-                    elif "completed" in action_lower:
-                        log_type = "course_completed"
-                    elif "contributed" in action_lower:
-                        log_type = "contributed_to_alliance"
+                    description = desc_col.get_text(strip=True)
+                    action_text = description
+                    
+                    # Column 3: Affected (building/mission/vehicle link)
+                    affected_name = ""
+                    affected_mc_id = ""
+                    affected_url = ""
+                    affected_type = ""
+                    
+                    affected_link = cols[3].find('a', href=True)
+                    if affected_link:
+                        affected_name = affected_link.get_text(strip=True)
+                        href = affected_link['href']
+                        affected_url = f"https://www.missionchief.com{href}"
+                        
+                        # Determine type from URL
+                        if '/buildings/' in href:
+                            affected_type = 'building'
+                            id_match = re.search(r'/buildings/(\d+)', href)
+                            if id_match:
+                                affected_mc_id = id_match.group(1)
+                        elif '/missions/' in href:
+                            affected_type = 'mission'
+                            id_match = re.search(r'/missions/(\d+)', href)
+                            if id_match:
+                                affected_mc_id = id_match.group(1)
+                        elif '/vehicles/' in href:
+                            affected_type = 'vehicle'
+                            id_match = re.search(r'/vehicles/(\d+)', href)
+                            if id_match:
+                                affected_mc_id = id_match.group(1)
+                        elif '/users/' in href:
+                            affected_type = 'user'
+                            id_match = re.search(r'/users/(\d+)', href)
+                            if id_match:
+                                affected_mc_id = id_match.group(1)
+                    
+                    # Generate unique hash for deduplication
+                    hash_string = f"{timestamp}{action_key}{executed_name}{affected_name}{description}"
+                    log_hash = hashlib.sha256(hash_string.encode()).hexdigest()
                     
                     logs.append({
-                        'log_id': log_id,
-                        'log_type': log_type,
-                        'username': username,
-                        'action': action_col,
-                        'description': action_col,
-                        'log_timestamp': timestamp_col
+                        'hash': log_hash,
+                        'ts': timestamp,
+                        'action_key': action_key,
+                        'action_text': action_text,
+                        'executed_name': executed_name,
+                        'executed_mc_id': executed_mc_id,
+                        'executed_url': executed_url,
+                        'affected_name': affected_name,
+                        'affected_type': affected_type,
+                        'affected_mc_id': affected_mc_id,
+                        'affected_url': affected_url,
+                        'description': description,
+                        'contribution_amount': contribution_amount
                     })
                 
                 if self.debug_mode and logs:
@@ -192,6 +256,8 @@ class LogsScraper(commands.Cog):
                 
         except Exception as e:
             await self._debug_log(f"❌ Error page {page_num}: {str(e)}", ctx)
+            import traceback
+            traceback.print_exc()
             return []
     
     async def _scrape_all_logs(self, ctx=None, max_pages=100):
@@ -255,14 +321,13 @@ class LogsScraper(commands.Cog):
                 
                 # If it's a training course, also store in training_courses table
                 if log['action_key'] in ['created_course', 'created_a_course', 'course_completed']:
-                    # Count existing occurrences
                     cursor.execute('''
                         SELECT COUNT(*) FROM training_courses 
                         WHERE username = ? AND course_name = ? AND log_timestamp = ?
                     ''', (log['executed_name'], log['action_text'], log['ts']))
                     count = cursor.fetchone()[0]
                     
-                    if count < 4:  # Allow up to 4 occurrences
+                    if count < 4:
                         try:
                             cursor.execute('''
                                 INSERT INTO training_courses (username, course_name, log_timestamp, occurrence)
@@ -347,10 +412,10 @@ class LogsScraper(commands.Cog):
         cursor.execute("SELECT COUNT(*) FROM training_courses")
         total_training = cursor.fetchone()[0]
         
-        cursor.execute("SELECT MIN(log_timestamp), MAX(log_timestamp) FROM logs")
+        cursor.execute("SELECT MIN(ts), MAX(ts) FROM logs")
         min_time, max_time = cursor.fetchone()
         
-        cursor.execute("SELECT MAX(log_id) FROM logs")
+        cursor.execute("SELECT MAX(id) FROM logs")
         max_id = cursor.fetchone()[0]
         
         conn.close()
