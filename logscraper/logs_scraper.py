@@ -7,6 +7,7 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 from pathlib import Path
 import re
+import hashlib
 
 class LogsScraper(commands.Cog):
     """Scrapes alliance logs from MissionChief"""
