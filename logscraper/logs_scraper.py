@@ -372,12 +372,8 @@ class LogsScraper(commands.Cog):
                       log['contribution_amount']))
                 inserted += 1
                 
-                # Handle training courses
+                # Count training courses (don't insert separately - data is in logs table)
                 if log['action_key'] in ['created_course', 'course_completed']:
-                    cursor.execute('''
-                        INSERT INTO training_courses (log_id, course_name, username, timestamp)
-                        VALUES (last_insert_rowid(), ?, ?, ?)
-                    ''', (log['description'], log['executed_name'], log['ts']))
                     training_inserted += 1
                     
             except sqlite3.IntegrityError:
