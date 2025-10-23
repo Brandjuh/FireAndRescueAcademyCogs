@@ -7,11 +7,7 @@ FIXED:
 - Better contribution display
 - Proper database integration
 - Error handling for infractions
-
-Integrates with:
-- MemberSync: Discord ↔ MC linking
-- AllianceScraper: MC member data, contributions, logs
-- SanctionManager: Sanctions/infractions
+- Using regular commands instead of hybrid for compatibility
 """
 
 from __future__ import annotations
@@ -22,7 +18,6 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
 
 import discord
-from discord import app_commands
 from redbot.core import commands, Config, checks
 from redbot.core.bot import Red
 from redbot.core.data_manager import cog_data_path
@@ -381,14 +376,9 @@ class MemberManager(ConfigCommands, commands.Cog):
     
     # ==================== COMMANDS ====================
     
-    @commands.hybrid_command(name="member")
+    @commands.command(name="member")
     @commands.guild_only()
-    async def member_info(
-        self,
-        ctx: commands.Context,
-        *,
-        target: str
-    ):
+    async def member_info(self, ctx, *, target: str):
         """
         Look up comprehensive member information.
         
@@ -401,175 +391,160 @@ class MemberManager(ConfigCommands, commands.Cog):
             await ctx.send("❌ You don't have permission to use this command.")
             return
         
-        await ctx.defer()
-        
-        # Resolve target
-        member_data = await self._resolve_target(ctx.guild, target)
-        
-        if not member_data:
-            await ctx.send(
-                f"❌ Could not find member matching `{target}`.\n"
-                f"Try using their Discord mention, MC ID, or exact name."
+        async with ctx.typing():
+            # Resolve target
+            member_data = await self._resolve_target(ctx.guild, target)
+            
+            if not member_data:
+                await ctx.send(
+                    f"❌ Could not find member matching `{target}`.\n"
+                    f"Try using their Discord mention, MC ID, or exact name."
+                )
+                return
+            
+            # Create view with member data
+            view = MemberOverviewView(
+                bot=self.bot,
+                db=self.db,
+                config=self.config,
+                member_data=member_data,
+                integrations={
+                    "membersync": self.membersync,
+                    "alliance_scraper": self.alliance_scraper,
+                    "sanction_manager": self.sanction_manager
+                },
+                invoker_id=ctx.author.id
             )
-            return
-        
-        # Create view with member data
-        view = MemberOverviewView(
-            bot=self.bot,
-            db=self.db,
-            config=self.config,
-            member_data=member_data,
-            integrations={
-                "membersync": self.membersync,
-                "alliance_scraper": self.alliance_scraper,
-                "sanction_manager": self.sanction_manager
-            },
-            invoker_id=ctx.author.id  # 🔧 FIX: Track who opened this view
-        )
-        
-        # Get initial embed
-        embed = await view.get_overview_embed()
-        
-        # Send message
-        message = await ctx.send(embed=embed, view=view)
-        view.message = message
+            
+            # Get initial embed
+            embed = await view.get_overview_embed()
+            
+            # Send message
+            message = await ctx.send(embed=embed, view=view)
+            view.message = message
     
-    @commands.hybrid_command(name="membersearch")
+    @commands.command(name="membersearch")
     @commands.guild_only()
-    async def member_search(
-        self,
-        ctx: commands.Context,
-        *,
-        query: str
-    ):
-        """
-        Search for members by name (fuzzy search).
-        """
+    async def member_search(self, ctx, *, query: str):
+        """Search for members by name (fuzzy search)."""
         if not await self._is_moderator(ctx.author):
             await ctx.send("❌ You don't have permission to use this command.")
             return
         
-        await ctx.defer()
-        
-        # Perform fuzzy search
-        results = await fuzzy_search_member(
-            target=query,
-            guild=ctx.guild,
-            membersync=self.membersync,
-            alliance_scraper=self.alliance_scraper,
-            limit=10
-        )
-        
-        if not results:
-            await ctx.send(f"❌ No members found matching `{query}`")
+        async with ctx.typing():
+            # Perform fuzzy search
+            results = await fuzzy_search_member(
+                target=query,
+                guild=ctx.guild,
+                membersync=self.membersync,
+                alliance_scraper=self.alliance_scraper,
+                limit=10
+            )
+            
+            if not results:
+                await ctx.send(f"❌ No members found matching `{query}`")
+                return
+            
+            # Format results
+            embed = discord.Embed(
+                title=f"🔍 Search Results: {query}",
+                color=discord.Color.blue()
+            )
+            
+            lines = []
+            for i, result in enumerate(results, 1):
+                discord_id = result.get("discord_id")
+                mc_id = result.get("mc_user_id")
+                name = result.get("name", "Unknown")
+                
+                line = f"{i}. **{name}**"
+                if discord_id:
+                    line += f" • <@{discord_id}>"
+                if mc_id:
+                    line += f" • MC: `{mc_id}`"
+                
+                lines.append(line)
+            
+            embed.description = "\n".join(lines)
+            embed.set_footer(text=f"Found {len(results)} result(s)")
+            
+            await ctx.send(embed=embed)
+    
+    @commands.command(name="memberstats")
+    @commands.guild_only()
+    async def member_stats(self, ctx):
+        """Show overall member management statistics."""
+        if not await self._is_admin(ctx.author):
+            await ctx.send("❌ You don't have permission to use this command.")
             return
         
-        # Format results
-        embed = discord.Embed(
-            title=f"🔍 Search Results: {query}",
-            color=discord.Color.blue()
-        )
-        
-        lines = []
-        for i, result in enumerate(results, 1):
-            discord_id = result.get("discord_id")
-            mc_id = result.get("mc_user_id")
-            name = result.get("name", "Unknown")
+        async with ctx.typing():
+            embed = discord.Embed(
+                title="📊 Member Management Statistics",
+                color=discord.Color.gold()
+            )
             
-            line = f"{i}. **{name}**"
-            if discord_id:
-                line += f" • <@{discord_id}>"
-            if mc_id:
-                line += f" • MC: `{mc_id}`"
+            try:
+                # Total notes
+                notes = await self.db.get_notes(limit=9999)
+                active_notes = len([n for n in notes if n["status"] == "active"])
+                
+                embed.add_field(
+                    name="📝 Notes",
+                    value=f"**Total:** {len(notes)}\n**Active:** {active_notes}",
+                    inline=True
+                )
+                
+                # Total infractions
+                infractions = await self.db.get_infractions(limit=9999)
+                active_infractions = len([i for i in infractions if i["status"] == "active"])
+                
+                embed.add_field(
+                    name="⚠️ Infractions",
+                    value=f"**Total:** {len(infractions)}\n**Active:** {active_infractions}",
+                    inline=True
+                )
+                
+                # Events
+                events = await self.db.get_events(limit=9999)
+                
+                embed.add_field(
+                    name="📅 Events",
+                    value=f"**Total:** {len(events)}",
+                    inline=True
+                )
+                
+                # Integration status
+                integrations = []
+                if self.membersync:
+                    integrations.append("✅ MemberSync")
+                else:
+                    integrations.append("❌ MemberSync")
+                
+                if self.alliance_scraper:
+                    integrations.append("✅ AllianceScraper")
+                else:
+                    integrations.append("❌ AllianceScraper")
+                
+                if self.sanction_manager:
+                    integrations.append("✅ SanctionManager")
+                else:
+                    integrations.append("❌ SanctionManager")
+                
+                embed.add_field(
+                    name="🔌 Integrations",
+                    value="\n".join(integrations),
+                    inline=False
+                )
+                
+            except Exception as e:
+                log.error(f"Error getting stats: {e}")
+                embed.description = "⚠️ Error retrieving statistics"
             
-            lines.append(line)
-        
-        embed.description = "\n".join(lines)
-        embed.set_footer(text=f"Found {len(results)} result(s)")
-        
-        await ctx.send(embed=embed)
+            await ctx.send(embed=embed)
 
-
-# ==================== SETUP FUNCTION ====================
 
 async def setup(bot: Red):
     """Required setup function for Red-DiscordBot cog loading."""
     cog = MemberManager(bot)
     await bot.add_cog(cog)
-    
-    @commands.hybrid_command(name="memberstats")
-    @commands.guild_only()
-    async def member_stats(self, ctx: commands.Context):
-        """
-        Show overall member management statistics.
-        """
-        if not await self._is_admin(ctx.author):
-            await ctx.send("❌ You don't have permission to use this command.")
-            return
-        
-        await ctx.defer()
-        
-        # Get stats from database
-        embed = discord.Embed(
-            title="📊 Member Management Statistics",
-            color=discord.Color.gold()
-        )
-        
-        try:
-            # Total notes
-            notes = await self.db.get_notes(limit=9999)
-            active_notes = len([n for n in notes if n["status"] == "active"])
-            
-            embed.add_field(
-                name="📝 Notes",
-                value=f"**Total:** {len(notes)}\n**Active:** {active_notes}",
-                inline=True
-            )
-            
-            # Total infractions
-            infractions = await self.db.get_infractions(limit=9999)
-            active_infractions = len([i for i in infractions if i["status"] == "active"])
-            
-            embed.add_field(
-                name="⚠️ Infractions",
-                value=f"**Total:** {len(infractions)}\n**Active:** {active_infractions}",
-                inline=True
-            )
-            
-            # Events
-            events = await self.db.get_events(limit=9999)
-            
-            embed.add_field(
-                name="📅 Events",
-                value=f"**Total:** {len(events)}",
-                inline=True
-            )
-            
-            # Integration status
-            integrations = []
-            if self.membersync:
-                integrations.append("✅ MemberSync")
-            else:
-                integrations.append("❌ MemberSync")
-            
-            if self.alliance_scraper:
-                integrations.append("✅ AllianceScraper")
-            else:
-                integrations.append("❌ AllianceScraper")
-            
-            if self.sanction_manager:
-                integrations.append("✅ SanctionManager")
-            else:
-                integrations.append("❌ SanctionManager")
-            
-            embed.add_field(
-                name="🔌 Integrations",
-                value="\n".join(integrations),
-                inline=False
-            )
-            
-        except Exception as e:
-            log.error(f"Error getting stats: {e}")
-            embed.description = "⚠️ Error retrieving statistics"
-        
-        await ctx.send(embed=embed)
