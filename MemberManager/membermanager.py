@@ -488,6 +488,14 @@ class MemberManager(ConfigCommands, commands.Cog):
         embed.set_footer(text=f"Found {len(results)} result(s)")
         
         await ctx.send(embed=embed)
+
+
+# ==================== SETUP FUNCTION ====================
+
+async def setup(bot: Red):
+    """Required setup function for Red-DiscordBot cog loading."""
+    cog = MemberManager(bot)
+    await bot.add_cog(cog)
     
     @commands.hybrid_command(name="memberstats")
     @commands.guild_only()
