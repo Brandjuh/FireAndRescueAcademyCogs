@@ -8,23 +8,14 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
-from pathlib import Path
 
-import discord
 import aiosqlite
-from redbot.core import commands, Config, checks
-from redbot.core.bot import Red
+import discord
+from redbot.core import commands, checks, Config
 from redbot.core.data_manager import cog_data_path
 import pytz
 
-log = logging.getLogger("red.leaderboard")
-
-DEFAULTS = {
-    "daily_earned_channel": None,
-    "daily_contrib_channel": None,
-    "monthly_earned_channel": None,
-    "monthly_contrib_channel": None,
-}
+logger = logging.getLogger("red.leaderboard")
 
 MEDALS = {
     1: "🥇",
@@ -44,727 +35,731 @@ BLACKLISTED_USERNAMES = [
     "25,000",  # Parsed username as amount
 ]
 
-# Sanity check: INT64_MAX indicates parsing error
-INT64_MAX = 9223372036854775807
-
-
 class Leaderboard(commands.Cog):
-    """Alliance leaderboard system - daily and monthly top 10 rankings."""
-
-    def __init__(self, bot: Red):
+    """Daily and monthly top 10 rankings for alliance contributions and earned credits."""
+    
+    def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0x4C45414442, force_registration=True)
-        self.config.register_global(**DEFAULTS)
+        self.config = Config.get_conf(self, identifier=1234567890123, force_registration=True)
         
-        # NEW: Use scraper_databases folder
+        default_guild = {
+            "daily_earned_channel": None,
+            "daily_contrib_channel": None,
+            "monthly_earned_channel": None,
+            "monthly_contrib_channel": None,
+        }
+        self.config.register_guild(**default_guild)
+        
+        # Database paths for new scraper_databases structure
         base_path = cog_data_path(raw_name="scraper_databases")
         self.members_db_path = base_path / "members_v2.db"
         self.income_db_path = base_path / "income_v2.db"
         
-        self._daily_task: Optional[asyncio.Task] = None
-        self._monthly_task: Optional[asyncio.Task] = None
-
-    async def cog_load(self):
-        """Start background tasks on cog load."""
-        self._daily_task = asyncio.create_task(self._daily_loop())
-        self._monthly_task = asyncio.create_task(self._monthly_loop())
-        log.info("Leaderboard cog loaded - tasks started")
-
-    async def cog_unload(self):
-        """Cancel background tasks on cog unload."""
-        if self._daily_task:
-            self._daily_task.cancel()
-        if self._monthly_task:
-            self._monthly_task.cancel()
-        log.info("Leaderboard cog unloaded")
-
-    # ==================== BACKGROUND TASKS ====================
-
-    async def _daily_loop(self):
-        """Daily leaderboard posting loop - runs at 06:00 Amsterdam time."""
-        await self.bot.wait_until_ready()
-        tz = pytz.timezone('Europe/Amsterdam')
+        # Timezone for Amsterdam
+        self.tz = pytz.timezone('Europe/Amsterdam')
         
-        while True:
+        # Start scheduled tasks
+        self.daily_task = self.bot.loop.create_task(self._daily_leaderboard_loop())
+        self.monthly_task = self.bot.loop.create_task(self._monthly_leaderboard_loop())
+        
+        logger.info("Leaderboard cog initialized with new database structure")
+    
+    def cog_unload(self):
+        """Cancel tasks on unload."""
+        if self.daily_task:
+            self.daily_task.cancel()
+        if self.monthly_task:
+            self.monthly_task.cancel()
+    
+    def _filter_invalid_entries(self, entries: List[Dict]) -> List[Dict]:
+        """
+        Filter out invalid/corrupted entries.
+        Returns list of valid entries.
+        """
+        valid_entries = []
+        
+        for entry in entries:
+            username = entry.get("username", "")
+            user_id = entry.get("user_id", "")
+            credits = entry.get("credits", 0)
+            
+            # Check blacklists
+            if user_id in BLACKLISTED_USER_IDS:
+                logger.info(f"Filtered blacklisted user_id: {user_id}")
+                continue
+                
+            if username in BLACKLISTED_USERNAMES:
+                logger.info(f"Filtered blacklisted username: {username}")
+                continue
+            
+            # Filter INT64_MAX (parsing error fallback)
+            if credits == 9223372036854775807:
+                logger.info(f"Filtered INT64_MAX value for {username}")
+                continue
+            
+            # Filter usernames that are ONLY digits and longer than 10 chars
+            # (likely scraped IDs instead of usernames)
+            if username.replace(",", "").replace(".", "").isdigit() and len(username.replace(",", "").replace(".", "")) > 10:
+                logger.info(f"Filtered numeric username (likely ID): {username}")
+                continue
+            
+            # NEW: Filter if username contains large numbers that match the credit amount
+            # This catches cases where scraper parsed username as credits
+            username_digits = ''.join(c for c in username if c.isdigit())
+            if username_digits and len(username_digits) >= 5:
+                # Check if the digits in username roughly match the credit amount
+                try:
+                    username_number = int(username_digits)
+                    # If username number is within 10% of credits, likely parsing error
+                    if credits > 0 and abs(username_number - credits) / credits < 0.1:
+                        logger.info(f"Filtered username/credit mismatch: {username} has {credits:,} credits (username contains {username_number:,})")
+                        continue
+                except ValueError:
+                    pass
+            
+            valid_entries.append(entry)
+        
+        return valid_entries
+    
+    async def _get_earned_credits_rankings(self, period: str) -> Optional[Dict]:
+        """
+        Get earned credits rankings from members_v2.db.
+        Calculates DELTA between current and previous timestamps.
+        Returns dict with 'current' and 'previous' lists of {username, credits, rank}
+        """
+        if not self.members_db_path.exists():
+            logger.error("members_v2.db not found")
+            return None
+        
+        try:
+            async with aiosqlite.connect(self.members_db_path) as db:
+                # Determine lookback period
+                lookback_hours = 24 if period == "daily" else 30 * 24  # 30 days for monthly
+                
+                # Get the two most recent timestamps
+                query = """
+                    SELECT DISTINCT timestamp
+                    FROM members
+                    ORDER BY timestamp DESC
+                    LIMIT 2
+                """
+                
+                async with db.execute(query) as cursor:
+                    timestamps = await cursor.fetchall()
+                
+                if len(timestamps) < 2:
+                    logger.warning("Not enough timestamps for earned credits comparison")
+                    return None
+                
+                current_ts = timestamps[0][0]
+                
+                # Calculate lookback timestamp
+                current_dt = datetime.fromisoformat(current_ts)
+                lookback_dt = current_dt - timedelta(hours=lookback_hours)
+                
+                logger.info(f"Earned credits {period} - Current: {current_ts}, Lookback: {lookback_dt.isoformat()}")
+                
+                # Get current credits for all members
+                query = """
+                    SELECT member_id, username, earned_credits
+                    FROM members
+                    WHERE timestamp = ?
+                    AND earned_credits > 0
+                """
+                
+                async with db.execute(query, (current_ts,)) as cursor:
+                    current_data = await cursor.fetchall()
+                
+                if not current_data:
+                    logger.warning("No current data found")
+                    return None
+                
+                # Get credits from lookback period (find closest timestamp)
+                query = """
+                    SELECT DISTINCT timestamp
+                    FROM members
+                    WHERE timestamp <= ?
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                """
+                
+                async with db.execute(query, (lookback_dt.isoformat(),)) as cursor:
+                    lookback_result = await cursor.fetchone()
+                
+                if not lookback_result:
+                    logger.warning("No lookback timestamp found")
+                    return None
+                
+                lookback_ts = lookback_result[0]
+                logger.info(f"Using lookback timestamp: {lookback_ts}")
+                
+                # Get lookback credits
+                query = """
+                    SELECT member_id, earned_credits
+                    FROM members
+                    WHERE timestamp = ?
+                """
+                
+                async with db.execute(query, (lookback_ts,)) as cursor:
+                    lookback_data = await cursor.fetchall()
+                
+                # Build lookback map
+                lookback_map = {member_id: credits for member_id, credits in lookback_data}
+                
+                # Calculate deltas
+                delta_list = []
+                for member_id, username, current_credits in current_data:
+                    lookback_credits = lookback_map.get(member_id, current_credits)
+                    delta = current_credits - lookback_credits
+                    
+                    if delta > 0:  # Only include members with positive growth
+                        delta_list.append({
+                            "username": username,
+                            "credits": delta,
+                            "user_id": str(member_id)
+                        })
+                
+                if not delta_list:
+                    logger.warning("No members with positive credit growth")
+                    return None
+                
+                # Filter invalid entries
+                delta_filtered = self._filter_invalid_entries(delta_list)
+                
+                # Sort by delta and get top 10
+                delta_filtered.sort(key=lambda x: x["credits"], reverse=True)
+                current_rankings = delta_filtered[:10]
+                
+                # Add ranks
+                for i, entry in enumerate(current_rankings, 1):
+                    entry["rank"] = i
+                
+                # For previous period, do the same calculation but with older timestamps
+                # Get timestamp for previous period
+                previous_lookback_dt = lookback_dt - timedelta(hours=lookback_hours)
+                
+                query = """
+                    SELECT DISTINCT timestamp
+                    FROM members
+                    WHERE timestamp <= ?
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                """
+                
+                async with db.execute(query, (previous_lookback_dt.isoformat(),)) as cursor:
+                    prev_lookback_result = await cursor.fetchone()
+                
+                previous_rankings = []
+                if prev_lookback_result:
+                    prev_lookback_ts = prev_lookback_result[0]
+                    
+                    # Get previous period data
+                    async with db.execute("SELECT member_id, username, earned_credits FROM members WHERE timestamp = ?", 
+                                        (lookback_ts,)) as cursor:
+                        prev_current_data = await cursor.fetchall()
+                    
+                    async with db.execute("SELECT member_id, earned_credits FROM members WHERE timestamp = ?",
+                                        (prev_lookback_ts,)) as cursor:
+                        prev_lookback_data = await cursor.fetchall()
+                    
+                    prev_lookback_map = {member_id: credits for member_id, credits in prev_lookback_data}
+                    
+                    prev_delta_list = []
+                    for member_id, username, credits in prev_current_data:
+                        prev_lookback_credits = prev_lookback_map.get(member_id, credits)
+                        delta = credits - prev_lookback_credits
+                        
+                        if delta > 0:
+                            prev_delta_list.append({
+                                "username": username,
+                                "credits": delta,
+                                "user_id": str(member_id)
+                            })
+                    
+                    prev_delta_filtered = self._filter_invalid_entries(prev_delta_list)
+                    prev_delta_filtered.sort(key=lambda x: x["credits"], reverse=True)
+                    previous_rankings = prev_delta_filtered[:20]
+                    
+                    for i, entry in enumerate(previous_rankings, 1):
+                        entry["rank"] = i
+                
+                return {
+                    "current": current_rankings,
+                    "previous": previous_rankings
+                }
+                
+        except Exception as e:
+            logger.error(f"Error getting earned credits rankings: {e}", exc_info=True)
+            return None
+    
+    async def _get_treasury_rankings(self, period: str) -> Optional[Dict]:
+        """
+        Get treasury contribution rankings from income_v2.db.
+        NOTE: IncomeScraper stores member contributions as 'expense' type!
+        We filter out period='paginated' which contains actual expenses (African Prison, etc.)
+        Returns dict with 'current' and 'previous' lists of {username, credits, rank}
+        """
+        if not self.income_db_path.exists():
+            logger.error("income_v2.db not found")
+            return None
+        
+        try:
+            async with aiosqlite.connect(self.income_db_path) as db:
+                # Get the two most recent timestamps for this period
+                # Filter out 'paginated' period (those are actual expenses, not contributions)
+                query = """
+                    SELECT DISTINCT timestamp
+                    FROM income
+                    WHERE entry_type = 'expense' 
+                    AND period = ?
+                    ORDER BY timestamp DESC
+                    LIMIT 2
+                """
+                
+                async with db.execute(query, (period,)) as cursor:
+                    timestamps = await cursor.fetchall()
+                
+                if not timestamps:
+                    logger.warning(f"No timestamp found for treasury {period}")
+                    return None
+                
+                current_ts = timestamps[0][0]
+                previous_ts = timestamps[1][0] if len(timestamps) > 1 else None
+                
+                logger.info(f"Treasury {period} - Current: {current_ts}, Previous: {previous_ts}")
+                
+                # Get current period rankings (fetch more to account for filtering)
+                query = """
+                    SELECT username, amount as credits
+                    FROM income
+                    WHERE entry_type = 'expense'
+                    AND period = ?
+                    AND timestamp = ?
+                    ORDER BY amount DESC
+                    LIMIT 30
+                """
+                
+                async with db.execute(query, (period, current_ts)) as cursor:
+                    current_raw = await cursor.fetchall()
+                
+                # Convert to dict format and filter
+                current_data = [
+                    {"username": username, "credits": credits}
+                    for username, credits in current_raw
+                ]
+                current_filtered = self._filter_invalid_entries(current_data)
+                current_rankings = current_filtered[:10]  # Take top 10 after filtering
+                
+                # Add ranks
+                for i, entry in enumerate(current_rankings, 1):
+                    entry["rank"] = i
+                
+                # Get previous period rankings if available
+                previous_rankings = []
+                if previous_ts:
+                    async with db.execute(query, (period, previous_ts)) as cursor:
+                        previous_raw = await cursor.fetchall()
+                    
+                    previous_data = [
+                        {"username": username, "credits": credits}
+                        for username, credits in previous_raw
+                    ]
+                    previous_filtered = self._filter_invalid_entries(previous_data)
+                    previous_rankings = previous_filtered[:20]  # Keep more for comparison
+                    
+                    for i, entry in enumerate(previous_rankings, 1):
+                        entry["rank"] = i
+                
+                return {
+                    "current": current_rankings,
+                    "previous": previous_rankings
+                }
+                
+        except Exception as e:
+            logger.error(f"Error getting treasury rankings: {e}", exc_info=True)
+            return None
+    
+    def _calculate_rank_changes(self, current: List[Dict], previous: List[Dict]) -> List[Tuple[Dict, str]]:
+        """
+        Calculate rank changes between current and previous periods.
+        Returns list of (entry, change_indicator) tuples.
+        """
+        # Build previous rank map
+        prev_map = {entry["username"]: entry["rank"] for entry in previous}
+        
+        results = []
+        for entry in current:
+            username = entry["username"]
+            current_rank = entry["rank"]
+            
+            if username not in prev_map:
+                # New in top 10
+                indicator = "🆕"
+            else:
+                prev_rank = prev_map[username]
+                rank_change = prev_rank - current_rank
+                
+                if rank_change > 0:
+                    # Moved up
+                    indicator = f"▲ +{rank_change}"
+                elif rank_change < 0:
+                    # Moved down
+                    indicator = f"▼ {rank_change}"
+                else:
+                    # Same position
+                    indicator = "━"
+            
+            results.append((entry, indicator))
+        
+        return results
+    
+    def _create_leaderboard_embed(self, title: str, rankings_data: Optional[Dict], 
+                                  leaderboard_type: str, is_test: bool = False) -> discord.Embed:
+        """
+        Create a leaderboard embed from rankings data.
+        leaderboard_type: 'earned' or 'contrib'
+        """
+        if is_test:
+            title += " (TEST)"
+        
+        embed = discord.Embed(
+            title=f"🏆 {title}",
+            color=discord.Color.gold(),
+            timestamp=datetime.now(self.tz)
+        )
+        
+        if not rankings_data or not rankings_data.get("current"):
+            embed.description = "No data available for this period."
+            embed.set_footer(text="Rankings based on last 24 hours • Using new scraper_databases")
+            return embed
+        
+        current = rankings_data["current"]
+        previous = rankings_data["previous"]
+        
+        # Calculate rank changes
+        rankings_with_changes = self._calculate_rank_changes(current, previous)
+        
+        # Build leaderboard text
+        lines = []
+        for entry, change_indicator in rankings_with_changes:
+            rank = entry["rank"]
+            username = entry["username"]
+            credits = entry["credits"]
+            
+            # Medal for top 3
+            medal = MEDALS.get(rank, "")
+            
+            # Format: 🥇 Username - 1,234,567 credits ▲ +2
+            rank_str = f"#{rank:02d}" if rank > 3 else medal
+            line = f"{rank_str} **{username}** - {credits:,} credits `{change_indicator}`"
+            lines.append(line)
+        
+        embed.description = "\n".join(lines)
+        
+        period_text = "last 24 hours" if "Daily" in title else "last 30 days"
+        embed.set_footer(text=f"Rankings based on {period_text} • Using new scraper_databases")
+        
+        return embed
+    
+    async def _post_leaderboard(self, guild: discord.Guild, channel_id: int, 
+                               embed: discord.Embed) -> bool:
+        """Post leaderboard embed to specified channel."""
+        if not channel_id:
+            return False
+        
+        channel = guild.get_channel(channel_id)
+        if not channel:
+            logger.warning(f"Channel {channel_id} not found in guild {guild.id}")
+            return False
+        
+        try:
+            await channel.send(embed=embed)
+            return True
+        except discord.Forbidden:
+            logger.error(f"No permission to post in channel {channel_id}")
+            return False
+        except Exception as e:
+            logger.error(f"Error posting leaderboard: {e}", exc_info=True)
+            return False
+    
+    async def _daily_leaderboard_loop(self):
+        """Daily leaderboard posting at 06:00 Amsterdam time."""
+        await self.bot.wait_until_ready()
+        
+        while not self.bot.is_closed():
             try:
-                now = datetime.now(tz)
+                now = datetime.now(self.tz)
+                
                 # Calculate next 06:00
                 target = now.replace(hour=6, minute=0, second=0, microsecond=0)
                 if now >= target:
                     target += timedelta(days=1)
                 
                 wait_seconds = (target - now).total_seconds()
-                log.info(f"Daily leaderboard: waiting {wait_seconds:.0f}s until {target}")
+                logger.info(f"Next daily leaderboard in {wait_seconds/3600:.1f} hours")
                 
                 await asyncio.sleep(wait_seconds)
                 
-                # Post daily leaderboards
-                await self._post_daily_leaderboards()
+                # Post to all guilds
+                for guild in self.bot.guilds:
+                    guild_config = await self.config.guild(guild).all()
+                    
+                    # Daily Earned Credits
+                    if guild_config["daily_earned_channel"]:
+                        data = await self._get_earned_credits_rankings("daily")
+                        embed = self._create_leaderboard_embed(
+                            "Daily Top 10 - Earned Credits",
+                            data,
+                            "earned"
+                        )
+                        await self._post_leaderboard(guild, guild_config["daily_earned_channel"], embed)
+                    
+                    # Daily Contributions
+                    if guild_config["daily_contrib_channel"]:
+                        data = await self._get_treasury_rankings("daily")
+                        embed = self._create_leaderboard_embed(
+                            "Daily Top 10 - Treasury Contributions",
+                            data,
+                            "contrib"
+                        )
+                        await self._post_leaderboard(guild, guild_config["daily_contrib_channel"], embed)
                 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                log.exception(f"Error in daily leaderboard loop: {e}")
-                await asyncio.sleep(300)  # Wait 5 minutes on error
-
-    async def _monthly_loop(self):
-        """Monthly leaderboard posting loop - runs on last day of month at 06:00 Amsterdam time."""
+                logger.error(f"Error in daily leaderboard loop: {e}", exc_info=True)
+                await asyncio.sleep(3600)  # Wait 1 hour on error
+    
+    async def _monthly_leaderboard_loop(self):
+        """Monthly leaderboard posting on last day of month at 06:00 Amsterdam time."""
         await self.bot.wait_until_ready()
-        tz = pytz.timezone('Europe/Amsterdam')
         
-        while True:
+        while not self.bot.is_closed():
             try:
-                now = datetime.now(tz)
+                now = datetime.now(self.tz)
                 
                 # Calculate next last day of month at 06:00
-                # Try this month first
-                last_day = self._get_last_day_of_month(now.year, now.month)
-                target = now.replace(day=last_day, hour=6, minute=0, second=0, microsecond=0)
+                # Move to next month, then subtract 1 day
+                if now.month == 12:
+                    next_month = now.replace(year=now.year + 1, month=1, day=1)
+                else:
+                    next_month = now.replace(month=now.month + 1, day=1)
                 
-                # If we're past that time, go to next month
+                last_day = next_month - timedelta(days=1)
+                target = last_day.replace(hour=6, minute=0, second=0, microsecond=0)
+                
+                # If we're past this month's target, calculate for next month
                 if now >= target:
-                    next_month = now.month + 1 if now.month < 12 else 1
-                    next_year = now.year if now.month < 12 else now.year + 1
-                    last_day = self._get_last_day_of_month(next_year, next_month)
-                    target = datetime(next_year, next_month, last_day, 6, 0, 0, tzinfo=tz)
+                    if target.month == 12:
+                        next_month = target.replace(year=target.year + 1, month=1, day=1)
+                    else:
+                        next_month = target.replace(month=target.month + 1, day=1)
+                    
+                    last_day = next_month - timedelta(days=1)
+                    target = last_day.replace(hour=6, minute=0, second=0, microsecond=0)
                 
                 wait_seconds = (target - now).total_seconds()
-                log.info(f"Monthly leaderboard: waiting {wait_seconds:.0f}s until {target}")
+                logger.info(f"Next monthly leaderboard on {target.date()} ({wait_seconds/86400:.1f} days)")
                 
                 await asyncio.sleep(wait_seconds)
                 
-                # Post monthly leaderboards
-                await self._post_monthly_leaderboards()
+                # Post to all guilds
+                for guild in self.bot.guilds:
+                    guild_config = await self.config.guild(guild).all()
+                    
+                    # Monthly Earned Credits
+                    if guild_config["monthly_earned_channel"]:
+                        data = await self._get_earned_credits_rankings("monthly")
+                        embed = self._create_leaderboard_embed(
+                            "Monthly Top 10 - Earned Credits",
+                            data,
+                            "earned"
+                        )
+                        await self._post_leaderboard(guild, guild_config["monthly_earned_channel"], embed)
+                    
+                    # Monthly Contributions
+                    if guild_config["monthly_contrib_channel"]:
+                        data = await self._get_treasury_rankings("monthly")
+                        embed = self._create_leaderboard_embed(
+                            "Monthly Top 10 - Treasury Contributions",
+                            data,
+                            "contrib"
+                        )
+                        await self._post_leaderboard(guild, guild_config["monthly_contrib_channel"], embed)
                 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                log.exception(f"Error in monthly leaderboard loop: {e}")
-                await asyncio.sleep(300)
-
-    def _get_last_day_of_month(self, year: int, month: int) -> int:
-        """Get last day of given month."""
-        if month == 12:
-            next_month = datetime(year + 1, 1, 1)
-        else:
-            next_month = datetime(year, month + 1, 1)
-        last_day = next_month - timedelta(days=1)
-        return last_day.day
-
-    # ==================== POSTING LOGIC ====================
-
-    async def _post_daily_leaderboards(self):
-        """Post both daily earned credits and contributions leaderboards."""
-        log.info("Posting daily leaderboards...")
-        
-        # Get earned credits data
-        earned_data = await self._get_earned_credits_rankings(period='daily')
-        if earned_data:
-            earned_embed = self._create_leaderboard_embed(
-                title="🏆 Daily Top 10 - Earned Credits",
-                current_rankings=earned_data['current'],
-                previous_rankings=earned_data['previous'],
-                period='daily',
-                metric='earned_credits'
-            )
-            channel_id = await self.config.daily_earned_channel()
-            if channel_id:
-                await self._send_to_channel(channel_id, earned_embed)
-        
-        # Get treasury contributions data
-        contrib_data = await self._get_treasury_rankings(period='daily')
-        if contrib_data:
-            contrib_embed = self._create_leaderboard_embed(
-                title="💰 Daily Top 10 - Treasury Contributions",
-                current_rankings=contrib_data['current'],
-                previous_rankings=contrib_data['previous'],
-                period='daily',
-                metric='contributions'
-            )
-            channel_id = await self.config.daily_contrib_channel()
-            if channel_id:
-                await self._send_to_channel(channel_id, contrib_embed)
-
-    async def _post_monthly_leaderboards(self):
-        """Post both monthly earned credits and contributions leaderboards."""
-        log.info("Posting monthly leaderboards...")
-        
-        # Get earned credits data
-        earned_data = await self._get_earned_credits_rankings(period='monthly')
-        if earned_data:
-            earned_embed = self._create_leaderboard_embed(
-                title="🏆 Monthly Top 10 - Earned Credits",
-                current_rankings=earned_data['current'],
-                previous_rankings=earned_data['previous'],
-                period='monthly',
-                metric='earned_credits'
-            )
-            channel_id = await self.config.monthly_earned_channel()
-            if channel_id:
-                await self._send_to_channel(channel_id, earned_embed)
-        
-        # Get treasury contributions data
-        contrib_data = await self._get_treasury_rankings(period='monthly')
-        if contrib_data:
-            contrib_embed = self._create_leaderboard_embed(
-                title="💰 Monthly Top 10 - Treasury Contributions",
-                current_rankings=contrib_data['current'],
-                previous_rankings=contrib_data['previous'],
-                period='monthly',
-                metric='contributions'
-            )
-            channel_id = await self.config.monthly_contrib_channel()
-            if channel_id:
-                await self._send_to_channel(channel_id, contrib_embed)
-
-    async def _send_to_channel(self, channel_id: int, embed: discord.Embed):
-        """Send embed to specified channel."""
-        try:
-            channel = self.bot.get_channel(channel_id)
-            if channel:
-                await channel.send(embed=embed)
-                log.info(f"Posted leaderboard to channel {channel_id}")
-            else:
-                log.warning(f"Channel {channel_id} not found")
-        except Exception as e:
-            log.exception(f"Error sending to channel {channel_id}: {e}")
-
-    # ==================== FILTERING ====================
-
-    def _filter_invalid_entries(self, rankings: List[Dict], metric: str) -> List[Dict]:
-        """Filter out corrupted/invalid entries from rankings."""
-        filtered = []
-        for entry in rankings:
-            member_id = str(entry.get('member_id', ''))
-            username = entry.get('username', '')
-            
-            # Check blacklists
-            if member_id in BLACKLISTED_USER_IDS:
-                log.warning(f"Filtered blacklisted member_id: {member_id}")
-                continue
-            
-            if username in BLACKLISTED_USERNAMES:
-                log.warning(f"Filtered blacklisted username: {username}")
-                continue
-            
-            # Check for INT64_MAX (parsing error indicator)
-            if metric == 'earned_credits':
-                value = entry.get('earned_credits', 0)
-            else:
-                value = entry.get('amount', 0)
-            
-            if value >= INT64_MAX:
-                log.warning(f"Filtered INT64_MAX value for {username}: {value}")
-                continue
-            
-            # Check for suspiciously numeric usernames (likely IDs)
-            if username and username.isdigit() and len(username) > 10:
-                log.warning(f"Filtered numeric username (likely ID): {username}")
-                continue
-            
-            filtered.append(entry)
-        
-        return filtered
-
-    # ==================== DATA RETRIEVAL ====================
-
-    async def _get_earned_credits_rankings(self, period: str) -> Optional[Dict]:
-        """
-        Get earned credits rankings from members_v2.db.
-        Calculates DELTA between current and previous timestamps.
-        Returns dict with 'current' and 'previous' rankings.
-        """
-        if not self.members_db_path.exists():
-            log.error(f"Database not found at {self.members_db_path}")
-            return None
-
-        async with aiosqlite.connect(self.members_db_path) as db:
-            db.row_factory = aiosqlite.Row
-            
-            # Get most recent timestamp
-            cur = await db.execute("""
-                SELECT MAX(timestamp) as latest FROM members
-            """)
-            row = await cur.fetchone()
-            if not row or not row['latest']:
-                log.error("No timestamps found in members table")
-                return None
-            
-            current_time = row['latest']
-            log.info(f"Current timestamp: {current_time}")
-            
-            # Calculate previous time based on period
-            if period == 'daily':
-                dt = datetime.fromisoformat(current_time)
-                previous_dt = dt - timedelta(days=1)
-            else:  # monthly
-                dt = datetime.fromisoformat(current_time)
-                previous_dt = dt - timedelta(days=30)
-            
-            previous_time = previous_dt.isoformat()
-            log.info(f"Looking for timestamp <= {previous_time}")
-            
-            # Find closest previous timestamp
-            cur = await db.execute("""
-                SELECT timestamp FROM members
-                WHERE timestamp <= ? AND timestamp < ?
-                GROUP BY timestamp
-                ORDER BY timestamp DESC
-                LIMIT 1
-            """, (previous_time, current_time))
-            prev_time_row = await cur.fetchone()
-            
-            if not prev_time_row:
-                log.error(f"No previous period data found before {previous_time}")
-                # Try to find ANY previous timestamp
-                cur = await db.execute("""
-                    SELECT timestamp FROM members
-                    WHERE timestamp < ?
-                    GROUP BY timestamp
-                    ORDER BY timestamp DESC
-                    LIMIT 1
-                """, (current_time,))
-                prev_time_row = await cur.fetchone()
-                
-                if not prev_time_row:
-                    log.error("No previous timestamps found at all")
-                    return None
-            
-            previous_scrape_time = prev_time_row['timestamp']
-            log.info(f"Using previous timestamp: {previous_scrape_time}")
-            
-            # Get current period data
-            cur = await db.execute("""
-                SELECT member_id, username, earned_credits, timestamp
-                FROM members
-                WHERE timestamp = ?
-                ORDER BY earned_credits DESC
-            """, (current_time,))
-            current_data = {row['member_id']: dict(row) for row in await cur.fetchall()}
-            log.info(f"Found {len(current_data)} members in current period")
-            
-            # Get previous period data
-            cur = await db.execute("""
-                SELECT member_id, username, earned_credits, timestamp
-                FROM members
-                WHERE timestamp = ?
-                ORDER BY earned_credits DESC
-            """, (previous_scrape_time,))
-            previous_data = {row['member_id']: dict(row) for row in await cur.fetchall()}
-            log.info(f"Found {len(previous_data)} members in previous period")
-            
-            # Calculate deltas (growth in the period)
-            deltas = []
-            for member_id, current_entry in current_data.items():
-                current_credits = current_entry['earned_credits']
-                
-                # Get previous credits (or 0 if new member)
-                previous_credits = 0
-                if member_id in previous_data:
-                    previous_credits = previous_data[member_id]['earned_credits']
-                
-                # Calculate delta
-                delta = current_credits - previous_credits
-                
-                if delta > 0:  # Only include members with positive growth
-                    deltas.append({
-                        'member_id': member_id,
-                        'username': current_entry['username'],
-                        'earned_credits': delta,
-                        'timestamp': current_entry['timestamp']
-                    })
-            
-            log.info(f"Calculated {len(deltas)} members with positive growth")
-            
-            # Sort by delta and get top entries
-            deltas.sort(key=lambda x: x['earned_credits'], reverse=True)
-            current_raw = deltas[:20]
-            current = self._filter_invalid_entries(current_raw, 'earned_credits')[:10]
-            
-            # For previous rankings, calculate deltas from one period before that
-            # Find timestamp before previous
-            if period == 'daily':
-                dt = datetime.fromisoformat(previous_scrape_time)
-                before_previous_dt = dt - timedelta(days=1)
-            else:
-                dt = datetime.fromisoformat(previous_scrape_time)
-                before_previous_dt = dt - timedelta(days=30)
-            
-            before_previous_time = before_previous_dt.isoformat()
-            
-            cur = await db.execute("""
-                SELECT timestamp FROM members
-                WHERE timestamp <= ? AND timestamp < ?
-                GROUP BY timestamp
-                ORDER BY timestamp DESC
-                LIMIT 1
-            """, (before_previous_time, previous_scrape_time))
-            before_prev_row = await cur.fetchone()
-            
-            previous = []
-            if before_prev_row:
-                # Get data from before previous period
-                cur = await db.execute("""
-                    SELECT member_id, username, earned_credits, timestamp
-                    FROM members
-                    WHERE timestamp = ?
-                """, (before_prev_row['timestamp'],))
-                before_previous_data = {row['member_id']: dict(row) for row in await cur.fetchall()}
-                
-                # Calculate deltas for previous period
-                prev_deltas = []
-                for member_id, prev_entry in previous_data.items():
-                    prev_credits = prev_entry['earned_credits']
-                    
-                    before_credits = 0
-                    if member_id in before_previous_data:
-                        before_credits = before_previous_data[member_id]['earned_credits']
-                    
-                    delta = prev_credits - before_credits
-                    
-                    if delta > 0:
-                        prev_deltas.append({
-                            'member_id': member_id,
-                            'username': prev_entry['username'],
-                            'earned_credits': delta,
-                            'timestamp': prev_entry['timestamp']
-                        })
-                
-                prev_deltas.sort(key=lambda x: x['earned_credits'], reverse=True)
-                previous_raw = prev_deltas[:30]
-                previous = self._filter_invalid_entries(previous_raw, 'earned_credits')[:20]
-            
-            return {
-                'current': current,
-                'previous': previous
-            }
-
-    async def _get_treasury_rankings(self, period: str) -> Optional[Dict]:
-        """
-        Get treasury contribution rankings from income_v2.db.
-        NOTE: IncomeScraper stores member contributions as 'expense' type!
-        Returns dict with 'current' and 'previous' rankings.
-        """
-        if not self.income_db_path.exists():
-            log.error(f"Database not found at {self.income_db_path}")
-            return None
-
-        async with aiosqlite.connect(self.income_db_path) as db:
-            db.row_factory = aiosqlite.Row
-            
-            period_type = 'daily' if period == 'daily' else 'monthly'
-            
-            # NOTE: Using 'expense' because IncomeScraper stores contributions as expenses!
-            # Get most recent timestamp for this period
-            cur = await db.execute("""
-                SELECT MAX(timestamp) as latest 
-                FROM income 
-                WHERE period = ? AND entry_type = 'expense'
-            """, (period_type,))
-            row = await cur.fetchone()
-            if not row or not row['latest']:
-                return None
-            
-            current_time = row['latest']
-            
-            # Get current rankings
-            cur = await db.execute("""
-                SELECT username, amount, timestamp
-                FROM income
-                WHERE period = ? AND entry_type = 'expense' AND timestamp = ?
-                ORDER BY amount DESC
-                LIMIT 20
-            """, (period_type, current_time))
-            current_raw = [dict(row) for row in await cur.fetchall()]
-            current = self._filter_invalid_entries(current_raw, 'contributions')[:10]
-            
-            # Get previous period timestamp
-            if period == 'daily':
-                dt = datetime.fromisoformat(current_time)
-                previous_dt = dt - timedelta(days=1)
-                previous_time = previous_dt.isoformat()
-            else:
-                dt = datetime.fromisoformat(current_time)
-                previous_dt = dt - timedelta(days=30)
-                previous_time = previous_dt.isoformat()
-            
-            cur = await db.execute("""
-                SELECT timestamp FROM income
-                WHERE period = ? AND entry_type = 'expense' AND timestamp <= ?
-                GROUP BY timestamp
-                ORDER BY timestamp DESC
-                LIMIT 1
-            """, (period_type, previous_time))
-            prev_time_row = await cur.fetchone()
-            
-            previous = []
-            if prev_time_row:
-                cur = await db.execute("""
-                    SELECT username, amount, timestamp
-                    FROM income
-                    WHERE period = ? AND entry_type = 'expense' AND timestamp = ?
-                    ORDER BY amount DESC
-                    LIMIT 30
-                """, (period_type, prev_time_row['timestamp']))
-                previous_raw = [dict(row) for row in await cur.fetchall()]
-                previous = self._filter_invalid_entries(previous_raw, 'contributions')[:20]
-            
-            return {
-                'current': current,
-                'previous': previous
-            }
-
-    # ==================== EMBED CREATION ====================
-
-    def _create_leaderboard_embed(
-        self,
-        title: str,
-        current_rankings: List[Dict],
-        previous_rankings: List[Dict],
-        period: str,
-        metric: str
-    ) -> discord.Embed:
-        """Create a formatted leaderboard embed with position changes."""
-        
-        embed = discord.Embed(
-            title=title,
-            color=discord.Color.gold(),
-            timestamp=datetime.utcnow()
-        )
-        
-        # Create previous rankings lookup by username (income_v2.db doesn't have member_id)
-        prev_lookup = {}
-        for idx, player in enumerate(previous_rankings, 1):
-            username = player.get('username', '')
-            prev_lookup[username] = idx
-        
-        # Build leaderboard text
-        lines = []
-        for idx, player in enumerate(current_rankings, 1):
-            medal = MEDALS.get(idx, f"`#{idx:02d}`")
-            name = player.get('username', 'Unknown')[:20]  # Truncate long names
-            
-            # Determine value based on metric
-            if metric == 'earned_credits':
-                value = player.get('earned_credits', 0)
-            else:  # contributions
-                value = player.get('amount', 0)
-            
-            value_str = f"{value:,}"
-            
-            # Calculate position change
-            prev_pos = prev_lookup.get(name)
-            
-            if prev_pos is None:
-                change = "🆕"
-            else:
-                diff = prev_pos - idx
-                if diff > 0:
-                    change = f"▲ +{diff}"
-                elif diff < 0:
-                    change = f"▼ {diff}"
-                else:
-                    change = "━"
-            
-            # Format line
-            line = f"{medal} **{name}** - {value_str} credits `{change}`"
-            lines.append(line)
-        
-        # Add all lines to embed
-        if lines:
-            embed.description = "\n".join(lines)
-        else:
-            embed.description = "No data available for this period."
-        
-        # Add footer
-        period_text = "last 24 hours" if period == 'daily' else "this month"
-        embed.set_footer(text=f"Rankings based on {period_text} • Using new scraper_databases")
-        
-        return embed
-
-    # ==================== COMMANDS ====================
-
+                logger.error(f"Error in monthly leaderboard loop: {e}", exc_info=True)
+                await asyncio.sleep(86400)  # Wait 24 hours on error
+    
     @commands.group(name="topplayers")
     @checks.admin_or_permissions(manage_guild=True)
     async def topplayers(self, ctx):
         """Top players leaderboard configuration commands."""
         if ctx.invoked_subcommand is None:
             await ctx.send_help(ctx.command)
-
+    
     @topplayers.command(name="dailyearnedchannel")
     async def set_daily_earned_channel(self, ctx, channel: discord.TextChannel):
-        """Set channel for daily earned credits leaderboard."""
-        await self.config.daily_earned_channel.set(channel.id)
+        """Set the channel for daily earned credits leaderboard."""
+        await self.config.guild(ctx.guild).daily_earned_channel.set(channel.id)
         await ctx.send(f"✅ Daily earned credits leaderboard will be posted in {channel.mention}")
-
+    
     @topplayers.command(name="dailycontribchannel")
     async def set_daily_contrib_channel(self, ctx, channel: discord.TextChannel):
-        """Set channel for daily treasury contributions leaderboard."""
-        await self.config.daily_contrib_channel.set(channel.id)
+        """Set the channel for daily treasury contributions leaderboard."""
+        await self.config.guild(ctx.guild).daily_contrib_channel.set(channel.id)
         await ctx.send(f"✅ Daily treasury contributions leaderboard will be posted in {channel.mention}")
-
+    
     @topplayers.command(name="monthlyearnedchannel")
     async def set_monthly_earned_channel(self, ctx, channel: discord.TextChannel):
-        """Set channel for monthly earned credits leaderboard."""
-        await self.config.monthly_earned_channel.set(channel.id)
+        """Set the channel for monthly earned credits leaderboard."""
+        await self.config.guild(ctx.guild).monthly_earned_channel.set(channel.id)
         await ctx.send(f"✅ Monthly earned credits leaderboard will be posted in {channel.mention}")
-
+    
     @topplayers.command(name="monthlycontribchannel")
     async def set_monthly_contrib_channel(self, ctx, channel: discord.TextChannel):
-        """Set channel for monthly treasury contributions leaderboard."""
-        await self.config.monthly_contrib_channel.set(channel.id)
+        """Set the channel for monthly treasury contributions leaderboard."""
+        await self.config.guild(ctx.guild).monthly_contrib_channel.set(channel.id)
         await ctx.send(f"✅ Monthly treasury contributions leaderboard will be posted in {channel.mention}")
-
+    
     @topplayers.command(name="settings")
     async def show_settings(self, ctx):
-        """Show current top players leaderboard settings."""
-        daily_earned = await self.config.daily_earned_channel()
-        daily_contrib = await self.config.daily_contrib_channel()
-        monthly_earned = await self.config.monthly_earned_channel()
-        monthly_contrib = await self.config.monthly_contrib_channel()
+        """Show current leaderboard settings."""
+        guild_config = await self.config.guild(ctx.guild).all()
         
         embed = discord.Embed(
-            title="Top Players Leaderboard Settings",
+            title="⚙️ Top Players Leaderboard Settings",
             color=discord.Color.blue()
         )
         
+        # Channel settings
+        channels = []
+        for key, label in [
+            ("daily_earned_channel", "Daily Earned Credits"),
+            ("daily_contrib_channel", "Daily Contributions"),
+            ("monthly_earned_channel", "Monthly Earned Credits"),
+            ("monthly_contrib_channel", "Monthly Contributions"),
+        ]:
+            channel_id = guild_config[key]
+            if channel_id:
+                channel = ctx.guild.get_channel(channel_id)
+                channel_text = channel.mention if channel else f"⚠️ Channel not found (ID: {channel_id})"
+            else:
+                channel_text = "Not set"
+            channels.append(f"**{label}:** {channel_text}")
+        
         embed.add_field(
-            name="Daily Earned Credits",
-            value=f"<#{daily_earned}>" if daily_earned else "Not set",
-            inline=False
-        )
-        embed.add_field(
-            name="Daily Contributions",
-            value=f"<#{daily_contrib}>" if daily_contrib else "Not set",
-            inline=False
-        )
-        embed.add_field(
-            name="Monthly Earned Credits",
-            value=f"<#{monthly_earned}>" if monthly_earned else "Not set",
-            inline=False
-        )
-        embed.add_field(
-            name="Monthly Contributions",
-            value=f"<#{monthly_contrib}>" if monthly_contrib else "Not set",
+            name="📢 Post Channels",
+            value="\n".join(channels),
             inline=False
         )
         
         # Database status
-        members_exists = "✅" if self.members_db_path.exists() else "❌"
-        income_exists = "✅" if self.income_db_path.exists() else "❌"
+        db_status = []
+        db_status.append(f"members_v2.db: {'✅ Found' if self.members_db_path.exists() else '❌ Not found'}")
+        db_status.append(f"income_v2.db: {'✅ Found' if self.income_db_path.exists() else '❌ Not found'}")
         
         embed.add_field(
-            name="Database Status",
-            value=f"{members_exists} members_v2.db\n{income_exists} income_v2.db",
+            name="💾 Database Status",
+            value="\n".join(db_status),
             inline=False
         )
         
-        embed.set_footer(text="Posts daily at 06:00 Amsterdam time | Monthly on last day of month at 06:00")
+        # Schedule info
+        now = datetime.now(self.tz)
+        embed.add_field(
+            name="⏰ Schedule",
+            value=f"**Daily:** 06:00 Amsterdam time\n**Monthly:** Last day of month at 06:00\n**Current time:** {now.strftime('%Y-%m-%d %H:%M:%S %Z')}",
+            inline=False
+        )
         
         await ctx.send(embed=embed)
-
-    @topplayers.command(name="checklatest")
+    
+    @topplayers.command(name="testnow")
     @checks.is_owner()
-    async def check_latest(self, ctx, period: str = "daily"):
-        """Check what's in the latest scrape for a specific period."""
-        if not self.income_db_path.exists():
-            await ctx.send("❌ income_v2.db not found")
+    async def test_now(self, ctx, leaderboard_type: str):
+        """
+        Test a leaderboard immediately (owner only).
+        Types: daily_earned, daily_contrib, monthly_earned, monthly_contrib
+        """
+        type_map = {
+            "daily_earned": ("Daily Top 10 - Earned Credits", "daily", "earned"),
+            "daily_contrib": ("Daily Top 10 - Treasury Contributions", "daily", "contrib"),
+            "monthly_earned": ("Monthly Top 10 - Earned Credits", "monthly", "earned"),
+            "monthly_contrib": ("Monthly Top 10 - Treasury Contributions", "monthly", "contrib"),
+        }
+        
+        if leaderboard_type not in type_map:
+            await ctx.send(f"❌ Invalid type. Use: {', '.join(type_map.keys())}")
             return
         
-        async with aiosqlite.connect(self.income_db_path) as db:
-            db.row_factory = aiosqlite.Row
-            
-            # Get latest timestamp for this period
-            cur = await db.execute("""
-                SELECT MAX(timestamp) as latest 
-                FROM income 
-                WHERE period = ? AND entry_type = 'expense'
-            """, (period,))
-            row = await cur.fetchone()
-            
-            if not row or not row['latest']:
-                await ctx.send(f"❌ No data for period '{period}'")
-                return
-            
-            latest = row['latest']
-            
-            # Get top 15 from that timestamp
-            cur = await db.execute("""
-                SELECT username, amount, period, entry_type, timestamp
-                FROM income
-                WHERE period = ? AND entry_type = 'expense' AND timestamp = ?
-                ORDER BY amount DESC
-                LIMIT 15
-            """, (period, latest))
-            
-            results = await cur.fetchall()
-            
-            embed = discord.Embed(
-                title=f"📊 Latest {period.upper()} scrape",
-                description=f"Timestamp: {latest}",
-                color=discord.Color.green()
-            )
-            
-            if results:
-                lines = []
-                for idx, row in enumerate(results, 1):
-                    lines.append(f"{idx}. **{row['username']}** - {row['amount']:,} credits")
-                
-                embed.add_field(
-                    name="Top 15 Contributors",
-                    value="\n".join(lines),
-                    inline=False
-                )
-            else:
-                embed.description += "\n\n⚠️ No data found!"
-            
-            await ctx.send(embed=embed)
-
+        title, period, board_type = type_map[leaderboard_type]
+        
+        # Get data
+        if board_type == "earned":
+            data = await self._get_earned_credits_rankings(period)
+        else:
+            data = await self._get_treasury_rankings(period)
+        
+        # Create embed
+        embed = self._create_leaderboard_embed(title, data, board_type, is_test=True)
+        
+        await ctx.send(embed=embed)
+    
     @topplayers.command(name="timestamps")
     @checks.is_owner()
     async def show_timestamps(self, ctx):
         """Show recent timestamps in both databases."""
         embed = discord.Embed(title="🕐 Recent Timestamps", color=discord.Color.blue())
         
-        # Members timestamps
+        # Members database
         if self.members_db_path.exists():
-            async with aiosqlite.connect(self.members_db_path) as db:
-                cur = await db.execute("""
-                    SELECT DISTINCT timestamp 
-                    FROM members 
-                    ORDER BY timestamp DESC 
-                    LIMIT 10
-                """)
-                timestamps = await cur.fetchall()
-                
-                ts_text = "\n".join([f"• {t[0]}" for t in timestamps])
-                embed.add_field(
-                    name="members_v2.db (last 10 scrapes)",
-                    value=ts_text if ts_text else "No timestamps",
-                    inline=False
-                )
+            try:
+                async with aiosqlite.connect(self.members_db_path) as db:
+                    query = "SELECT DISTINCT timestamp FROM members ORDER BY timestamp DESC LIMIT 10"
+                    async with db.execute(query) as cursor:
+                        timestamps = await cursor.fetchall()
+                    
+                    ts_text = "\n".join([f"• {ts[0]}" for ts in timestamps])
+                    embed.add_field(
+                        name="members_v2.db (last 10 scrapes)",
+                        value=ts_text or "No data",
+                        inline=False
+                    )
+            except Exception as e:
+                embed.add_field(name="members_v2.db", value=f"Error: {str(e)}", inline=False)
+        else:
+            embed.add_field(name="members_v2.db", value="❌ Not found", inline=False)
         
-        # Income timestamps
+        # Income database
         if self.income_db_path.exists():
-            async with aiosqlite.connect(self.income_db_path) as db:
-                cur = await db.execute("""
-                    SELECT DISTINCT timestamp, period
-                    FROM income 
-                    WHERE entry_type='expense'
-                    ORDER BY timestamp DESC 
-                    LIMIT 10
-                """)
-                timestamps = await cur.fetchall()
-                
-                ts_text = "\n".join([f"• {t[0]} ({t[1]})" for t in timestamps])
-                embed.add_field(
-                    name="income_v2.db (last 10 scrapes, expense/daily)",
-                    value=ts_text if ts_text else "No timestamps",
-                    inline=False
-                )
+            try:
+                async with aiosqlite.connect(self.income_db_path) as db:
+                    query = """
+                        SELECT DISTINCT timestamp, period 
+                        FROM income 
+                        WHERE entry_type = 'expense' AND period IN ('daily', 'monthly')
+                        ORDER BY timestamp DESC 
+                        LIMIT 10
+                    """
+                    async with db.execute(query) as cursor:
+                        timestamps = await cursor.fetchall()
+                    
+                    ts_text = "\n".join([f"• {ts[0]} ({ts[1]})" for ts in timestamps])
+                    embed.add_field(
+                        name="income_v2.db (last 10 scrapes, expense/daily)",
+                        value=ts_text or "No data",
+                        inline=False
+                    )
+            except Exception as e:
+                embed.add_field(name="income_v2.db", value=f"Error: {str(e)}", inline=False)
+        else:
+            embed.add_field(name="income_v2.db", value="❌ Not found", inline=False)
         
         await ctx.send(embed=embed)
-
+    
     @topplayers.command(name="debug")
     @checks.is_owner()
     async def debug_databases(self, ctx):
@@ -775,186 +770,216 @@ class Leaderboard(commands.Cog):
         if self.members_db_path.exists():
             try:
                 async with aiosqlite.connect(self.members_db_path) as db:
-                    # Count total records
-                    cur = await db.execute("SELECT COUNT(*) FROM members")
-                    total = (await cur.fetchone())[0]
+                    # Total records
+                    async with db.execute("SELECT COUNT(*) FROM members") as cursor:
+                        total = (await cursor.fetchone())[0]
                     
-                    # Get latest timestamp
-                    cur = await db.execute("SELECT MAX(timestamp) FROM members")
-                    latest = (await cur.fetchone())[0]
+                    # Records with credits > 0
+                    async with db.execute("SELECT COUNT(*) FROM members WHERE earned_credits > 0") as cursor:
+                        with_credits = (await cursor.fetchone())[0]
                     
-                    # Get unique timestamps
-                    cur = await db.execute("SELECT COUNT(DISTINCT timestamp) FROM members")
-                    timestamps = (await cur.fetchone())[0]
+                    # Unique timestamps
+                    async with db.execute("SELECT COUNT(DISTINCT timestamp) FROM members") as cursor:
+                        unique_ts = (await cursor.fetchone())[0]
                     
-                    # Count members with credits > 0
-                    cur = await db.execute("SELECT COUNT(*) FROM members WHERE earned_credits > 0")
-                    with_credits = (await cur.fetchone())[0]
+                    # Latest scrape
+                    async with db.execute("SELECT MAX(timestamp) FROM members") as cursor:
+                        latest = (await cursor.fetchone())[0]
                     
-                    # Sample data WITH CREDITS
-                    cur = await db.execute("""
-                        SELECT member_id, username, earned_credits, timestamp 
+                    # Top earners from latest scrape
+                    async with db.execute("""
+                        SELECT username, earned_credits 
                         FROM members 
-                        WHERE earned_credits > 0
-                        ORDER BY timestamp DESC, earned_credits DESC 
+                        WHERE timestamp = ? 
+                        ORDER BY earned_credits DESC 
                         LIMIT 5
-                    """)
-                    sample = await cur.fetchall()
+                    """, (latest,)) as cursor:
+                        top_earners = await cursor.fetchall()
                     
-                    if sample:
-                        sample_text = "\n".join([f"• {row[1]}: {row[2]:,} credits" for row in sample])
-                    else:
-                        sample_text = "⚠️ NO MEMBERS WITH CREDITS > 0!"
+                    top_text = "\n".join([f"• {name}: {credits:,} credits" for name, credits in top_earners])
                     
                     embed.add_field(
-                        name="✅ members_v2.db",
+                        name="📊 members_v2.db",
                         value=f"**Total records:** {total:,}\n"
                               f"**With credits > 0:** {with_credits:,}\n"
-                              f"**Unique timestamps:** {timestamps}\n"
-                              f"**Latest scrape:** {latest[:19] if latest else 'N/A'}\n"
-                              f"**Top earners (latest):**\n{sample_text}",
+                              f"**Unique timestamps:** {unique_ts:,}\n"
+                              f"**Latest scrape:** {latest}\n"
+                              f"**Top earners (latest):**\n{top_text}",
                         inline=False
                     )
             except Exception as e:
-                embed.add_field(name="❌ members_v2.db", value=f"Error: {str(e)}", inline=False)
+                embed.add_field(name="members_v2.db", value=f"❌ Error: {str(e)}", inline=False)
         else:
-            embed.add_field(name="❌ members_v2.db", value="File not found", inline=False)
+            embed.add_field(name="members_v2.db", value="❌ Not found", inline=False)
         
         # Check income_v2.db
         if self.income_db_path.exists():
             try:
                 async with aiosqlite.connect(self.income_db_path) as db:
-                    # Count ALL records (not just income type)
-                    cur = await db.execute("SELECT COUNT(*) FROM income")
-                    total_all = (await cur.fetchone())[0]
+                    # Total records
+                    async with db.execute("SELECT COUNT(*) FROM income") as cursor:
+                        total = (await cursor.fetchone())[0]
                     
-                    # Count by entry_type
-                    cur = await db.execute("SELECT entry_type, COUNT(*) FROM income GROUP BY entry_type")
-                    by_type = await cur.fetchall()
-                    type_text = "\n".join([f"  • {t[0]}: {t[1]:,}" for t in by_type]) if by_type else "  ⚠️ No data"
+                    # By type
+                    async with db.execute("SELECT entry_type, COUNT(*) FROM income GROUP BY entry_type") as cursor:
+                        by_type = await cursor.fetchall()
                     
-                    # Count income records specifically
-                    cur = await db.execute("SELECT COUNT(*) FROM income WHERE entry_type='income'")
-                    total_income = (await cur.fetchone())[0]
+                    # Income records specifically
+                    async with db.execute("SELECT COUNT(*) FROM income WHERE entry_type = 'expense' AND period IN ('daily', 'monthly')") as cursor:
+                        contrib_count = (await cursor.fetchone())[0]
                     
-                    # Get latest timestamp (any type)
-                    cur = await db.execute("SELECT MAX(timestamp) FROM income")
-                    latest = (await cur.fetchone())[0]
+                    # Latest scrape
+                    async with db.execute("SELECT MAX(timestamp) FROM income WHERE entry_type = 'expense' AND period = 'daily'") as cursor:
+                        latest = (await cursor.fetchone())[0]
                     
-                    # Count by period
-                    cur = await db.execute("SELECT period, COUNT(*) FROM income WHERE entry_type='income' GROUP BY period")
-                    periods = await cur.fetchall()
+                    # By period
+                    async with db.execute("SELECT period, COUNT(*) FROM income WHERE entry_type = 'expense' GROUP BY period") as cursor:
+                        by_period = await cursor.fetchall()
                     
-                    if periods:
-                        period_text = "\n".join([f"  • {p[0]}: {p[1]:,}" for p in periods])
+                    # Sample data (show ALL types if no income)
+                    async with db.execute("""
+                        SELECT username, amount, period, entry_type
+                        FROM income 
+                        WHERE entry_type = 'expense' AND period = 'daily'
+                        ORDER BY timestamp DESC, amount DESC
+                        LIMIT 5
+                    """) as cursor:
+                        sample = await cursor.fetchall()
+                    
+                    type_text = "\n".join([f"• {t}: {c:,}" for t, c in by_type])
+                    period_text = "\n".join([f"• {p}: {c:,}" for p, c in by_period])
+                    
+                    if sample:
+                        sample_text = "\n".join([f"• {name}: {amt:,} ({per}, type={typ})" for name, amt, per, typ in sample])
                     else:
-                        period_text = "  ⚠️ No income data - check if scraped as 'expense'?"
+                        sample_text = "No data"
                     
-                    # Sample data (show ANY type if income is empty)
-                    if total_income > 0:
-                        cur = await db.execute("SELECT username, amount, period, entry_type, timestamp FROM income WHERE entry_type='income' ORDER BY timestamp DESC LIMIT 3")
-                        sample = await cur.fetchall()
-                        sample_text = "\n".join([f"• {row[0]}: {row[1]:,} ({row[2]}, {row[3]})" for row in sample])
-                    else:
-                        # Show ANY data to debug
-                        cur = await db.execute("SELECT username, amount, period, entry_type, timestamp FROM income ORDER BY timestamp DESC LIMIT 5")
-                        sample = await cur.fetchall()
-                        if sample:
-                            sample_text = "⚠️ Showing ALL types (no 'income' found):\n" + "\n".join([f"• {row[0]}: {row[1]:,} ({row[2]}, type={row[3]})" for row in sample])
-                        else:
-                            sample_text = "⚠️ No data at all"
-                    
-                    status = "✅" if total_income > 0 else "⚠️"
                     embed.add_field(
-                        name=f"{status} income_v2.db",
-                        value=f"**Total records:** {total_all:,}\n"
+                        name="💰 income_v2.db",
+                        value=f"**Total records:** {total:,}\n"
                               f"**By type:**\n{type_text}\n"
-                              f"**Income records:** {total_income:,}\n"
-                              f"**Latest scrape:** {latest[:19] if latest else 'N/A'}\n"
-                              f"**Income by period:**\n{period_text}\n"
+                              f"**Contribution records (daily/monthly):** {contrib_count:,}\n"
+                              f"**Latest scrape:** {latest or 'N/A'}\n"
+                              f"**By period:**\n{period_text}\n"
                               f"**Sample:**\n{sample_text}",
                         inline=False
                     )
             except Exception as e:
-                embed.add_field(name="❌ income_v2.db", value=f"Error: {str(e)}", inline=False)
+                embed.add_field(name="income_v2.db", value=f"❌ Error: {str(e)}", inline=False)
         else:
-            embed.add_field(name="❌ income_v2.db", value="File not found", inline=False)
+            embed.add_field(name="income_v2.db", value="❌ Not found", inline=False)
         
         await ctx.send(embed=embed)
-
-    @topplayers.command(name="testnow")
+    
+    @topplayers.command(name="checklatest")
     @checks.is_owner()
-    async def test_now(self, ctx, leaderboard_type: str):
+    async def check_latest(self, ctx, period: str = "daily", username: str = None):
         """
-        Manually trigger a leaderboard post for testing.
-        Types: daily_earned, daily_contrib, monthly_earned, monthly_contrib
+        Check what's in the latest scrape for a specific period, optionally search for specific username.
+        NOTE: Only shows contribution data (period='daily' or 'monthly'), NOT expenses (period='paginated')
         """
-        async with ctx.typing():
-            try:
-                if leaderboard_type == "daily_earned":
-                    data = await self._get_earned_credits_rankings(period='daily')
-                    if data:
-                        embed = self._create_leaderboard_embed(
-                            title="🏆 Daily Top 10 - Earned Credits (TEST)",
-                            current_rankings=data['current'],
-                            previous_rankings=data['previous'],
-                            period='daily',
-                            metric='earned_credits'
-                        )
-                        await ctx.send(embed=embed)
-                    else:
-                        await ctx.send("❌ No data available")
-                
-                elif leaderboard_type == "daily_contrib":
-                    data = await self._get_treasury_rankings(period='daily')
-                    if data:
-                        embed = self._create_leaderboard_embed(
-                            title="💰 Daily Top 10 - Treasury Contributions (TEST)",
-                            current_rankings=data['current'],
-                            previous_rankings=data['previous'],
-                            period='daily',
-                            metric='contributions'
-                        )
-                        await ctx.send(embed=embed)
-                    else:
-                        await ctx.send("❌ No data available")
-                
-                elif leaderboard_type == "monthly_earned":
-                    data = await self._get_earned_credits_rankings(period='monthly')
-                    if data:
-                        embed = self._create_leaderboard_embed(
-                            title="🏆 Monthly Top 10 - Earned Credits (TEST)",
-                            current_rankings=data['current'],
-                            previous_rankings=data['previous'],
-                            period='monthly',
-                            metric='earned_credits'
-                        )
-                        await ctx.send(embed=embed)
-                    else:
-                        await ctx.send("❌ No data available")
-                
-                elif leaderboard_type == "monthly_contrib":
-                    data = await self._get_treasury_rankings(period='monthly')
-                    if data:
-                        embed = self._create_leaderboard_embed(
-                            title="💰 Monthly Top 10 - Treasury Contributions (TEST)",
-                            current_rankings=data['current'],
-                            previous_rankings=data['previous'],
-                            period='monthly',
-                            metric='contributions'
-                        )
-                        await ctx.send(embed=embed)
-                    else:
-                        await ctx.send("❌ No data available")
-                
-                else:
-                    await ctx.send("❌ Invalid type. Use: daily_earned, daily_contrib, monthly_earned, monthly_contrib")
+        if not self.income_db_path.exists():
+            await ctx.send("❌ income_v2.db not found!")
+            return
+        
+        if period not in ["daily", "monthly"]:
+            await ctx.send("❌ Period must be 'daily' or 'monthly'")
+            return
+        
+        try:
+            async with aiosqlite.connect(self.income_db_path) as db:
+                # Get latest timestamp for this period (contributions only, not paginated expenses)
+                query = """
+                    SELECT MAX(timestamp) as latest_ts
+                    FROM income
+                    WHERE entry_type = 'expense' AND period = ?
+                """
+                async with db.execute(query, (period,)) as cursor:
+                    result = await cursor.fetchone()
+                    if not result or not result[0]:
+                        await ctx.send(f"❌ No data found for period: {period}")
+                        return
                     
-            except Exception as e:
-                log.exception(f"Error in test command: {e}")
-                await ctx.send(f"❌ Error: {str(e)}")
-
-
-async def setup(bot: Red):
-    """Add cog to bot."""
-    await bot.add_cog(Leaderboard(bot))
+                    latest_ts = result[0]
+                
+                # If searching for specific username
+                if username:
+                    query = """
+                        SELECT username, amount
+                        FROM income
+                        WHERE entry_type = 'expense' 
+                        AND period = ?
+                        AND timestamp = ?
+                        AND username LIKE ?
+                        ORDER BY amount DESC
+                    """
+                    async with db.execute(query, (period, latest_ts, f"%{username}%")) as cursor:
+                        results = await cursor.fetchall()
+                        
+                        if not results:
+                            await ctx.send(f"❌ Username '{username}' not found in latest {period} scrape (timestamp: {latest_ts})")
+                            return
+                        
+                        embed = discord.Embed(
+                            title=f"🔍 Search Results for '{username}'",
+                            description=f"Period: {period}\nTimestamp: {latest_ts}",
+                            color=discord.Color.blue()
+                        )
+                        
+                        for i, (uname, amount) in enumerate(results, 1):
+                            embed.add_field(
+                                name=f"{i}. {uname}",
+                                value=f"{amount:,} credits",
+                                inline=False
+                            )
+                        
+                        await ctx.send(embed=embed)
+                        return
+                
+                # Get ALL contributors (not just top 15) to verify complete data
+                query = """
+                    SELECT username, amount
+                    FROM income
+                    WHERE entry_type = 'expense' 
+                    AND period = ?
+                    AND timestamp = ?
+                    ORDER BY amount DESC
+                """
+                
+                async with db.execute(query, (period, latest_ts)) as cursor:
+                    results = await cursor.fetchall()
+                
+                if not results:
+                    await ctx.send(f"❌ No contributors found for {period}")
+                    return
+                
+                embed = discord.Embed(
+                    title=f"📊 Latest {period.upper()} scrape (RAW DATA)",
+                    description=f"Timestamp: {latest_ts}\nTotal contributors: {len(results)}",
+                    color=discord.Color.green()
+                )
+                
+                # Show top 20
+                contributors_text = "\n".join([
+                    f"{i}. **{username}** - {amount:,} credits"
+                    for i, (username, amount) in enumerate(results[:20], 1)
+                ])
+                
+                embed.add_field(
+                    name="Top 20 Contributors (unfiltered)",
+                    value=contributors_text,
+                    inline=False
+                )
+                
+                if len(results) > 20:
+                    embed.add_field(
+                        name="Note",
+                        value=f"... and {len(results) - 20} more contributors",
+                        inline=False
+                    )
+                
+                await ctx.send(embed=embed)
+                
+        except Exception as e:
+            logger.error(f"Error checking latest scrape: {e}", exc_info=True)
+            await ctx.send(f"❌ Error: {str(e)}")
