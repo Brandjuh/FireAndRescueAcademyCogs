@@ -41,8 +41,6 @@ class ConnectFourGame(Minigame):
         super().__init__(cog, players, channel, bet_amount)
         if len(players) != 2:
             raise ValueError("Game must have 2 players")
-        self.accepted = False
-        self.board = Board(7, 6, Player.NONE)
         
         # Check if playing against bot
         against_bot = any(player.bot for player in players)
@@ -52,12 +50,12 @@ class ConnectFourGame(Minigame):
             human_player = next(p for p in players if not p.bot)
             bot_player = next(p for p in players if p.bot)
             self.players = [human_player, bot_player]
-            # Random starting player
-            self.current = random.choice([Player.RED, Player.BLUE])
-        else:
-            # PvP: random starting color
-            self.current = random.choice([Player.RED, Player.BLUE])
+        # Note: if PvP, players list stays as provided by minigames.py
         
+        self.accepted = False
+        self.board = Board(7, 6, Player.NONE)
+        # Random starting player
+        self.current = random.choice([Player.RED, Player.BLUE])
         self.winner = Player.NONE
         self.time = 0
         self.cancelled = False
