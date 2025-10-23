@@ -1,6 +1,8 @@
 """
 Data models for MemberManager
 Type-safe dataclasses for member information
+
+🔧 UPDATED: Added audit-related fields
 """
 
 from dataclasses import dataclass, field
@@ -31,7 +33,7 @@ class MemberData:
     mc_left: Optional[datetime] = None
     
     # Link status
-    link_status: Optional[str] = None  # "approved", "pending", "none"
+    link_status: Optional[str] = None  # "approved", "pending", "denied", "none"
     link_created: Optional[datetime] = None
     
     # Stats
@@ -54,8 +56,13 @@ class MemberData:
         return self.mc_user_id is not None
     
     def is_linked(self) -> bool:
-        """Check if Discord and MC accounts are linked."""
-        return self.has_discord() and self.has_mc() and self.link_status == "approved"
+        """Check if Discord and MC accounts are properly linked."""
+        return (
+            self.has_discord() and 
+            self.has_mc() and 
+            self.link_status == "approved" and
+            self.is_verified
+        )
     
     def get_display_name(self) -> str:
         """Get best available display name."""
@@ -83,41 +90,33 @@ class NoteData:
     note_id: int
     ref_code: str
     guild_id: int
-    
-    # Target
     discord_id: Optional[int]
     mc_user_id: Optional[str]
-    
-    # Content
     note_text: str
     author_id: int
     author_name: str
+    created_at: int
     
-    # Links
+    # Optional fields
     infraction_ref: Optional[str] = None
     sanction_ref: Optional[int] = None
-    
-    # Timestamps
-    created_at: int = 0
     updated_at: Optional[int] = None
-    expires_at: Optional[int] = None
-    
-    # Metadata
     updated_by: Optional[int] = None
-    content_hash: str = ""
+    updated_by_name: Optional[str] = None  # 🔧 NEW
+    expires_at: Optional[int] = None
     status: str = "active"
     is_pinned: bool = False
     tags: Optional[List[str]] = None
+    
+    def is_active(self) -> bool:
+        """Check if note is active."""
+        return self.status == "active"
     
     def is_expired(self) -> bool:
         """Check if note has expired."""
         if not self.expires_at:
             return False
-        return self.expires_at < int(datetime.now().timestamp())
-    
-    def is_active(self) -> bool:
-        """Check if note is active (not deleted or expired)."""
-        return self.status == "active" and not self.is_expired()
+        return int(datetime.now().timestamp()) > self.expires_at
 
 
 @dataclass
@@ -127,63 +126,62 @@ class InfractionData:
     infraction_id: int
     ref_code: str
     guild_id: int
-    
-    # Target
     discord_id: Optional[int]
     mc_user_id: Optional[str]
     target_name: str
-    
-    # Infraction details
     platform: str  # "discord" or "missionchief"
-    infraction_type: str  # "mute", "kick", "ban", "warning", "timeout"
+    infraction_type: str
     reason: str
-    duration: Optional[int] = None  # seconds
+    moderator_id: int
+    moderator_name: str
+    created_at: int
     
-    # Moderator
-    moderator_id: int = 0
-    moderator_name: str = ""
-    
-    # Timestamps
-    created_at: int = 0
+    # Optional fields
+    duration: Optional[int] = None
     expires_at: Optional[int] = None
     revoked_at: Optional[int] = None
-    
-    # Revocation
     revoked_by: Optional[int] = None
     revoke_reason: Optional[str] = None
-    
-    # Severity
     severity_score: int = 1
     status: str = "active"
+    
+    def is_active(self) -> bool:
+        """Check if infraction is active."""
+        return self.status == "active"
     
     def is_expired(self) -> bool:
         """Check if infraction has expired."""
         if not self.expires_at:
             return False
-        return self.expires_at < int(datetime.now().timestamp())
+        return int(datetime.now().timestamp()) > self.expires_at
     
-    def is_active(self) -> bool:
-        """Check if infraction is active."""
-        return self.status == "active" and not self.is_expired()
+    def is_revoked(self) -> bool:
+        """Check if infraction was revoked."""
+        return self.status == "revoked"
+
+
+@dataclass
+class AuditEntry:
+    """🔧 NEW: Audit log entry."""
     
-    def is_temporary(self) -> bool:
-        """Check if this is a temporary punishment."""
-        return self.duration is not None and self.expires_at is not None
+    audit_id: int
+    guild_id: int
+    action_type: str
+    action_target: str
+    actor_id: int
+    actor_name: str
+    timestamp: int
     
-    def get_platform_emoji(self) -> str:
-        """Get emoji for platform."""
-        return "💬" if self.platform == "discord" else "🚒"
+    # Optional fields
+    discord_id: Optional[int] = None
+    mc_user_id: Optional[str] = None
+    old_value: Optional[str] = None
+    new_value: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
     
-    def get_type_emoji(self) -> str:
-        """Get emoji for infraction type."""
-        emoji_map = {
-            "warning": "⚠️",
-            "mute": "🔇",
-            "kick": "👢",
-            "ban": "🔨",
-            "timeout": "⏰"
-        }
-        return emoji_map.get(self.infraction_type, "❓")
+    def get_action_display(self) -> str:
+        """Get human-readable action type."""
+        return self.action_type.replace("_", " ").title()
 
 
 @dataclass
@@ -192,37 +190,20 @@ class EventData:
     
     event_id: int
     guild_id: int
-    
-    # Target
-    discord_id: Optional[int]
-    mc_user_id: Optional[str]
-    
-    # Event details
     event_type: str
     event_data: Dict[str, Any]
-    triggered_by: str  # "automation", "admin", "system"
+    triggered_by: str
+    timestamp: int
     
-    # Context
+    # Optional fields
+    discord_id: Optional[int] = None
+    mc_user_id: Optional[str] = None
     actor_id: Optional[int] = None
-    timestamp: int = 0
     notes: Optional[str] = None
     
-    def get_type_emoji(self) -> str:
-        """Get emoji for event type."""
-        emoji_map = {
-            "joined_discord": "📥",
-            "left_discord": "📤",
-            "joined_mc": "🚒",
-            "left_mc": "🚪",
-            "link_created": "🔗",
-            "link_approved": "✅",
-            "role_changed": "👔",
-            "contribution_drop": "📉",
-            "contribution_rise": "📈",
-            "watchlist_added": "👁️",
-            "watchlist_removed": "✔️"
-        }
-        return emoji_map.get(self.event_type, "📌")
+    def get_event_display(self) -> str:
+        """Get human-readable event type."""
+        return self.event_type.replace("_", " ").title()
 
 
 @dataclass
@@ -231,22 +212,16 @@ class WatchlistEntry:
     
     watchlist_id: int
     guild_id: int
-    
-    # Target
-    discord_id: Optional[int]
-    mc_user_id: Optional[str]
-    
-    # Details
     reason: str
     added_by: int
     added_at: int
-    watch_type: str  # "contribution", "behavior", "probation", "general"
-    
-    # Alert configuration
-    alert_threshold: Optional[Dict[str, Any]] = None
-    
-    # Status
+    watch_type: str
     status: str = "active"
+    
+    # Optional fields
+    discord_id: Optional[int] = None
+    mc_user_id: Optional[str] = None
+    alert_threshold: Optional[str] = None
     resolved_at: Optional[int] = None
     resolved_by: Optional[int] = None
     resolution_notes: Optional[str] = None
@@ -255,48 +230,6 @@ class WatchlistEntry:
         """Check if watchlist entry is active."""
         return self.status == "active"
     
-    def get_type_emoji(self) -> str:
-        """Get emoji for watch type."""
-        emoji_map = {
-            "contribution": "📊",
-            "behavior": "⚠️",
-            "probation": "🚨",
-            "general": "👁️"
-        }
-        return emoji_map.get(self.watch_type, "👁️")
-
-
-@dataclass
-class ContributionTrend:
-    """Contribution rate trend analysis."""
-    
-    mc_user_id: str
-    current_rate: float
-    previous_rate: Optional[float] = None
-    
-    # Trend calculation
-    trend: str = "unknown"  # "rising", "falling", "stable", "unknown"
-    change_percent: float = 0.0
-    
-    # Weekly breakdown
-    weekly_rates: List[float] = field(default_factory=list)
-    
-    def is_concerning(self, threshold: float = 5.0) -> bool:
-        """Check if contribution rate is below threshold."""
-        return self.current_rate < threshold
-    
-    def is_dropping(self, drop_threshold: float = 1.0) -> bool:
-        """Check if contribution is dropping significantly."""
-        if not self.previous_rate:
-            return False
-        return self.change_percent < -drop_threshold
-    
-    def get_emoji(self) -> str:
-        """Get emoji representing trend."""
-        if self.trend == "rising":
-            return "📈"
-        elif self.trend == "falling":
-            return "📉"
-        elif self.trend == "stable":
-            return "➡️"
-        return "❓"
+    def is_resolved(self) -> bool:
+        """Check if watchlist entry is resolved."""
+        return self.status == "resolved"
