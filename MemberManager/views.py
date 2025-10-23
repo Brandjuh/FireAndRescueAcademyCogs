@@ -343,7 +343,13 @@ class MemberOverviewView(discord.ui.View):
             else:
                 mc_lines.append("**Contribution:** *No data*")
             
-            mc_lines.append(f"**Status:** ✅ Active")
+            # 🔧 FIX: Status based on alliance membership
+            if "Left alliance" in (data.mc_role or ""):
+                mc_lines.append(f"**Status:** ❌ Not in alliance")
+            elif data.mc_username and "Former member" not in data.mc_username:
+                mc_lines.append(f"**Status:** ✅ Active in alliance")
+            else:
+                mc_lines.append(f"**Status:** ⚠️ Unknown")
         else:
             mc_lines.append("*No MissionChief information available*")
         
@@ -478,7 +484,9 @@ class MemberOverviewView(discord.ui.View):
             color=discord.Color.red()
         )
         
-        # 🔧 FIX: Better error handling
+        all_infractions = []
+        
+        # 🔧 FIX: Get infractions from MemberManager DB
         try:
             infractions = await self.db.get_infractions(
                 discord_id=data.discord_id,
@@ -486,24 +494,41 @@ class MemberOverviewView(discord.ui.View):
                 status="active",
                 limit=10
             )
+            all_infractions.extend([(i, "mm") for i in infractions])
         except Exception as e:
             log.error(f"Error fetching infractions: {e}")
-            embed.description = "⚠️ Error loading infractions"
-            return embed
         
-        if not infractions:
+        # 🆕 NEW: Get sanctions from SanctionManager
+        sanction_manager = self.integrations.get("sanction_manager")
+        if sanction_manager:
+            try:
+                guild_id = data.discord_id  # Assuming we have guild context
+                sanctions = sanction_manager.db.get_user_sanctions(
+                    guild_id=guild_id,
+                    discord_user_id=data.discord_id,
+                    mc_user_id=data.mc_user_id
+                )
+                active_sanctions = [s for s in sanctions if s.get("status") == "active"]
+                all_infractions.extend([(s, "sm") for s in active_sanctions])
+            except Exception as e:
+                log.error(f"Error fetching sanctions: {e}")
+        
+        if not all_infractions:
             embed.description = "*No active infractions for this member.*"
             embed.color = discord.Color.green()
             return embed
         
-        # Group by platform
-        discord_infractions = [i for i in infractions if i.get("platform") == "discord"]
-        mc_infractions = [i for i in infractions if i.get("platform") == "missionchief"]
+        # Sort by date (newest first)
+        all_infractions.sort(key=lambda x: x[0].get("created_at", 0), reverse=True)
         
-        # Discord infractions
-        if discord_infractions:
+        # Group by source
+        mm_infractions = [i for i, src in all_infractions if src == "mm"]
+        sm_infractions = [i for i, src in all_infractions if src == "sm"]
+        
+        # MemberManager infractions
+        if mm_infractions:
             lines = []
-            for inf in discord_infractions[:5]:
+            for inf in mm_infractions[:5]:
                 ref = inf.get("ref_code", "???")
                 inf_type = inf.get("infraction_type", "Unknown")
                 reason = truncate_text(inf.get("reason", ""), 80)
@@ -516,36 +541,38 @@ class MemberOverviewView(discord.ui.View):
                 lines.append(f"  *By {moderator} • {created}*\n")
             
             embed.add_field(
-                name="🎮 Discord Infractions",
+                name="📋 MemberManager Infractions",
                 value="\n".join(lines),
                 inline=False
             )
         
-        # MC infractions
-        if mc_infractions:
+        # SanctionManager sanctions
+        if sm_infractions:
             lines = []
-            for inf in mc_infractions[:5]:
-                ref = inf.get("ref_code", "???")
-                inf_type = inf.get("infraction_type", "Unknown")
-                reason = truncate_text(inf.get("reason", ""), 80)
-                created = format_timestamp(inf.get("created_at", 0), "R")
-                moderator = inf.get("moderator_name", "Unknown")
-                severity = inf.get("severity_score", 1)
+            for sanction in sm_infractions[:5]:
+                sanction_id = sanction.get("sanction_id", "???")
+                sanction_type = sanction.get("sanction_type", "Unknown")
+                reason = truncate_text(sanction.get("reason_detail", ""), 80)
+                created = format_timestamp(sanction.get("created_at", 0), "R")
+                admin = sanction.get("admin_username", "Unknown")
                 
-                lines.append(f"• **`{ref}`** | {inf_type} | Severity: {severity}")
+                lines.append(f"• **Sanction #{sanction_id}** | {sanction_type}")
                 lines.append(f"  {reason}")
-                lines.append(f"  *By {moderator} • {created}*\n")
+                lines.append(f"  *By {admin} • {created}*\n")
             
             embed.add_field(
-                name="🚒 MissionChief Infractions",
+                name="🚨 Sanctions",
                 value="\n".join(lines),
                 inline=False
             )
         
         # Summary
-        total_severity = sum(i.get("severity_score", 1) for i in infractions)
+        total_severity = sum(
+            i[0].get("severity_score", 1) if i[1] == "mm" else 2 
+            for i in all_infractions
+        )
         embed.set_footer(
-            text=f"Total active: {len(infractions)} | "
+            text=f"Total active: {len(all_infractions)} | "
                  f"Total severity: {total_severity}"
         )
         
