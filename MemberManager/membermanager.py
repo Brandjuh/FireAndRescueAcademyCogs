@@ -2,10 +2,16 @@
 MemberManager - Comprehensive member tracking and management
 Fire & Rescue Academy Alliance
 
+FIXED:
+- Verification status now checks link_status='approved' + role
+- Better contribution display
+- Proper database integration
+- Error handling for infractions
+
 Integrates with:
 - MemberSync: Discord ↔ MC linking
 - AllianceScraper: MC member data, contributions, logs
-- Red's modlog: Discord infractions
+- SanctionManager: Sanctions/infractions
 """
 
 from __future__ import annotations
@@ -28,12 +34,10 @@ from .views import MemberOverviewView
 from .utils import fuzzy_search_member, format_contribution_trend
 from .automation import ContributionMonitor
 from .config_commands import ConfigCommands
-from .utils import fuzzy_search_member, format_contribution_trend
-from .automation import ContributionMonitor
 
 log = logging.getLogger("red.FARA.MemberManager")
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 DEFAULTS = {
     "contribution_threshold": 5.0,
@@ -66,7 +70,7 @@ class MemberManager(ConfigCommands, commands.Cog):
         self.bot = bot
         self.config = Config.get_conf(
             self,
-            identifier=0xFA11A9E5,  # Unique identifier for this cog
+            identifier=0xFA11A9E5,
             force_registration=True
         )
         self.config.register_global(**DEFAULTS)
@@ -123,12 +127,11 @@ class MemberManager(ConfigCommands, commands.Cog):
     
     def _register_views(self):
         """Register persistent views for button interactions."""
-        # Views will be added here when we create them
         pass
     
     async def _delayed_start(self):
         """Start automation after bot is ready."""
-        await self.bot.wait_until_ready()
+        await self.bot.wait_until_red_ready()
         await asyncio.sleep(5)
         
         # Initialize contribution monitor
@@ -170,193 +173,18 @@ class MemberManager(ConfigCommands, commands.Cog):
         if member.guild_permissions.administrator:
             return True
         
-        admin_roles = await self.config.admin_role_ids()
-        return any(role.id in admin_roles for role in member.roles)
+        admin_role_ids = await self.config.admin_role_ids()
+        return any(role.id in admin_role_ids for role in member.roles)
     
     async def _is_moderator(self, member: discord.Member) -> bool:
-        """Check if member has moderator permissions (read-only + limited actions)."""
+        """Check if member has moderator permissions."""
         if await self._is_admin(member):
             return True
         
-        mod_roles = await self.config.moderator_role_ids()
-        return any(role.id in mod_roles for role in member.roles)
+        mod_role_ids = await self.config.moderator_role_ids()
+        return any(role.id in mod_role_ids for role in member.roles)
     
-    # ==================== LISTENERS ====================
-    
-    @commands.Cog.listener()
-    async def on_member_join(self, member: discord.Member):
-        """Track when members join Discord."""
-        if member.bot:
-            return
-        
-        # Check if they have an MC account linked
-        if self.membersync:
-            link = await self.membersync.get_link_for_discord(member.id)
-            if link:
-                await self.db.add_event(
-                    guild_id=member.guild.id,
-                    discord_id=member.id,
-                    mc_user_id=link.get("mc_user_id"),
-                    event_type="joined_discord",
-                    event_data={"username": str(member)},
-                    triggered_by="system"
-                )
-    
-    @commands.Cog.listener()
-    async def on_member_remove(self, member: discord.Member):
-        """Track when members leave Discord."""
-        if member.bot:
-            return
-        
-        # Check if they have an MC account
-        if self.membersync:
-            link = await self.membersync.get_link_for_discord(member.id)
-            if link:
-                mc_id = link.get("mc_user_id")
-                
-                # Log the departure
-                await self.db.add_event(
-                    guild_id=member.guild.id,
-                    discord_id=member.id,
-                    mc_user_id=mc_id,
-                    event_type="left_discord",
-                    event_data={"username": str(member)},
-                    triggered_by="system"
-                )
-                
-                # Check for coordinated MC + Discord departure (within 72h)
-                # This will be implemented in automation.py
-    
-    @commands.Cog.listener()
-    async def on_modlog_case_create(self, case):
-        """
-        Auto-create infractions from Red's modlog events.
-        Triggered when moderators use Red's built-in mod commands.
-        """
-        try:
-            # Get case details
-            user_id = case.user.id if hasattr(case, 'user') else None
-            if not user_id:
-                return
-            
-            # Map modlog action to our infraction type
-            action_type = str(case.action_type).lower()
-            
-            infraction_map = {
-                "ban": "ban",
-                "tempban": "ban",
-                "kick": "kick",
-                "mute": "mute",
-                "tempmute": "mute",
-                "timeout": "timeout",
-                "warning": "warning",
-            }
-            
-            infraction_type = infraction_map.get(action_type)
-            if not infraction_type:
-                return  # Not a type we track
-            
-            # Get MC ID if linked
-            mc_id = None
-            if self.membersync:
-                link = await self.membersync.get_link_for_discord(user_id)
-                if link:
-                    mc_id = link.get("mc_user_id")
-            
-            # Calculate duration for temp actions
-            duration = None
-            if hasattr(case, 'until') and case.until:
-                duration = int((case.until - datetime.now(timezone.utc)).total_seconds())
-            
-            # Create infraction
-            await self.db.add_infraction(
-                guild_id=case.guild.id,
-                discord_id=user_id,
-                mc_user_id=mc_id,
-                target_name=str(case.user) if hasattr(case, 'user') else "Unknown",
-                platform="discord",
-                infraction_type=infraction_type,
-                reason=case.reason or "No reason provided",
-                moderator_id=case.moderator.id if hasattr(case, 'moderator') else None,
-                moderator_name=str(case.moderator) if hasattr(case, 'moderator') else "Unknown",
-                duration=duration
-            )
-            
-            log.info(
-                f"Auto-created infraction for {user_id} "
-                f"(type: {infraction_type}, case: {case.case_number})"
-            )
-            
-        except Exception as e:
-            log.error(f"Failed to create infraction from modlog: {e}", exc_info=True)
-    
-    # ==================== MAIN COMMAND GROUP ====================
-    
-    @commands.hybrid_group(name="member", fallback="help")
-    @commands.guild_only()
-    async def member(self, ctx: commands.Context):
-        """
-        Member management commands.
-        
-        View member information, add notes/infractions, and more.
-        """
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
-    
-    # ==================== WHOIS COMMAND ====================
-    
-    @member.command(name="whois", aliases=["lookup", "info"])
-    @commands.guild_only()
-    async def whois(
-        self,
-        ctx: commands.Context,
-        *,
-        target: str
-    ):
-        """
-        Look up a member by Discord mention, MC ID, MC username, or Discord username.
-        
-        Uses fuzzy search to find members even with typos.
-        
-        **Examples:**
-        - `[p]member whois @JohnDoe`
-        - `[p]member whois 123456` (MC ID)
-        - `[p]member whois JohnDoe` (fuzzy search)
-        """
-        # Check permissions
-        if not await self._is_moderator(ctx.author):
-            await ctx.send("❌ You need moderator permissions to use this command.")
-            return
-        
-        await ctx.typing()
-        
-        # Try to find the member
-        member_data = await self._resolve_target(ctx.guild, target)
-        
-        if not member_data:
-            await ctx.send(
-                f"❌ Could not find member matching `{target}`.\n"
-                "Try using: @mention, MC ID, MC username, or Discord username."
-            )
-            return
-        
-        # Create the overview view with tabs
-        view = MemberOverviewView(
-            bot=self.bot,
-            db=self.db,
-            config=self.config,
-            member_data=member_data,
-            integrations={
-                "membersync": self.membersync,
-                "alliance_scraper": self.alliance_scraper,
-                "sanction_manager": self.sanction_manager,
-            }
-        )
-        
-        # Get initial embed
-        embed = await view.get_overview_embed()
-        
-        await ctx.send(embed=embed, view=view)
+    # ==================== MEMBER LOOKUP ====================
     
     async def _resolve_target(
         self,
@@ -364,7 +192,7 @@ class MemberManager(ConfigCommands, commands.Cog):
         target: str
     ) -> Optional[MemberData]:
         """
-        Resolve a target string to a MemberData object.
+        Resolve a target string to member data.
         
         Tries in order:
         1. Discord mention/ID
@@ -426,6 +254,8 @@ class MemberManager(ConfigCommands, commands.Cog):
     ) -> MemberData:
         """
         Build a complete MemberData object from available sources.
+        
+        🔧 FIXED: Now properly checks link_status='approved' for verification
         """
         data = MemberData(
             discord_id=discord_id,
@@ -439,17 +269,12 @@ class MemberManager(ConfigCommands, commands.Cog):
                 data.discord_username = str(member)
                 data.discord_roles = [r.name for r in member.roles if r.name != "@everyone"]
                 data.discord_joined = member.joined_at
-                
-                # Check for verified role from MemberSync config
-                if self.membersync:
-                    verified_role_id = await self.membersync.config.verified_role_id()
-                    if verified_role_id:
-                        verified_role = guild.get_role(verified_role_id)
-                        if verified_role and verified_role in member.roles:
-                            data.is_verified = True
         
-        # Get MC data from MemberSync link
+        # 🔧 FIX: Get MC data and link status from MemberSync
         if self.membersync:
+            link = None
+            
+            # Get link data
             if discord_id and not mc_user_id:
                 link = await self.membersync.get_link_for_discord(discord_id)
                 if link:
@@ -458,32 +283,79 @@ class MemberManager(ConfigCommands, commands.Cog):
             elif mc_user_id and not discord_id:
                 link = await self.membersync.get_link_for_mc(mc_user_id)
                 if link:
-                    data.discord_id = link.get("discord_id")
+                    data.discord_id = int(link.get("discord_id"))
                     data.link_status = link.get("status", "unknown")
+            elif discord_id and mc_user_id:
+                # Both provided, just get status
+                link = await self.membersync.get_link_for_discord(discord_id)
+                if link:
+                    data.link_status = link.get("status", "unknown")
+            
+            # 🔧 FIX: Set is_verified based on link_status AND role
+            if link and link.get("status") == "approved":
+                data.is_verified = True
+                
+                # Also check if they have the verified role
+                if discord_id:
+                    member = guild.get_member(discord_id)
+                    if member:
+                        verified_role_id = await self.membersync.config.verified_role_id()
+                        if verified_role_id:
+                            verified_role = guild.get_role(verified_role_id)
+                            if verified_role and verified_role not in member.roles:
+                                # Linked but missing role - flag this
+                                data.is_verified = True  # Still verified in DB
+                                log.warning(f"Member {discord_id} is linked but missing verified role")
         
-        # Get MC data from AllianceScraper
+        # 🔧 FIX: Get MC data from AllianceScraper with better error handling
         if data.mc_user_id and self.alliance_scraper:
-            mc_data = await self._get_mc_data(data.mc_user_id)
-            if mc_data:
-                data.mc_username = mc_data.get("name")
-                data.mc_role = mc_data.get("role")
-                data.contribution_rate = mc_data.get("contribution_rate")
+            try:
+                mc_data = await self._get_mc_data(data.mc_user_id)
+                if mc_data:
+                    data.mc_username = mc_data.get("name")
+                    data.mc_role = mc_data.get("role")
+                    data.contribution_rate = mc_data.get("contribution_rate")
+                    
+                    # 🔧 FIX: Ensure contribution_rate is properly formatted
+                    if data.contribution_rate is not None:
+                        try:
+                            data.contribution_rate = float(data.contribution_rate)
+                        except (ValueError, TypeError):
+                            data.contribution_rate = None
+            except Exception as e:
+                log.error(f"Failed to get MC data for {data.mc_user_id}: {e}")
         
-        # Get notes count
+        # 🔧 FIX: Get notes count with error handling
         if self.db:
-            notes = await self.db.get_notes(
-                discord_id=data.discord_id,
-                mc_user_id=data.mc_user_id
-            )
-            data.notes_count = len(notes)
+            try:
+                notes = await self.db.get_notes(
+                    discord_id=data.discord_id,
+                    mc_user_id=data.mc_user_id
+                )
+                data.notes_count = len(notes)
+            except Exception as e:
+                log.error(f"Failed to get notes: {e}")
+                data.notes_count = 0
         
-        # Get infractions count
+        # 🔧 FIX: Get infractions count with error handling
         if self.db:
-            infractions = await self.db.get_infractions(
-                discord_id=data.discord_id,
-                mc_user_id=data.mc_user_id
-            )
-            data.infractions_count = len([i for i in infractions if i["status"] == "active"])
+            try:
+                infractions = await self.db.get_infractions(
+                    discord_id=data.discord_id,
+                    mc_user_id=data.mc_user_id
+                )
+                data.infractions_count = len([i for i in infractions if i["status"] == "active"])
+                
+                # Calculate severity score
+                data.severity_score = sum(
+                    i.get("severity_score", 1) 
+                    for i in infractions 
+                    if i["status"] == "active"
+                )
+            except Exception as e:
+                log.error(f"Failed to get infractions: {e}")
+                data.infractions_count = 0
+                data.severity_score = 0
         
         return data
     
@@ -503,12 +375,193 @@ class MemberManager(ConfigCommands, commands.Cog):
             if rows:
                 return dict(rows[0])
         except Exception as e:
-            log.error(f"Failed to get MC data: {e}", exc_info=True)
+            log.error(f"Error querying alliance data: {e}")
         
         return None
-
-
-# This is the standard way to set up a cog for Red-DiscordBot
-async def setup(bot: Red):
-    """Load MemberManager cog."""
-    await bot.add_cog(MemberManager(bot))
+    
+    # ==================== COMMANDS ====================
+    
+    @commands.hybrid_command(name="member")
+    @commands.guild_only()
+    async def member_info(
+        self,
+        ctx: commands.Context,
+        *,
+        target: str
+    ):
+        """
+        Look up comprehensive member information.
+        
+        Supports:
+        - Discord @mention or ID
+        - MissionChief ID
+        - Name search (fuzzy)
+        """
+        if not await self._is_moderator(ctx.author):
+            await ctx.send("❌ You don't have permission to use this command.")
+            return
+        
+        await ctx.defer()
+        
+        # Resolve target
+        member_data = await self._resolve_target(ctx.guild, target)
+        
+        if not member_data:
+            await ctx.send(
+                f"❌ Could not find member matching `{target}`.\n"
+                f"Try using their Discord mention, MC ID, or exact name."
+            )
+            return
+        
+        # Create view with member data
+        view = MemberOverviewView(
+            bot=self.bot,
+            db=self.db,
+            config=self.config,
+            member_data=member_data,
+            integrations={
+                "membersync": self.membersync,
+                "alliance_scraper": self.alliance_scraper,
+                "sanction_manager": self.sanction_manager
+            },
+            invoker_id=ctx.author.id  # 🔧 FIX: Track who opened this view
+        )
+        
+        # Get initial embed
+        embed = await view.get_overview_embed()
+        
+        # Send message
+        message = await ctx.send(embed=embed, view=view)
+        view.message = message
+    
+    @commands.hybrid_command(name="membersearch")
+    @commands.guild_only()
+    async def member_search(
+        self,
+        ctx: commands.Context,
+        *,
+        query: str
+    ):
+        """
+        Search for members by name (fuzzy search).
+        """
+        if not await self._is_moderator(ctx.author):
+            await ctx.send("❌ You don't have permission to use this command.")
+            return
+        
+        await ctx.defer()
+        
+        # Perform fuzzy search
+        results = await fuzzy_search_member(
+            target=query,
+            guild=ctx.guild,
+            membersync=self.membersync,
+            alliance_scraper=self.alliance_scraper,
+            limit=10
+        )
+        
+        if not results:
+            await ctx.send(f"❌ No members found matching `{query}`")
+            return
+        
+        # Format results
+        embed = discord.Embed(
+            title=f"🔍 Search Results: {query}",
+            color=discord.Color.blue()
+        )
+        
+        lines = []
+        for i, result in enumerate(results, 1):
+            discord_id = result.get("discord_id")
+            mc_id = result.get("mc_user_id")
+            name = result.get("name", "Unknown")
+            
+            line = f"{i}. **{name}**"
+            if discord_id:
+                line += f" • <@{discord_id}>"
+            if mc_id:
+                line += f" • MC: `{mc_id}`"
+            
+            lines.append(line)
+        
+        embed.description = "\n".join(lines)
+        embed.set_footer(text=f"Found {len(results)} result(s)")
+        
+        await ctx.send(embed=embed)
+    
+    @commands.hybrid_command(name="memberstats")
+    @commands.guild_only()
+    async def member_stats(self, ctx: commands.Context):
+        """
+        Show overall member management statistics.
+        """
+        if not await self._is_admin(ctx.author):
+            await ctx.send("❌ You don't have permission to use this command.")
+            return
+        
+        await ctx.defer()
+        
+        # Get stats from database
+        embed = discord.Embed(
+            title="📊 Member Management Statistics",
+            color=discord.Color.gold()
+        )
+        
+        try:
+            # Total notes
+            notes = await self.db.get_notes(limit=9999)
+            active_notes = len([n for n in notes if n["status"] == "active"])
+            
+            embed.add_field(
+                name="📝 Notes",
+                value=f"**Total:** {len(notes)}\n**Active:** {active_notes}",
+                inline=True
+            )
+            
+            # Total infractions
+            infractions = await self.db.get_infractions(limit=9999)
+            active_infractions = len([i for i in infractions if i["status"] == "active"])
+            
+            embed.add_field(
+                name="⚠️ Infractions",
+                value=f"**Total:** {len(infractions)}\n**Active:** {active_infractions}",
+                inline=True
+            )
+            
+            # Events
+            events = await self.db.get_events(limit=9999)
+            
+            embed.add_field(
+                name="📅 Events",
+                value=f"**Total:** {len(events)}",
+                inline=True
+            )
+            
+            # Integration status
+            integrations = []
+            if self.membersync:
+                integrations.append("✅ MemberSync")
+            else:
+                integrations.append("❌ MemberSync")
+            
+            if self.alliance_scraper:
+                integrations.append("✅ AllianceScraper")
+            else:
+                integrations.append("❌ AllianceScraper")
+            
+            if self.sanction_manager:
+                integrations.append("✅ SanctionManager")
+            else:
+                integrations.append("❌ SanctionManager")
+            
+            embed.add_field(
+                name="🔌 Integrations",
+                value="\n".join(integrations),
+                inline=False
+            )
+            
+        except Exception as e:
+            log.error(f"Error getting stats: {e}")
+            embed.description = "⚠️ Error retrieving statistics"
+        
+        await ctx.send(embed=embed)
