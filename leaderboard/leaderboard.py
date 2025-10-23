@@ -33,6 +33,7 @@ BLACKLISTED_USERNAMES = [
     "52525255252",  # Looks like an ID
     "Pierce702420",  # Username with numbers parsed as credits
     "25,000",  # Parsed username as amount
+    "Franny192",  # 192 parsed from username instead of real contribution
 ]
 
 class Leaderboard(commands.Cog):
@@ -888,6 +889,12 @@ class Leaderboard(commands.Cog):
         
         try:
             async with aiosqlite.connect(self.income_db_path) as db:
+                # First, let's see ALL distinct periods and entry_types
+                debug_query = "SELECT DISTINCT entry_type, period, COUNT(*) FROM income GROUP BY entry_type, period"
+                async with db.execute(debug_query) as cursor:
+                    all_data = await cursor.fetchall()
+                    await ctx.send(f"🔍 DEBUG - Data in database:\n" + "\n".join([f"  • {etype} / {per}: {cnt} records" for etype, per, cnt in all_data]))
+                
                 # Get latest timestamp for this period (contributions only, not paginated expenses)
                 query = """
                     SELECT MAX(timestamp) as latest_ts
@@ -897,7 +904,7 @@ class Leaderboard(commands.Cog):
                 async with db.execute(query, (period,)) as cursor:
                     result = await cursor.fetchone()
                     if not result or not result[0]:
-                        await ctx.send(f"❌ No data found for period: {period}")
+                        await ctx.send(f"❌ No data found for period: {period}\nTry checking if entry_type='expense' and period='{period}' exists in debug info above.")
                         return
                     
                     latest_ts = result[0]
