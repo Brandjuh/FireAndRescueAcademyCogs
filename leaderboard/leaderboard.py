@@ -33,6 +33,7 @@ BLACKLISTED_USERNAMES = [
     "52525255252",  # Looks like an ID
     "Pierce702420",  # Username with numbers parsed as credits
     "25,000",  # Parsed username as amount
+    "Franny192",  # 192 parsed from username instead of real contribution
 ]
 
 class Leaderboard(commands.Cog):
@@ -295,7 +296,7 @@ class Leaderboard(commands.Cog):
     async def _get_treasury_rankings(self, period: str) -> Optional[Dict]:
         """
         Get treasury contribution rankings from income_v2.db.
-        NOTE: IncomeScraper stores member contributions as 'expense' type!
+        NOTE: IncomeScraper stores member contributions as 'income' type (not 'expense')!
         We filter out period='paginated' which contains actual expenses (African Prison, etc.)
         Returns dict with 'current' and 'previous' lists of {username, credits, rank}
         """
@@ -306,11 +307,11 @@ class Leaderboard(commands.Cog):
         try:
             async with aiosqlite.connect(self.income_db_path) as db:
                 # Get the two most recent timestamps for this period
-                # Filter out 'paginated' period (those are actual expenses, not contributions)
+                # NOTE: Using entry_type='income' (not 'expense')!
                 query = """
                     SELECT DISTINCT timestamp
                     FROM income
-                    WHERE entry_type = 'expense' 
+                    WHERE entry_type = 'income' 
                     AND period = ?
                     ORDER BY timestamp DESC
                     LIMIT 2
@@ -332,7 +333,7 @@ class Leaderboard(commands.Cog):
                 query = """
                     SELECT username, amount as credits
                     FROM income
-                    WHERE entry_type = 'expense'
+                    WHERE entry_type = 'income'
                     AND period = ?
                     AND timestamp = ?
                     ORDER BY amount DESC
@@ -898,12 +899,12 @@ class Leaderboard(commands.Cog):
                 query = """
                     SELECT MAX(timestamp) as latest_ts
                     FROM income
-                    WHERE entry_type = 'expense' AND period = ?
+                    WHERE entry_type = 'income' AND period = ?
                 """
                 async with db.execute(query, (period,)) as cursor:
                     result = await cursor.fetchone()
                     if not result or not result[0]:
-                        await ctx.send(f"❌ No data found for period: {period}\nTry checking if entry_type='expense' and period='{period}' exists in debug info above.")
+                        await ctx.send(f"❌ No data found for period: {period}\nTry checking if entry_type='income' and period='{period}' exists in debug info above.")
                         return
                     
                     latest_ts = result[0]
@@ -913,7 +914,7 @@ class Leaderboard(commands.Cog):
                     query = """
                         SELECT username, amount
                         FROM income
-                        WHERE entry_type = 'expense' 
+                        WHERE entry_type = 'income' 
                         AND period = ?
                         AND timestamp = ?
                         AND username LIKE ?
@@ -946,7 +947,7 @@ class Leaderboard(commands.Cog):
                 query = """
                     SELECT username, amount
                     FROM income
-                    WHERE entry_type = 'expense' 
+                    WHERE entry_type = 'income' 
                     AND period = ?
                     AND timestamp = ?
                     ORDER BY amount DESC
