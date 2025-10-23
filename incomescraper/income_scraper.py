@@ -67,34 +67,28 @@ class IncomeScraper(commands.Cog):
             self.scrape_task.cancel()
     
     async def _background_scraper(self):
-        """Background task that scrapes income/expenses every hour at :30"""
+        """Background task that scrapes income/expenses every hour"""
         await self.bot.wait_until_ready()
         
-        while True:
+        while not self.bot.is_closed():
             try:
-                # Wait until the next :30 minute mark
-                now = datetime.now()
-                next_run = now.replace(minute=30, second=0, microsecond=0)
-                if now.minute >= 30:
-                    next_run = next_run.replace(hour=now.hour + 1)
-                wait_seconds = (next_run - now).total_seconds()
+                # Run scrape
+                await self._scrape_all_income(ctx=None, include_expenses=False, max_expense_pages=5)
                 
-                await asyncio.sleep(wait_seconds)
-                
-                # Run scrape (without expenses pagination for background)
-                await self._scrape_all_income(ctx=None, include_expenses=False)
+                # Wait 1 hour
+                await asyncio.sleep(3600)
                 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 print(f"[IncomeScraper] Background scrape error: {e}")
-                await asyncio.sleep(3600)  # Wait 1 hour on error
+                await asyncio.sleep(3600)
     
     async def _get_session(self, ctx=None):
         """Get authenticated session from CookieManager"""
         cookie_manager = self.bot.get_cog("CookieManager")
         if not cookie_manager:
-            await self._debug_log("❌ CookieManager cog not loaded!", ctx)
+            await self._debug_log("❌ CookieManager cog not loaded", ctx)
             if ctx:
                 await ctx.send("❌ CookieManager cog not loaded! Load it with: `!load cookiemanager`")
             return None
@@ -142,7 +136,7 @@ class IncomeScraper(commands.Cog):
         return has_content
     
     async def _scrape_income_tab(self, session, tab_type='daily', ctx=None):
-        """Scrape income/expense data from a specific tab (daily or monthly)"""
+        """Scrape income/expense data from a specific tab (daily or monthly) - FIXED VERSION"""
         # Construct URL with tab parameter
         if tab_type == 'monthly':
             url = f"{self.income_url}?tab=monthly"
@@ -176,80 +170,94 @@ class IncomeScraper(commands.Cog):
                 entries = []
                 
                 for table_idx, table in enumerate(tables):
-                    # Try to determine table type by headers or content
-                    headers = [th.get_text(strip=True) for th in table.find_all('th')]
+                    # Get headers to identify column positions
+                    header_row = table.find('tr')
+                    if not header_row:
+                        continue
                     
-                    # Determine if this is income or expense table
-                    # Income tables usually have "Username" or "Member" columns
-                    # Expense tables might have "Amount" or "Cost" columns
-                    is_income_table = any('member' in h.lower() or 'user' in h.lower() for h in headers)
-                    is_expense_table = any('expense' in h.lower() or 'cost' in h.lower() for h in headers)
+                    headers = [th.get_text(strip=True).lower() for th in header_row.find_all('th')]
                     
-                    # If can't determine, look at first data row
-                    if not is_income_table and not is_expense_table:
-                        first_row = table.find('tr')
-                        if first_row:
-                            first_data = first_row.get_text()
-                            # Simple heuristic: if has username-like text, it's income
-                            is_income_table = bool(re.search(r'[A-Za-z]+\d+', first_data))
+                    if not headers:
+                        # No headers found, skip this table
+                        continue
                     
+                    await self._debug_log(f"Table {table_idx} headers: {headers}", ctx)
+                    
+                    # Find column indices based on headers
+                    name_col_idx = None
+                    credits_col_idx = None
+                    
+                    for idx, header in enumerate(headers):
+                        if 'name' in header or 'user' in header or 'member' in header or 'player' in header:
+                            name_col_idx = idx
+                        elif 'credit' in header or 'amount' in header or 'coin' in header or 'contribution' in header:
+                            credits_col_idx = idx
+                    
+                    # If we couldn't identify columns by headers, try positional approach
+                    # Typically: Column 0 = Name, Column 1 = Credits
+                    if name_col_idx is None and credits_col_idx is None:
+                        if len(headers) >= 2:
+                            await self._debug_log(f"⚠️ No clear headers, using positional: col0=name, col1=credits", ctx)
+                            name_col_idx = 0
+                            credits_col_idx = 1
+                        else:
+                            await self._debug_log(f"❌ Table {table_idx}: not enough columns", ctx)
+                            continue
+                    
+                    await self._debug_log(f"✅ Table {table_idx}: name_col={name_col_idx}, credits_col={credits_col_idx}", ctx)
+                    
+                    # Determine if this is income or expense table (though for contributions, it's all 'expense' type)
+                    is_income_table = any('member' in h or 'user' in h or 'name' in h for h in headers)
                     entry_type = 'income' if is_income_table else 'expense'
                     
-                    await self._debug_log(f"Table {table_idx}: type={entry_type}", ctx)
-                    
-                    # Parse rows
-                    for row in table.find_all('tr')[1:]:  # Skip header
+                    # Parse data rows
+                    parsed_count = 0
+                    for row in table.find_all('tr')[1:]:  # Skip header row
                         cols = row.find_all('td')
                         if len(cols) < 2:
                             continue
                         
-                        # Extract username and amount
+                        # Extract username from the identified column
                         username = ""
-                        amount = 0
-                        description = ""
-                        
-                        # Try to find username (usually first column with link)
-                        for col in cols:
-                            link = col.find('a', href=True)
-                            if link and '/users/' in link['href']:
+                        if name_col_idx is not None and name_col_idx < len(cols):
+                            name_cell = cols[name_col_idx]
+                            # Try to find link first (more reliable)
+                            link = name_cell.find('a', href=True)
+                            if link and '/users/' in link.get('href', ''):
                                 username = link.get_text(strip=True)
-                                break
+                            else:
+                                username = name_cell.get_text(strip=True)
                         
-                        # If no username found, use first column text
-                        if not username and cols:
-                            username = cols[0].get_text(strip=True)
-                        
-                        # Find amount (look for numbers with commas)
-                        for col in cols:
-                            text = col.get_text(strip=True)
-                            # Look for currency amounts: 123,456 or 123456
+                        # Extract credits from the identified column
+                        amount = 0
+                        if credits_col_idx is not None and credits_col_idx < len(cols):
+                            credits_cell = cols[credits_col_idx]
+                            text = credits_cell.get_text(strip=True)
+                            
+                            # Parse credits - look for numbers with optional commas
                             match = re.search(r'([\d,]+)', text)
                             if match:
                                 amount_str = match.group(1).replace(',', '')
                                 try:
                                     amount = int(amount_str)
-                                    if amount > 100:  # Sanity check
-                                        # Clamp to INT64 range
-                                        amount = max(INT64_MIN, min(INT64_MAX, amount))
-                                        break
+                                    # Clamp to INT64 range
+                                    amount = max(INT64_MIN, min(INT64_MAX, amount))
                                 except ValueError:
+                                    await self._debug_log(f"⚠️ Could not parse amount: {text}", ctx)
                                     continue
                         
-                        # Extract description (longest text column)
-                        for col in cols:
-                            text = col.get_text(strip=True)
-                            if len(text) > len(description) and not re.match(r'^[\d,]+$', text):
-                                description = text
-                        
+                        # Validate and add entry
                         if username and amount > 0:
-                            await self._debug_log(f"💰 {entry_type}: {username[:20]}... = {amount:,}", ctx)
+                            parsed_count += 1
+                            if parsed_count <= 5:  # Only log first 5 for brevity
+                                await self._debug_log(f"💰 {entry_type}: {username} = {amount:,}", ctx)
                             
                             entries.append({
                                 'entry_type': entry_type,
                                 'period': tab_type,
                                 'username': username,
                                 'amount': amount,
-                                'description': description
+                                'description': ''
                             })
                 
                 await self._debug_log(f"✅ Parsed {len(entries)} entries from {tab_type} tab", ctx)
@@ -257,6 +265,8 @@ class IncomeScraper(commands.Cog):
                 
         except Exception as e:
             await self._debug_log(f"❌ Error scraping {tab_type}: {str(e)}", ctx)
+            import traceback
+            await self._debug_log(f"Traceback: {traceback.format_exc()}", ctx)
             return []
     
     async def _scrape_expenses_pages(self, session, ctx=None, max_pages=100):
@@ -275,6 +285,7 @@ class IncomeScraper(commands.Cog):
             if ctx and page % 100 == 0:
                 pct = (page / max_pages) * 100
                 await ctx.send(f"⏳ Progress: {page}/{max_pages} ({pct:.1f}%) - {len(all_entries)} expenses collected")
+            
             url = f"{self.income_url}" if page == 1 else f"{self.income_url}?page={page}"
             await self._debug_log(f"🌐 Page {page}: {url}", ctx)
             
@@ -282,12 +293,14 @@ class IncomeScraper(commands.Cog):
                 async with session.get(url) as resp:
                     if resp.status != 200:
                         empty_count += 1
-                        if empty_count >= 3: break
+                        if empty_count >= 3: 
+                            break
                         page += 1
                         continue
                     
                     html = await resp.text()
-                    if not await self._check_logged_in(html, ctx): break
+                    if not await self._check_logged_in(html, ctx): 
+                        break
                     
                     soup = BeautifulSoup(html, 'html.parser')
                     
@@ -295,7 +308,8 @@ class IncomeScraper(commands.Cog):
                     page_entries = []
                     for table in soup.find_all('table'):
                         rows = table.find_all('tr')
-                        if len(rows) < 2: continue
+                        if len(rows) < 2: 
+                            continue
                         
                         # Check header row for expense table signature
                         headers = [th.get_text(strip=True).lower() for th in rows[0].find_all('th')]
@@ -303,7 +317,8 @@ class IncomeScraper(commands.Cog):
                         # Parse data rows
                         for row in rows[1:]:
                             cols = row.find_all('td')
-                            if len(cols) < 3: continue
+                            if len(cols) < 3: 
+                                continue
                             
                             # Column order: Credits, Name, Description, Date
                             credits_col = cols[0].get_text(strip=True)
@@ -312,10 +327,12 @@ class IncomeScraper(commands.Cog):
                             
                             # Parse credits
                             credits_match = re.search(r'([\d,]+)', credits_col)
-                            if not credits_match: continue
+                            if not credits_match: 
+                                continue
                             
                             amount = int(credits_match.group(1).replace(',', ''))
-                            if amount < 100: continue  # Skip invalid
+                            if amount < 100: 
+                                continue  # Skip invalid
                             amount = min(amount, INT64_MAX)
                             
                             # Get username (might have link)
