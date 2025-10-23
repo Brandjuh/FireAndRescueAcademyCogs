@@ -43,7 +43,21 @@ class ConnectFourGame(Minigame):
             raise ValueError("Game must have 2 players")
         self.accepted = False
         self.board = Board(7, 6, Player.NONE)
-        self.current = random.choice([Player.RED, Player.BLUE])
+        
+        # Check if playing against bot
+        against_bot = any(player.bot for player in players)
+        
+        if against_bot:
+            # Human player is always RED (index 0), bot is BLUE (index 1)
+            human_player = next(p for p in players if not p.bot)
+            bot_player = next(p for p in players if p.bot)
+            self.players = [human_player, bot_player]
+            # Random starting player
+            self.current = random.choice([Player.RED, Player.BLUE])
+        else:
+            # PvP: random starting color
+            self.current = random.choice([Player.RED, Player.BLUE])
+        
         self.winner = Player.NONE
         self.time = 0
         self.cancelled = False
@@ -72,30 +86,121 @@ class ConnectFourGame(Minigame):
             self.current = self.opponent(self.current)
 
     def do_turn_ai(self):
-        moves = {}
-        avoid_moves = []
+        """
+        Verbeterde AI met scoringssysteem:
+        - Prioriteit 1: Win direct als mogelijk
+        - Prioriteit 2: Blokkeer directe tegenstander winst
+        - Prioriteit 3: Bouw eigen lijnen op (3-op-rij, 2-op-rij)
+        - Prioriteit 4: Blokkeer tegenstander lijnen
+        - Prioriteit 5: Voorkom dat tegenstander next turn kan winnen
+        - Prioriteit 6: Speel centrum kolommen (betere posities)
+        """
         columns = self.available_columns(self.board)
         if len(columns) == 1:
-            moves[columns[0]] = 0
-        else:
-            for column in columns:
-                temp_board = self.board.copy()
-                self.drop_piece(temp_board, column, self.current)
-                if self.check_win(temp_board, self.current, self.time + 1):
-                    moves = {column: 0}
-                    avoid_moves = []
-                    break
-                lose_count = self.may_lose_count(temp_board, self.current, self.opponent(self.current), self.time + 1, depth=3)
-                moves[column] = lose_count
-                if self.may_lose_count(temp_board, self.current, self.opponent(self.current), self.time + 1, depth=1) > 0:
-                    avoid_moves.append(column)
-        if len(avoid_moves) < len(moves):
-            for move in avoid_moves:
-                moves.pop(move)
-        least_loses = min(moves.values())
-        final_options = [col for col, val in moves.items() if val == least_loses]
-        move = random.choice(final_options)
+            self.do_turn(self.member(self.current), columns[0])
+            return
+        
+        best_score = float('-inf')
+        best_moves = []
+        
+        for column in columns:
+            score = 0
+            temp_board = self.board.copy()
+            self.drop_piece(temp_board, column, self.current)
+            
+            # Prioriteit 1: Directe winst (hoogste score)
+            if self.check_win(temp_board, self.current, self.time + 1):
+                self.do_turn(self.member(self.current), column)
+                return
+            
+            # Prioriteit 2: Blokkeer directe tegenstander winst
+            opponent = self.opponent(self.current)
+            temp_board_opp = self.board.copy()
+            self.drop_piece(temp_board_opp, column, opponent)
+            if self.check_win(temp_board_opp, opponent, self.time + 1):
+                score += 900  # Zeer hoge score voor blokkeren winst
+            
+            # Prioriteit 3: Tel eigen lijnen (offensief spel)
+            score += self.count_threats(temp_board, self.current, 3) * 100  # 3-op-rij
+            score += self.count_threats(temp_board, self.current, 2) * 10   # 2-op-rij
+            
+            # Prioriteit 4: Blokkeer tegenstander lijnen (defensief)
+            score += self.count_threats(self.board, opponent, 3) * 50  # Blokkeer 3-op-rij
+            score += self.count_threats(self.board, opponent, 2) * 5   # Blokkeer 2-op-rij
+            
+            # Prioriteit 5: Voorkom setup voor volgende beurt tegenstander
+            dangerous_setups = self.check_dangerous_setup(temp_board, opponent)
+            score -= dangerous_setups * 200  # Penalty voor gevaarlijke situaties
+            
+            # Prioriteit 6: Centrum kolommen zijn strategisch beter
+            center_distance = abs(column - 3)
+            score += (3 - center_distance) * 3
+            
+            # Kleine randomness voor variatie (5%)
+            score += random.uniform(-2, 2)
+            
+            # Track beste moves
+            if score > best_score:
+                best_score = score
+                best_moves = [column]
+            elif score == best_score:
+                best_moves.append(column)
+        
+        # Kies random uit beste moves
+        move = random.choice(best_moves)
         self.do_turn(self.member(self.current), move)
+
+    @classmethod
+    def count_threats(cls, board: Board, color: Player, length: int) -> int:
+        """Tel hoeveel (bijna) lijnen van bepaalde lengte bestaan"""
+        count = 0
+        
+        # Horizontaal
+        for y in range(board.height):
+            for x in range(board.width - 3):
+                window = [board[x + i, y] for i in range(4)]
+                if window.count(color) == length and window.count(Player.NONE) == 4 - length:
+                    count += 1
+        
+        # Verticaal
+        for x in range(board.width):
+            for y in range(board.height - 3):
+                window = [board[x, y + i] for i in range(4)]
+                if window.count(color) == length and window.count(Player.NONE) == 4 - length:
+                    count += 1
+        
+        # Diagonaal (links-onder naar rechts-boven)
+        for x in range(board.width - 3):
+            for y in range(3, board.height):
+                window = [board[x + i, y - i] for i in range(4)]
+                if window.count(color) == length and window.count(Player.NONE) == 4 - length:
+                    count += 1
+        
+        # Diagonaal (links-boven naar rechts-onder)
+        for x in range(board.width - 3):
+            for y in range(board.height - 3):
+                window = [board[x + i, y + i] for i in range(4)]
+                if window.count(color) == length and window.count(Player.NONE) == 4 - length:
+                    count += 1
+        
+        return count
+
+    @classmethod
+    def check_dangerous_setup(cls, board: Board, opponent_color: Player) -> int:
+        """
+        Check of tegenstander na deze zet kan winnen in volgende beurt.
+        Retourneert aantal gevaarlijke posities.
+        """
+        danger_count = 0
+        columns = cls.available_columns(board)
+        
+        for col in columns:
+            temp = board.copy()
+            cls.drop_piece(temp, col, opponent_color)
+            if cls.check_win(temp, opponent_color, 0):
+                danger_count += 1
+        
+        return danger_count
 
     def is_finished(self) -> bool:
         return self.winner != Player.NONE or self.cancelled or self.time == len(self.board._data)
@@ -159,20 +264,6 @@ class ConnectFourGame(Minigame):
         if not available_columns:
             raise ValueError("No available columns")
         return random.choice(available_columns)
-    
-    @classmethod
-    def may_lose_count(cls, board: Board, color: Player, current: Player, time: int, depth: int):
-        count = 0
-        if depth <= 0 or time == len(board._data):
-            return count
-        for column in cls.available_columns(board):
-            temp_board = board.copy()
-            cls.drop_piece(temp_board, column, current)
-            if current != color and cls.check_win(temp_board, current, time + 1):
-                count += 1
-            elif current != color or not cls.check_win(temp_board, current, time + 1):
-                count += cls.may_lose_count(temp_board, color, cls.opponent(current), time + 1, depth - 1)
-        return count
 
     def find_winning_line(self) -> List[tuple]:
         """Find the positions of the winning 4-in-a-row"""
@@ -240,7 +331,7 @@ class ConnectFourGame(Minigame):
             if self.winner.value == i:
                 description += "👑 "
             elif not self.is_finished() and self.current.value == i and self.accepted:
-                description += "►"
+                description += "▶"
             description += f"{EMOJIS[Player(i)]} - {player.mention}\n"
         
         # Add economy info
