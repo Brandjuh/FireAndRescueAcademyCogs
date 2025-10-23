@@ -1,6 +1,6 @@
 """
 Database layer for MemberManager
-Handles all SQLite operations with aiosqlite
+Handles all SQLite operations with aiosqlite + Audit Log System
 """
 
 import aiosqlite
@@ -30,7 +30,7 @@ def _hash_content(text: str) -> str:
 
 
 class MemberDatabase:
-    """SQLite database for MemberManager."""
+    """SQLite database for MemberManager with full audit trail."""
     
     def __init__(self, db_path: str):
         self.db_path = Path(db_path)
@@ -43,7 +43,6 @@ class MemberDatabase:
         self._conn = await aiosqlite.connect(self.db_path)
         self._conn.row_factory = aiosqlite.Row
         
-        # Execute schema from schema file
         await self._create_tables()
         
         log.info(f"Database initialized at {self.db_path}")
@@ -71,6 +70,7 @@ class MemberDatabase:
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER,
                 updated_by INTEGER,
+                updated_by_name TEXT,
                 expires_at INTEGER,
                 content_hash TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'active',
@@ -120,6 +120,24 @@ class MemberDatabase:
             )
         """)
         
+        # 🆕 AUDIT LOG TABLE
+        await self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                discord_id INTEGER,
+                mc_user_id TEXT,
+                action_type TEXT NOT NULL,
+                action_target TEXT NOT NULL,
+                actor_id INTEGER NOT NULL,
+                actor_name TEXT NOT NULL,
+                old_value TEXT,
+                new_value TEXT,
+                timestamp INTEGER NOT NULL,
+                metadata TEXT
+            )
+        """)
+        
         # Watchlist table
         await self._conn.execute("""
             CREATE TABLE IF NOT EXISTS watchlist (
@@ -153,25 +171,6 @@ class MemberDatabase:
             )
         """)
         
-        # Config table
-        await self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS config (
-                guild_id INTEGER PRIMARY KEY,
-                contribution_threshold REAL DEFAULT 5.0,
-                contribution_trend_weeks INTEGER DEFAULT 3,
-                auto_contribution_alert INTEGER DEFAULT 1,
-                auto_role_drift_check INTEGER DEFAULT 1,
-                auto_dormancy_check INTEGER DEFAULT 1,
-                admin_alert_channel INTEGER,
-                modlog_channel INTEGER,
-                admin_role_ids TEXT,
-                moderator_role_ids TEXT,
-                note_expiry_days INTEGER DEFAULT 90,
-                dormancy_threshold_days INTEGER DEFAULT 30,
-                updated_at INTEGER NOT NULL
-            )
-        """)
-        
         # Create indices
         await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_discord ON notes(discord_id)")
         await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_mc ON notes(mc_user_id)")
@@ -180,8 +179,81 @@ class MemberDatabase:
         await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_infractions_mc ON infractions(mc_user_id)")
         await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_discord ON member_events(discord_id)")
         await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_mc ON member_events(mc_user_id)")
+        await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_discord ON audit_log(discord_id)")
+        await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_mc ON audit_log(mc_user_id)")
+        await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_log(action_target)")
         
         await self._conn.commit()
+    
+    # ==================== AUDIT LOG ====================
+    
+    async def log_action(
+        self,
+        guild_id: int,
+        action_type: str,
+        action_target: str,
+        actor_id: int,
+        actor_name: str,
+        discord_id: Optional[int] = None,
+        mc_user_id: Optional[str] = None,
+        old_value: Optional[str] = None,
+        new_value: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> int:
+        """
+        Log an action to audit trail.
+        
+        Action types: note_created, note_edited, note_deleted, infraction_added, etc.
+        """
+        metadata_json = json.dumps(metadata) if metadata else None
+        
+        cursor = await self._conn.execute(
+            """
+            INSERT INTO audit_log (
+                guild_id, discord_id, mc_user_id, action_type, action_target,
+                actor_id, actor_name, old_value, new_value, timestamp, metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id, discord_id, mc_user_id, action_type, action_target,
+                actor_id, actor_name, old_value, new_value, _timestamp(), metadata_json
+            )
+        )
+        await self._conn.commit()
+        
+        return cursor.lastrowid
+    
+    async def get_audit_log(
+        self,
+        discord_id: Optional[int] = None,
+        mc_user_id: Optional[str] = None,
+        action_type: Optional[str] = None,
+        action_target: Optional[str] = None,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Get audit log entries."""
+        query = "SELECT * FROM audit_log WHERE 1=1"
+        params = []
+        
+        if discord_id:
+            query += " AND discord_id=?"
+            params.append(discord_id)
+        if mc_user_id:
+            query += " AND mc_user_id=?"
+            params.append(mc_user_id)
+        if action_type:
+            query += " AND action_type=?"
+            params.append(action_type)
+        if action_target:
+            query += " AND action_target=?"
+            params.append(action_target)
+        
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+        
+        cursor = await self._conn.execute(query, params)
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
     
     # ==================== NOTES ====================
     
@@ -234,6 +306,18 @@ class MemberDatabase:
         )
         await self._conn.commit()
         
+        # 🆕 LOG TO AUDIT
+        await self.log_action(
+            guild_id=guild_id,
+            action_type="note_created",
+            action_target=ref_code,
+            actor_id=author_id,
+            actor_name=author_name,
+            discord_id=discord_id,
+            mc_user_id=mc_user_id,
+            new_value=note_text[:100]  # Preview
+        )
+        
         log.info(f"Created note {ref_code} for discord={discord_id}, mc={mc_user_id}")
         return ref_code
     
@@ -274,30 +358,84 @@ class MemberDatabase:
         self,
         ref_code: str,
         new_text: str,
-        updated_by: int
+        updated_by: int,
+        updated_by_name: str
     ) -> bool:
-        """Update note text."""
+        """Update note text with audit trail."""
+        # Get old text first
+        cursor = await self._conn.execute(
+            "SELECT note_text, discord_id, mc_user_id, guild_id FROM notes WHERE ref_code=?",
+            (ref_code,)
+        )
+        old_row = await cursor.fetchone()
+        
+        if not old_row:
+            return False
+        
+        old_text = old_row["note_text"]
         new_hash = _hash_content(new_text)
         
         result = await self._conn.execute(
             """
             UPDATE notes 
-            SET note_text=?, updated_at=?, updated_by=?, content_hash=?
+            SET note_text=?, updated_at=?, updated_by=?, updated_by_name=?, content_hash=?
             WHERE ref_code=?
             """,
-            (new_text, _timestamp(), updated_by, new_hash, ref_code)
+            (new_text, _timestamp(), updated_by, updated_by_name, new_hash, ref_code)
         )
         await self._conn.commit()
         
+        if result.rowcount > 0:
+            # 🆕 LOG TO AUDIT
+            await self.log_action(
+                guild_id=old_row["guild_id"],
+                action_type="note_edited",
+                action_target=ref_code,
+                actor_id=updated_by,
+                actor_name=updated_by_name,
+                discord_id=old_row["discord_id"],
+                mc_user_id=old_row["mc_user_id"],
+                old_value=old_text[:100],
+                new_value=new_text[:100]
+            )
+        
         return result.rowcount > 0
     
-    async def delete_note(self, ref_code: str) -> bool:
+    async def delete_note(
+        self,
+        ref_code: str,
+        deleted_by: int,
+        deleted_by_name: str
+    ) -> bool:
         """Soft delete a note."""
+        # Get note info first
+        cursor = await self._conn.execute(
+            "SELECT discord_id, mc_user_id, guild_id, note_text FROM notes WHERE ref_code=?",
+            (ref_code,)
+        )
+        row = await cursor.fetchone()
+        
+        if not row:
+            return False
+        
         result = await self._conn.execute(
             "UPDATE notes SET status='deleted' WHERE ref_code=?",
             (ref_code,)
         )
         await self._conn.commit()
+        
+        if result.rowcount > 0:
+            # 🆕 LOG TO AUDIT
+            await self.log_action(
+                guild_id=row["guild_id"],
+                action_type="note_deleted",
+                action_target=ref_code,
+                actor_id=deleted_by,
+                actor_name=deleted_by_name,
+                discord_id=row["discord_id"],
+                mc_user_id=row["mc_user_id"],
+                old_value=row["note_text"][:100]
+            )
         
         return result.rowcount > 0
     
@@ -351,6 +489,18 @@ class MemberDatabase:
         )
         await self._conn.commit()
         
+        # 🆕 LOG TO AUDIT
+        await self.log_action(
+            guild_id=guild_id,
+            action_type="infraction_added",
+            action_target=ref_code,
+            actor_id=moderator_id,
+            actor_name=moderator_name,
+            discord_id=discord_id,
+            mc_user_id=mc_user_id,
+            new_value=f"{infraction_type}: {reason[:50]}"
+        )
+        
         log.info(f"Created infraction {ref_code} for discord={discord_id}, mc={mc_user_id}")
         return ref_code
     
@@ -390,9 +540,20 @@ class MemberDatabase:
         self,
         ref_code: str,
         revoked_by: int,
+        revoked_by_name: str,
         reason: str
     ) -> bool:
         """Revoke an infraction."""
+        # Get infraction info first
+        cursor = await self._conn.execute(
+            "SELECT discord_id, mc_user_id, guild_id FROM infractions WHERE ref_code=?",
+            (ref_code,)
+        )
+        row = await cursor.fetchone()
+        
+        if not row:
+            return False
+        
         result = await self._conn.execute(
             """
             UPDATE infractions 
@@ -402,6 +563,19 @@ class MemberDatabase:
             (_timestamp(), revoked_by, reason, ref_code)
         )
         await self._conn.commit()
+        
+        if result.rowcount > 0:
+            # 🆕 LOG TO AUDIT
+            await self.log_action(
+                guild_id=row["guild_id"],
+                action_type="infraction_revoked",
+                action_target=ref_code,
+                actor_id=revoked_by,
+                actor_name=revoked_by_name,
+                discord_id=row["discord_id"],
+                mc_user_id=row["mc_user_id"],
+                new_value=reason
+            )
         
         return result.rowcount > 0
     
@@ -478,171 +652,6 @@ class MemberDatabase:
         params.append(limit)
         
         cursor = await self._conn.execute(query, params)
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
-    
-    # ==================== WATCHLIST ====================
-    
-    async def add_to_watchlist(
-        self,
-        guild_id: int,
-        discord_id: Optional[int],
-        mc_user_id: Optional[str],
-        reason: str,
-        added_by: int,
-        watch_type: str,
-        alert_threshold: Optional[Dict[str, Any]] = None
-    ) -> int:
-        """Add member to watchlist. Returns watchlist_id."""
-        threshold_json = json.dumps(alert_threshold) if alert_threshold else None
-        
-        try:
-            cursor = await self._conn.execute(
-                """
-                INSERT INTO watchlist (
-                    guild_id, discord_id, mc_user_id, reason, added_by,
-                    added_at, watch_type, alert_threshold
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    guild_id, discord_id, mc_user_id, reason, added_by,
-                    _timestamp(), watch_type, threshold_json
-                )
-            )
-            await self._conn.commit()
-            return cursor.lastrowid
-        except aiosqlite.IntegrityError:
-            # Already on watchlist
-            return 0
-    
-    async def remove_from_watchlist(
-        self,
-        guild_id: int,
-        discord_id: Optional[int],
-        mc_user_id: Optional[str],
-        resolved_by: int,
-        resolution_notes: Optional[str] = None
-    ) -> bool:
-        """Remove member from watchlist."""
-        query = "UPDATE watchlist SET status='resolved', resolved_at=?, resolved_by=?, resolution_notes=? WHERE guild_id=? AND status='active'"
-        params = [_timestamp(), resolved_by, resolution_notes, guild_id]
-        
-        if discord_id:
-            query += " AND discord_id=?"
-            params.append(discord_id)
-        if mc_user_id:
-            query += " AND mc_user_id=?"
-            params.append(mc_user_id)
-        
-        result = await self._conn.execute(query, params)
-        await self._conn.commit()
-        
-        return result.rowcount > 0
-    
-    async def get_watchlist(
-        self,
-        guild_id: int,
-        watch_type: Optional[str] = None,
-        status: str = "active"
-    ) -> List[Dict[str, Any]]:
-        """Get watchlist entries."""
-        query = "SELECT * FROM watchlist WHERE guild_id=? AND status=?"
-        params = [guild_id, status]
-        
-        if watch_type:
-            query += " AND watch_type=?"
-            params.append(watch_type)
-        
-        query += " ORDER BY added_at DESC"
-        
-        cursor = await self._conn.execute(query, params)
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
-    
-    async def is_on_watchlist(
-        self,
-        guild_id: int,
-        discord_id: Optional[int] = None,
-        mc_user_id: Optional[str] = None
-    ) -> bool:
-        """Check if member is on active watchlist."""
-        query = "SELECT 1 FROM watchlist WHERE guild_id=? AND status='active'"
-        params = [guild_id]
-        
-        if discord_id:
-            query += " AND discord_id=?"
-            params.append(discord_id)
-        if mc_user_id:
-            query += " AND mc_user_id=?"
-            params.append(mc_user_id)
-        
-        cursor = await self._conn.execute(query, params)
-        row = await cursor.fetchone()
-        return row is not None
-    
-    # ==================== ROLE HISTORY ====================
-    
-    async def add_role_change(
-        self,
-        mc_user_id: str,
-        old_role: Optional[str],
-        new_role: str,
-        source: str = "scraper",
-        notes: Optional[str] = None
-    ) -> int:
-        """Record MC role change. Returns id."""
-        cursor = await self._conn.execute(
-            """
-            INSERT INTO role_history (
-                mc_user_id, old_role, new_role, detected_at, source, notes
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (mc_user_id, old_role, new_role, _timestamp(), source, notes)
-        )
-        await self._conn.commit()
-        
-        return cursor.lastrowid
-    
-    async def get_role_history(
-        self,
-        mc_user_id: str,
-        limit: int = 20
-    ) -> List[Dict[str, Any]]:
-        """Get role change history."""
-        cursor = await self._conn.execute(
-            """
-            SELECT * FROM role_history 
-            WHERE mc_user_id=? 
-            ORDER BY detected_at DESC 
-            LIMIT ?
-            """,
-            (mc_user_id, limit)
-        )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
-    
-    # ==================== SEARCH ====================
-    
-    async def search_notes(
-        self,
-        query: str,
-        guild_id: int,
-        limit: int = 20
-    ) -> List[Dict[str, Any]]:
-        """Search notes by text content."""
-        search_term = f"%{query}%"
-        
-        cursor = await self._conn.execute(
-            """
-            SELECT * FROM notes 
-            WHERE guild_id=? 
-            AND status='active' 
-            AND (note_text LIKE ? OR ref_code LIKE ?)
-            ORDER BY created_at DESC 
-            LIMIT ?
-            """,
-            (guild_id, search_term, search_term, limit)
-        )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
     
