@@ -125,10 +125,10 @@ class Minigames(BaseMinigameCog):
         assert ctx.guild and isinstance(ctx.author, discord.Member) and isinstance(ctx.channel, discord.TextChannel)
         opponent = opponent or ctx.guild.me
         
-        # Randomize player order only when playing against bot
+        # For Connect4 bot games, player ordering is handled in ConnectFourGame.__init__
+        # Always pass [human, bot] so ConnectFourGame can ensure human is RED
         if opponent.bot:
             players = [ctx.author, opponent]
-            random.shuffle(players)
         else:
             # PvP: opponent (invited player) is always RED, author is BLUE
             players = [opponent, ctx.author]
@@ -208,25 +208,19 @@ class Minigames(BaseMinigameCog):
         if not leaderboard:
             return await ctx.send("No one has played any games yet!")
         
-        # Sort
+        # Sort leaderboard
         leaderboard.sort(key=lambda x: x[sort_by], reverse=True)
         
         # Create embed
-        sort_names = {
-            "wins": "🏆 Most Wins",
-            "earnings": "💰 Highest Earnings",
-            "games": "🎮 Most Games",
-            "winrate": "📈 Highest Win Rate"
-        }
-        
         embed = discord.Embed(
-            title=f"{sort_names[sort_by]} Leaderboard",
+            title=f"🏆 Minigame Leaderboard - Top {sort_by.capitalize()}",
             color=await ctx.embed_color()
         )
         
+        # Show top 10
         description = ""
-        for idx, entry in enumerate(leaderboard[:10], 1):
-            medal = "🥇" if idx == 1 else "🥈" if idx == 2 else "🥉" if idx == 3 else f"`{idx}.`"
+        for i, entry in enumerate(leaderboard[:10], 1):
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"`#{i}`")
             
             if sort_by == "wins":
                 value = f"{entry['wins']} wins"
@@ -240,35 +234,43 @@ class Minigames(BaseMinigameCog):
             description += f"{medal} **{entry['member'].display_name}** - {value}\n"
         
         embed.description = description
-        embed.set_footer(text=f"Showing top {min(10, len(leaderboard))} players")
+        embed.set_footer(text=f"Total players: {len(leaderboard)}")
         
         await ctx.send(embed=embed)
 
-    async def base_minigame_cmd(self,
-                                game_cls: Type[Minigame],
-                                ctx: Union[commands.Context, discord.Interaction],
-                                players: List[discord.Member],
-                                against_bot: bool,
-                                ):
-        author = ctx.author if isinstance(ctx, commands.Context) else ctx.user
-        reply = ctx.reply if isinstance(ctx, commands.Context) else ctx.response.send_message
-        assert ctx.guild and isinstance(ctx.channel, discord.TextChannel) and isinstance(author, discord.Member)
+    async def base_minigame_cmd(
+        self, 
+        game_cls: Type[Minigame], 
+        ctx: Union[commands.Context, discord.Interaction], 
+        players: List[discord.Member], 
+        against_bot: bool
+    ):
+        """Base handler for starting minigames"""
+        # Handle both Context and Interaction
+        if isinstance(ctx, discord.Interaction):
+            author = ctx.user
+            assert isinstance(author, discord.Member) and isinstance(ctx.channel, discord.TextChannel)
+            reply = ctx.followup.send
+        else:
+            author = ctx.author
+            assert isinstance(author, discord.Member) and isinstance(ctx.channel, discord.TextChannel)
+            reply = ctx.send
         
-        # Get bet and win amounts
+        # Check economy requirements
         bet_amount = await self.config.guild(ctx.guild).bet_amount()
         win_min = await self.config.guild(ctx.guild).win_min()
         win_max = await self.config.guild(ctx.guild).win_max()
         win_amount = random.randint(win_min, win_max)
         currency = await bank.get_currency_name(ctx.guild)
         
-        # Check if player has enough balance
-        if not against_bot:
+        if bet_amount > 0 and not against_bot:
             for player in players:
-                if not player.bot:
-                    balance = await bank.get_balance(player)
-                    if balance < bet_amount:
-                        return await reply(f"{player.mention} doesn't have enough {currency}! (Need: {bet_amount}, Have: {balance})", ephemeral=True)
-        else:
+                if player.bot:
+                    continue
+                balance = await bank.get_balance(player)
+                if balance < bet_amount:
+                    return await reply(f"{player.mention} doesn't have enough {currency}! (Need: {bet_amount}, Have: {balance})", ephemeral=True)
+        elif bet_amount > 0 and against_bot:
             balance = await bank.get_balance(author)
             if balance < bet_amount:
                 return await reply(f"You don't have enough {currency}! (Need: {bet_amount}, Have: {balance})", ephemeral=True)
