@@ -1,22 +1,14 @@
 """
-MemberManager - Comprehensive Member Management System
+MemberManager - Comprehensive member tracking and management
 Fire & Rescue Academy Alliance
-
-Author: FireAndRescueAcademy
-Version: 1.0.0
 """
 
 from .membermanager import MemberManager, setup
 
 __red_end_user_data_statement__ = (
-    "This cog stores member information including Discord IDs, MissionChief IDs, "
-    "notes, infractions, and audit trails. Data can be deleted upon user request."
+    "This cog stores member notes, infractions, and audit logs. "
+    "Users can request deletion of their data by contacting server administrators."
 )
 
-__version__ = "1.0.0"
-__author__ = "FireAndRescueAcademy"
-
-async def setup(bot):
-    """Load MemberManager cog."""
-    from .membermanager import MemberManager
-    await bot.add_cog(MemberManager(bot))
+__author__ = "Fire & Rescue Academy Development Team"
+__version__ = "1.1.0"
