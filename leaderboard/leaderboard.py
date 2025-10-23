@@ -39,7 +39,9 @@ BLACKLISTED_USER_IDS = [
 
 BLACKLISTED_USERNAMES = [
     "Yeehaw12121212212112",  # Invalid username pattern
-    "52525255252",  # Invalid username (looks like ID)
+    "52525255252",  # Looks like an ID
+    "Pierce702420",  # Username with numbers parsed as credits
+    "25,000",  # Parsed username as amount
 ]
 
 # Sanity check: INT64_MAX indicates parsing error
