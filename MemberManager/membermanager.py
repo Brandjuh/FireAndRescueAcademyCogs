@@ -274,19 +274,19 @@ class MemberManager(ConfigCommands, commands.Cog):
                 link = await self.membersync.get_link_for_discord(discord_id)
                 if link:
                     data.mc_user_id = link.get("mc_user_id")
-                    data.link_status = link.get("status", "unknown")
+                    data.link_status = link.get("status", "none")
             elif mc_user_id and not discord_id:
                 link = await self.membersync.get_link_for_mc(mc_user_id)
                 if link:
                     data.discord_id = int(link.get("discord_id"))
-                    data.link_status = link.get("status", "unknown")
+                    data.link_status = link.get("status", "none")
             elif discord_id and mc_user_id:
                 # Both provided, just get status
                 link = await self.membersync.get_link_for_discord(discord_id)
                 if link:
-                    data.link_status = link.get("status", "unknown")
+                    data.link_status = link.get("status", "none")
             
-            # 🔧 FIX: Set is_verified based on link_status AND role
+            # 🔧 FIX: Set is_verified ONLY if link exists AND is approved
             if link and link.get("status") == "approved":
                 data.is_verified = True
                 
@@ -299,10 +299,14 @@ class MemberManager(ConfigCommands, commands.Cog):
                             verified_role = guild.get_role(verified_role_id)
                             if verified_role and verified_role not in member.roles:
                                 # Linked but missing role - flag this
-                                data.is_verified = True  # Still verified in DB
                                 log.warning(f"Member {discord_id} is linked but missing verified role")
+            else:
+                # 🔧 NEW: No link or not approved = not verified
+                data.is_verified = False
+                data.link_status = link.get("status", "none") if link else "none"
         
-        # 🔧 FIX: Get MC data from AllianceScraper with better error handling
+        # 🔧 FIX: Get MC data from AllianceScraper - verify member is actually in alliance
+        mc_in_alliance = False
         if data.mc_user_id and self.alliance_scraper:
             try:
                 mc_data = await self._get_mc_data(data.mc_user_id)
@@ -310,6 +314,7 @@ class MemberManager(ConfigCommands, commands.Cog):
                     data.mc_username = mc_data.get("name")
                     data.mc_role = mc_data.get("role")
                     data.contribution_rate = mc_data.get("contribution_rate")
+                    mc_in_alliance = True
                     
                     # 🔧 FIX: Ensure contribution_rate is properly formatted
                     if data.contribution_rate is not None:
@@ -319,6 +324,11 @@ class MemberManager(ConfigCommands, commands.Cog):
                             data.contribution_rate = None
             except Exception as e:
                 log.error(f"Failed to get MC data for {data.mc_user_id}: {e}")
+        
+        # 🔧 NEW: If has MC ID but not in alliance, they're not active
+        if data.mc_user_id and not mc_in_alliance:
+            data.mc_username = f"Former member ({data.mc_user_id})"
+            data.mc_role = "Left alliance"
         
         # 🔧 FIX: Get notes count with error handling
         if self.db:
@@ -351,6 +361,29 @@ class MemberManager(ConfigCommands, commands.Cog):
                 log.error(f"Failed to get infractions: {e}")
                 data.infractions_count = 0
                 data.severity_score = 0
+        
+        # 🆕 NEW: Get sanctions from SanctionManager
+        if self.sanction_manager:
+            try:
+                sanctions = self.sanction_manager.db.get_user_sanctions(
+                    guild.id,
+                    discord_id=data.discord_id,
+                    mc_user_id=data.mc_user_id
+                )
+                # Add active sanctions to infraction count
+                active_sanctions = [s for s in sanctions if s.get("status") == "active"]
+                data.infractions_count += len(active_sanctions)
+                
+                # Increase severity for sanctions
+                for sanction in active_sanctions:
+                    if "Warning" in sanction.get("sanction_type", ""):
+                        data.severity_score += 2
+                    elif "Kick" in sanction.get("sanction_type", ""):
+                        data.severity_score += 5
+                    elif "Ban" in sanction.get("sanction_type", ""):
+                        data.severity_score += 10
+            except Exception as e:
+                log.error(f"Failed to get sanctions: {e}")
         
         return data
     
