@@ -23,18 +23,10 @@ MEDALS = {
     3: "🥉"
 }
 
-# Blacklist for corrupted/invalid entries
-BLACKLISTED_USER_IDS = [
-    "26856671065906104064",  # Corrupted user ID
-]
+# Blacklist for corrupted/invalid entries (EMPTY - scraper is fixed!)
+BLACKLISTED_USER_IDS = []
 
-BLACKLISTED_USERNAMES = [
-    "Yeehaw12121212212112",  # Invalid username pattern
-    "52525255252",  # Looks like an ID
-    "Pierce702420",  # Username with numbers parsed as credits
-    "25,000",  # Parsed username as amount
-    "Franny192",  # 192 parsed from username instead of real contribution
-]
+BLACKLISTED_USERNAMES = []
 
 class Leaderboard(commands.Cog):
     """Daily and monthly top 10 rankings for alliance contributions and earned credits."""
