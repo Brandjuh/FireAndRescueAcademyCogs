@@ -420,6 +420,7 @@ class Leaderboard(commands.Cog):
     async def _get_treasury_rankings(self, period: str) -> Optional[Dict]:
         """
         Get treasury contribution rankings from income_v2.db.
+        NOTE: IncomeScraper stores member contributions as 'expense' type!
         Returns dict with 'current' and 'previous' rankings.
         """
         if not self.income_db_path.exists():
@@ -431,11 +432,12 @@ class Leaderboard(commands.Cog):
             
             period_type = 'daily' if period == 'daily' else 'monthly'
             
-            # Get most recent timestamp for this period and entry_type
+            # NOTE: Using 'expense' because IncomeScraper stores contributions as expenses!
+            # Get most recent timestamp for this period
             cur = await db.execute("""
                 SELECT MAX(timestamp) as latest 
                 FROM income 
-                WHERE period = ? AND entry_type = 'income'
+                WHERE period = ? AND entry_type = 'expense'
             """, (period_type,))
             row = await cur.fetchone()
             if not row or not row['latest']:
@@ -447,7 +449,7 @@ class Leaderboard(commands.Cog):
             cur = await db.execute("""
                 SELECT username, amount, timestamp
                 FROM income
-                WHERE period = ? AND entry_type = 'income' AND timestamp = ?
+                WHERE period = ? AND entry_type = 'expense' AND timestamp = ?
                 ORDER BY amount DESC
                 LIMIT 20
             """, (period_type, current_time))
@@ -466,7 +468,7 @@ class Leaderboard(commands.Cog):
             
             cur = await db.execute("""
                 SELECT timestamp FROM income
-                WHERE period = ? AND entry_type = 'income' AND timestamp <= ?
+                WHERE period = ? AND entry_type = 'expense' AND timestamp <= ?
                 GROUP BY timestamp
                 ORDER BY timestamp DESC
                 LIMIT 1
@@ -478,7 +480,7 @@ class Leaderboard(commands.Cog):
                 cur = await db.execute("""
                     SELECT username, amount, timestamp
                     FROM income
-                    WHERE period = ? AND entry_type = 'income' AND timestamp = ?
+                    WHERE period = ? AND entry_type = 'expense' AND timestamp = ?
                     ORDER BY amount DESC
                     LIMIT 30
                 """, (period_type, prev_time_row['timestamp']))
