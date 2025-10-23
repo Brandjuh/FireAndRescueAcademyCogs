@@ -137,9 +137,13 @@ class IncomeScraper(commands.Cog):
     
     async def _scrape_income_tab(self, session, tab_type='daily', ctx=None):
         """Scrape income/expense data from a specific tab (daily or monthly) - FIXED VERSION"""
-        # Construct URL with tab parameter
-        # MissionChief likely uses tabs or links on the page itself
-        url = self.income_url
+        # Construct URL with type parameter (NOT tab!)
+        # Daily: https://www.missionchief.com/verband/kasse
+        # Monthly: https://www.missionchief.com/verband/kasse?type=monthly
+        if tab_type == 'monthly':
+            url = f"{self.income_url}?type=monthly"
+        else:
+            url = self.income_url
         
         await self._debug_log(f"🌐 Scraping {tab_type} income: {url}", ctx)
         
