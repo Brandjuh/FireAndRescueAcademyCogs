@@ -661,18 +661,32 @@ class Leaderboard(commands.Cog):
                     cur = await db.execute("SELECT COUNT(DISTINCT timestamp) FROM members")
                     timestamps = (await cur.fetchone())[0]
                     
-                    # Sample data
-                    cur = await db.execute("SELECT member_id, username, earned_credits, timestamp FROM members ORDER BY timestamp DESC LIMIT 3")
+                    # Count members with credits > 0
+                    cur = await db.execute("SELECT COUNT(*) FROM members WHERE earned_credits > 0")
+                    with_credits = (await cur.fetchone())[0]
+                    
+                    # Sample data WITH CREDITS
+                    cur = await db.execute("""
+                        SELECT member_id, username, earned_credits, timestamp 
+                        FROM members 
+                        WHERE earned_credits > 0
+                        ORDER BY timestamp DESC, earned_credits DESC 
+                        LIMIT 5
+                    """)
                     sample = await cur.fetchall()
                     
-                    sample_text = "\n".join([f"• {row[1]}: {row[2]:,} credits ({row[3][:19]})" for row in sample])
+                    if sample:
+                        sample_text = "\n".join([f"• {row[1]}: {row[2]:,} credits" for row in sample])
+                    else:
+                        sample_text = "⚠️ NO MEMBERS WITH CREDITS > 0!"
                     
                     embed.add_field(
                         name="✅ members_v2.db",
                         value=f"**Total records:** {total:,}\n"
+                              f"**With credits > 0:** {with_credits:,}\n"
                               f"**Unique timestamps:** {timestamps}\n"
                               f"**Latest scrape:** {latest[:19] if latest else 'N/A'}\n"
-                              f"**Sample:**\n{sample_text}",
+                              f"**Top earners (latest):**\n{sample_text}",
                         inline=False
                     )
             except Exception as e:
@@ -695,15 +709,22 @@ class Leaderboard(commands.Cog):
                     # Count by period
                     cur = await db.execute("SELECT period, COUNT(*) FROM income WHERE entry_type='income' GROUP BY period")
                     periods = await cur.fetchall()
-                    period_text = "\n".join([f"  • {p[0]}: {p[1]:,}" for p in periods])
+                    
+                    if periods:
+                        period_text = "\n".join([f"  • {p[0]}: {p[1]:,}" for p in periods])
+                    else:
+                        period_text = "  ⚠️ No data - Run: [p]income scrape"
                     
                     # Sample data
-                    cur = await db.execute("SELECT username, amount, period, timestamp FROM income WHERE entry_type='income' ORDER BY timestamp DESC LIMIT 3")
-                    sample = await cur.fetchall()
-                    sample_text = "\n".join([f"• {row[0]}: {row[1]:,} ({row[2]}, {row[3][:19]})" for row in sample])
+                    if total > 0:
+                        cur = await db.execute("SELECT username, amount, period, timestamp FROM income WHERE entry_type='income' ORDER BY timestamp DESC LIMIT 3")
+                        sample = await cur.fetchall()
+                        sample_text = "\n".join([f"• {row[0]}: {row[1]:,} ({row[2]})" for row in sample])
+                    else:
+                        sample_text = "⚠️ No income data yet"
                     
                     embed.add_field(
-                        name="✅ income_v2.db",
+                        name="✅ income_v2.db" if total > 0 else "⚠️ income_v2.db (EMPTY)",
                         value=f"**Total income records:** {total:,}\n"
                               f"**Latest scrape:** {latest[:19] if latest else 'N/A'}\n"
                               f"**By period:**\n{period_text}\n"
