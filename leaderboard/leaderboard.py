@@ -661,6 +661,63 @@ class Leaderboard(commands.Cog):
         
         await ctx.send(embed=embed)
 
+    @topplayers.command(name="checklatest")
+    @checks.is_owner()
+    async def check_latest(self, ctx, period: str = "daily"):
+        """Check what's in the latest scrape for a specific period."""
+        if not self.income_db_path.exists():
+            await ctx.send("❌ income_v2.db not found")
+            return
+        
+        async with aiosqlite.connect(self.income_db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            # Get latest timestamp for this period
+            cur = await db.execute("""
+                SELECT MAX(timestamp) as latest 
+                FROM income 
+                WHERE period = ? AND entry_type = 'expense'
+            """, (period,))
+            row = await cur.fetchone()
+            
+            if not row or not row['latest']:
+                await ctx.send(f"❌ No data for period '{period}'")
+                return
+            
+            latest = row['latest']
+            
+            # Get top 15 from that timestamp
+            cur = await db.execute("""
+                SELECT username, amount, period, entry_type, timestamp
+                FROM income
+                WHERE period = ? AND entry_type = 'expense' AND timestamp = ?
+                ORDER BY amount DESC
+                LIMIT 15
+            """, (period, latest))
+            
+            results = await cur.fetchall()
+            
+            embed = discord.Embed(
+                title=f"📊 Latest {period.upper()} scrape",
+                description=f"Timestamp: {latest}",
+                color=discord.Color.green()
+            )
+            
+            if results:
+                lines = []
+                for idx, row in enumerate(results, 1):
+                    lines.append(f"{idx}. **{row['username']}** - {row['amount']:,} credits")
+                
+                embed.add_field(
+                    name="Top 15 Contributors",
+                    value="\n".join(lines),
+                    inline=False
+                )
+            else:
+                embed.description += "\n\n⚠️ No data found!"
+            
+            await ctx.send(embed=embed)
+
     @topplayers.command(name="timestamps")
     @checks.is_owner()
     async def show_timestamps(self, ctx):
