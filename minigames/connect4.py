@@ -92,60 +92,65 @@ class ConnectFourGame(Minigame):
         - Prioriteit 4: Blokkeer tegenstander lijnen
         - Prioriteit 5: Voorkom dat tegenstander next turn kan winnen
         - Prioriteit 6: Speel centrum kolommen (betere posities)
+        
+        NOTE: This calls do_turn() which handles the full turn logic
         """
         columns = self.available_columns(self.board)
         if len(columns) == 1:
-            self.do_turn(self.member(self.current), columns[0])
-            return
+            move = columns[0]
+        else:
+            best_score = float('-inf')
+            best_moves = []
+            
+            for column in columns:
+                score = 0
+                temp_board = self.board.copy()
+                self.drop_piece(temp_board, column, self.current)
+                
+                # Prioriteit 1: Directe winst (hoogste score)
+                if self.check_win(temp_board, self.current, self.time + 1):
+                    # Direct win found, take it immediately
+                    move = column
+                    self.do_turn(self.member(self.current), move)
+                    return
+                
+                # Prioriteit 2: Blokkeer directe tegenstander winst
+                opponent = self.opponent(self.current)
+                temp_board_opp = self.board.copy()
+                self.drop_piece(temp_board_opp, column, opponent)
+                if self.check_win(temp_board_opp, opponent, self.time + 1):
+                    score += 900  # Zeer hoge score voor blokkeren winst
+                
+                # Prioriteit 3: Tel eigen lijnen (offensief spel)
+                score += self.count_threats(temp_board, self.current, 3) * 100  # 3-op-rij
+                score += self.count_threats(temp_board, self.current, 2) * 10   # 2-op-rij
+                
+                # Prioriteit 4: Blokkeer tegenstander lijnen (defensief)
+                score += self.count_threats(self.board, opponent, 3) * 50  # Blokkeer 3-op-rij
+                score += self.count_threats(self.board, opponent, 2) * 5   # Blokkeer 2-op-rij
+                
+                # Prioriteit 5: Voorkom setup voor volgende beurt tegenstander
+                dangerous_setups = self.check_dangerous_setup(temp_board, opponent)
+                score -= dangerous_setups * 200  # Penalty voor gevaarlijke situaties
+                
+                # Prioriteit 6: Centrum kolommen zijn strategisch beter
+                center_distance = abs(column - 3)
+                score += (3 - center_distance) * 3
+                
+                # Kleine randomness voor variatie (5%)
+                score += random.uniform(-2, 2)
+                
+                # Track beste moves
+                if score > best_score:
+                    best_score = score
+                    best_moves = [column]
+                elif score == best_score:
+                    best_moves.append(column)
+            
+            # Kies random uit beste moves
+            move = random.choice(best_moves)
         
-        best_score = float('-inf')
-        best_moves = []
-        
-        for column in columns:
-            score = 0
-            temp_board = self.board.copy()
-            self.drop_piece(temp_board, column, self.current)
-            
-            # Prioriteit 1: Directe winst (hoogste score)
-            if self.check_win(temp_board, self.current, self.time + 1):
-                self.do_turn(self.member(self.current), column)
-                return
-            
-            # Prioriteit 2: Blokkeer directe tegenstander winst
-            opponent = self.opponent(self.current)
-            temp_board_opp = self.board.copy()
-            self.drop_piece(temp_board_opp, column, opponent)
-            if self.check_win(temp_board_opp, opponent, self.time + 1):
-                score += 900  # Zeer hoge score voor blokkeren winst
-            
-            # Prioriteit 3: Tel eigen lijnen (offensief spel)
-            score += self.count_threats(temp_board, self.current, 3) * 100  # 3-op-rij
-            score += self.count_threats(temp_board, self.current, 2) * 10   # 2-op-rij
-            
-            # Prioriteit 4: Blokkeer tegenstander lijnen (defensief)
-            score += self.count_threats(self.board, opponent, 3) * 50  # Blokkeer 3-op-rij
-            score += self.count_threats(self.board, opponent, 2) * 5   # Blokkeer 2-op-rij
-            
-            # Prioriteit 5: Voorkom setup voor volgende beurt tegenstander
-            dangerous_setups = self.check_dangerous_setup(temp_board, opponent)
-            score -= dangerous_setups * 200  # Penalty voor gevaarlijke situaties
-            
-            # Prioriteit 6: Centrum kolommen zijn strategisch beter
-            center_distance = abs(column - 3)
-            score += (3 - center_distance) * 3
-            
-            # Kleine randomness voor variatie (5%)
-            score += random.uniform(-2, 2)
-            
-            # Track beste moves
-            if score > best_score:
-                best_score = score
-                best_moves = [column]
-            elif score == best_score:
-                best_moves.append(column)
-        
-        # Kies random uit beste moves
-        move = random.choice(best_moves)
+        # Execute the move
         self.do_turn(self.member(self.current), move)
 
     @classmethod
