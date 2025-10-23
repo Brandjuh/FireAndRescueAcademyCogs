@@ -20,13 +20,34 @@ class RematchView(discord.ui.View):
         if interaction.user not in self.game.players:
             return await interaction.response.send_message("You didn't play this game! You should start a new one.", ephemeral=True)
         
+        # Defer the interaction first to prevent timeout
+        await interaction.response.defer(ephemeral=True)
+        
+        # Determine opponent
         temp_players = list(self.game.players)
         temp_players.remove(interaction.user)
         opponent = temp_players[0]
-        players = [interaction.user, opponent] if opponent.bot else [opponent, interaction.user]
+        
+        # For Connect4 bot games: always pass [human, bot] so ConnectFourGame can handle color assignment
+        # For PvP: keep invited player as first (RED)
+        from minigames.connect4 import ConnectFourGame
+        if isinstance(self.game, ConnectFourGame) and opponent.bot:
+            # Bot game: human first, bot second (ConnectFourGame.__init__ will assign RED to human)
+            players = [interaction.user, opponent]
+        elif opponent.bot:
+            # Other bot games (like TicTacToe)
+            players = [interaction.user, opponent]
+        else:
+            # PvP: opponent goes first (is RED/CROSS)
+            players = [opponent, interaction.user]
 
         self.stop()
+        
+        # Create a context-like object for the interaction
+        # base_minigame_cmd will handle the interaction properly
         await self.game.cog.base_minigame_cmd(type(self.game), interaction, players, opponent.bot)
+        
+        # Clean up old message
         await self.on_timeout()
         
     async def on_timeout(self):
