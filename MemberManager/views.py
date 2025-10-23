@@ -1,6 +1,12 @@
 """
 Discord UI Views for MemberManager
 Tab-based interface with buttons for navigation
+
+🔧 FIXED:
+- Multi-user access prevention (interaction_check)
+- Audit log tab showing all edits
+- Note editing shows editor name
+- Better error handling
 """
 
 import discord
@@ -24,7 +30,7 @@ class MemberOverviewView(discord.ui.View):
     """
     Main view for member information with tabs.
     
-    Tabs: Overview | Notes | Infractions | Events
+    Tabs: Overview | Notes | Infractions | Events | Audit
     """
     
     def __init__(
@@ -33,7 +39,8 @@ class MemberOverviewView(discord.ui.View):
         db,
         config,
         member_data: MemberData,
-        integrations: Dict[str, Any]
+        integrations: Dict[str, Any],
+        invoker_id: int  # 🔧 NEW: Track who can use this view
     ):
         super().__init__(timeout=300)  # 5 minute timeout
         
@@ -42,13 +49,19 @@ class MemberOverviewView(discord.ui.View):
         self.config = config
         self.member_data = member_data
         self.integrations = integrations
+        self.invoker_id = invoker_id  # 🔧 NEW
         
         self.current_tab = "overview"
         self.message: Optional[discord.Message] = None
     
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        """Only allow the command invoker to use buttons."""
-        # For now, allow anyone with permissions
+        """🔧 FIX: Only allow the command invoker to use buttons."""
+        if interaction.user.id != self.invoker_id:
+            await interaction.response.send_message(
+                "❌ This is not your member info panel. Use `/member` to create your own.",
+                ephemeral=True
+            )
+            return False
         return True
     
     async def on_timeout(self):
@@ -61,6 +74,41 @@ class MemberOverviewView(discord.ui.View):
                 await self.message.edit(view=self)
             except:
                 pass
+    
+    async def _update_view(self, interaction: discord.Interaction):
+        """Update the view based on current tab."""
+        # Get appropriate embed
+        if self.current_tab == "overview":
+            embed = await self.get_overview_embed()
+        elif self.current_tab == "notes":
+            embed = await self.get_notes_embed()
+        elif self.current_tab == "infractions":
+            embed = await self.get_infractions_embed()
+        elif self.current_tab == "events":
+            embed = await self.get_events_embed()
+        elif self.current_tab == "audit":  # 🔧 NEW
+            embed = await self.get_audit_embed()
+        else:
+            embed = await self.get_overview_embed()
+        
+        # Update button styles
+        self._update_button_styles()
+        
+        try:
+            await interaction.response.edit_message(embed=embed, view=self)
+        except discord.errors.InteractionResponded:
+            await interaction.edit_original_response(embed=embed, view=self)
+    
+    def _update_button_styles(self):
+        """Update button styles based on current tab."""
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                if item.custom_id == f"mm:{self.current_tab}":
+                    item.style = discord.ButtonStyle.primary
+                elif item.custom_id and item.custom_id.startswith("mm:") and ":" in item.custom_id:
+                    # Tab button
+                    if item.custom_id.split(":")[1] in ["overview", "notes", "infractions", "events", "audit"]:
+                        item.style = discord.ButtonStyle.secondary
     
     # ==================== TAB BUTTONS ====================
     
@@ -124,6 +172,22 @@ class MemberOverviewView(discord.ui.View):
         self.current_tab = "events"
         await self._update_view(interaction)
     
+    @discord.ui.button(
+        label="Audit",
+        style=discord.ButtonStyle.secondary,
+        custom_id="mm:audit",
+        emoji="📋",
+        row=0
+    )
+    async def btn_audit(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        """🔧 NEW: Show audit log tab."""
+        self.current_tab = "audit"
+        await self._update_view(interaction)
+    
     # ==================== ACTION BUTTONS ====================
     
     @discord.ui.button(
@@ -155,7 +219,6 @@ class MemberOverviewView(discord.ui.View):
         button: discord.ui.Button
     ):
         """Open modal to edit a note."""
-        # Only show in notes tab
         if self.current_tab != "notes":
             await interaction.response.send_message(
                 "⚠️ Switch to the Notes tab first to edit notes.",
@@ -179,7 +242,6 @@ class MemberOverviewView(discord.ui.View):
         button: discord.ui.Button
     ):
         """Open modal to delete a note."""
-        # Only show in notes tab
         if self.current_tab != "notes":
             await interaction.response.send_message(
                 "⚠️ Switch to the Notes tab first to delete notes.",
@@ -191,49 +253,33 @@ class MemberOverviewView(discord.ui.View):
         await interaction.response.send_modal(modal)
     
     @discord.ui.button(
-        label="Export Data",
+        label="Refresh",
         style=discord.ButtonStyle.secondary,
-        emoji="💾",
-        custom_id="mm:export",
+        emoji="🔄",
+        custom_id="mm:refresh",
         row=1
     )
-    async def btn_export(
+    async def btn_refresh(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button
     ):
-        """Export member data."""
-        await interaction.response.send_message(
-            "📦 Export feature coming soon!",
-            ephemeral=True
-        )
-    
-    @discord.ui.button(
-        label="Close",
-        style=discord.ButtonStyle.danger,
-        emoji="❌",
-        custom_id="mm:close",
-        row=1
-    )
-    async def btn_close(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-        """Close the view and delete the message."""
-        # Disable all buttons
-        for item in self.children:
-            item.disabled = True
+        """Refresh member data."""
+        await interaction.response.defer()
         
-        try:
-            await interaction.message.delete()
-        except:
-            # If we can't delete, just disable the view
-            await interaction.response.edit_message(
-                content="*View closed*",
-                embed=None,
-                view=self
-            )
+        # Rebuild member data
+        guild = interaction.guild
+        if guild:
+            # Get parent cog
+            cog = self.bot.get_cog("MemberManager")
+            if cog:
+                self.member_data = await cog._build_member_data(
+                    guild=guild,
+                    discord_id=self.member_data.discord_id,
+                    mc_user_id=self.member_data.mc_user_id
+                )
+        
+        await self._update_view(interaction)
     
     # ==================== EMBED BUILDERS ====================
     
@@ -241,36 +287,27 @@ class MemberOverviewView(discord.ui.View):
         """Build the overview embed."""
         data = self.member_data
         
+        # Base embed
         embed = discord.Embed(
-            title=f"👤 Member Overview - {data.get_display_name()}",
-            color=discord.Color.blue()
+            title=f"👤 Member Overview: {data.get_display_name()}",
+            color=discord.Color.blue() if data.is_verified else discord.Color.orange()
         )
         
         # Discord Information
         discord_lines = []
         if data.has_discord():
-            discord_lines.append(f"**Username:** {data.discord_username or 'Unknown'}")
+            discord_lines.append(f"**User:** {data.discord_username}")
             discord_lines.append(f"**ID:** `{data.discord_id}`")
-            
-            # Show server nickname if different from username
-            if data.discord_id:
-                guild = None
-                # Try to get guild from interaction context
-                if hasattr(self, 'message') and self.message:
-                    guild = self.message.guild
-                
-                if guild:
-                    member = guild.get_member(data.discord_id)
-                    if member and member.display_name != member.name:
-                        discord_lines.append(f"**Server Nickname:** {member.display_name}")
-            
-            discord_lines.append(f"**Roles:** {format_role_list(data.discord_roles)}")
             
             if data.discord_joined:
                 discord_lines.append(f"**Joined:** {format_timestamp(int(data.discord_joined.timestamp()), 'D')}")
             
             status_emoji = "✅" if data.is_verified else "⚠️"
             discord_lines.append(f"**Status:** {status_emoji} {'Verified' if data.is_verified else 'Not Verified'}")
+            
+            # 🔧 FIX: Show link status if available
+            if data.link_status:
+                discord_lines.append(f"**Link Status:** {data.link_status}")
         else:
             discord_lines.append("*No Discord information available*")
         
@@ -292,12 +329,19 @@ class MemberOverviewView(discord.ui.View):
             
             mc_lines.append(f"**Role:** {data.mc_role or 'None'}")
             
+            # 🔧 FIX: Better contribution display with error handling
             if data.contribution_rate is not None:
-                contrib_display = format_contribution_trend(
-                    data.contribution_rate,
-                    use_emoji=True
-                )
-                mc_lines.append(f"**Contribution:** {contrib_display}")
+                try:
+                    contrib_display = format_contribution_trend(
+                        data.contribution_rate,
+                        use_emoji=True
+                    )
+                    mc_lines.append(f"**Contribution:** {contrib_display}")
+                except Exception as e:
+                    log.error(f"Error formatting contribution: {e}")
+                    mc_lines.append(f"**Contribution:** {data.contribution_rate}%")
+            else:
+                mc_lines.append("**Contribution:** *No data*")
             
             mc_lines.append(f"**Status:** ✅ Active")
         else:
@@ -343,12 +387,17 @@ class MemberOverviewView(discord.ui.View):
         )
         
         # Fetch notes
-        notes = await self.db.get_notes(
-            discord_id=data.discord_id,
-            mc_user_id=data.mc_user_id,
-            status="active",
-            limit=10
-        )
+        try:
+            notes = await self.db.get_notes(
+                discord_id=data.discord_id,
+                mc_user_id=data.mc_user_id,
+                status="active",
+                limit=10
+            )
+        except Exception as e:
+            log.error(f"Error fetching notes: {e}")
+            embed.description = "⚠️ Error loading notes"
+            return embed
         
         if not notes:
             embed.description = "*No notes found for this member.*"
@@ -369,6 +418,12 @@ class MemberOverviewView(discord.ui.View):
                 
                 pinned_lines.append(f"📌 **`{ref}`** | {created} | {author}")
                 pinned_lines.append(f"   {text}")
+                
+                # 🔧 NEW: Show if edited
+                if note.get("updated_by"):
+                    updated_by_name = note.get("updated_by_name", "Unknown")
+                    updated_at = format_timestamp(note.get("updated_at", 0), "R")
+                    pinned_lines.append(f"   ✏️ *Edited by {updated_by_name} {updated_at}*")
                 
                 if note.get("infraction_ref"):
                     pinned_lines.append(f"   🔗 Linked: `{note['infraction_ref']}`")
@@ -391,7 +446,14 @@ class MemberOverviewView(discord.ui.View):
                 author = note.get("author_name", "Unknown")
                 
                 regular_lines.append(f"• **`{ref}`** | {created} | {author}")
-                regular_lines.append(f"  {text}\n")
+                regular_lines.append(f"  {text}")
+                
+                # 🔧 NEW: Show if edited
+                if note.get("updated_by"):
+                    updated_by_name = note.get("updated_by_name", "Unknown")
+                    regular_lines.append(f"  ✏️ *Edited by {updated_by_name}*")
+                
+                regular_lines.append("")
             
             if len(notes) > 8:
                 remaining = len(notes) - 8
@@ -403,7 +465,7 @@ class MemberOverviewView(discord.ui.View):
                 inline=False
             )
         
-        embed.set_footer(text=f"Total notes: {len(notes)}")
+        embed.set_footer(text=f"Total notes: {len(notes)} | Use Edit/Delete buttons to manage")
         
         return embed
     
@@ -416,70 +478,76 @@ class MemberOverviewView(discord.ui.View):
             color=discord.Color.red()
         )
         
-        # Fetch infractions
-        infractions = await self.db.get_infractions(
-            discord_id=data.discord_id,
-            mc_user_id=data.mc_user_id,
-            limit=15
-        )
+        # 🔧 FIX: Better error handling
+        try:
+            infractions = await self.db.get_infractions(
+                discord_id=data.discord_id,
+                mc_user_id=data.mc_user_id,
+                status="active",
+                limit=10
+            )
+        except Exception as e:
+            log.error(f"Error fetching infractions: {e}")
+            embed.description = "⚠️ Error loading infractions"
+            return embed
         
         if not infractions:
-            embed.description = "*No infractions found for this member.*"
+            embed.description = "*No active infractions for this member.*"
+            embed.color = discord.Color.green()
             return embed
         
         # Group by platform
-        discord_inf = [i for i in infractions if i.get("platform") == "discord"]
-        mc_inf = [i for i in infractions if i.get("platform") == "missionchief"]
+        discord_infractions = [i for i in infractions if i.get("platform") == "discord"]
+        mc_infractions = [i for i in infractions if i.get("platform") == "missionchief"]
         
         # Discord infractions
-        if discord_inf:
-            discord_lines = []
-            for inf in discord_inf[:5]:
+        if discord_infractions:
+            lines = []
+            for inf in discord_infractions[:5]:
                 ref = inf.get("ref_code", "???")
-                inf_type = inf.get("infraction_type", "unknown")
-                reason = truncate_text(inf.get("reason", "No reason"), 60)
+                inf_type = inf.get("infraction_type", "Unknown")
+                reason = truncate_text(inf.get("reason", ""), 80)
                 created = format_timestamp(inf.get("created_at", 0), "R")
-                status = inf.get("status", "unknown")
+                moderator = inf.get("moderator_name", "Unknown")
+                severity = inf.get("severity_score", 1)
                 
-                status_emoji = "🔴" if status == "active" else "⚪"
-                
-                discord_lines.append(
-                    f"{status_emoji} **`{ref}`** - {inf_type.title()} | {created}\n"
-                    f"   {reason}"
-                )
+                lines.append(f"• **`{ref}`** | {inf_type} | Severity: {severity}")
+                lines.append(f"  {reason}")
+                lines.append(f"  *By {moderator} • {created}*\n")
             
             embed.add_field(
-                name=f"💬 Discord Infractions ({len(discord_inf)})",
-                value="\n\n".join(discord_lines) if discord_lines else "*None*",
+                name="🎮 Discord Infractions",
+                value="\n".join(lines),
                 inline=False
             )
         
         # MC infractions
-        if mc_inf:
-            mc_lines = []
-            for inf in mc_inf[:5]:
+        if mc_infractions:
+            lines = []
+            for inf in mc_infractions[:5]:
                 ref = inf.get("ref_code", "???")
-                inf_type = inf.get("infraction_type", "unknown")
-                reason = truncate_text(inf.get("reason", "No reason"), 60)
+                inf_type = inf.get("infraction_type", "Unknown")
+                reason = truncate_text(inf.get("reason", ""), 80)
                 created = format_timestamp(inf.get("created_at", 0), "R")
-                status = inf.get("status", "unknown")
+                moderator = inf.get("moderator_name", "Unknown")
+                severity = inf.get("severity_score", 1)
                 
-                status_emoji = "🔴" if status == "active" else "⚪"
-                
-                mc_lines.append(
-                    f"{status_emoji} **`{ref}`** - {inf_type.title()} | {created}\n"
-                    f"   {reason}"
-                )
+                lines.append(f"• **`{ref}`** | {inf_type} | Severity: {severity}")
+                lines.append(f"  {reason}")
+                lines.append(f"  *By {moderator} • {created}*\n")
             
             embed.add_field(
-                name=f"🚒 MissionChief Infractions ({len(mc_inf)})",
-                value="\n\n".join(mc_lines) if mc_lines else "*None*",
+                name="🚒 MissionChief Infractions",
+                value="\n".join(lines),
                 inline=False
             )
         
         # Summary
-        active_count = len([i for i in infractions if i.get("status") == "active"])
-        embed.set_footer(text=f"Total: {len(infractions)} | Active: {active_count}")
+        total_severity = sum(i.get("severity_score", 1) for i in infractions)
+        embed.set_footer(
+            text=f"Total active: {len(infractions)} | "
+                 f"Total severity: {total_severity}"
+        )
         
         return embed
     
@@ -488,78 +556,113 @@ class MemberOverviewView(discord.ui.View):
         data = self.member_data
         
         embed = discord.Embed(
-            title=f"📌 Events - {data.get_display_name()}",
+            title=f"📅 Events - {data.get_display_name()}",
             color=discord.Color.purple()
         )
         
-        # Fetch events
-        events = await self.db.get_events(
-            discord_id=data.discord_id,
-            mc_user_id=data.mc_user_id,
-            limit=10
-        )
-        
-        if not events:
-            embed.description = "*No events found for this member.*"
+        try:
+            events = await self.db.get_events(
+                discord_id=data.discord_id,
+                mc_user_id=data.mc_user_id,
+                limit=10
+            )
+        except Exception as e:
+            log.error(f"Error fetching events: {e}")
+            embed.description = "⚠️ Error loading events"
             return embed
         
-        event_lines = []
+        if not events:
+            embed.description = "*No events recorded for this member.*"
+            return embed
+        
+        lines = []
         for event in events:
             event_type = event.get("event_type", "unknown")
             timestamp = format_timestamp(event.get("timestamp", 0), "R")
-            triggered = event.get("triggered_by", "unknown")
+            triggered_by = event.get("triggered_by", "system")
             
-            # Get emoji for event type
-            emoji_map = {
-                "joined_discord": "📥",
-                "left_discord": "📤",
-                "joined_mc": "🚒",
-                "left_mc": "🚪",
-                "link_created": "🔗",
-                "role_changed": "👔",
-                "contribution_drop": "📉"
-            }
-            emoji = emoji_map.get(event_type, "📌")
+            # Format event type
+            event_display = event_type.replace("_", " ").title()
             
-            event_lines.append(
-                f"{emoji} **{event_type.replace('_', ' ').title()}** | {timestamp}\n"
-                f"   Triggered by: {triggered}"
-            )
+            lines.append(f"• **{event_display}** | {triggered_by} | {timestamp}")
+            
+            # Add notes if present
+            if event.get("notes"):
+                lines.append(f"  *{truncate_text(event['notes'], 100)}*")
+            
+            lines.append("")
         
-        embed.description = "\n\n".join(event_lines)
-        embed.set_footer(text=f"Showing {len(events)} most recent events")
+        embed.description = "\n".join(lines)
+        embed.set_footer(text=f"Total events: {len(events)}")
         
         return embed
     
-    async def _update_view(self, interaction: discord.Interaction):
-        """Update the view when tabs change."""
-        # Update button styles
-        for item in self.children:
-            if isinstance(item, discord.ui.Button) and item.row == 0:
-                # Tab buttons
-                tab_name = item.custom_id.split(":")[-1]
-                if tab_name == self.current_tab:
-                    item.style = discord.ButtonStyle.primary
-                else:
-                    item.style = discord.ButtonStyle.secondary
+    async def get_audit_embed(self) -> discord.Embed:
+        """🔧 NEW: Build the audit log embed."""
+        data = self.member_data
         
-        # Get appropriate embed
-        if self.current_tab == "overview":
-            embed = await self.get_overview_embed()
-        elif self.current_tab == "notes":
-            embed = await self.get_notes_embed()
-        elif self.current_tab == "infractions":
-            embed = await self.get_infractions_embed()
-        elif self.current_tab == "events":
-            embed = await self.get_events_embed()
-        else:
-            embed = await self.get_overview_embed()
+        embed = discord.Embed(
+            title=f"📋 Audit Log - {data.get_display_name()}",
+            color=discord.Color.dark_gray()
+        )
         
-        await interaction.response.edit_message(embed=embed, view=self)
+        try:
+            audit_entries = await self.db.get_audit_log(
+                discord_id=data.discord_id,
+                mc_user_id=data.mc_user_id,
+                limit=20
+            )
+        except Exception as e:
+            log.error(f"Error fetching audit log: {e}")
+            embed.description = "⚠️ Error loading audit log"
+            return embed
+        
+        if not audit_entries:
+            embed.description = "*No audit entries for this member.*"
+            return embed
+        
+        lines = []
+        for entry in audit_entries:
+            action_type = entry.get("action_type", "unknown")
+            action_target = entry.get("action_target", "")
+            actor_name = entry.get("actor_name", "Unknown")
+            timestamp = format_timestamp(entry.get("timestamp", 0), "R")
+            
+            # Format action type with emoji
+            action_emoji = {
+                "note_created": "📝",
+                "note_edited": "✏️",
+                "note_deleted": "🗑️",
+                "infraction_added": "⚠️",
+                "infraction_revoked": "✅",
+            }.get(action_type, "•")
+            
+            action_display = action_type.replace("_", " ").title()
+            
+            line = f"{action_emoji} **{action_display}** | `{action_target}`"
+            lines.append(line)
+            lines.append(f"  *By {actor_name} • {timestamp}*")
+            
+            # Show old/new values for edits
+            if action_type == "note_edited":
+                old_val = entry.get("old_value")
+                new_val = entry.get("new_value")
+                if old_val and new_val:
+                    lines.append(f"  📄 {truncate_text(old_val, 50)}")
+                    lines.append(f"  ➡️ {truncate_text(new_val, 50)}")
+            
+            lines.append("")
+        
+        embed.description = "\n".join(lines)
+        embed.set_footer(text=f"Showing last {len(audit_entries)} actions")
+        
+        return embed
 
+
+# ==================== MODALS ====================
 
 class AddNoteModal(discord.ui.Modal, title="Add Note"):
-    """Modal for adding a note to a member."""
+    """Modal for adding a new note."""
     
     note_text = discord.ui.TextInput(
         label="Note Text",
@@ -627,25 +730,13 @@ class AddNoteModal(discord.ui.Modal, title="Add Note"):
                 ephemeral=True
             )
             
-            # Refresh the view
-            embed = await self.parent_view.get_notes_embed()
+            # Update view
+            await self.parent_view._update_view(interaction)
             
-            # Update button styles
-            for item in self.parent_view.children:
-                if isinstance(item, discord.ui.Button) and item.row == 0:
-                    tab_name = item.custom_id.split(":")[-1]
-                    if tab_name == "notes":
-                        item.style = discord.ButtonStyle.primary
-                    else:
-                        item.style = discord.ButtonStyle.secondary
-            
-            if self.parent_view.message:
-                await self.parent_view.message.edit(embed=embed, view=self.parent_view)
-        
         except Exception as e:
-            log.error(f"Failed to add note: {e}", exc_info=True)
+            log.error(f"Error adding note: {e}")
             await interaction.response.send_message(
-                f"❌ Failed to add note: {str(e)}",
+                f"❌ Error adding note: {str(e)}",
                 ephemeral=True
             )
 
@@ -674,38 +765,35 @@ class EditNoteModal(discord.ui.Modal, title="Edit Note"):
         self.parent_view = parent_view
     
     async def on_submit(self, interaction: discord.Interaction):
-        """Handle note edit submission."""
+        """Handle note edit."""
         try:
-            # Update note in database
+            # 🔧 NEW: Update note with editor tracking
             success = await self.parent_view.db.update_note(
                 ref_code=self.ref_code.value,
                 new_text=self.new_text.value,
-                updated_by=interaction.user.id
+                updated_by=interaction.user.id,
+                updated_by_name=str(interaction.user)
             )
             
-            if not success:
+            if success:
+                await interaction.response.send_message(
+                    f"✅ Note `{self.ref_code.value}` updated successfully!",
+                    ephemeral=True
+                )
+                
+                # Update view
+                self.parent_view.current_tab = "notes"
+                await self.parent_view._update_view(interaction)
+            else:
                 await interaction.response.send_message(
                     f"❌ Note `{self.ref_code.value}` not found.",
                     ephemeral=True
                 )
-                return
-            
-            await interaction.response.send_message(
-                f"✅ Note `{self.ref_code.value}` updated successfully!",
-                ephemeral=True
-            )
-            
-            # Refresh the notes view
-            self.parent_view.current_tab = "notes"
-            embed = await self.parent_view.get_notes_embed()
-            
-            if self.parent_view.message:
-                await self.parent_view.message.edit(embed=embed, view=self.parent_view)
-        
+                
         except Exception as e:
-            log.error(f"Failed to edit note: {e}", exc_info=True)
+            log.error(f"Error editing note: {e}")
             await interaction.response.send_message(
-                f"❌ Failed to edit note: {str(e)}",
+                f"❌ Error editing note: {str(e)}",
                 ephemeral=True
             )
 
@@ -721,12 +809,12 @@ class DeleteNoteModal(discord.ui.Modal, title="Delete Note"):
         max_length=50
     )
     
-    reason = discord.ui.TextInput(
-        label="Reason for Deletion",
-        style=discord.TextStyle.paragraph,
-        placeholder="Why are you deleting this note?",
+    confirm = discord.ui.TextInput(
+        label="Type DELETE to confirm",
+        style=discord.TextStyle.short,
+        placeholder="DELETE",
         required=True,
-        max_length=500
+        max_length=10
     )
     
     def __init__(self, parent_view: MemberOverviewView):
@@ -735,36 +823,23 @@ class DeleteNoteModal(discord.ui.Modal, title="Delete Note"):
     
     async def on_submit(self, interaction: discord.Interaction):
         """Handle note deletion."""
+        if self.confirm.value.upper() != "DELETE":
+            await interaction.response.send_message(
+                "❌ You must type DELETE to confirm.",
+                ephemeral=True
+            )
+            return
+        
         try:
-            # Check if note exists first
-            notes = await self.parent_view.db.get_notes(ref_code=self.ref_code.value)
-            
-            if not notes:
-                await interaction.response.send_message(
-                    f"❌ Note `{self.ref_code.value}` not found.",
-                    ephemeral=True
-                )
-                return
-            
-            # Delete note
-            success = await self.parent_view.db.delete_note(self.ref_code.value)
+            # 🔧 NEW: Delete note with actor tracking
+            success = await self.parent_view.db.delete_note(
+                ref_code=self.ref_code.value,
+                deleted_by=interaction.user.id,
+                deleted_by_name=str(interaction.user)
+            )
             
             if success:
-                # Log the deletion as an event
-                await self.parent_view.db.add_event(
-                    guild_id=interaction.guild.id,
-                    discord_id=self.parent_view.member_data.discord_id,
-                    mc_user_id=self.parent_view.member_data.mc_user_id,
-                    event_type="note_deleted",
-                    event_data={
-                        "ref_code": self.ref_code.value,
-                        "reason": self.reason.value
-                    },
-                    triggered_by="admin",
-                    actor_id=interaction.user.id
-                )
-                
-                # Update count
+                # Update member data
                 self.parent_view.member_data.notes_count -= 1
                 
                 await interaction.response.send_message(
@@ -772,21 +847,18 @@ class DeleteNoteModal(discord.ui.Modal, title="Delete Note"):
                     ephemeral=True
                 )
                 
-                # Refresh the notes view
+                # Update view
                 self.parent_view.current_tab = "notes"
-                embed = await self.parent_view.get_notes_embed()
-                
-                if self.parent_view.message:
-                    await self.parent_view.message.edit(embed=embed, view=self.parent_view)
+                await self.parent_view._update_view(interaction)
             else:
                 await interaction.response.send_message(
-                    f"❌ Failed to delete note `{self.ref_code.value}`.",
+                    f"❌ Note `{self.ref_code.value}` not found.",
                     ephemeral=True
                 )
-        
+                
         except Exception as e:
-            log.error(f"Failed to delete note: {e}", exc_info=True)
+            log.error(f"Error deleting note: {e}")
             await interaction.response.send_message(
-                f"❌ Failed to delete note: {str(e)}",
+                f"❌ Error deleting note: {str(e)}",
                 ephemeral=True
             )
