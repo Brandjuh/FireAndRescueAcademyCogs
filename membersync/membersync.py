@@ -91,11 +91,23 @@ class MemberSync(commands.Cog):
             await db.commit()
 
     def _guess_alliance_db(self) -> Optional[pathlib.Path]:
+        """Try to find the members database - prioritize members_v2.db from scraper_databases."""
         base = pathlib.Path.home() / ".local" / "share" / "Red-DiscordBot" / "data"
+        
+        # First try: scraper_databases/members_v2.db (NEW membersscraper location)
+        for inst in base.iterdir():
+            p = inst / "cogs" / "scraper_databases" / "members_v2.db"
+            if p.exists():
+                log.info(f"Found members database at: {p}")
+                return p
+        
+        # Fallback: AllianceScraper/alliance.db (OLD location, if it exists)
         for inst in base.iterdir():
             p = inst / "cogs" / "AllianceScraper" / "alliance.db"
             if p.exists():
+                log.warning(f"Using legacy AllianceScraper database at: {p}")
                 return p
+        
         return None
 
     async def _query_alliance(self, sql: str, params: Tuple[Any, ...] = ()) -> List[sqlite3.Row]:
@@ -146,34 +158,81 @@ class MemberSync(commands.Cog):
         return await asyncio.get_running_loop().run_in_executor(None, _run)
 
     async def _find_member_in_db(self, candidate_name: Optional[str], candidate_mc_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Find member in database - supports both old (alliance.db) and new (members_v2.db) schemas."""
         name = _lower(candidate_name) if candidate_name else None
         mcid = str(candidate_mc_id) if candidate_mc_id else None
+        
+        db_path = await self.config.alliance_db_path()
+        if not db_path:
+            return None
+        
+        # Detect which database schema we're using
+        is_new_schema = "members_v2.db" in str(db_path)
 
         if mcid:
-            for col in ("user_id", "mc_user_id"):
-                rows = await self._query_alliance(f"SELECT * FROM members_current WHERE {col}=?", (mcid,))
+            if is_new_schema:
+                # New schema: members table with member_id column
+                # Get the most recent record for this member_id
+                rows = await self._query_alliance(
+                    "SELECT member_id, username, rank, earned_credits, online_status, timestamp "
+                    "FROM members WHERE member_id=? ORDER BY timestamp DESC LIMIT 1",
+                    (mcid,)
+                )
+                if rows:
+                    r = dict(rows[0])
+                    return {
+                        "mc_id": str(r.get("member_id")),
+                        "name": r.get("username"),
+                        "role": r.get("rank"),
+                        "earned_credits": r.get("earned_credits"),
+                        "user_id": str(r.get("member_id"))  # For compatibility
+                    }
+            else:
+                # Old schema: members_current with user_id/mc_user_id columns
+                for col in ("user_id", "mc_user_id"):
+                    rows = await self._query_alliance(f"SELECT * FROM members_current WHERE {col}=?", (mcid,))
+                    if rows:
+                        r = dict(rows[0])
+                        r["mc_id"] = mcid
+                        return r
+                        
+                # Try profile_href as fallback
+                rows = await self._query_alliance("SELECT * FROM members_current WHERE profile_href LIKE ?", (f"%/users/{mcid}%",))
                 if rows:
                     r = dict(rows[0])
                     r["mc_id"] = mcid
                     return r
-            rows = await self._query_alliance("SELECT * FROM members_current WHERE profile_href LIKE ?", (f"%/users/{mcid}",))
-            if rows:
-                r = dict(rows[0])
-                r["mc_id"] = mcid
-                return r
 
         if name:
-            rows = await self._query_alliance("SELECT * FROM members_current WHERE lower(name)=?", (name,))
-            if rows:
-                r = dict(rows[0])
-                mc = r.get("user_id") or r.get("mc_user_id")
-                if not mc:
-                    href = r.get("profile_href") or ""
-                    m = re.search(r"/users/(\d+)", href or "")
-                    if m:
-                        mc = m.group(1)
-                r["mc_id"] = mc
-                return r
+            if is_new_schema:
+                # New schema: match on username
+                rows = await self._query_alliance(
+                    "SELECT member_id, username, rank, earned_credits, online_status, timestamp "
+                    "FROM members WHERE lower(username)=? ORDER BY timestamp DESC LIMIT 1",
+                    (name,)
+                )
+                if rows:
+                    r = dict(rows[0])
+                    return {
+                        "mc_id": str(r.get("member_id")),
+                        "name": r.get("username"),
+                        "role": r.get("rank"),
+                        "earned_credits": r.get("earned_credits"),
+                        "user_id": str(r.get("member_id"))
+                    }
+            else:
+                # Old schema
+                rows = await self._query_alliance("SELECT * FROM members_current WHERE lower(name)=?", (name,))
+                if rows:
+                    r = dict(rows[0])
+                    mc = r.get("user_id") or r.get("mc_user_id")
+                    if not mc:
+                        href = r.get("profile_href") or ""
+                        m = re.search(r"/users/(\d+)", href or "")
+                        if m:
+                            mc = m.group(1)
+                    r["mc_id"] = mc
+                    return r
 
         return None
 
@@ -661,6 +720,7 @@ class MemberSync(commands.Cog):
         asyncio.create_task(_loop())
 
     async def _prune_once(self):
+        """Prune verified roles from members no longer in the alliance."""
         guild = self.bot.guilds[0] if self.bot.guilds else None
         if not guild:
             return
@@ -669,19 +729,39 @@ class MemberSync(commands.Cog):
         if not role:
             return
 
-        rows = await self._query_alliance("SELECT user_id, mc_user_id, profile_href FROM members_current")
+        db_path = await self.config.alliance_db_path()
+        if not db_path:
+            log.warning("No alliance database configured for prune check")
+            return
+        
+        # Detect which database schema we're using
+        is_new_schema = "members_v2.db" in str(db_path)
+        
+        # Get current member IDs from database
         current_ids: set[str] = set()
-        for r in rows:
-            mc = r["user_id"] if "user_id" in r.keys() else None
-            if not mc and "mc_user_id" in r.keys():
-                mc = r["mc_user_id"]
-            if not mc and "profile_href" in r.keys() and r["profile_href"]:
-                m = re.search(r"/users/(\d+)", r["profile_href"])
-                if m:
-                    mc = m.group(1)
-            if mc:
-                current_ids.add(str(mc))
+        
+        if is_new_schema:
+            # New schema: get distinct member_ids from members table
+            rows = await self._query_alliance("SELECT DISTINCT member_id FROM members WHERE member_id IS NOT NULL AND member_id != ''")
+            for r in rows:
+                mid = r["member_id"]
+                if mid:
+                    current_ids.add(str(mid))
+        else:
+            # Old schema: get from members_current
+            rows = await self._query_alliance("SELECT user_id, mc_user_id, profile_href FROM members_current")
+            for r in rows:
+                mc = r["user_id"] if "user_id" in r.keys() else None
+                if not mc and "mc_user_id" in r.keys():
+                    mc = r["mc_user_id"]
+                if not mc and "profile_href" in r.keys() and r["profile_href"]:
+                    m = re.search(r"/users/(\d+)", r["profile_href"])
+                    if m:
+                        mc = m.group(1)
+                if mc:
+                    current_ids.add(str(mc))
 
+        # Get all approved links
         def _run():
             con = sqlite3.connect(self.links_db)
             con.row_factory = sqlite3.Row
