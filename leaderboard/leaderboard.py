@@ -698,12 +698,21 @@ class Leaderboard(commands.Cog):
         if self.income_db_path.exists():
             try:
                 async with aiosqlite.connect(self.income_db_path) as db:
-                    # Count total income records
-                    cur = await db.execute("SELECT COUNT(*) FROM income WHERE entry_type='income'")
-                    total = (await cur.fetchone())[0]
+                    # Count ALL records (not just income type)
+                    cur = await db.execute("SELECT COUNT(*) FROM income")
+                    total_all = (await cur.fetchone())[0]
                     
-                    # Get latest timestamp
-                    cur = await db.execute("SELECT MAX(timestamp) FROM income WHERE entry_type='income'")
+                    # Count by entry_type
+                    cur = await db.execute("SELECT entry_type, COUNT(*) FROM income GROUP BY entry_type")
+                    by_type = await cur.fetchall()
+                    type_text = "\n".join([f"  • {t[0]}: {t[1]:,}" for t in by_type]) if by_type else "  ⚠️ No data"
+                    
+                    # Count income records specifically
+                    cur = await db.execute("SELECT COUNT(*) FROM income WHERE entry_type='income'")
+                    total_income = (await cur.fetchone())[0]
+                    
+                    # Get latest timestamp (any type)
+                    cur = await db.execute("SELECT MAX(timestamp) FROM income")
                     latest = (await cur.fetchone())[0]
                     
                     # Count by period
@@ -713,21 +722,30 @@ class Leaderboard(commands.Cog):
                     if periods:
                         period_text = "\n".join([f"  • {p[0]}: {p[1]:,}" for p in periods])
                     else:
-                        period_text = "  ⚠️ No data - Run: [p]income scrape"
+                        period_text = "  ⚠️ No income data - check if scraped as 'expense'?"
                     
-                    # Sample data
-                    if total > 0:
-                        cur = await db.execute("SELECT username, amount, period, timestamp FROM income WHERE entry_type='income' ORDER BY timestamp DESC LIMIT 3")
+                    # Sample data (show ANY type if income is empty)
+                    if total_income > 0:
+                        cur = await db.execute("SELECT username, amount, period, entry_type, timestamp FROM income WHERE entry_type='income' ORDER BY timestamp DESC LIMIT 3")
                         sample = await cur.fetchall()
-                        sample_text = "\n".join([f"• {row[0]}: {row[1]:,} ({row[2]})" for row in sample])
+                        sample_text = "\n".join([f"• {row[0]}: {row[1]:,} ({row[2]}, {row[3]})" for row in sample])
                     else:
-                        sample_text = "⚠️ No income data yet"
+                        # Show ANY data to debug
+                        cur = await db.execute("SELECT username, amount, period, entry_type, timestamp FROM income ORDER BY timestamp DESC LIMIT 5")
+                        sample = await cur.fetchall()
+                        if sample:
+                            sample_text = "⚠️ Showing ALL types (no 'income' found):\n" + "\n".join([f"• {row[0]}: {row[1]:,} ({row[2]}, type={row[3]})" for row in sample])
+                        else:
+                            sample_text = "⚠️ No data at all"
                     
+                    status = "✅" if total_income > 0 else "⚠️"
                     embed.add_field(
-                        name="✅ income_v2.db" if total > 0 else "⚠️ income_v2.db (EMPTY)",
-                        value=f"**Total income records:** {total:,}\n"
+                        name=f"{status} income_v2.db",
+                        value=f"**Total records:** {total_all:,}\n"
+                              f"**By type:**\n{type_text}\n"
+                              f"**Income records:** {total_income:,}\n"
                               f"**Latest scrape:** {latest[:19] if latest else 'N/A'}\n"
-                              f"**By period:**\n{period_text}\n"
+                              f"**Income by period:**\n{period_text}\n"
                               f"**Sample:**\n{sample_text}",
                         inline=False
                     )
