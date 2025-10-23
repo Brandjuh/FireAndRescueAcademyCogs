@@ -138,10 +138,8 @@ class IncomeScraper(commands.Cog):
     async def _scrape_income_tab(self, session, tab_type='daily', ctx=None):
         """Scrape income/expense data from a specific tab (daily or monthly) - FIXED VERSION"""
         # Construct URL with tab parameter
-        if tab_type == 'monthly':
-            url = f"{self.income_url}?tab=monthly"
-        else:
-            url = self.income_url
+        # MissionChief likely uses tabs or links on the page itself
+        url = self.income_url
         
         await self._debug_log(f"🌐 Scraping {tab_type} income: {url}", ctx)
         
@@ -161,8 +159,17 @@ class IncomeScraper(commands.Cog):
                     await self._debug_log(f"❌ Session expired", ctx)
                     return []
                 
-                # Parse tables
+                # Parse HTML
                 soup = BeautifulSoup(html_content, 'html.parser')
+                
+                # Look for tab links to understand structure
+                tab_links = soup.find_all('a', href=True)
+                tab_info = [a['href'] for a in tab_links if 'tab=' in a.get('href', '')]
+                if tab_info and ctx:
+                    await self._debug_log(f"📑 Found tab links: {tab_info[:5]}", ctx)
+                
+                # Find the correct table based on tab_type
+                # Look for heading/label that indicates daily vs monthly
                 tables = soup.find_all('table')
                 
                 await self._debug_log(f"📊 Found {len(tables)} tables on page", ctx)
@@ -182,6 +189,13 @@ class IncomeScraper(commands.Cog):
                         continue
                     
                     await self._debug_log(f"Table {table_idx} headers: {headers}", ctx)
+                    
+                    # CRITICAL: Skip expense tables on daily/monthly tabs
+                    # Expense tables have headers like: ['credits', 'name', 'description', 'date']
+                    # This is the African Prison expenses table - we scrape this separately with pagination
+                    if 'description' in headers and 'date' in headers:
+                        await self._debug_log(f"⏭️ Table {table_idx}: Skipping expenses table (scraped separately)", ctx)
+                        continue
                     
                     # Find column indices based on headers
                     name_col_idx = None
