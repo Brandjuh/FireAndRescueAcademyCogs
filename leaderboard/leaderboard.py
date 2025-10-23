@@ -639,6 +639,84 @@ class Leaderboard(commands.Cog):
         
         await ctx.send(embed=embed)
 
+    @topplayers.command(name="debug")
+    @checks.is_owner()
+    async def debug_databases(self, ctx):
+        """Debug: Check database contents and structure."""
+        embed = discord.Embed(title="🔍 Database Debug Info", color=discord.Color.blue())
+        
+        # Check members_v2.db
+        if self.members_db_path.exists():
+            try:
+                async with aiosqlite.connect(self.members_db_path) as db:
+                    # Count total records
+                    cur = await db.execute("SELECT COUNT(*) FROM members")
+                    total = (await cur.fetchone())[0]
+                    
+                    # Get latest timestamp
+                    cur = await db.execute("SELECT MAX(timestamp) FROM members")
+                    latest = (await cur.fetchone())[0]
+                    
+                    # Get unique timestamps
+                    cur = await db.execute("SELECT COUNT(DISTINCT timestamp) FROM members")
+                    timestamps = (await cur.fetchone())[0]
+                    
+                    # Sample data
+                    cur = await db.execute("SELECT member_id, username, earned_credits, timestamp FROM members ORDER BY timestamp DESC LIMIT 3")
+                    sample = await cur.fetchall()
+                    
+                    sample_text = "\n".join([f"• {row[1]}: {row[2]:,} credits ({row[3][:19]})" for row in sample])
+                    
+                    embed.add_field(
+                        name="✅ members_v2.db",
+                        value=f"**Total records:** {total:,}\n"
+                              f"**Unique timestamps:** {timestamps}\n"
+                              f"**Latest scrape:** {latest[:19] if latest else 'N/A'}\n"
+                              f"**Sample:**\n{sample_text}",
+                        inline=False
+                    )
+            except Exception as e:
+                embed.add_field(name="❌ members_v2.db", value=f"Error: {str(e)}", inline=False)
+        else:
+            embed.add_field(name="❌ members_v2.db", value="File not found", inline=False)
+        
+        # Check income_v2.db
+        if self.income_db_path.exists():
+            try:
+                async with aiosqlite.connect(self.income_db_path) as db:
+                    # Count total income records
+                    cur = await db.execute("SELECT COUNT(*) FROM income WHERE entry_type='income'")
+                    total = (await cur.fetchone())[0]
+                    
+                    # Get latest timestamp
+                    cur = await db.execute("SELECT MAX(timestamp) FROM income WHERE entry_type='income'")
+                    latest = (await cur.fetchone())[0]
+                    
+                    # Count by period
+                    cur = await db.execute("SELECT period, COUNT(*) FROM income WHERE entry_type='income' GROUP BY period")
+                    periods = await cur.fetchall()
+                    period_text = "\n".join([f"  • {p[0]}: {p[1]:,}" for p in periods])
+                    
+                    # Sample data
+                    cur = await db.execute("SELECT username, amount, period, timestamp FROM income WHERE entry_type='income' ORDER BY timestamp DESC LIMIT 3")
+                    sample = await cur.fetchall()
+                    sample_text = "\n".join([f"• {row[0]}: {row[1]:,} ({row[2]}, {row[3][:19]})" for row in sample])
+                    
+                    embed.add_field(
+                        name="✅ income_v2.db",
+                        value=f"**Total income records:** {total:,}\n"
+                              f"**Latest scrape:** {latest[:19] if latest else 'N/A'}\n"
+                              f"**By period:**\n{period_text}\n"
+                              f"**Sample:**\n{sample_text}",
+                        inline=False
+                    )
+            except Exception as e:
+                embed.add_field(name="❌ income_v2.db", value=f"Error: {str(e)}", inline=False)
+        else:
+            embed.add_field(name="❌ income_v2.db", value="File not found", inline=False)
+        
+        await ctx.send(embed=embed)
+
     @topplayers.command(name="testnow")
     @checks.is_owner()
     async def test_now(self, ctx, leaderboard_type: str):
