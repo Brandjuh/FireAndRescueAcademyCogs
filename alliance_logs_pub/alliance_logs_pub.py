@@ -546,6 +546,7 @@ class AllianceLogsPub(commands.Cog):
         await ctx.send(f"✅ Posted {n} new log(s).")
 
 
+
 async def setup(bot):
     cog = AllianceLogsPub(bot)
     await bot.add_cog(cog)="version")
