@@ -11,7 +11,7 @@ import discord
 from redbot.core import commands, checks, Config
 from redbot.core.data_manager import cog_data_path
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 log = logging.getLogger("red.FARA.AllianceLogsPub")
 
@@ -46,21 +46,36 @@ DISPLAY = {
     "application_denied": ("Application denied", "red", "❌"),
     "left_alliance": ("Left the alliance", "orange", "🚪"),
     "kicked_from_alliance": ("Kicked from the alliance", "red", "🥾"),
-    "set_transport_request_admin": ("Set as Transport request admin", "blue", "🚚"),
-    "removed_transport_request_admin": ("Removed as Transport request admin", "orange", "🚚❌"),
-    "removed_as_admin": ("Removed as admin", "orange", "🛡️❌"),
-    "set_as_admin": ("Set as admin", "blue", "🛡️"),
-    "removed_as_education_admin": ("Removed as Education admin", "orange", "🎓❌"),
-    "set_as_education_admin": ("Set as Education admin", "blue", "🎓"),
-    "set_as_co_admin": ("Set as Co-admin", "blue", "👔"),
-    "removed_as_co_admin": ("Removed as Co-admin", "orange", "👔❌"),
-    "created_course": ("Started training course", "blue", "📚"),
-    "course_completed": ("Completed training course", "green", "🎓"),
+    "set_transport_admin": ("Set as Transport admin", "blue", "🚚"),
+    "removed_transport_admin": ("Removed as Transport admin", "orange", "🚚❌"),
+    "removed_admin": ("Removed as admin", "orange", "🛡️❌"),
+    "set_admin": ("Set as admin", "blue", "🛡️"),
+    "removed_education_admin": ("Removed as Education admin", "orange", "🎓❌"),
+    "set_education_admin": ("Set as Education admin", "blue", "🎓"),
+    "set_finance_admin": ("Set as Finance admin", "blue", "💰"),
+    "removed_finance_admin": ("Removed as Finance admin", "orange", "💰❌"),
+    "set_co_admin": ("Set as Co-Admin", "blue", "👑"),
+    "removed_co_admin": ("Removed as Co-Admin", "orange", "👑❌"),
+    "set_mod_action_admin": ("Set as Mod Action admin", "blue", "⚖️"),
+    "removed_mod_action_admin": ("Removed as Mod Action admin", "orange", "⚖️❌"),
+    "chat_ban_removed": ("Chat ban removed", "green", "💬✅"),
+    "chat_ban_set": ("Chat ban set", "red", "💬❌"),
+    "allowed_to_apply": ("Allowed to apply", "green", "📝✅"),
+    "not_allowed_to_apply": ("Not allowed to apply", "red", "📝❌"),
+    "created_course": ("Created a course", "blue", "📚"),
+    "course_completed": ("Course completed", "green", "🎓✅"),
+    "building_destroyed": ("Building destroyed", "red", "🏢💥"),
+    "building_constructed": ("Building constructed", "green", "🏢"),
+    "extension_started": ("Extension started", "blue", "🔨"),
+    "expansion_finished": ("Expansion finished", "green", "✅"),
+    "large_mission_started": ("Large scale mission started", "purple", "🚨"),
+    "alliance_event_started": ("Alliance event started", "purple", "🎉"),
+    "set_as_staff": ("Set as staff", "blue", "⭐"),
+    "removed_as_staff": ("Removed as staff", "orange", "⭐❌"),
+    "removed_event_manager": ("Removed Event Manager", "orange", "🎟️❌"),
+    "removed_custom_large_scale_mission": ("Removed custom large scale mission", "orange", "🗑️"),
     "promoted_to_event_manager": ("Promoted to Event Manager", "green", "🎟️"),
     "contributed_to_alliance": ("Contributed to the alliance", "gold", "💰"),
-    "extension_started": ("Extension started", "blue", "🏗️"),
-    "expansion_finished": ("Expansion finished", "green", "✅"),
-    "building_constructed": ("Building constructed", "green", "🏢"),
 }
 
 TITLE_TO_KEY = {v[0].lower(): k for k, v in DISPLAY.items()}
@@ -136,6 +151,7 @@ class AllianceLogsPub(commands.Cog):
             await db.commit()
 
     async def _mark_log_posted(self, log_id: int) -> bool:
+        """Mark a log as posted. Returns False if already posted (duplicate detection)."""
         async with aiosqlite.connect(self.db_path) as db:
             try:
                 await db.execute(
@@ -149,134 +165,156 @@ class AllianceLogsPub(commands.Cog):
                 return False
 
     async def _is_already_posted(self, log_id: int) -> bool:
+        """Check if a log ID was already posted."""
         async with aiosqlite.connect(self.db_path) as db:
             cur = await db.execute("SELECT 1 FROM posted_logs WHERE log_id = ?", (int(log_id),))
             return await cur.fetchone() is not None
 
-    def _title_from_row(self, row: Dict[str, Any]) -> Tuple[str, int, str, str]:
-        key = str(row.get("action_key") or "")
-        if key in DISPLAY:
-            title, color_name, emoji = DISPLAY[key]
-            color = PALETTE.get(color_name, PALETTE["grey"])
-            return title, color, emoji, key
-        return "Alliance Activity", PALETTE["grey"], "📋", key
+    def _profile_url(self, mc_user_id: str) -> Optional[str]:
+        """Generate profile URL."""
+        if not mc_user_id:
+            return None
+        return f"https://www.missionchief.com/profile/{mc_user_id}"
+
+    def _discord_profile_url(self, discord_id: int) -> str:
+        return f"https://discord.com/users/{discord_id}"
+
+    def _safe_markdown_link(self, text: str, url: str) -> str:
+        """Create safe markdown link, escaping special chars."""
+        if not text or not url:
+            return text or url or ""
+        safe_text = (text.replace("[", "\\[").replace("]", "\\]")
+                        .replace("(", "\\(").replace(")", "\\)"))
+        return f"[{safe_text}]({url})"
 
     def _format_timestamp(self, ts_str: str) -> str:
+        """Format timestamp consistently."""
+        if not ts_str:
+            return "-"
         try:
-            dt = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
-            return dt.strftime('%d %b %H:%M')
+            dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            return dt.strftime("%d %b %H:%M")
         except:
             return ts_str
-    
-    async def _get_mc_user_id(self, username: str) -> Optional[str]:
-        """Get MissionChief user ID from verified members"""
+
+    async def _discord_id_for_mc(self, mc_user_id: str) -> Optional[int]:
+        ms = self.bot.get_cog("MemberSync")
+        if not ms or not mc_user_id:
+            return None
         try:
-            verified_cog = self.bot.get_cog("VerifiedMembers")
-            if not verified_cog:
-                return None
-            # Try different method names
-            if hasattr(verified_cog, "get_mc_id_by_name"):
-                return await verified_cog.get_mc_id_by_name(username)
-            elif hasattr(verified_cog, "get_mc_user_id"):
-                return await verified_cog.get_mc_user_id(username)
-        except Exception as e:
-            log.debug(f"Error getting MC ID for {username}: {e}")
+            link = await ms.get_link_for_mc(str(mc_user_id))
+            if link and link.get("status") == "approved":
+                return int(link["discord_id"])
+        except Exception:
+            pass
         return None
-    
-    async def _get_discord_id(self, username: str) -> Optional[int]:
-        """Get Discord ID from verified members"""
-        try:
-            verified_cog = self.bot.get_cog("VerifiedMembers")
-            if not verified_cog:
-                return None
-            # Try different method names
-            if hasattr(verified_cog, "get_discord_id_by_name"):
-                return await verified_cog.get_discord_id_by_name(username)
-            elif hasattr(verified_cog, "get_discord_id"):
-                return await verified_cog.get_discord_id(username)
-        except Exception as e:
-            log.debug(f"Error getting Discord ID for {username}: {e}")
-        return None
-    
-    def _parse_description(self, desc: str) -> dict:
-        """Parse description to extract training/building details"""
-        result = {"raw": desc, "detail": "", "building": "", "building_id": None}
+
+    def _title_from_row(self, row: Dict[str, Any]) -> Tuple[str, int, str, str]:
+        key_raw = str(row.get("action_key") or "")
+        key = _map_user_action_input(key_raw) or _map_user_action_input(row.get("action_text") or "")
         
-        # Format: "Extension started (General Surgeon) → North Ottawa Community Hospital"
-        # Or: "Building constructed → Fire Station 5"
+        if not key or key not in DISPLAY:
+            log.info("Unknown action_key: '%s' (text: '%s')", 
+                     row.get("action_key"), row.get("action_text"))
+            return "Alliance log", PALETTE["grey"], "ℹ️", ""
         
-        # Extract detail in parentheses
-        detail_match = re.search(r'\(([^)]+)\)', desc)
-        if detail_match:
-            result["detail"] = detail_match.group(1)
-        
-        # Extract building after arrow
-        building_match = re.search(r'→\s*(.+?)(?:\s*$|\s*\()', desc)
-        if building_match:
-            result["building"] = building_match.group(1).strip()
-        
-        return result
+        title, palette_key, emoji = DISPLAY[key]
+        color = PALETTE.get(palette_key, PALETTE["grey"])
+        return title, color, emoji, key
 
     async def _desc_minimal(self, row: Dict[str, Any]) -> str:
+        lines: List[str] = []
         ts = row.get("ts") or "-"
         formatted_ts = self._format_timestamp(ts)
         
-        username = row.get("executed_name") or "Unknown"
-        show_exec = await self.config.show_executor_minimal()
-        
-        # Get MC and Discord IDs
-        mc_id = await self._get_mc_user_id(username)
-        discord_id = await self._get_discord_id(username)
-        
-        # Format username with links
-        username_text = username
-        if mc_id:
-            username_text = f"[{username}](https://www.missionchief.com/profile/{mc_id})"
-        if discord_id:
-            username_text += f" [[D]](https://discord.com/users/{discord_id})"
-        
-        desc = f"`{formatted_ts}` — by {username_text}" if show_exec else f"`{formatted_ts}`"
-        
-        # Parse and format description
-        description = row.get("description", "")
-        if description:
-            parsed = self._parse_description(description)
-            
-            # Format with detail and building link
-            parts = []
-            if parsed["detail"]:
-                parts.append(f"({parsed['detail']})")
-            if parsed["building"]:
-                # Try to get building ID and make link (for now, just show name)
-                parts.append(f"→ {parsed['building']}")
-            
-            if parts:
-                desc += "\n" + " ".join(parts)
-            else:
-                desc += f"\n{description}"
-        
-        return desc
+        first = f"`{formatted_ts}` —"
+        if await self.config.show_executor_minimal():
+            by = row.get("executed_name") or "-"
+            if row.get("executed_mc_id"):
+                url = self._profile_url(str(row["executed_mc_id"]))
+                by = self._safe_markdown_link(by, url)
+                did = await self._discord_id_for_mc(str(row["executed_mc_id"]))
+                if did:
+                    by += f" [[D]]({self._discord_profile_url(did)})"
+            first += f" by {by}"
+        lines.append(first)
+
+        desc = row.get("description") or row.get("action_text") or "-"
+        lines.append(str(desc))
+
+        if row.get("contribution_amount", 0) > 0:
+            amount = f"{row['contribution_amount']:,}".replace(",", ".")
+            lines.append(f"💰 Contributed: {amount} coins")
+
+        aff_name = row.get("affected_name") or ""
+        aff_url = row.get("affected_url") or ""
+        block: Optional[str] = None
+        if aff_name or aff_url:
+            label = aff_name or "link"
+            block = self._safe_markdown_link(label, aff_url) if aff_url else f"→ {label}"
+            if block and not block.startswith("→"):
+                block = f"→ {block}"
+            if str(row.get("affected_type") or "") == "user" and row.get("affected_mc_id"):
+                did = await self._discord_id_for_mc(str(row.get("affected_mc_id")))
+                if did:
+                    block += f" [[D]]({self._discord_profile_url(did)})"
+        else:
+            exec_name = row.get("executed_name") or ""
+            exec_url = self._profile_url(str(row.get("executed_mc_id"))) if row.get("executed_mc_id") else ""
+            if exec_name or exec_url:
+                label = exec_name or "profile"
+                block = self._safe_markdown_link(label, exec_url) if exec_url else f"→ {label}"
+                if block and not block.startswith("→"):
+                    block = f"→ {block}"
+        if block:
+            lines.append(block)
+
+        return NL.join(lines)
 
     async def _desc_compact(self, row: Dict[str, Any]) -> str:
-        lines = []
+        lines: List[str] = []
+        by = row.get("executed_name") or "-"
+        if row.get("executed_mc_id"):
+            url = self._profile_url(str(row["executed_mc_id"]))
+            by = self._safe_markdown_link(by, url)
+            did = await self._discord_id_for_mc(str(row["executed_mc_id"]))
+            if did:
+                by += f" [[D]]({self._discord_profile_url(did)})"
+        lines.append(f"**By:** {by}")
+        
+        aff_name = row.get("affected_name") or ""
+        aff_url = row.get("affected_url") or ""
+        if aff_name or aff_url:
+            aff_text = aff_name or "-"
+            if aff_url:
+                aff_text = self._safe_markdown_link(aff_name or "link", aff_url)
+            if str(row.get("affected_type") or "") == "user" and row.get("affected_mc_id"):
+                did = await self._discord_id_for_mc(str(row["affected_mc_id"]))
+                if did:
+                    aff_text += f" [[D]]({self._discord_profile_url(did)})"
+            lines.append(f"**Affected:** {aff_text}")
+        
+        details = str(row.get("description") or "-")
+        lines.append(f"**Details:** {details}")
+        
+        if row.get("contribution_amount", 0) > 0:
+            amount = f"{row['contribution_amount']:,}".replace(",", ".")
+            lines.append(f"**Contributed:** 💰 {amount} coins")
+        
         ts = row.get("ts") or "-"
         formatted_ts = self._format_timestamp(ts)
-        
-        by = row.get("executed_name") or "Unknown"
-        lines.append(f"`{formatted_ts}` — by {by}")
-        
-        if row.get("description"):
-            lines.append(row["description"])
-        
-        if row.get("action"):
-            lines.append(f"**Action:** {row['action']}")
-        
+        lines.append(f"**Date:** `{formatted_ts}`")
         return NL.join(lines)
 
     async def _publish_single_log(self, row: Dict[str, Any], main_ch: discord.TextChannel, 
                                    mirrors: Dict, style: str, emoji_titles: bool) -> bool:
+        """
+        Publish a single log entry with transactional ID tracking.
+        Returns True if successfully posted, False otherwise.
+        """
         log_id = int(row["id"])
         
+        # CRITICAL: Check if already posted
         if await self._is_already_posted(log_id):
             log.info("Skipping log ID %d - already posted", log_id)
             return False
@@ -284,60 +322,106 @@ class AllianceLogsPub(commands.Cog):
         title, color, emoji, key = self._title_from_row(row)
         title_text = f"{emoji} {title}" if emoji_titles and emoji else title
 
+        # Build embed based on style
         if style == "minimal":
             desc = await self._desc_minimal(row)
             e = discord.Embed(title=title_text, description=desc, color=color, timestamp=datetime.utcnow())
         elif style == "compact":
             desc = await self._desc_compact(row)
             e = discord.Embed(title=title_text, description=desc, color=color, timestamp=datetime.utcnow())
-        else:
+        else:  # fields
             e = discord.Embed(title=title_text, color=color, timestamp=datetime.utcnow())
             by = row.get("executed_name") or "-"
+            if row.get("executed_mc_id"):
+                url = self._profile_url(str(row["executed_mc_id"]))
+                by = self._safe_markdown_link(by, url)
+                did = await self._discord_id_for_mc(str(row["executed_mc_id"]))
+                if did:
+                    by += f" [[D]]({self._discord_profile_url(did)})"
             e.add_field(name="By", value=by, inline=False)
+            
+            aff_name = row.get("affected_name") or ""
+            aff_url = row.get("affected_url") or ""
+            aff_value = "-"
+            if aff_name or aff_url:
+                acc = self._safe_markdown_link(aff_name or "link", aff_url) if aff_url else (aff_name or "link")
+                if str(row.get("affected_type") or "") == "user" and row.get("affected_mc_id"):
+                    did = await self._discord_id_for_mc(str(row["affected_mc_id"]))
+                    if did:
+                        acc += f" [[D]]({self._discord_profile_url(did)})"
+                aff_value = acc
+            e.add_field(name="Affected", value=aff_value, inline=False)
             e.add_field(name="Details", value=str(row.get("description") or "-"), inline=False)
+            
+            if row.get("contribution_amount", 0) > 0:
+                amount = f"{row['contribution_amount']:,}".replace(",", ".")
+                e.add_field(name="Contribution", value=f"💰 {amount} coins", inline=False)
+            
+            ts = row.get("ts") or "-"
+            formatted_ts = self._format_timestamp(ts)
+            e.add_field(name="Date", value=f"`{formatted_ts}`", inline=False)
 
+        # Post to main channel
         try:
             await main_ch.send(embed=e)
-            
-            # Post to mirrors with action filtering
-            for mirror_key, mirror_cfg in mirrors.items():
-                if not mirror_cfg.get("enabled"):
-                    continue
-                
-                # Check if this action should go to this mirror
-                mirror_actions = mirror_cfg.get("actions", [])
-                if mirror_actions and key not in mirror_actions:
-                    continue  # Skip this mirror for this action
-                
-                for ch_id_str in mirror_cfg.get("channels", []):
-                    try:
-                        ch = main_ch.guild.get_channel(int(ch_id_str))
-                        if isinstance(ch, discord.TextChannel):
-                            await ch.send(embed=e)
-                    except Exception as e:
-                        log.debug("Failed to post to mirror channel %s: %s", ch_id_str, e)
-            
-            await self._mark_log_posted(log_id)
-            await self._set_last_id(log_id)
-            return True
-            
-        except Exception as e:
-            log.exception("Failed to publish log ID %d: %s", log_id, e)
+            log.info("Posted log ID %d to main channel", log_id)
+        except discord.Forbidden as ex:
+            log.error("No permission to post in main channel: %s", ex)
+            return False
+        except discord.HTTPException as ex:
+            log.warning("Failed to post log ID %d to main: %s", log_id, ex)
+            return False
+        except Exception as ex:
+            log.exception("Unexpected error posting log ID %d: %s", log_id, ex)
             return False
 
+        # CRITICAL: Mark as posted immediately after successful main post
+        if not await self._mark_log_posted(log_id):
+            log.error("RACE CONDITION: Log ID %d was posted by another process!", log_id)
+            return False
+        
+        # Update last_id immediately after successful post
+        await self._set_last_id(log_id)
+        log.debug("Updated last_id to %d after posting", log_id)
+
+        # FIXED: Mirror filtering - only post to mirrors configured for THIS action_key
+        if key and key in mirrors:
+            m = mirrors[key]
+            if m.get("enabled"):
+                guild = main_ch.guild
+                for cid in m.get("channels") or []:
+                    mch = guild.get_channel(int(cid))
+                    if not isinstance(mch, discord.TextChannel):
+                        continue
+                    try:
+                        await mch.send(embed=e)
+                        log.debug("Mirrored log ID %d (action: %s) to channel %d", log_id, key, cid)
+                    except discord.Forbidden:
+                        log.warning("No permission to mirror to channel %d", cid)
+                    except discord.HTTPException as ex:
+                        log.warning("Failed to mirror to channel %d: %s", cid, ex)
+                    except Exception as ex:
+                        log.exception("Unexpected error mirroring to channel %d: %s", cid, ex)
+
+        return True
+
     async def _tick_once(self) -> int:
+        """Process new logs one at a time with transactional safety."""
+        # Prevent concurrent runs
         if self._posting_lock.locked():
             log.info("Skipping tick - already posting")
             return 0
         
         async with self._posting_lock:
-            sc = self.bot.get_cog("LogsScraper")  # CHANGED FROM AllianceScraper
+            # FIXED: Use LogsScraper instead of AllianceScraper
+            sc = self.bot.get_cog("LogsScraper")
             if not sc or not hasattr(sc, "get_logs_after"):
                 return 0
             
             last_id = await self._get_last_id()
             max_posts = await self.config.max_posts_per_run()
             
+            # Get channel config
             guild = self.bot.guilds[0] if self.bot.guilds else None
             if not guild:
                 return 0
@@ -353,6 +437,7 @@ class AllianceLogsPub(commands.Cog):
             emoji_titles = bool(await self.config.emoji_titles())
             
             try:
+                # Fetch logs after last_id
                 rows = await sc.get_logs_after(int(last_id), limit=max_posts)
             except Exception as e:
                 log.exception("Failed to fetch logs: %s", e)
@@ -361,14 +446,17 @@ class AllianceLogsPub(commands.Cog):
             if not rows:
                 return 0
             
-            log.info("Fetched %d logs after ID %d", len(rows), last_id)
+            log.info("Fetched %d logs after ID %d (IDs: %s)", 
+                    len(rows), last_id, [r["id"] for r in rows[:10]])
             
             posted = 0
-            for row in rows:
+            for idx, row in enumerate(rows):
+                # Post single log with full transaction safety
                 success = await self._publish_single_log(row, main_ch, mirrors, style, emoji_titles)
                 
                 if success:
                     posted += 1
+                    # Small delay every 5 posts to avoid rate limits
                     if (posted % 5) == 0:
                         await asyncio.sleep(1)
                 else:
@@ -398,15 +486,87 @@ class AllianceLogsPub(commands.Cog):
     @commands.group(name="alog")
     @checks.admin_or_permissions(manage_guild=True)
     async def alog_group(self, ctx: commands.Context):
-        """AllianceLogs publisher commands"""
+        """AllianceLogs publisher commands."""
         pass
+
+    @alog_group.command(name="removemirror")
+    async def remove_mirror(self, ctx: commands.Context, action: str, channel: discord.TextChannel):
+        """Remove a mirror channel for a specific action."""
+        key = _map_user_action_input(action)
+        if not key:
+            await ctx.send("❌ Unknown action. Use `!alog listactions`.")
+            return
+        
+        mirrors = await self.config.mirrors()
+        m = mirrors.get(key, {"enabled": True, "channels": []})
+        m["channels"] = [cid for cid in m["channels"] if cid != int(channel.id)]
+        mirrors[key] = m
+        await self.config.mirrors.set(mirrors)
+        
+        action_name = DISPLAY[key][0]
+        await ctx.send(f"✅ Mirror removed: **{action_name}** from {channel.mention}")
+
+    @alog_group.command(name="togglemirror")
+    async def toggle_mirror(self, ctx: commands.Context, action: str):
+        """Toggle a mirror on/off."""
+        key = _map_user_action_input(action)
+        if not key:
+            await ctx.send("❌ Unknown action. Use `!alog listactions`.")
+            return
+        
+        mirrors = await self.config.mirrors()
+        m = mirrors.get(key, {"enabled": True, "channels": []})
+        m["enabled"] = not m.get("enabled", True)
+        mirrors[key] = m
+        await self.config.mirrors.set(mirrors)
+        
+        action_name = DISPLAY[key][0]
+        status = "enabled" if m["enabled"] else "disabled"
+        await ctx.send(f"✅ Mirror **{action_name}** {status}")
+
+    @alog_group.command(name="listactions")
+    async def list_actions(self, ctx: commands.Context):
+        """List all available action types."""
+        lines = ["**Available Actions:**"]
+        for key, (name, _, emoji) in DISPLAY.items():
+            lines.append(f"{emoji} `{key}` - {name}")
+        
+        # Send in chunks if too long
+        msg = "\n".join(lines)
+        if len(msg) > 1900:
+            for chunk in [lines[i:i+20] for i in range(0, len(lines), 20)]:
+                await ctx.send("\n".join(chunk))
+        else:
+            await ctx.send(msg)
+
+    @alog_group.command(name="run")
+    async def run(self, ctx: commands.Context):
+        """Manually trigger log posting."""
+        n = await self._tick_once()
+        await ctx.send(f"✅ Posted {n} new log(s).")
+
+
+async def setup(bot):
+    cog = AllianceLogsPub(bot)
+    await bot.add_cog(cog)="version")
+    async def version(self, ctx: commands.Context):
+        cfg = await self.config.all()
+        lines = [
+            "```",
+            f"AllianceLogsPub version: {__version__}",
+            f"Style: {cfg['style']}  Emoji titles: {cfg['emoji_titles']}",
+            f"Max posts per run: {cfg['max_posts_per_run']}",
+            f"Mirrors configured: {len(cfg.get('mirrors', {}))}",
+            "```",
+        ]
+        await ctx.send(NL.join(lines))
 
     @alog_group.command(name="status")
     async def status(self, ctx: commands.Context):
-        """Show current status and last processed ID"""
+        """Show current status and last processed ID."""
         last_id = await self._get_last_id()
         
-        sc = self.bot.get_cog("LogsScraper")  # CHANGED FROM AllianceScraper
+        sc = self.bot.get_cog("LogsScraper")
         scraper_available = sc is not None and hasattr(sc, "get_logs_after")
         
         total_logs = "N/A"
@@ -415,7 +575,7 @@ class AllianceLogsPub(commands.Cog):
                 import sqlite3
                 conn = sqlite3.connect(sc.db_path)
                 cursor = conn.cursor()
-                cursor.execute("SELECT COUNT(*), MAX(log_id) FROM logs")
+                cursor.execute("SELECT COUNT(*), MAX(id) FROM logs")
                 row = cursor.fetchone()
                 if row:
                     total_logs = f"{row[0]} (max ID: {row[1]})"
@@ -423,6 +583,7 @@ class AllianceLogsPub(commands.Cog):
             except Exception as e:
                 total_logs = f"Error: {e}"
         
+        # Check posted logs table
         posted_count = 0
         try:
             async with aiosqlite.connect(self.db_path) as db:
@@ -451,117 +612,76 @@ class AllianceLogsPub(commands.Cog):
 
     @alog_group.command(name="setlastid")
     async def setlastid(self, ctx: commands.Context, new_id: int):
-        """Manually set the last processed ID"""
+        """Manually set the last processed ID (use with caution!)."""
         old_id = await self._get_last_id()
         await self._set_last_id(int(new_id))
         await ctx.send(f"✅ Updated last_id from {old_id} to {new_id}")
         log.info("Manual last_id update: %d -> %d (by %s)", old_id, new_id, ctx.author)
 
-    @alog_group.command(name="run")
-    async def run(self, ctx: commands.Context):
-        """Manually trigger a posting run"""
-        n = await self._tick_once()
-        await ctx.send(f"✅ Posted {n} new log(s).")
-
     @alog_group.command(name="setchannel")
     async def setchannel(self, ctx: commands.Context, channel: discord.TextChannel):
-        """Set the main posting channel"""
-        await self.config.main_channel_id.set(channel.id)
+        """Set the main posting channel."""
+        await self.config.main_channel_id.set(int(channel.id))
         await ctx.send(f"✅ Main channel set to {channel.mention}")
 
     @alog_group.command(name="setinterval")
     async def setinterval(self, ctx: commands.Context, minutes: int):
-        """Set posting interval in minutes"""
-        if minutes < 1:
-            await ctx.send("❌ Interval must be at least 1 minute")
-            return
+        """Set posting interval in minutes (min: 1)."""
+        minutes = max(1, int(minutes))
         await self.config.interval_minutes.set(minutes)
         await ctx.send(f"✅ Interval set to {minutes} minutes")
 
+    @alog_group.command(name="setmaxposts")
+    async def setmaxposts(self, ctx: commands.Context, max_posts: int):
+        """Set max posts per run (1-100)."""
+        max_posts = max(1, min(100, int(max_posts)))
+        await self.config.max_posts_per_run.set(max_posts)
+        await ctx.send(f"✅ Max posts per run set to {max_posts}")
+
     @alog_group.command(name="setstyle")
     async def setstyle(self, ctx: commands.Context, style: str):
-        """Set embed style (minimal/compact/fields)"""
-        style = style.lower()
-        if style not in ["minimal", "compact", "fields"]:
-            await ctx.send("❌ Style must be: minimal, compact, or fields")
+        """Set embed style (minimal/compact/fields)."""
+        style = style.lower().strip()
+        if style not in {"minimal", "compact", "fields"}:
+            await ctx.send("❌ Style must be `minimal`, `compact`, or `fields`.")
             return
         await self.config.style.set(style)
-        await ctx.send(f"✅ Style set to: {style}")
-    
+        await ctx.send(f"✅ Style set to {style}")
+
     @alog_group.command(name="mirrors")
     async def list_mirrors(self, ctx: commands.Context):
-        """List all configured mirrors"""
+        """List all configured mirrors."""
         mirrors = await self.config.mirrors()
         if not mirrors:
-            await ctx.send("No mirrors configured")
+            await ctx.send("```\nNo mirrors configured.\n```")
             return
         
-        lines = ["**Configured Mirrors:**"]
-        for key, cfg in mirrors.items():
-            enabled = "✅" if cfg.get("enabled") else "❌"
-            channels = ", ".join([f"<#{ch}>" for ch in cfg.get("channels", [])])
-            actions = cfg.get("actions", [])
-            action_str = ", ".join(actions) if actions else "all actions"
-            lines.append(f"\n**{key}** {enabled}")
-            lines.append(f"  Channels: {channels or 'none'}")
-            lines.append(f"  Actions: {action_str}")
+        lines = []
+        for k, v in mirrors.items():
+            chans = ", ".join(f"<#{cid}>" for cid in (v.get("channels") or []))
+            action_name = DISPLAY.get(k, (k, "", ""))[0]
+            enabled = "✅" if v.get("enabled") else "❌"
+            lines.append(f"{enabled} **{action_name}** → {chans if chans else '(none)'}")
         
         await ctx.send("\n".join(lines))
-    
+
     @alog_group.command(name="addmirror")
-    async def add_mirror(self, ctx: commands.Context, name: str, channel: discord.TextChannel):
-        """Add a mirror channel"""
-        async with self.config.mirrors() as mirrors:
-            if name not in mirrors:
-                mirrors[name] = {"enabled": True, "channels": [], "actions": []}
-            if channel.id not in mirrors[name]["channels"]:
-                mirrors[name]["channels"].append(channel.id)
-        await ctx.send(f"✅ Added {channel.mention} to mirror '{name}'")
-    
-    @alog_group.command(name="removemirror")
-    async def remove_mirror(self, ctx: commands.Context, name: str):
-        """Remove a mirror entirely"""
-        async with self.config.mirrors() as mirrors:
-            if name in mirrors:
-                del mirrors[name]
-                await ctx.send(f"✅ Removed mirror '{name}'")
-            else:
-                await ctx.send(f"❌ Mirror '{name}' not found")
-    
-    @alog_group.command(name="setmirroractions")
-    async def set_mirror_actions(self, ctx: commands.Context, name: str, *actions: str):
-        """Set which actions go to a mirror (leave empty for all)"""
-        async with self.config.mirrors() as mirrors:
-            if name not in mirrors:
-                await ctx.send(f"❌ Mirror '{name}' not found")
-                return
-            
-            valid_actions = []
-            for action in actions:
-                key = _map_user_action_input(action)
-                if key:
-                    valid_actions.append(key)
-            
-            mirrors[name]["actions"] = valid_actions
-            
-            if valid_actions:
-                await ctx.send(f"✅ Mirror '{name}' will receive: {', '.join(valid_actions)}")
-            else:
-                await ctx.send(f"✅ Mirror '{name}' will receive all actions")
-    
-    @alog_group.command(name="togglemirror")
-    async def toggle_mirror(self, ctx: commands.Context, name: str):
-        """Enable/disable a mirror"""
-        async with self.config.mirrors() as mirrors:
-            if name not in mirrors:
-                await ctx.send(f"❌ Mirror '{name}' not found")
-                return
-            
-            mirrors[name]["enabled"] = not mirrors[name].get("enabled", True)
-            status = "enabled" if mirrors[name]["enabled"] else "disabled"
-            await ctx.send(f"✅ Mirror '{name}' {status}")
+    async def add_mirror(self, ctx: commands.Context, action: str, channel: discord.TextChannel):
+        """Add a mirror channel for a specific action."""
+        key = _map_user_action_input(action)
+        if not key:
+            await ctx.send("❌ Unknown action. Use `!alog listactions` to see valid options.")
+            return
+        
+        mirrors = await self.config.mirrors()
+        m = mirrors.get(key, {"enabled": True, "channels": []})
+        if int(channel.id) not in m["channels"]:
+            m["channels"].append(int(channel.id))
+        m["enabled"] = True
+        mirrors[key] = m
+        await self.config.mirrors.set(mirrors)
+        
+        action_name = DISPLAY[key][0]
+        await ctx.send(f"✅ Mirror added: **{action_name}** → {channel.mention}")
 
-
-async def setup(bot):
-    cog = AllianceLogsPub(bot)
-    await bot.add_cog(cog)
+    @alog_group.command(name
