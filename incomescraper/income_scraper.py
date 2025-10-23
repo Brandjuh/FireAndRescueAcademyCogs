@@ -522,6 +522,33 @@ class IncomeScraper(commands.Cog):
         else:
             await ctx.send("❌ Invalid mode. Use 'on' or 'off'")
     
+    @income_group.command(name="cleanexpenses")
+    async def clean_expenses(self, ctx):
+        """Delete all paginated expense records (use before backfill)"""
+        await ctx.send("⚠️ This will DELETE all paginated expense records! Type 'YES' to confirm.")
+        
+        def check(m):
+            return m.author == ctx.author and m.channel == ctx.channel
+        
+        try:
+            msg = await self.bot.wait_for('message', check=check, timeout=30.0)
+            if msg.content.upper() != 'YES':
+                return await ctx.send("❌ Cancelled")
+        except asyncio.TimeoutError:
+            return await ctx.send("❌ Timed out")
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COUNT(*) FROM income WHERE entry_type='expense' AND period='paginated'")
+        count = cursor.fetchone()[0]
+        
+        cursor.execute("DELETE FROM income WHERE entry_type='expense' AND period='paginated'")
+        conn.commit()
+        conn.close()
+        
+        await ctx.send(f"✅ Deleted {count} paginated expense records. Ready for backfill!")
+    
     @income_group.command(name="stats")
     async def show_stats(self, ctx):
         """Show income/expense statistics"""
