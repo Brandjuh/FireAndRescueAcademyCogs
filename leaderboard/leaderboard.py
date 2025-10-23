@@ -1,6 +1,7 @@
 """
 Alliance Leaderboard System for Missionchief USA
 Displays daily and monthly top 10 rankings for earned credits and treasury contributions.
+Uses NEW scraper_databases structure (members_v2.db, income_v2.db)
 """
 
 import asyncio
@@ -53,14 +54,10 @@ class Leaderboard(commands.Cog):
         self.config = Config.get_conf(self, identifier=0x4C45414442, force_registration=True)
         self.config.register_global(**DEFAULTS)
         
-        # Get AllianceScraper database path
-        scraper_cog = self.bot.get_cog("AllianceScraper")
-        if scraper_cog and hasattr(scraper_cog, 'db_path'):
-            self.db_path = scraper_cog.db_path
-        else:
-            # Fallback: try to guess path
-            data_path = cog_data_path(raw_name="AllianceScraper")
-            self.db_path = data_path / "alliance.db"
+        # NEW: Use scraper_databases folder
+        base_path = cog_data_path(raw_name="scraper_databases")
+        self.members_db_path = base_path / "members_v2.db"
+        self.income_db_path = base_path / "income_v2.db"
         
         self._daily_task: Optional[asyncio.Task] = None
         self._monthly_task: Optional[asyncio.Task] = None
@@ -236,31 +233,31 @@ class Leaderboard(commands.Cog):
         """Filter out corrupted/invalid entries from rankings."""
         filtered = []
         for entry in rankings:
-            user_id = entry.get('user_id', '')
-            name = entry.get('name', '')
+            member_id = str(entry.get('member_id', ''))
+            username = entry.get('username', '')
             
             # Check blacklists
-            if user_id in BLACKLISTED_USER_IDS:
-                log.warning(f"Filtered blacklisted user_id: {user_id}")
+            if member_id in BLACKLISTED_USER_IDS:
+                log.warning(f"Filtered blacklisted member_id: {member_id}")
                 continue
             
-            if name in BLACKLISTED_USERNAMES:
-                log.warning(f"Filtered blacklisted username: {name}")
+            if username in BLACKLISTED_USERNAMES:
+                log.warning(f"Filtered blacklisted username: {username}")
                 continue
             
             # Check for INT64_MAX (parsing error indicator)
             if metric == 'earned_credits':
                 value = entry.get('earned_credits', 0)
             else:
-                value = entry.get('credits', 0)
+                value = entry.get('amount', 0)
             
             if value >= INT64_MAX:
-                log.warning(f"Filtered INT64_MAX value for {name}: {value}")
+                log.warning(f"Filtered INT64_MAX value for {username}: {value}")
                 continue
             
             # Check for suspiciously numeric usernames (likely IDs)
-            if name and name.isdigit() and len(name) > 10:
-                log.warning(f"Filtered numeric username (likely ID): {name}")
+            if username and username.isdigit() and len(username) > 10:
+                log.warning(f"Filtered numeric username (likely ID): {username}")
                 continue
             
             filtered.append(entry)
@@ -271,34 +268,20 @@ class Leaderboard(commands.Cog):
 
     async def _get_earned_credits_rankings(self, period: str) -> Optional[Dict]:
         """
-        Get earned credits rankings for current and previous period.
-        Only includes members that are CURRENTLY in the alliance.
-        Calculates DELTA (growth) between two time periods.
+        Get earned credits rankings from members_v2.db.
+        Calculates DELTA between current and previous timestamps.
         Returns dict with 'current' and 'previous' rankings.
         """
-        if not self.db_path.exists():
-            log.error(f"Database not found at {self.db_path}")
+        if not self.members_db_path.exists():
+            log.error(f"Database not found at {self.members_db_path}")
             return None
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(self.members_db_path) as db:
             db.row_factory = aiosqlite.Row
             
-            # Get list of current active member IDs
+            # Get most recent timestamp
             cur = await db.execute("""
-                SELECT DISTINCT user_id FROM members_current WHERE user_id != ''
-            """)
-            current_member_ids = [row['user_id'] for row in await cur.fetchall()]
-            
-            if not current_member_ids:
-                log.warning("No current members found in database")
-                return None
-            
-            # Create placeholder string for SQL IN clause
-            placeholders = ','.join('?' * len(current_member_ids))
-            
-            # Get most recent scrape
-            cur = await db.execute("""
-                SELECT MAX(scraped_at) as latest FROM members_history
+                SELECT MAX(timestamp) as latest FROM members
             """)
             row = await cur.fetchone()
             if not row or not row['latest']:
@@ -308,20 +291,20 @@ class Leaderboard(commands.Cog):
             
             # Calculate previous time based on period
             if period == 'daily':
-                dt = datetime.fromisoformat(current_time.replace('Z', '+00:00'))
+                dt = datetime.fromisoformat(current_time)
                 previous_dt = dt - timedelta(days=1)
             else:  # monthly
-                dt = datetime.fromisoformat(current_time.replace('Z', '+00:00'))
+                dt = datetime.fromisoformat(current_time)
                 previous_dt = dt - timedelta(days=30)
             
             previous_time = previous_dt.isoformat()
             
-            # Get previous period timestamp - find closest timestamp
+            # Find closest previous timestamp
             cur = await db.execute("""
-                SELECT DISTINCT scraped_at
-                FROM members_history
-                WHERE scraped_at <= ?
-                ORDER BY scraped_at DESC
+                SELECT timestamp FROM members
+                WHERE timestamp <= ?
+                GROUP BY timestamp
+                ORDER BY timestamp DESC
                 LIMIT 1
             """, (previous_time,))
             prev_time_row = await cur.fetchone()
@@ -330,47 +313,45 @@ class Leaderboard(commands.Cog):
                 log.warning("No previous period data found for comparison")
                 return None
             
-            previous_scrape_time = prev_time_row['scraped_at']
+            previous_scrape_time = prev_time_row['timestamp']
             
-            # Get current period data - ONLY current members
-            query_current = f"""
-                SELECT user_id, name, earned_credits, scraped_at
-                FROM members_history
-                WHERE scraped_at = ? AND user_id IN ({placeholders})
+            # Get current period data
+            cur = await db.execute("""
+                SELECT member_id, username, earned_credits, timestamp
+                FROM members
+                WHERE timestamp = ?
                 ORDER BY earned_credits DESC
-            """
-            cur = await db.execute(query_current, [current_time] + current_member_ids)
-            current_data = {row['user_id']: dict(row) for row in await cur.fetchall()}
+            """, (current_time,))
+            current_data = {row['member_id']: dict(row) for row in await cur.fetchall()}
             
             # Get previous period data
-            query_previous = f"""
-                SELECT user_id, name, earned_credits, scraped_at
-                FROM members_history
-                WHERE scraped_at = ? AND user_id IN ({placeholders})
+            cur = await db.execute("""
+                SELECT member_id, username, earned_credits, timestamp
+                FROM members
+                WHERE timestamp = ?
                 ORDER BY earned_credits DESC
-            """
-            cur = await db.execute(query_previous, [previous_scrape_time] + current_member_ids)
-            previous_data = {row['user_id']: dict(row) for row in await cur.fetchall()}
+            """, (previous_scrape_time,))
+            previous_data = {row['member_id']: dict(row) for row in await cur.fetchall()}
             
             # Calculate deltas (growth in the period)
             deltas = []
-            for user_id, current_entry in current_data.items():
+            for member_id, current_entry in current_data.items():
                 current_credits = current_entry['earned_credits']
                 
                 # Get previous credits (or 0 if new member)
                 previous_credits = 0
-                if user_id in previous_data:
-                    previous_credits = previous_data[user_id]['earned_credits']
+                if member_id in previous_data:
+                    previous_credits = previous_data[member_id]['earned_credits']
                 
                 # Calculate delta
                 delta = current_credits - previous_credits
                 
                 if delta > 0:  # Only include members with positive growth
                     deltas.append({
-                        'user_id': user_id,
-                        'name': current_entry['name'],
-                        'earned_credits': delta,  # Use delta as the value
-                        'scraped_at': current_entry['scraped_at']
+                        'member_id': member_id,
+                        'username': current_entry['username'],
+                        'earned_credits': delta,
+                        'timestamp': current_entry['timestamp']
                     })
             
             # Sort by delta and get top entries
@@ -381,19 +362,19 @@ class Leaderboard(commands.Cog):
             # For previous rankings, calculate deltas from one period before that
             # Find timestamp before previous
             if period == 'daily':
-                dt = datetime.fromisoformat(previous_scrape_time.replace('Z', '+00:00'))
+                dt = datetime.fromisoformat(previous_scrape_time)
                 before_previous_dt = dt - timedelta(days=1)
             else:
-                dt = datetime.fromisoformat(previous_scrape_time.replace('Z', '+00:00'))
+                dt = datetime.fromisoformat(previous_scrape_time)
                 before_previous_dt = dt - timedelta(days=30)
             
             before_previous_time = before_previous_dt.isoformat()
             
             cur = await db.execute("""
-                SELECT DISTINCT scraped_at
-                FROM members_history
-                WHERE scraped_at <= ?
-                ORDER BY scraped_at DESC
+                SELECT timestamp FROM members
+                WHERE timestamp <= ?
+                GROUP BY timestamp
+                ORDER BY timestamp DESC
                 LIMIT 1
             """, (before_previous_time,))
             before_prev_row = await cur.fetchone()
@@ -401,31 +382,30 @@ class Leaderboard(commands.Cog):
             previous = []
             if before_prev_row:
                 # Get data from before previous period
-                query_before = f"""
-                    SELECT user_id, name, earned_credits, scraped_at
-                    FROM members_history
-                    WHERE scraped_at = ? AND user_id IN ({placeholders})
-                """
-                cur = await db.execute(query_before, [before_prev_row['scraped_at']] + current_member_ids)
-                before_previous_data = {row['user_id']: dict(row) for row in await cur.fetchall()}
+                cur = await db.execute("""
+                    SELECT member_id, username, earned_credits, timestamp
+                    FROM members
+                    WHERE timestamp = ?
+                """, (before_prev_row['timestamp'],))
+                before_previous_data = {row['member_id']: dict(row) for row in await cur.fetchall()}
                 
                 # Calculate deltas for previous period
                 prev_deltas = []
-                for user_id, prev_entry in previous_data.items():
+                for member_id, prev_entry in previous_data.items():
                     prev_credits = prev_entry['earned_credits']
                     
                     before_credits = 0
-                    if user_id in before_previous_data:
-                        before_credits = before_previous_data[user_id]['earned_credits']
+                    if member_id in before_previous_data:
+                        before_credits = before_previous_data[member_id]['earned_credits']
                     
                     delta = prev_credits - before_credits
                     
                     if delta > 0:
                         prev_deltas.append({
-                            'user_id': user_id,
-                            'name': prev_entry['name'],
+                            'member_id': member_id,
+                            'username': prev_entry['username'],
                             'earned_credits': delta,
-                            'scraped_at': prev_entry['scraped_at']
+                            'timestamp': prev_entry['timestamp']
                         })
                 
                 prev_deltas.sort(key=lambda x: x['earned_credits'], reverse=True)
@@ -439,23 +419,23 @@ class Leaderboard(commands.Cog):
 
     async def _get_treasury_rankings(self, period: str) -> Optional[Dict]:
         """
-        Get treasury contribution rankings for current and previous period.
+        Get treasury contribution rankings from income_v2.db.
         Returns dict with 'current' and 'previous' rankings.
         """
-        if not self.db_path.exists():
-            log.error(f"Database not found at {self.db_path}")
+        if not self.income_db_path.exists():
+            log.error(f"Database not found at {self.income_db_path}")
             return None
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(self.income_db_path) as db:
             db.row_factory = aiosqlite.Row
             
             period_type = 'daily' if period == 'daily' else 'monthly'
             
-            # Get most recent scrape for this period
+            # Get most recent timestamp for this period and entry_type
             cur = await db.execute("""
-                SELECT MAX(scraped_at) as latest 
-                FROM treasury_income 
-                WHERE period = ?
+                SELECT MAX(timestamp) as latest 
+                FROM income 
+                WHERE period = ? AND entry_type = 'income'
             """, (period_type,))
             row = await cur.fetchone()
             if not row or not row['latest']:
@@ -465,33 +445,30 @@ class Leaderboard(commands.Cog):
             
             # Get current rankings
             cur = await db.execute("""
-                SELECT user_id, user_name as name, credits, scraped_at
-                FROM treasury_income
-                WHERE period = ? AND scraped_at = ? AND credits > 0
-                ORDER BY credits DESC
+                SELECT username, amount, timestamp
+                FROM income
+                WHERE period = ? AND entry_type = 'income' AND timestamp = ?
+                ORDER BY amount DESC
                 LIMIT 20
             """, (period_type, current_time))
             current_raw = [dict(row) for row in await cur.fetchall()]
             current = self._filter_invalid_entries(current_raw, 'contributions')[:10]
             
-            # Get previous period rankings
-            # For treasury, we need to go back to previous scrape
+            # Get previous period timestamp
             if period == 'daily':
-                # Get scrapes from yesterday
-                dt = datetime.fromisoformat(current_time.replace('Z', '+00:00'))
+                dt = datetime.fromisoformat(current_time)
                 previous_dt = dt - timedelta(days=1)
                 previous_time = previous_dt.isoformat()
             else:
-                # Get scrapes from previous month
-                dt = datetime.fromisoformat(current_time.replace('Z', '+00:00'))
+                dt = datetime.fromisoformat(current_time)
                 previous_dt = dt - timedelta(days=30)
                 previous_time = previous_dt.isoformat()
             
             cur = await db.execute("""
-                SELECT DISTINCT scraped_at
-                FROM treasury_income
-                WHERE period = ? AND scraped_at <= ?
-                ORDER BY scraped_at DESC
+                SELECT timestamp FROM income
+                WHERE period = ? AND entry_type = 'income' AND timestamp <= ?
+                GROUP BY timestamp
+                ORDER BY timestamp DESC
                 LIMIT 1
             """, (period_type, previous_time))
             prev_time_row = await cur.fetchone()
@@ -499,12 +476,12 @@ class Leaderboard(commands.Cog):
             previous = []
             if prev_time_row:
                 cur = await db.execute("""
-                    SELECT user_id, user_name as name, credits, scraped_at
-                    FROM treasury_income
-                    WHERE period = ? AND scraped_at = ? AND credits > 0
-                    ORDER BY credits DESC
+                    SELECT username, amount, timestamp
+                    FROM income
+                    WHERE period = ? AND entry_type = 'income' AND timestamp = ?
+                    ORDER BY amount DESC
                     LIMIT 30
-                """, (period_type, prev_time_row['scraped_at']))
+                """, (period_type, prev_time_row['timestamp']))
                 previous_raw = [dict(row) for row in await cur.fetchall()]
                 previous = self._filter_invalid_entries(previous_raw, 'contributions')[:20]
             
@@ -531,28 +508,28 @@ class Leaderboard(commands.Cog):
             timestamp=datetime.utcnow()
         )
         
-        # Create previous rankings lookup by user_id
+        # Create previous rankings lookup by username (income_v2.db doesn't have member_id)
         prev_lookup = {}
         for idx, player in enumerate(previous_rankings, 1):
-            prev_lookup[player['user_id']] = idx
+            username = player.get('username', '')
+            prev_lookup[username] = idx
         
         # Build leaderboard text
         lines = []
         for idx, player in enumerate(current_rankings, 1):
             medal = MEDALS.get(idx, f"`#{idx:02d}`")
-            name = player['name'][:20]  # Truncate long names
+            name = player.get('username', 'Unknown')[:20]  # Truncate long names
             
             # Determine value based on metric
             if metric == 'earned_credits':
                 value = player.get('earned_credits', 0)
             else:  # contributions
-                value = player.get('credits', 0)
+                value = player.get('amount', 0)
             
             value_str = f"{value:,}"
             
             # Calculate position change
-            user_id = player['user_id']
-            prev_pos = prev_lookup.get(user_id)
+            prev_pos = prev_lookup.get(name)
             
             if prev_pos is None:
                 change = "🆕"
@@ -577,7 +554,7 @@ class Leaderboard(commands.Cog):
         
         # Add footer
         period_text = "last 24 hours" if period == 'daily' else "this month"
-        embed.set_footer(text=f"Rankings based on {period_text}")
+        embed.set_footer(text=f"Rankings based on {period_text} • Using new scraper_databases")
         
         return embed
 
@@ -645,6 +622,16 @@ class Leaderboard(commands.Cog):
         embed.add_field(
             name="Monthly Contributions",
             value=f"<#{monthly_contrib}>" if monthly_contrib else "Not set",
+            inline=False
+        )
+        
+        # Database status
+        members_exists = "✅" if self.members_db_path.exists() else "❌"
+        income_exists = "✅" if self.income_db_path.exists() else "❌"
+        
+        embed.add_field(
+            name="Database Status",
+            value=f"{members_exists} members_v2.db\n{income_exists} income_v2.db",
             inline=False
         )
         
