@@ -469,59 +469,95 @@ class MemberSync(commands.Cog):
         
         await ctx.send("✅ Database file exists\n")
         
+        # Detect schema type
+        is_new_schema = "members_v2.db" in str(db_path)
+        table_name = "members" if is_new_schema else "members_current"
+        
+        await ctx.send(f"**Detected Schema:** {'NEW (members_v2.db)' if is_new_schema else 'OLD (alliance.db)'}\n")
+        
         # 2. Get table schema
-        schema_rows = await self._query_alliance("PRAGMA table_info(members_current)")
-        if schema_rows:
-            columns = [dict(r) for r in schema_rows]
-            col_names = [c['name'] for c in columns]
-            await ctx.send(f"**Table Schema (members_current):**\n```\n{', '.join(col_names)}\n```\n")
-        else:
-            await ctx.send("❌ Could not read table schema!\n")
+        try:
+            schema_rows = await self._query_alliance(f"PRAGMA table_info({table_name})")
+            if schema_rows:
+                columns = [dict(r) for r in schema_rows]
+                col_names = [c['name'] for c in columns]
+                await ctx.send(f"**Table Schema ({table_name}):**\n```\n{', '.join(col_names)}\n```\n")
+            else:
+                await ctx.send(f"❌ Could not read table schema for {table_name}!\n")
+                col_names = []
+        except Exception as e:
+            await ctx.send(f"❌ Error reading schema: {e}\n")
             col_names = []
         
-        # 3. Try to find member by user_id
-        await ctx.send(f"**Searching for MC-ID `{mc_id}` in column: `user_id`**")
-        rows_user_id = await self._query_alliance("SELECT * FROM members_current WHERE user_id=?", (mc_id,))
+        # 3. Search for member based on schema type
+        if is_new_schema:
+            # NEW SCHEMA: Search in members table by member_id
+            await ctx.send(f"**Searching for MC-ID `{mc_id}` in: `members.member_id`**")
+            try:
+                rows = await self._query_alliance(
+                    "SELECT member_id, username, rank, earned_credits, online_status, timestamp "
+                    "FROM members WHERE member_id=? ORDER BY timestamp DESC LIMIT 1",
+                    (mc_id,)
+                )
+                
+                if rows:
+                    member_data = dict(rows[0])
+                    await ctx.send(f"✅ **Found in members table!**\n```json\n{json.dumps(member_data, indent=2, default=str)}\n```\n")
+                else:
+                    await ctx.send(f"❌ NOT found in members table (member_id column)\n")
+                    
+                # Show sample data
+                await ctx.send("**Sample of members in database (first 3):**")
+                all_members = await self._query_alliance(
+                    "SELECT member_id, username, rank, timestamp FROM members ORDER BY timestamp DESC LIMIT 3"
+                )
+                if all_members:
+                    for i, row in enumerate(all_members, 1):
+                        sample = dict(row)
+                        await ctx.send(f"```json\nMember {i}:\n{json.dumps(sample, indent=2, default=str)}\n```")
+                        
+            except Exception as e:
+                await ctx.send(f"❌ Error querying members table: {e}\n")
         
-        if rows_user_id:
-            member_data = dict(rows_user_id[0])
-            await ctx.send(f"✅ **Found in `user_id` column!**\n```json\n{json.dumps(member_data, indent=2, default=str)}\n```\n")
         else:
-            await ctx.send(f"❌ NOT found in `user_id` column\n")
-        
-        # 4. Try mc_user_id column (if it exists)
-        if 'mc_user_id' in col_names:
-            await ctx.send(f"**Searching for MC-ID `{mc_id}` in column: `mc_user_id`**")
-            rows_mc_user_id = await self._query_alliance("SELECT * FROM members_current WHERE mc_user_id=?", (mc_id,))
+            # OLD SCHEMA: Original search logic
+            await ctx.send(f"**Searching for MC-ID `{mc_id}` in column: `user_id`**")
+            rows_user_id = await self._query_alliance("SELECT * FROM members_current WHERE user_id=?", (mc_id,))
             
-            if rows_mc_user_id:
-                member_data = dict(rows_mc_user_id[0])
-                await ctx.send(f"✅ **Found in `mc_user_id` column!**\n```json\n{json.dumps(member_data, indent=2, default=str)}\n```\n")
+            if rows_user_id:
+                member_data = dict(rows_user_id[0])
+                await ctx.send(f"✅ **Found in `user_id` column!**\n```json\n{json.dumps(member_data, indent=2, default=str)}\n```\n")
             else:
-                await ctx.send(f"❌ NOT found in `mc_user_id` column\n")
-        else:
-            await ctx.send("ℹ️ Column `mc_user_id` does NOT exist in table\n")
-        
-        # 5. Try profile_href search
-        await ctx.send(f"**Searching for MC-ID `{mc_id}` in `profile_href`**")
-        rows_href = await self._query_alliance("SELECT * FROM members_current WHERE profile_href LIKE ?", (f"%/users/{mc_id}%",))
-        
-        if rows_href:
-            member_data = dict(rows_href[0])
-            await ctx.send(f"✅ **Found via profile_href!**\n```json\n{json.dumps(member_data, indent=2, default=str)}\n```\n")
-        else:
-            await ctx.send(f"❌ NOT found via profile_href\n")
-        
-        # 6. Show ALL members (first 5) to see data structure
-        await ctx.send("**Sample of ALL members in database (first 5):**")
-        all_members = await self._query_alliance("SELECT * FROM members_current LIMIT 5")
-        
-        if all_members:
-            for i, row in enumerate(all_members, 1):
-                member_sample = dict(row)
-                await ctx.send(f"```json\nMember {i}:\n{json.dumps(member_sample, indent=2, default=str)}\n```")
-        else:
-            await ctx.send("❌ No members found in database!\n")
+                await ctx.send(f"❌ NOT found in `user_id` column\n")
+            
+            if 'mc_user_id' in col_names:
+                await ctx.send(f"**Searching for MC-ID `{mc_id}` in column: `mc_user_id`**")
+                rows_mc_user_id = await self._query_alliance("SELECT * FROM members_current WHERE mc_user_id=?", (mc_id,))
+                
+                if rows_mc_user_id:
+                    member_data = dict(rows_mc_user_id[0])
+                    await ctx.send(f"✅ **Found in `mc_user_id` column!**\n```json\n{json.dumps(member_data, indent=2, default=str)}\n```\n")
+                else:
+                    await ctx.send(f"❌ NOT found in `mc_user_id` column\n")
+            
+            await ctx.send(f"**Searching for MC-ID `{mc_id}` in `profile_href`**")
+            rows_href = await self._query_alliance("SELECT * FROM members_current WHERE profile_href LIKE ?", (f"%/users/{mc_id}%",))
+            
+            if rows_href:
+                member_data = dict(rows_href[0])
+                await ctx.send(f"✅ **Found via profile_href!**\n```json\n{json.dumps(member_data, indent=2, default=str)}\n```\n")
+            else:
+                await ctx.send(f"❌ NOT found via profile_href\n")
+            
+            await ctx.send("**Sample of ALL members in database (first 5):**")
+            all_members = await self._query_alliance("SELECT * FROM members_current LIMIT 5")
+            
+            if all_members:
+                for i, row in enumerate(all_members, 1):
+                    member_sample = dict(row)
+                    await ctx.send(f"```json\nMember {i}:\n{json.dumps(member_sample, indent=2, default=str)}\n```")
+            else:
+                await ctx.send("❌ No members found in database!\n")
         
         # 7. Check MemberSync links database
         await ctx.send(f"\n**Checking MemberSync links for MC-ID `{mc_id}`:**")
@@ -532,21 +568,31 @@ class MemberSync(commands.Cog):
         else:
             await ctx.send(f"❌ No link found in MemberSync database\n")
         
-        # 8. Simulate prune check
+        # 8. Simulate prune check based on schema
         await ctx.send(f"\n**Simulating prune logic for MC-ID `{mc_id}`:**")
-        rows = await self._query_alliance("SELECT user_id, mc_user_id, profile_href FROM members_current")
+        
         current_ids: set[str] = set()
         
-        for r in rows:
-            mc = r["user_id"] if "user_id" in r.keys() else None
-            if not mc and "mc_user_id" in r.keys():
-                mc = r["mc_user_id"]
-            if not mc and "profile_href" in r.keys() and r["profile_href"]:
-                m = re.search(r"/users/(\d+)", r["profile_href"])
-                if m:
-                    mc = m.group(1)
-            if mc:
-                current_ids.add(str(mc))
+        if is_new_schema:
+            # New schema prune check
+            rows = await self._query_alliance("SELECT DISTINCT member_id FROM members WHERE member_id IS NOT NULL AND member_id != ''")
+            for r in rows:
+                mid = r["member_id"]
+                if mid:
+                    current_ids.add(str(mid))
+        else:
+            # Old schema prune check  
+            rows = await self._query_alliance("SELECT user_id, mc_user_id, profile_href FROM members_current")
+            for r in rows:
+                mc = r["user_id"] if "user_id" in r.keys() else None
+                if not mc and "mc_user_id" in r.keys():
+                    mc = r["mc_user_id"]
+                if not mc and "profile_href" in r.keys() and r["profile_href"]:
+                    m = re.search(r"/users/(\d+)", r["profile_href"])
+                    if m:
+                        mc = m.group(1)
+                if mc:
+                    current_ids.add(str(mc))
         
         if mc_id in current_ids:
             await ctx.send(f"✅ MC-ID `{mc_id}` IS in prune whitelist (would NOT be removed)")
