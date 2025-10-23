@@ -285,9 +285,11 @@ class Leaderboard(commands.Cog):
             """)
             row = await cur.fetchone()
             if not row or not row['latest']:
+                log.error("No timestamps found in members table")
                 return None
             
             current_time = row['latest']
+            log.info(f"Current timestamp: {current_time}")
             
             # Calculate previous time based on period
             if period == 'daily':
@@ -298,22 +300,36 @@ class Leaderboard(commands.Cog):
                 previous_dt = dt - timedelta(days=30)
             
             previous_time = previous_dt.isoformat()
+            log.info(f"Looking for timestamp <= {previous_time}")
             
             # Find closest previous timestamp
             cur = await db.execute("""
                 SELECT timestamp FROM members
-                WHERE timestamp <= ?
+                WHERE timestamp <= ? AND timestamp < ?
                 GROUP BY timestamp
                 ORDER BY timestamp DESC
                 LIMIT 1
-            """, (previous_time,))
+            """, (previous_time, current_time))
             prev_time_row = await cur.fetchone()
             
             if not prev_time_row:
-                log.warning("No previous period data found for comparison")
-                return None
+                log.error(f"No previous period data found before {previous_time}")
+                # Try to find ANY previous timestamp
+                cur = await db.execute("""
+                    SELECT timestamp FROM members
+                    WHERE timestamp < ?
+                    GROUP BY timestamp
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                """, (current_time,))
+                prev_time_row = await cur.fetchone()
+                
+                if not prev_time_row:
+                    log.error("No previous timestamps found at all")
+                    return None
             
             previous_scrape_time = prev_time_row['timestamp']
+            log.info(f"Using previous timestamp: {previous_scrape_time}")
             
             # Get current period data
             cur = await db.execute("""
@@ -323,6 +339,7 @@ class Leaderboard(commands.Cog):
                 ORDER BY earned_credits DESC
             """, (current_time,))
             current_data = {row['member_id']: dict(row) for row in await cur.fetchall()}
+            log.info(f"Found {len(current_data)} members in current period")
             
             # Get previous period data
             cur = await db.execute("""
@@ -332,6 +349,7 @@ class Leaderboard(commands.Cog):
                 ORDER BY earned_credits DESC
             """, (previous_scrape_time,))
             previous_data = {row['member_id']: dict(row) for row in await cur.fetchall()}
+            log.info(f"Found {len(previous_data)} members in previous period")
             
             # Calculate deltas (growth in the period)
             deltas = []
@@ -354,6 +372,8 @@ class Leaderboard(commands.Cog):
                         'timestamp': current_entry['timestamp']
                     })
             
+            log.info(f"Calculated {len(deltas)} members with positive growth")
+            
             # Sort by delta and get top entries
             deltas.sort(key=lambda x: x['earned_credits'], reverse=True)
             current_raw = deltas[:20]
@@ -372,11 +392,11 @@ class Leaderboard(commands.Cog):
             
             cur = await db.execute("""
                 SELECT timestamp FROM members
-                WHERE timestamp <= ?
+                WHERE timestamp <= ? AND timestamp < ?
                 GROUP BY timestamp
                 ORDER BY timestamp DESC
                 LIMIT 1
-            """, (before_previous_time,))
+            """, (before_previous_time, previous_scrape_time))
             before_prev_row = await cur.fetchone()
             
             previous = []
@@ -638,6 +658,51 @@ class Leaderboard(commands.Cog):
         )
         
         embed.set_footer(text="Posts daily at 06:00 Amsterdam time | Monthly on last day of month at 06:00")
+        
+        await ctx.send(embed=embed)
+
+    @topplayers.command(name="timestamps")
+    @checks.is_owner()
+    async def show_timestamps(self, ctx):
+        """Show recent timestamps in both databases."""
+        embed = discord.Embed(title="🕐 Recent Timestamps", color=discord.Color.blue())
+        
+        # Members timestamps
+        if self.members_db_path.exists():
+            async with aiosqlite.connect(self.members_db_path) as db:
+                cur = await db.execute("""
+                    SELECT DISTINCT timestamp 
+                    FROM members 
+                    ORDER BY timestamp DESC 
+                    LIMIT 10
+                """)
+                timestamps = await cur.fetchall()
+                
+                ts_text = "\n".join([f"• {t[0]}" for t in timestamps])
+                embed.add_field(
+                    name="members_v2.db (last 10 scrapes)",
+                    value=ts_text if ts_text else "No timestamps",
+                    inline=False
+                )
+        
+        # Income timestamps
+        if self.income_db_path.exists():
+            async with aiosqlite.connect(self.income_db_path) as db:
+                cur = await db.execute("""
+                    SELECT DISTINCT timestamp, period
+                    FROM income 
+                    WHERE entry_type='expense'
+                    ORDER BY timestamp DESC 
+                    LIMIT 10
+                """)
+                timestamps = await cur.fetchall()
+                
+                ts_text = "\n".join([f"• {t[0]} ({t[1]})" for t in timestamps])
+                embed.add_field(
+                    name="income_v2.db (last 10 scrapes, expense/daily)",
+                    value=ts_text if ts_text else "No timestamps",
+                    inline=False
+                )
         
         await ctx.send(embed=embed)
 
