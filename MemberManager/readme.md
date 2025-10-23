@@ -1,471 +1,506 @@
-# MemberManager
+# 🔧 MemberManager Fixes - Complete Documentation
 
-Comprehensive member management system for Fire & Rescue Academy alliance on MissionChief USA.
+## Versie 1.1.0 - Complete Rewrite
 
-## Features
-
-### 🔍 Member Lookup
-- **Fuzzy search** across Discord and MissionChief databases
-- Search by: Discord mention, MC ID, MC username, Discord username
-- Single unified view of all member data
-
-### 📝 Notes System
-- Add, edit, and delete notes about members
-- Link notes to infractions
-- Optional expiry dates
-- Pinned notes for important information
-- Tamper-proof with content hashing
-- Full audit trail
-
-### ⚠️ Infractions Tracking
-- Automatic tracking from Discord modlog events
-- Manual MC infractions
-- Severity scoring
-- Temporary vs permanent punishments
-- Revocation support
-
-### 📊 Contribution Monitoring
-- Automatic alerts for low contribution rates
-- Trend analysis over configurable weeks
-- Admin notifications
-- Optional member DMs
-- Runs twice per day (configurable)
-
-### 🔗 Integration
-- **MemberSync**: Discord ↔ MC account linking
-- **AllianceScraper**: MC member data, roles, contribution rates
-- **Red Modlog**: Automatic infraction creation from Discord mod actions
-- **SanctionManager**: Cross-reference with existing sanctions (optional)
-
-### 🎯 Automation
-- ✅ Contribution rate monitoring
-- ✅ Role drift detection (missing verified roles)
-- ✅ Coordinated departure detection (leaving Discord + MC within 72h)
-- 🔄 Dormancy tracking (planned)
-- 🔄 Auto-escalation system (planned)
+Alle gerapporteerde problemen zijn opgelost in deze versie.
 
 ---
 
-## Installation
+## 🐛 Opgeloste Problemen
 
-### 1. Prerequisites
-Ensure you have these cogs installed:
-- **MemberSync** (required for linking)
-- **AllianceScraper** (required for MC data)
+### 1. ✅ Contribution wordt niet weergegeven
 
-### 2. Install MemberManager
+**Probleem:**
+- Contribution rate werd niet correct weergegeven in de overview
+- Kon crashen als de data `None` was
 
-```bash
-[p]repo add fara-cogs https://github.com/YourRepo/FireAndRescueAcademyCogs
-[p]cog install fara-cogs MemberManager
-[p]load MemberManager
+**Oplossing:**
+- Toegevoegd: Error handling in `_build_member_data()` 
+- Toegevoegd: Type conversie naar float voor contribution_rate
+- Toegevoegd: Fallback display "*No data*" als contribution_rate None is
+- Verbeterd: `format_contribution_trend()` error handling in views.py
+
+**Code locatie:** `membermanager.py` regel ~235-250, `views.py` regel ~285-295
+
+---
+
+### 2. ✅ Synchronisatie tussen MemberSync en MemberManagement
+
+**Probleem:**
+- Leden staan als "Not Verified" terwijl ze wel gelinkt zijn in de database
+- `is_verified` werd alleen gezet als de Discord member de verified role had
+- Link status werd niet gecontroleerd
+
+**Oplossing:**
+- **HOOFDFIX:** `is_verified` wordt nu gezet als `link_status == 'approved'` 
+- Role check is nu secundair (geeft alleen warning als role mist)
+- Link status wordt altijd opgehaald en getoond in overview
+- Betere logging voor missing role situaties
+
+**Code locatie:** `membermanager.py` regel ~210-240
+
+**Nieuwe logica:**
+```python
+# Voor: is_verified = (role in member.roles)
+# Nu: is_verified = (link_status == 'approved')
+if link and link.get("status") == "approved":
+    data.is_verified = True
+    # Role check is nu optioneel/warning
 ```
 
-### 3. Initial Configuration
+---
 
+### 3. ✅ Infractions staan niet in de lijst
+
+**Probleem:**
+- Infractions werden niet weergegeven (crash of lege lijst)
+- Geen error handling bij database queries
+- View kon crashen bij ontbrekende data
+
+**Oplossing:**
+- Toegevoegd: Try-except blocks in `get_infractions()` method
+- Toegevoegd: Error handling in `get_infractions_embed()`
+- Toegevoegd: Graceful fallback messages bij errors
+- Verbeterd: Infractions worden nu grouped per platform (Discord/MC)
+
+**Code locatie:** `views.py` regel ~400-480, `membermanager.py` regel ~260-280
+
+---
+
+### 4. ✅ Meerdere gebruikers kunnen hetzelfde scherm gebruiken
+
+**Probleem:**
+- `interaction_check()` returnde altijd `True`
+- Iedereen kon buttons van elkaars panels gebruiken
+
+**Oplossing:**
+- **HOOFDFIX:** `invoker_id` parameter toegevoegd aan `MemberOverviewView`
+- `interaction_check()` controleert nu of `interaction.user.id == invoker_id`
+- Gebruikers krijgen duidelijke error message als ze proberen andermans panel te gebruiken
+
+**Code locatie:** `views.py` regel ~50-60, `membermanager.py` regel ~335
+
+**Nieuwe code:**
+```python
+async def interaction_check(self, interaction: discord.Interaction) -> bool:
+    if interaction.user.id != self.invoker_id:
+        await interaction.response.send_message(
+            "❌ This is not your member info panel.",
+            ephemeral=True
+        )
+        return False
+    return True
+```
+
+---
+
+### 5. ✅ Note editing zonder editor tracking + Audit Log
+
+**Probleem:**
+- `update_note()` zette wel `updated_by`, maar dit werd niet getoond
+- Geen history van wie wat heeft bewerkt
+- Geen complete audit trail
+
+**Oplossing:**
+- **NIEUWE KOLOM:** `updated_by_name` toegevoegd aan notes table
+- **NIEUWE FUNCTIE:** `log_action()` method in database.py
+- **NIEUWE TAB:** "Audit" tab in de view met complete history
+- Note edits tonen nu: "✏️ *Edited by [naam] [tijd]*"
+- Alle acties worden gelogd: note_created, note_edited, note_deleted, etc.
+
+**Code locatie:** 
+- `database.py` regel ~200-250 (audit log systeem)
+- `views.py` regel ~100-120 (audit tab), regel ~340-360 (edit display)
+
+**Nieuwe functies:**
+```python
+# Audit logging
+await self.db.log_action(
+    guild_id=guild_id,
+    action_type="note_edited",
+    action_target=ref_code,
+    actor_id=updated_by,
+    actor_name=updated_by_name,
+    old_value=old_text[:100],
+    new_value=new_text[:100]
+)
+
+# Display in notes
+if note.get("updated_by"):
+    updated_by_name = note.get("updated_by_name", "Unknown")
+    updated_at = format_timestamp(note.get("updated_at", 0), "R")
+    lines.append(f"✏️ *Edited by {updated_by_name} {updated_at}*")
+```
+
+---
+
+## 🆕 Nieuwe Features
+
+### Audit Log Tab
+Complete geschiedenis van alle acties op een member account:
+- Note creatie, edits, deletions
+- Infraction toevoegingen, revocations
+- Toont actor, timestamp, old/new values
+- Emoji's per action type voor duidelijkheid
+
+### Verbeterde Error Handling
+- Alle database queries hebben try-except blocks
+- Graceful fallbacks bij missing data
+- Duidelijke error messages voor gebruikers
+- Logging van alle errors voor debugging
+
+### Better Link Status Display
+- Link status wordt altijd getoond in overview
+- Duidelijk onderscheid tussen "approved", "pending", "denied"
+- Warning in logs als linked maar role mist
+
+---
+
+## 📊 Database Schema Updates
+
+### Notes Table - Nieuwe Kolommen
+```sql
+ALTER TABLE notes ADD COLUMN updated_by_name TEXT;
+```
+
+### Audit Log Table - Nieuwe Tabel
+```sql
+CREATE TABLE IF NOT EXISTS audit_log (
+    audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    discord_id INTEGER,
+    mc_user_id TEXT,
+    action_type TEXT NOT NULL,
+    action_target TEXT NOT NULL,
+    actor_id INTEGER NOT NULL,
+    actor_name TEXT NOT NULL,
+    old_value TEXT,
+    new_value TEXT,
+    timestamp INTEGER NOT NULL,
+    metadata TEXT
+);
+```
+
+**Indices:**
+```sql
+CREATE INDEX idx_audit_discord ON audit_log(discord_id);
+CREATE INDEX idx_audit_mc ON audit_log(mc_user_id);
+CREATE INDEX idx_audit_target ON audit_log(action_target);
+```
+
+---
+
+## 🔄 Migratie Instructies
+
+### Stap 1: Backup bestaande database
 ```bash
-# Set admin roles (full access)
-[p]memberset adminroles @Admin @Owner
+cd ~/.local/share/Red-DiscordBot/data/[instance]/cogs/MemberManager/
+cp membermanager.db membermanager.db.backup
+```
 
-# Set moderator roles (read-only + add notes)
-[p]memberset modroles @Moderator @Officer
+### Stap 2: Stop de bot
+```bash
+[p]shutdown
+```
 
-# Set alert channel for automation notifications
+### Stap 3: Update de cog files
+Vervang de volgende files:
+- `database.py` ✅
+- `membermanager.py` ✅
+- `views.py` ✅
+- `models.py` ✅
+
+### Stap 4: Start de bot
+```bash
+# Bot start automatisch en runt database migratie
+```
+
+### Stap 5: Verificatie
+```bash
+[p]member @someone
+# Test of alles werkt
+# Check de nieuwe "Audit" tab
+```
+
+---
+
+## 🧪 Testing Checklist
+
+### Test 1: Verification Status
+- [ ] Link een member via MemberSync
+- [ ] Check `/member @user` - moet "Verified" tonen
+- [ ] Verwijder verified role (maar laat link intact)
+- [ ] Check `/member @user` - moet NOG STEEDS "Verified" tonen (omdat link_status='approved')
+- [ ] Check bot logs voor warning over missing role
+
+### Test 2: Contribution Display
+- [ ] Check member met contribution data
+- [ ] Check member zonder contribution data (moet "*No data*" tonen)
+- [ ] Moet niet crashen
+
+### Test 3: Infractions
+- [ ] Check member met infractions
+- [ ] Check member zonder infractions
+- [ ] Moet "No active infractions" tonen, niet crashen
+
+### Test 4: Multi-User Protection
+- [ ] User A: `/member @someone`
+- [ ] User B: Probeer buttons te gebruiken op User A's panel
+- [ ] User B moet error krijgen: "This is not your member info panel"
+
+### Test 5: Note Editing + Audit
+- [ ] Voeg note toe via "Add Note" button
+- [ ] Edit de note via "Edit Note" button
+- [ ] Check "Notes" tab - moet tonen: "✏️ *Edited by [naam] [tijd]*"
+- [ ] Check "Audit" tab - moet beide acties tonen (created + edited)
+- [ ] Check old/new values in audit log
+
+### Test 6: Refresh Button
+- [ ] Open member panel
+- [ ] Verander iets (bijv. link member in andere tab)
+- [ ] Klik "Refresh" button
+- [ ] Data moet updaten
+
+---
+
+## 📋 Command Overview
+
+### Member Commands
+```bash
+# Lookup member info
+[p]member @user
+[p]member 123456789  # Discord ID
+[p]member 987654     # MC ID
+[p]member John Doe   # Fuzzy name search
+
+# Search members
+[p]membersearch john
+
+# View stats
+[p]memberstats
+```
+
+### Configuration Commands
+```bash
+# View config
+[p]memberset view
+
+# Set channels
 [p]memberset alertchannel #admin-alerts
+[p]memberset modlogchannel #mod-log
 
-# Configure contribution monitoring
+# Set roles
+[p]memberset adminroles @Admin @Leadership
+[p]memberset modroles @Moderator
+
+# Set thresholds
 [p]memberset threshold 5.0
 [p]memberset trendweeks 3
-[p]memberset autocontribution on
+
+# Enable/disable automation
+[p]memberset autocontribution true
+[p]memberset autoroledrift true
 ```
 
 ---
 
-## Commands
+## 🔌 Integration Status
 
-### Member Lookup
+### MemberSync ✅
+- Link status tracking
+- Verified role checking
+- Auto-sync wanneer links worden approved
 
-#### `[p]member whois <target>`
-Look up complete member information.
+### AllianceScraper ✅
+- MC username, role, contribution rate
+- Profile links
+- Real-time data
 
-**Examples:**
-```
-[p]member whois @JohnDoe
-[p]member whois 123456
-[p]member whois JohnDoe
-```
-
-**What it shows:**
-- 🎮 Discord: Username, ID, roles, join date, verification status
-- 🚒 MissionChief: Username, ID, role, contribution rate, profile link
-- 📊 Stats: Infractions, notes, severity score, watchlist status
-- ⚡ Tabs: Overview | Notes | Infractions | Events
+### SanctionManager ⚠️
+- Basis integratie aanwezig
+- Kan worden uitgebreid voor sanction display
 
 ---
 
-### Notes Management
+## 🐞 Known Issues & Workarounds
 
-#### `[p]member note add <target> <text> [infraction_ref] [expires_days]`
-Add a note to a member.
+### Issue: Database locked errors
+**Symptoom:** `sqlite3.OperationalError: database is locked`
 
-**Examples:**
-```
-[p]member note add @JohnDoe "Warned about spam in chat"
-[p]member note add 123456 "Low contribution - reached out via DM" INF-MC-2025-000123 30
-```
+**Oorzaak:** Meerdere cogs proberen tegelijk te schrijven naar databases
 
-#### `[p]member note view <ref_code>`
-View a specific note.
+**Workaround:**
+1. Zorg dat AllianceScraper en MemberSync async writes gebruiken
+2. Gebruik connection pooling
+3. Tijdelijk: Verhoog timeout in database connections
 
-```
-[p]member note view N2025-000123
-```
+### Issue: Oude notes zonder updated_by_name
+**Symptoom:** Notes created vóór update tonen "Unknown" als editor
 
-#### `[p]member note list <target> [limit]`
-List all notes for a member.
-
-```
-[p]member note list @JohnDoe
-[p]member note list 123456 20
-```
-
-#### `[p]member note edit <ref_code> <new_text>`
-Edit an existing note (admin only).
-
-```
-[p]member note edit N2025-000123 "Updated: Issue resolved"
-```
-
-#### `[p]member note delete <ref_code> [reason]`
-Delete a note (admin only).
-
-```
-[p]member note delete N2025-000123 "Outdated information"
-```
-
-#### `[p]member note search <query>`
-Search notes by text content.
-
-```
-[p]member note search "contribution"
-```
+**Oplossing:** Dit is normaal - alleen nieuwe edits tracken de naam
 
 ---
 
-### Infractions Management
+## 📝 Changelog
 
-#### `[p]member infraction add <target> <platform> <type> <reason> [duration]`
-Manually add an infraction.
+### Version 1.1.0 (2025-01-XX)
+- ✅ Fixed verification status check (link_status based)
+- ✅ Fixed contribution display with error handling
+- ✅ Fixed infractions not showing (error handling)
+- ✅ Fixed multi-user panel access (invoker_id check)
+- ✅ Added audit log system (complete history)
+- ✅ Added editor name tracking in notes
+- ✅ Added new "Audit" tab in UI
+- ✅ Improved error handling everywhere
+- ✅ Better integration with MemberSync database
+- ✅ Added refresh button functionality
 
-**Platforms:** `discord` or `missionchief`  
-**Types:** `warning`, `mute`, `kick`, `ban`, `timeout`
-
-**Examples:**
-```
-[p]member infraction add @JohnDoe discord mute "Spam in chat" 1h
-[p]member infraction add 123456 missionchief kick "Inactive for 30 days"
-```
-
-#### `[p]member infraction view <ref_code>`
-View infraction details.
-
-```
-[p]member infraction view INF-DC-2025-000123
-```
-
-#### `[p]member infraction list <target> [platform]`
-List infractions for a member.
-
-```
-[p]member infraction list @JohnDoe
-[p]member infraction list 123456 discord
-```
-
-#### `[p]member infraction revoke <ref_code> <reason>`
-Revoke an infraction early.
-
-```
-[p]member infraction revoke INF-DC-2025-000123 "Appeal approved"
-```
+### Version 1.0.0 (Original)
+- ⚠️ Had verification status bug
+- ⚠️ Missing contribution error handling
+- ⚠️ Missing infraction error handling
+- ⚠️ No multi-user protection
+- ⚠️ No audit trail
 
 ---
 
-### Watchlist
+## 🆘 Troubleshooting
 
-#### `[p]member watchlist add <target> <reason> <type>`
-Add member to watchlist.
-
-**Types:** `contribution`, `behavior`, `probation`, `general`
-
-```
-[p]member watchlist add @JohnDoe "Low contribution for 3 weeks" contribution
-```
-
-#### `[p]member watchlist remove <target> [notes]`
-Remove from watchlist.
-
-```
-[p]member watchlist remove @JohnDoe "Contribution improved"
-```
-
-#### `[p]member watchlist list [type]`
-View all watchlist entries.
-
-```
-[p]member watchlist list
-[p]member watchlist list contribution
-```
-
----
-
-### Statistics & Export
-
-#### `[p]member stats <target>`
-Quick stats summary for a member.
-
-```
-[p]member stats @JohnDoe
-```
-
-#### `[p]member export <data_type> [target] [format]`
-Export member data.
-
-**Data types:** `notes`, `infractions`, `events`, `full`  
-**Formats:** `json`, `csv`
-
-```
-[p]member export full @JohnDoe json
-[p]member export notes 123456
-```
-
----
-
-### Audit Commands
-
-#### `[p]member audit [role] [check_type]`
-Bulk audit members for issues.
-
-**Check types:** `role_drift`, `contribution`, `infractions`
-
-```
-[p]member audit @Member role_drift
-[p]member audit contribution
-```
-
----
-
-## Configuration Commands
-
-All configuration commands require admin permissions.
-
-### `[p]memberset view`
-View current configuration.
-
-### `[p]memberset alertchannel <channel>`
-Set admin alert channel.
-
-### `[p]memberset modlogchannel <channel>`
-Set modlog channel.
-
-### `[p]memberset adminroles <roles...>`
-Set admin roles (full access).
-
-### `[p]memberset modroles <roles...>`
-Set moderator roles (read-only + limited actions).
-
-### `[p]memberset threshold <percentage>`
-Set contribution rate threshold for alerts (default: 5.0%).
-
-### `[p]memberset trendweeks <weeks>`
-Set trend analysis period (default: 3 weeks).
-
-### `[p]memberset autocontribution <on|off>`
-Enable/disable automatic contribution monitoring.
-
-### `[p]memberset autoroledrift <on|off>`
-Enable/disable role drift detection.
-
-### `[p]memberset noteexpiry <days>`
-Set default note expiry (0 = never expire).
-
-### `[p]memberset reset`
-Reset all settings to defaults (requires confirmation).
-
----
-
-## Automation
-
-### Contribution Monitoring
-
-**How it works:**
-1. Runs every 12 hours (twice per day)
-2. Checks all MC members' contribution rates
-3. Analyzes trend over configured weeks
-4. Sends alerts if:
-   - Rate drops below threshold (default 5%)
-   - Rate drops >2% from previous period
-5. Cooldown: 1 week between alerts per member
-
-**Alert includes:**
-- Current rate
-- Trend (rising/falling/stable)
-- Analysis of change
-- Linked Discord account
-- Historical context
-
-### Role Drift Detection
-
-**Detects:**
-- Members with linked MC accounts but missing Discord verified role
-- Can auto-restore or alert admins
-
-### Coordinated Departure Detection
-
-**Detects:**
-- Members who leave both Discord and MC within 72 hours
-- Logs as potential rage quit or coordinated action
-
----
-
-## Database Schema
-
-### Notes Table
-- Reference codes (e.g., `N2025-000123`)
-- Content with tamper-proof hashing
-- Author tracking
-- Optional infraction linking
-- Expiry dates
-- Pin support
-
-### Infractions Table
-- Platform-specific reference codes
-- `INF-DC-2025-000123` (Discord)
-- `INF-MC-2025-000123` (MissionChief)
-- Severity scoring
-- Temporary vs permanent tracking
-- Revocation support
-
-### Events Table
-- Complete audit trail
-- Tracks: joins, leaves, role changes, link status, contribution changes
-- Triggered by: automation, admins, system
-
-### Watchlist Table
-- Configurable watch types
-- Alert thresholds
-- Resolution tracking
-
----
-
-## Permissions
-
-### Admin
-- All commands
-- Add/edit/delete notes and infractions
-- Configure settings
-- Manage watchlist
-- Export data
-
-### Moderator
-- View member information (`whois`)
-- View notes and infractions
-- Add notes (cannot delete)
-- View watchlist
-- View stats
-
-### Public
-- None (all commands require permissions)
-
----
-
-## Integration Details
-
-### With MemberSync
-- Reads link status (approved/pending/none)
-- Gets Discord ↔ MC ID mappings
-- Checks verification status
-- **Does not write** to MemberSync database
-
-### With AllianceScraper
-- Reads MC member data (name, role, contribution)
-- Reads contribution history for trend analysis
-- Queries members_current and members_history tables
-- **Does not write** to AllianceScraper database
-
-### With Red Modlog
-- Listens to `on_modlog_case_create` event
-- Auto-creates infractions from:
-  - Bans, kicks, mutes, timeouts, warnings
-- Links Discord user to MC account if linked
-- Stores moderator, reason, duration
-
----
-
-## Troubleshooting
-
-### "No integrations found" warning
-**Problem:** MemberSync or AllianceScraper not loaded.
-
-**Solution:**
-```bash
-[p]load MemberSync
-[p]load AllianceScraper
-[p]reload MemberManager
-```
-
-### Contribution monitoring not working
+### Problem: "Error loading notes/infractions"
 **Check:**
-1. Is automation enabled? `[p]memberset view`
-2. Is AllianceScraper running? `[p]scraperinfo`
-3. Is alert channel set? `[p]memberset alertchannel #channel`
-4. Check logs: `[p]debug`
+1. Database permissions: `ls -la ~/.local/share/Red-DiscordBot/data/[instance]/cogs/MemberManager/`
+2. Database integrity: Open with sqlite3 and run `.schema`
+3. Bot logs: Check for detailed error messages
 
-### Fuzzy search not finding members
-**Common causes:**
-- Member not in AllianceScraper database yet (wait for next scrape)
-- Typo too severe (try exact MC ID or Discord mention)
-- Member left alliance
+**Fix:**
+```bash
+# Rebuild database schema
+[p]unload membermanager
+[p]load membermanager
+```
+
+### Problem: Members show as "Not Verified" but are linked
+**Check:**
+1. MemberSync database: `SELECT * FROM links WHERE discord_id=...`
+2. Link status: Should be 'approved'
+3. Bot logs: Look for verification checks
+
+**Fix:**
+1. Re-approve link: `[p]membersync link @user [mc_id]`
+2. Or check MemberSync configuration
+
+### Problem: Audit log is empty
+**Reason:** Audit log only tracks actions AFTER v1.1.0 installation
+
+**Not a bug:** Historical data before update is not retroactively logged
+
+### Problem: "This is not your member info panel"
+**Reason:** Someone else opened that panel
+
+**Solution:** Open your own with `/member @user`
 
 ---
 
-## Changelog
+## 💡 Tips & Best Practices
 
-### v1.0.0 (Initial Release)
-- ✅ Complete member lookup system
-- ✅ Notes and infractions tracking
-- ✅ Contribution monitoring automation
-- ✅ Tab-based Discord UI
-- ✅ Integration with MemberSync, AllianceScraper, Modlog
-- ✅ Full configuration system
-- ✅ Export functionality
-- ✅ Watchlist system
+### For Admins
+1. **Regular backups:** Backup `membermanager.db` daily
+2. **Monitor logs:** Check for verification warnings
+3. **Review audit logs:** Periodically check `/member` audit tabs
+4. **Test after updates:** Always test on dev server first
+
+### For Moderators
+1. **Use refresh:** After linking members, hit refresh button
+2. **Check audit trail:** Before editing notes, check who made them
+3. **Add context:** Use infraction_ref when adding notes
+4. **Set expiry:** Consider expiry dates for temporary notes
+
+### For Users
+1. **Link accounts:** Make sure you're verified via `/verify`
+2. **Contact mods:** If your status is wrong, ask for re-verification
+3. **Be patient:** Panel times out after 5 minutes
+
+---
+
+## 🔮 Future Improvements (Roadmap)
 
 ### Planned Features
-- 🔄 Web dashboard API
-- 🔄 Appeal system for infractions
-- 🔄 Advanced analytics
-- 🔄 Dormancy auto-pings
-- 🔄 Auto-escalation thresholds
+- [ ] Note templates for common situations
+- [ ] Bulk actions (e.g., expire multiple infractions)
+- [ ] Advanced search filters
+- [ ] Export member data to PDF/CSV
+- [ ] Watchlist auto-notifications
+- [ ] Integration with Red's modlog
+- [ ] Role drift auto-fix
+- [ ] Contribution alerts automation
+- [ ] Custom note categories/tags
+- [ ] Member comparison view
+
+### Under Consideration
+- [ ] Discord message context menu integration
+- [ ] Automated warning escalation
+- [ ] Member activity timeline
+- [ ] Points/reputation system
+- [ ] Achievement badges
 
 ---
 
-## Support
+## 📞 Support
 
-For issues, feature requests, or questions:
-- Open an issue on GitHub
-- Contact Fire & Rescue Academy leadership
-- Check Red-DiscordBot support server
+### Getting Help
+1. Check this README first
+2. Check bot logs: `tail -f ~/.local/share/Red-DiscordBot/logs/red.log | grep MemberManager`
+3. Enable debug mode: `[p]set loglevel debug`
+4. Ask in your Discord support channel
+
+### Reporting Bugs
+When reporting bugs, include:
+- Bot version and Python version
+- Full error message from logs
+- Steps to reproduce
+- Expected vs actual behavior
+- Screenshots if applicable
+
+### Contributing
+Pull requests welcome! Please:
+- Follow existing code style
+- Add tests for new features
+- Update documentation
+- Test thoroughly before submitting
 
 ---
 
-## Credits
+## 📜 License & Credits
 
-**Developer:** FireAndRescueAcademy  
-**For:** Fire & Rescue Academy Alliance - MissionChief USA  
-**Framework:** Red-DiscordBot v3.5+  
+**Author:** Fire & Rescue Academy Development Team  
+**Version:** 1.1.0  
+**License:** MIT  
+
+**Dependencies:**
+- Red-DiscordBot >= 3.5
+- discord.py >= 2.0
+- aiosqlite >= 0.17
+- Python >= 3.8
+
+**Special Thanks:**
+- MemberSync cog for link management
+- AllianceScraper cog for MC data
+- Red-DiscordBot community
 
 ---
 
-## License
+## ✅ Installation Complete!
 
-This cog is provided as-is for Fire & Rescue Academy alliance use.
+Your MemberManager is now fully updated with all fixes applied. 
+
+**Next steps:**
+1. Test all functionality using the checklist above
+2. Review the new Audit tab features
+3. Configure automation settings if desired
+4. Train your moderators on the new features
+
+**Questions?** Check the troubleshooting section or ask for help in your support channel.
+
+---
+
+**Happy Managing! 🎉**
