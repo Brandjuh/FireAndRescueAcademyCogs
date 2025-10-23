@@ -191,10 +191,17 @@ class IncomeScraper(commands.Cog):
                     await self._debug_log(f"Table {table_idx} headers: {headers}", ctx)
                     
                     # CRITICAL: Skip expense tables on daily/monthly tabs
-                    # Expense tables have headers like: ['credits', 'name', 'description', 'date']
-                    # This is the African Prison expenses table - we scrape this separately with pagination
-                    if 'description' in headers and 'date' in headers:
-                        await self._debug_log(f"⏭️ Table {table_idx}: Skipping expenses table (scraped separately)", ctx)
+                    # The expenses table has pagination and is scraped separately
+                    # Expense tables have 4 columns: ['credits', 'name', 'description', 'date']
+                    # Income tables have 2 columns: ['name', 'credits']
+                    if len(headers) >= 4 or ('description' in headers and 'date' in headers):
+                        await self._debug_log(f"⏭️  Table {table_idx}: Skipping expenses table (scraped with pagination separately)", ctx)
+                        continue
+                    
+                    # Also skip if this is clearly an expense table based on column order
+                    # Expense tables start with 'credits' column, income tables start with 'name'
+                    if headers and headers[0] in ['credits', 'credit', 'amount']:
+                        await self._debug_log(f"⏭️ Table {table_idx}: Skipping expense table (credits column first)", ctx)
                         continue
                     
                     # Find column indices based on headers
