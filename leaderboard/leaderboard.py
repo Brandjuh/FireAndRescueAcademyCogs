@@ -33,7 +33,6 @@ BLACKLISTED_USERNAMES = [
     "52525255252",  # Looks like an ID
     "Pierce702420",  # Username with numbers parsed as credits
     "25,000",  # Parsed username as amount
-    "Franny192",  # 192 parsed from username instead of real contribution
 ]
 
 class Leaderboard(commands.Cog):
