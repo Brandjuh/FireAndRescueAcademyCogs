@@ -1,39 +1,40 @@
 from __future__ import annotations
 
-import sqlite3
 import asyncio
 import logging
+import sqlite3
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import discord
 from redbot.core import commands, checks, Config
 
-# We reuse your existing local modules
+# Lokale modules
 from . import etl
-from .config import DB_PATH
 from .search import fuzzy_search, get_vehicle
+from .config import DB_PATH
 
 log = logging.getLogger("red.FARA.AssetManager")
 
 DEFAULTS_GUILD = {
     "enabled": True,
     "interval_hours": 24,
-    "announce_channel_id": None,  # optional: where to post ETL summaries
+    "announce_channel_id": None,
     "last_run_iso": None,
     "last_ok_iso": None,
     "last_error": None,
 }
 
+
 class AssetManager(commands.Cog):
-    """Keep MissionChief assets up-to-date in assets.db and provide search commands."""
+    """Houdt assets.db up-to-date en biedt fuzzy search en details."""
 
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=0xA55E7A, force_registration=True)
         self.config.register_guild(**DEFAULTS_GUILD)
 
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
         self._ready = asyncio.Event()
 
     # ---------- Lifecycle ----------
@@ -53,22 +54,59 @@ class AssetManager(commands.Cog):
     async def on_red_ready(self):
         self._ready.set()
 
+    # ---------- DB helpers ----------
+
+    async def _ensure_schema(self):
+        await asyncio.to_thread(etl.ensure_db)
+
+    def _table_exists(self, table: str) -> bool:
+        try:
+            with sqlite3.connect(str(DB_PATH)) as con:
+                cur = con.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                )
+                return cur.fetchone() is not None
+        except Exception:
+            return False
+
+    def _rowcount(self, table: str) -> int:
+        try:
+            with sqlite3.connect(str(DB_PATH)) as con:
+                cur = con.execute(f"SELECT COUNT(1) FROM {table}")
+                return int(cur.fetchone()[0])
+        except Exception:
+            return 0
+
     # ---------- Background Runner ----------
 
     async def _runner(self):
         await self._ready.wait()
-        await asyncio.sleep(5)  # small delay after startup
+        await asyncio.sleep(5)
+
+        # Ensure schema once on startup
+        try:
+            await self._ensure_schema()
+        except Exception:
+            log.exception("Kon schema niet initialiseren")
+
+        # Initial ETL als DB leeg is of index ontbreekt
+        need_initial = not self._table_exists("search_index") or self._rowcount("vehicles") == 0
+        if need_initial:
+            try:
+                await asyncio.to_thread(etl.run_etl)
+                log.info("AssetManager: initial ETL uitgevoerd bij start")
+            except Exception:
+                log.exception("Initial ETL bij start faalde")
 
         while True:
             try:
-                # run for all guilds that enabled it
                 for guild in self.bot.guilds:
                     try:
                         await self._maybe_run_for_guild(guild)
                     except Exception as e:
                         log.exception("Guild ETL error in %s: %s", guild.id, e)
-                # global sleep tick
-                await asyncio.sleep(60)  # check once per minute whether any guild wants a run
+                await asyncio.sleep(60)
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -96,9 +134,8 @@ class AssetManager(commands.Cog):
             return
 
         await conf.last_run_iso.set(now.isoformat())
-        # Run ETL in a thread so we don't block the event loop
         try:
-            result = await asyncio.to_thread(etl.run_etl)
+            await asyncio.to_thread(etl.run_etl)
             await conf.last_ok_iso.set(datetime.now(timezone.utc).isoformat())
             await conf.last_error.set(None)
             await self._announce(guild, f"Assets ETL ok. DB: `{DB_PATH.name}` is up-to-date.")
@@ -118,13 +155,50 @@ class AssetManager(commands.Cog):
         except Exception:
             log.debug("Failed to announce in %s", channel_id)
 
-    # ---------- Admin commands ----------
+    # ---------- Commands ----------
 
     @commands.group(name="assets", invoke_without_command=True)
+    async def assets_group(self, ctx: commands.Context, *, query: str | None = None):
+        """
+        Hoofdcommando: fuzzy search over alle assets.
+        Gebruik: [p]assets <zoekterm>
+        Subcommands: status, enable, interval, announce, reload, vehicle
+        """
+        if query is None:
+            return await ctx.send("Gebruik: `[p]assets <zoekterm>` of `[p]assets status`.")
+
+        await self._ensure_schema()
+        if not self._table_exists("search_index"):
+            return await ctx.send("De assets-database is nog niet opgebouwd. Voer eerst `[p]assets reload` uit.")
+
+        if self._rowcount("vehicles") == 0 and self._rowcount("buildings") == 0:
+            return await ctx.send("Geen assets gevonden. Run eerst `[p]assets reload` om data op te halen.")
+
+        # Fuzzy search over alle types
+        try:
+            items = await asyncio.to_thread(fuzzy_search, query, None, 20)
+        except sqlite3.OperationalError:
+            return await ctx.send("Zoekindex ontbreekt of is corrupt. Run `[p]assets reload` om te herstellen.")
+
+        if not items:
+            return await ctx.send("Geen resultaten.")
+        lines = [f"`{i['type']}` #{i['ref_id']} — **{i['name']}** (score {i['score']})" for i in items[:20]]
+        await ctx.send("\n".join(lines))
+
+    @assets_group.command(name="status")
     @checks.admin_or_permissions(manage_guild=True)
-    async def assets_group(self, ctx: commands.Context):
-        """Manage and query the assets database."""
+    async def assets_status(self, ctx: commands.Context):
+        """Toon status en rowcounts."""
+        await self._ensure_schema()
         conf = self.config.guild(ctx.guild)
+
+        counts = {
+            "vehicles": self._rowcount("vehicles"),
+            "equipment": self._rowcount("equipment"),
+            "schoolings": self._rowcount("schoolings"),
+            "buildings": self._rowcount("buildings"),
+            "search_index": self._rowcount("search_index") if self._table_exists("search_index") else 0,
+        }
         data = {
             "enabled": await conf.enabled(),
             "interval_hours": await conf.interval_hours(),
@@ -133,6 +207,7 @@ class AssetManager(commands.Cog):
             "last_ok_iso": await conf.last_ok_iso(),
             "last_error": await conf.last_error(),
             "db_path": str(DB_PATH),
+            "counts": counts,
         }
         lines = [f"**{k}**: {v}" for k, v in data.items()]
         await ctx.send("\n".join(lines))
@@ -140,14 +215,14 @@ class AssetManager(commands.Cog):
     @assets_group.command(name="enable")
     @checks.admin_or_permissions(manage_guild=True)
     async def assets_enable(self, ctx: commands.Context, value: bool):
-        """Enable or disable scheduled ETL."""
+        """Enable/disable scheduled ETL."""
         await self.config.guild(ctx.guild).enabled.set(value)
         await ctx.send(f"Scheduled ETL is now {'enabled' if value else 'disabled'}.")
 
     @assets_group.command(name="interval")
     @checks.admin_or_permissions(manage_guild=True)
     async def assets_interval(self, ctx: commands.Context, hours: int):
-        """Set ETL run interval in hours (default 24)."""
+        """Set ETL interval in hours (1..168)."""
         hours = max(1, min(168, hours))
         await self.config.guild(ctx.guild).interval_hours.set(hours)
         await ctx.send(f"Interval set to {hours}h.")
@@ -155,14 +230,15 @@ class AssetManager(commands.Cog):
     @assets_group.command(name="announce")
     @checks.admin_or_permissions(manage_guild=True)
     async def assets_announce(self, ctx: commands.Context, channel: Optional[discord.TextChannel]):
-        """Set or clear an announce channel for ETL results."""
+        """Set/clear announce channel for ETL results."""
         await self.config.guild(ctx.guild).announce_channel_id.set(channel.id if channel else None)
         await ctx.send(f"Announce channel set to {channel.mention if channel else 'None'}.")
 
     @assets_group.command(name="reload")
     @checks.admin_or_permissions(manage_guild=True)
     async def assets_reload(self, ctx: commands.Context):
-        """Run ETL now."""
+        """Run ETL nu."""
+        await self._ensure_schema()
         msg = await ctx.send("Running ETL...")
         try:
             await asyncio.to_thread(etl.run_etl)
@@ -173,36 +249,28 @@ class AssetManager(commands.Cog):
             await self.config.guild(ctx.guild).last_error.set(str(e))
             await msg.edit(content=f"ETL failed: {e}")
 
-    # ---------- Query commands (user-facing) ----------
-
-    @assets_group.command(name="search")
-    async def assets_search(self, ctx: commands.Context, typ: str, *, query: str):
-        """Search assets with fuzzy matching.
-        typ: any | vehicle | equipment | schooling | building
-        """
-        typ = typ.lower().strip()
-        if typ not in {"any", "vehicle", "equipment", "schooling", "building"}:
-            return await ctx.send("Type must be one of: any, vehicle, equipment, schooling, building.")
-        items = await asyncio.to_thread(fuzzy_search, query, None if typ == "any" else typ, 20)
-        if not items:
-            return await ctx.send("No results.")
-        # compact table
-        lines = [f"`{i['type']}` #{i['ref_id']} — **{i['name']}** (score {i['score']})" for i in items[:20]]
-        await ctx.send("\n".join(lines))
-
     @assets_group.command(name="vehicle")
     async def assets_vehicle(self, ctx: commands.Context, vehicle_id: int):
-        """Show detailed info for a vehicle by ID."""
+        """Toon voertuigdetails op ID."""
+        await self._ensure_schema()
+        if not self._table_exists("vehicles"):
+            return await ctx.send("De assets-database is nog niet opgebouwd. Gebruik eerst `[p]assets reload`.")
+        if self._rowcount("vehicles") == 0:
+            return await ctx.send("Er staan nog geen voertuigen in de database. Run `[p]assets reload`.")
+
         def _get():
-            import sqlite3
             con = sqlite3.connect(DB_PATH)
             con.row_factory = sqlite3.Row
             with con:
                 return get_vehicle(con, vehicle_id)
 
-        v = await asyncio.to_thread(_get)
+        try:
+            v = await asyncio.to_thread(_get)
+        except sqlite3.OperationalError:
+            return await ctx.send("Database of index mist. Run `[p]assets reload` om te herstellen.")
+
         if not v:
-            return await ctx.send("Not found.")
+            return await ctx.send("Niet gevonden.")
 
         emb = discord.Embed(title=f"{v['name']} (#{v['id']})", colour=discord.Colour.blurple())
         fields = [
