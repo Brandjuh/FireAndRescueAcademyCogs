@@ -176,286 +176,6 @@ class MembersScraper(commands.Cog):
                 ''')
                 
                 conn.commit()
-            conn.close()
-            
-            await ctx.send(f"✅ Cleared {deleted} skipped entries")
-        except Exception as e:
-            await ctx.send(f"❌ Error: {e}")
-    
-    @members_group.command(name="debug")
-    async def debug_scrape(self, ctx):
-        """Full diagnostic"""
-        embed = discord.Embed(title="🔍 Diagnostics", color=discord.Color.blue())
-        
-        cookie_manager = self.bot.get_cog("CookieManager")
-        if not cookie_manager:
-            embed.add_field(name="❌ CookieManager", value="NOT LOADED", inline=False)
-            await ctx.send(embed=embed)
-            return
-        else:
-            embed.add_field(name="✅ CookieManager", value="Loaded", inline=False)
-        
-        try:
-            session = await cookie_manager.get_session()
-            if not session or session.closed:
-                embed.add_field(name="❌ Session", value="Failed", inline=False)
-                await ctx.send(embed=embed)
-                return
-            else:
-                embed.add_field(name="✅ Session", value="OK", inline=False)
-        except Exception as e:
-            embed.add_field(name="❌ Session Error", value=f"```{e}```", inline=False)
-            await ctx.send(embed=embed)
-            return
-        
-        await ctx.send("🔄 Testing connection...")
-        test_url = f"{self.members_url}?page=1"
-        
-        try:
-            async with session.get(test_url) as response:
-                status = response.status
-                html = await response.text()
-                final_url = str(response.url)
-                
-                embed.add_field(
-                    name="📡 HTTP",
-                    value=f"Status: `{status}`\nURL: `{final_url}`\nHTML: `{len(html)}` chars",
-                    inline=False
-                )
-                
-                soup = BeautifulSoup(html, 'html.parser')
-                login_form = soup.find('form', action=lambda x: x and 'sign_in' in str(x))
-                member_links = soup.find_all('a', href=lambda x: x and '/users/' in str(x))
-                
-                if login_form:
-                    embed.add_field(name="❌ Login", value="NOT LOGGED IN\nRun: `[p]cookie login`", inline=False)
-                elif len(member_links) >= 5:
-                    embed.add_field(name="✅ Login", value=f"Logged in ({len(member_links)} member links)", inline=False)
-                else:
-                    embed.add_field(name="⚠️ Login", value="Unclear", inline=False)
-                
-                all_tables = soup.find_all('table')
-                total_rows = sum(len(table.find_all('tr')) for table in all_tables)
-                
-                embed.add_field(
-                    name="📋 Tables",
-                    value=f"Found {len(all_tables)} tables with {total_rows} total rows",
-                    inline=False
-                )
-                
-                members, skipped, stats = self._extract_member_rows_safe(html, 1)
-                
-                embed.add_field(
-                    name="🔍 Parsing Test",
-                    value=(
-                        f"Parsed: {stats['members_parsed']}\n"
-                        f"Skipped (no link): {stats['skipped_no_link']}\n"
-                        f"Skipped (no ID): {stats['skipped_no_id']}\n"
-                        f"Skipped (invalid): {stats['skipped_invalid_data']}"
-                    ),
-                    inline=False
-                )
-                
-        except Exception as e:
-            embed.add_field(name="❌ Error", value=f"```{e}```", inline=False)
-        
-        await ctx.send(embed=embed)
-    
-    @members_group.command(name="testpage")
-    async def test_page(self, ctx, page: int = 1):
-        """Test specific page"""
-        await ctx.send(f"🔍 Testing page {page}...")
-        
-        old_debug = self.debug_mode
-        old_channel = self.debug_channel
-        self.debug_mode = True
-        self.debug_channel = ctx.channel
-        
-        try:
-            session = await self._get_session(ctx)
-            if not session:
-                await ctx.send("❌ No session")
-                return
-            
-            members = await self._scrape_members_page(session, page, ctx)
-            
-            if not members:
-                await ctx.send(f"❌ Page {page} returned 0 members")
-            else:
-                embed = discord.Embed(
-                    title=f"📊 Page {page} Results",
-                    description=f"Found {len(members)} members",
-                    color=discord.Color.green()
-                )
-                
-                for i, member in enumerate(members[:3], 1):
-                    value = (
-                        f"**ID:** {member['member_id']}\n"
-                        f"**Rank:** {member['rank']}\n"
-                        f"**Credits:** {member['earned_credits']:,}\n"
-                        f"**Contribution:** {member.get('contribution_rate', 0)}%\n"
-                        f"**Status:** {member['online_status']}"
-                    )
-                    
-                    embed.add_field(
-                        name=f"{i}. {member['username']}",
-                        value=value,
-                        inline=False
-                    )
-                
-                if len(members) > 3:
-                    embed.set_footer(text=f"... and {len(members) - 3} more")
-                
-                await ctx.send(embed=embed)
-        finally:
-            self.debug_mode = old_debug
-            self.debug_channel = old_channel
-    
-    @members_group.command(name="checklogin")
-    async def check_login(self, ctx):
-        """Check login status"""
-        async with ctx.typing():
-            try:
-                cookie_manager = self.bot.get_cog("CookieManager")
-                if not cookie_manager:
-                    await ctx.send("❌ CookieManager not loaded")
-                    return
-                
-                session = await cookie_manager.get_session()
-                test_url = self.members_url
-                
-                async with session.get(test_url) as response:
-                    html = await response.text()
-                    final_url = str(response.url)
-                
-                soup = BeautifulSoup(html, 'html.parser')
-                login_form = soup.find('form', action=lambda x: x and 'sign_in' in str(x))
-                member_links = soup.find_all('a', href=lambda x: x and '/users/' in str(x))
-                
-                embed = discord.Embed(title="🔐 Login Status")
-                
-                if login_form:
-                    embed.color = discord.Color.red()
-                    embed.description = "**❌ NOT LOGGED IN**"
-                    embed.add_field(name="Action", value="Run: `[p]cookie login`", inline=False)
-                elif len(member_links) >= 5:
-                    embed.color = discord.Color.green()
-                    embed.description = "**✅ LOGGED IN**"
-                    embed.add_field(name="Details", value=f"Found {len(member_links)} member links", inline=False)
-                else:
-                    embed.color = discord.Color.orange()
-                    embed.description = "**⚠️ UNCLEAR**"
-                    embed.add_field(name="Details", value=f"URL: `{final_url}`", inline=False)
-                
-                await ctx.send(embed=embed)
-                
-            except Exception as e:
-                await ctx.send(f"❌ Error: {e}")
-    
-    @members_group.command(name="fixsession")
-    async def fix_session(self, ctx):
-        """Force refresh session"""
-        await ctx.send("🔄 Refreshing session...")
-        
-        try:
-            cookie_manager = self.bot.get_cog("CookieManager")
-            if not cookie_manager:
-                await ctx.send("❌ CookieManager not loaded")
-                return
-            
-            await ctx.send("🔐 Forcing re-login...")
-            success = await cookie_manager._perform_login()
-            
-            if success:
-                await ctx.send("✅ Session refreshed! Try scraping again.")
-            else:
-                await ctx.send("❌ Login failed. Check `[p]cookie debug trace`")
-        except Exception as e:
-            await ctx.send(f"❌ Error: {e}")
-    
-    @members_group.command(name="enabledebug")
-    async def enable_debug(self, ctx):
-        """Enable debug mode"""
-        self.debug_mode = True
-        self.debug_channel = ctx.channel
-        await ctx.send("✅ Debug mode **ENABLED** - All scraping will show detailed logs here")
-    
-    @members_group.command(name="disabledebug")
-    async def disable_debug(self, ctx):
-        """Disable debug mode"""
-        self.debug_mode = False
-        self.debug_channel = None
-        await ctx.send("✅ Debug mode **DISABLED**")
-    
-    @members_group.command(name="validate")
-    async def validate_data(self, ctx):
-        """Validate database data quality"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            
-            cursor.execute("SELECT MAX(DATE(timestamp)) as latest FROM members")
-            latest = cursor.fetchone()['latest']
-            
-            issues = []
-            
-            cursor.execute("""
-                SELECT COUNT(*) FROM members 
-                WHERE DATE(timestamp) = ? AND earned_credits = 0
-            """, (latest,))
-            zero_credits = cursor.fetchone()[0]
-            if zero_credits > 0:
-                issues.append(f"⚠️ {zero_credits} members with 0 credits")
-            
-            cursor.execute("""
-                SELECT COUNT(*) FROM members 
-                WHERE DATE(timestamp) = ? AND contribution_rate = 0
-            """, (latest,))
-            zero_rate = cursor.fetchone()[0]
-            
-            cursor.execute("""
-                SELECT COUNT(*) FROM members 
-                WHERE DATE(timestamp) = ? AND contribution_rate > 100
-            """, (latest,))
-            high_rate = cursor.fetchone()[0]
-            if high_rate > 0:
-                issues.append(f"❌ {high_rate} members with rate > 100%")
-            
-            cursor.execute("""
-                SELECT COUNT(*) FROM members 
-                WHERE DATE(timestamp) = ? AND earned_credits < 0
-            """, (latest,))
-            negative = cursor.fetchone()[0]
-            if negative > 0:
-                issues.append(f"❌ {negative} members with negative credits")
-            
-            conn.close()
-            
-            embed = discord.Embed(
-                title="🔍 Data Quality Validation",
-                color=discord.Color.green() if not issues else discord.Color.orange()
-            )
-            
-            if not issues:
-                embed.description = "✅ **All data looks good!**"
-            else:
-                embed.description = "**Issues found:**\n" + "\n".join(issues)
-            
-            embed.add_field(
-                name="Info",
-                value=f"Zero contrib rate: {zero_rate} (this is normal for some members)",
-                inline=False
-            )
-            
-            await ctx.send(embed=embed)
-            
-        except Exception as e:
-            await ctx.send(f"❌ Error: {e}")
-
-
-async def setup(bot):
-    await bot.add_cog(MembersScraper(bot))
                 conn.close()
                 log.info(f"Database initialized with MemberSync compatibility: {self.db_path}")
                 break
@@ -1096,3 +816,283 @@ async def setup(bot):
             cursor.execute("DELETE FROM skipped_entries")
             deleted = cursor.rowcount
             conn.commit()
+            conn.close()
+            
+            await ctx.send(f"✅ Cleared {deleted} skipped entries")
+        except Exception as e:
+            await ctx.send(f"❌ Error: {e}")
+    
+    @members_group.command(name="debug")
+    async def debug_scrape(self, ctx):
+        """Full diagnostic"""
+        embed = discord.Embed(title="🔍 Diagnostics", color=discord.Color.blue())
+        
+        cookie_manager = self.bot.get_cog("CookieManager")
+        if not cookie_manager:
+            embed.add_field(name="❌ CookieManager", value="NOT LOADED", inline=False)
+            await ctx.send(embed=embed)
+            return
+        else:
+            embed.add_field(name="✅ CookieManager", value="Loaded", inline=False)
+        
+        try:
+            session = await cookie_manager.get_session()
+            if not session or session.closed:
+                embed.add_field(name="❌ Session", value="Failed", inline=False)
+                await ctx.send(embed=embed)
+                return
+            else:
+                embed.add_field(name="✅ Session", value="OK", inline=False)
+        except Exception as e:
+            embed.add_field(name="❌ Session Error", value=f"```{e}```", inline=False)
+            await ctx.send(embed=embed)
+            return
+        
+        await ctx.send("🔄 Testing connection...")
+        test_url = f"{self.members_url}?page=1"
+        
+        try:
+            async with session.get(test_url) as response:
+                status = response.status
+                html = await response.text()
+                final_url = str(response.url)
+                
+                embed.add_field(
+                    name="📡 HTTP",
+                    value=f"Status: `{status}`\nURL: `{final_url}`\nHTML: `{len(html)}` chars",
+                    inline=False
+                )
+                
+                soup = BeautifulSoup(html, 'html.parser')
+                login_form = soup.find('form', action=lambda x: x and 'sign_in' in str(x))
+                member_links = soup.find_all('a', href=lambda x: x and '/users/' in str(x))
+                
+                if login_form:
+                    embed.add_field(name="❌ Login", value="NOT LOGGED IN\nRun: `[p]cookie login`", inline=False)
+                elif len(member_links) >= 5:
+                    embed.add_field(name="✅ Login", value=f"Logged in ({len(member_links)} member links)", inline=False)
+                else:
+                    embed.add_field(name="⚠️ Login", value="Unclear", inline=False)
+                
+                all_tables = soup.find_all('table')
+                total_rows = sum(len(table.find_all('tr')) for table in all_tables)
+                
+                embed.add_field(
+                    name="📋 Tables",
+                    value=f"Found {len(all_tables)} tables with {total_rows} total rows",
+                    inline=False
+                )
+                
+                members, skipped, stats = self._extract_member_rows_safe(html, 1)
+                
+                embed.add_field(
+                    name="🔍 Parsing Test",
+                    value=(
+                        f"Parsed: {stats['members_parsed']}\n"
+                        f"Skipped (no link): {stats['skipped_no_link']}\n"
+                        f"Skipped (no ID): {stats['skipped_no_id']}\n"
+                        f"Skipped (invalid): {stats['skipped_invalid_data']}"
+                    ),
+                    inline=False
+                )
+                
+        except Exception as e:
+            embed.add_field(name="❌ Error", value=f"```{e}```", inline=False)
+        
+        await ctx.send(embed=embed)
+    
+    @members_group.command(name="testpage")
+    async def test_page(self, ctx, page: int = 1):
+        """Test specific page"""
+        await ctx.send(f"🔍 Testing page {page}...")
+        
+        old_debug = self.debug_mode
+        old_channel = self.debug_channel
+        self.debug_mode = True
+        self.debug_channel = ctx.channel
+        
+        try:
+            session = await self._get_session(ctx)
+            if not session:
+                await ctx.send("❌ No session")
+                return
+            
+            members = await self._scrape_members_page(session, page, ctx)
+            
+            if not members:
+                await ctx.send(f"❌ Page {page} returned 0 members")
+            else:
+                embed = discord.Embed(
+                    title=f"📊 Page {page} Results",
+                    description=f"Found {len(members)} members",
+                    color=discord.Color.green()
+                )
+                
+                for i, member in enumerate(members[:3], 1):
+                    value = (
+                        f"**ID:** {member['member_id']}\n"
+                        f"**Rank:** {member['rank']}\n"
+                        f"**Credits:** {member['earned_credits']:,}\n"
+                        f"**Contribution:** {member.get('contribution_rate', 0)}%\n"
+                        f"**Status:** {member['online_status']}"
+                    )
+                    
+                    embed.add_field(
+                        name=f"{i}. {member['username']}",
+                        value=value,
+                        inline=False
+                    )
+                
+                if len(members) > 3:
+                    embed.set_footer(text=f"... and {len(members) - 3} more")
+                
+                await ctx.send(embed=embed)
+        finally:
+            self.debug_mode = old_debug
+            self.debug_channel = old_channel
+    
+    @members_group.command(name="checklogin")
+    async def check_login(self, ctx):
+        """Check login status"""
+        async with ctx.typing():
+            try:
+                cookie_manager = self.bot.get_cog("CookieManager")
+                if not cookie_manager:
+                    await ctx.send("❌ CookieManager not loaded")
+                    return
+                
+                session = await cookie_manager.get_session()
+                test_url = self.members_url
+                
+                async with session.get(test_url) as response:
+                    html = await response.text()
+                    final_url = str(response.url)
+                
+                soup = BeautifulSoup(html, 'html.parser')
+                login_form = soup.find('form', action=lambda x: x and 'sign_in' in str(x))
+                member_links = soup.find_all('a', href=lambda x: x and '/users/' in str(x))
+                
+                embed = discord.Embed(title="🔐 Login Status")
+                
+                if login_form:
+                    embed.color = discord.Color.red()
+                    embed.description = "**❌ NOT LOGGED IN**"
+                    embed.add_field(name="Action", value="Run: `[p]cookie login`", inline=False)
+                elif len(member_links) >= 5:
+                    embed.color = discord.Color.green()
+                    embed.description = "**✅ LOGGED IN**"
+                    embed.add_field(name="Details", value=f"Found {len(member_links)} member links", inline=False)
+                else:
+                    embed.color = discord.Color.orange()
+                    embed.description = "**⚠️ UNCLEAR**"
+                    embed.add_field(name="Details", value=f"URL: `{final_url}`", inline=False)
+                
+                await ctx.send(embed=embed)
+                
+            except Exception as e:
+                await ctx.send(f"❌ Error: {e}")
+    
+    @members_group.command(name="fixsession")
+    async def fix_session(self, ctx):
+        """Force refresh session"""
+        await ctx.send("🔄 Refreshing session...")
+        
+        try:
+            cookie_manager = self.bot.get_cog("CookieManager")
+            if not cookie_manager:
+                await ctx.send("❌ CookieManager not loaded")
+                return
+            
+            await ctx.send("🔐 Forcing re-login...")
+            success = await cookie_manager._perform_login()
+            
+            if success:
+                await ctx.send("✅ Session refreshed! Try scraping again.")
+            else:
+                await ctx.send("❌ Login failed. Check `[p]cookie debug trace`")
+        except Exception as e:
+            await ctx.send(f"❌ Error: {e}")
+    
+    @members_group.command(name="enabledebug")
+    async def enable_debug(self, ctx):
+        """Enable debug mode"""
+        self.debug_mode = True
+        self.debug_channel = ctx.channel
+        await ctx.send("✅ Debug mode **ENABLED** - All scraping will show detailed logs here")
+    
+    @members_group.command(name="disabledebug")
+    async def disable_debug(self, ctx):
+        """Disable debug mode"""
+        self.debug_mode = False
+        self.debug_channel = None
+        await ctx.send("✅ Debug mode **DISABLED**")
+    
+    @members_group.command(name="validate")
+    async def validate_data(self, ctx):
+        """Validate database data quality"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT MAX(DATE(timestamp)) as latest FROM members")
+            latest = cursor.fetchone()['latest']
+            
+            issues = []
+            
+            cursor.execute("""
+                SELECT COUNT(*) FROM members 
+                WHERE DATE(timestamp) = ? AND earned_credits = 0
+            """, (latest,))
+            zero_credits = cursor.fetchone()[0]
+            if zero_credits > 0:
+                issues.append(f"⚠️ {zero_credits} members with 0 credits")
+            
+            cursor.execute("""
+                SELECT COUNT(*) FROM members 
+                WHERE DATE(timestamp) = ? AND contribution_rate = 0
+            """, (latest,))
+            zero_rate = cursor.fetchone()[0]
+            
+            cursor.execute("""
+                SELECT COUNT(*) FROM members 
+                WHERE DATE(timestamp) = ? AND contribution_rate > 100
+            """, (latest,))
+            high_rate = cursor.fetchone()[0]
+            if high_rate > 0:
+                issues.append(f"❌ {high_rate} members with rate > 100%")
+            
+            cursor.execute("""
+                SELECT COUNT(*) FROM members 
+                WHERE DATE(timestamp) = ? AND earned_credits < 0
+            """, (latest,))
+            negative = cursor.fetchone()[0]
+            if negative > 0:
+                issues.append(f"❌ {negative} members with negative credits")
+            
+            conn.close()
+            
+            embed = discord.Embed(
+                title="🔍 Data Quality Validation",
+                color=discord.Color.green() if not issues else discord.Color.orange()
+            )
+            
+            if not issues:
+                embed.description = "✅ **All data looks good!**"
+            else:
+                embed.description = "**Issues found:**\n" + "\n".join(issues)
+            
+            embed.add_field(
+                name="Info",
+                value=f"Zero contrib rate: {zero_rate} (this is normal for some members)",
+                inline=False
+            )
+            
+            await ctx.send(embed=embed)
+            
+        except Exception as e:
+            await ctx.send(f"❌ Error: {e}")
+
+
+async def setup(bot):
+    await bot.add_cog(MembersScraper(bot))
