@@ -9,6 +9,7 @@ FIXED:
 - Error handling for infractions
 - Using regular commands instead of hybrid for compatibility
 - ✅ contribution_rate now properly read from members_v2.db
+- ✅ Direct MC ID lookup in members_v2.db (no link required)
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from .config_commands import ConfigCommands
 
 log = logging.getLogger("red.FARA.MemberManager")
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 DEFAULTS = {
     "contribution_threshold": 5.0,
@@ -196,8 +197,10 @@ class MemberManager(ConfigCommands, commands.Cog):
         
         Tries in order:
         1. Discord mention/ID
-        2. MC ID
+        2. MC ID (direct database lookup)
         3. Fuzzy search on names
+        
+        🔧 FIXED: Now searches members_v2.db directly for MC IDs, not just MemberSync links
         """
         # Try Discord mention/ID
         discord_member = None
@@ -219,17 +222,27 @@ class MemberManager(ConfigCommands, commands.Cog):
                 discord_id=discord_member.id
             )
         
-        # Try MC ID (numeric string)
-        if target.isdigit() and self.membersync:
-            link = await self.membersync.get_link_for_mc(target)
-            if link:
+        # 🔧 NEW: Try MC ID (direct database lookup in members_v2.db)
+        if target.isdigit():
+            # First check if this MC ID exists in the database
+            mc_data = await self._get_mc_data(target)
+            
+            if mc_data:
+                # Found in members database! Now check if there's a link
+                discord_id = None
+                if self.membersync:
+                    link = await self.membersync.get_link_for_mc(target)
+                    if link:
+                        discord_id = link.get("discord_id")
+                
+                # Build member data (with or without Discord link)
                 return await self._build_member_data(
                     guild=guild,
-                    discord_id=link.get("discord_id"),
+                    discord_id=discord_id,
                     mc_user_id=target
                 )
         
-        # Fuzzy search
+        # Fuzzy search (last resort)
         result = await fuzzy_search_member(
             target=target,
             guild=guild,
