@@ -198,7 +198,7 @@ class MembersScraper(commands.Cog):
                 pass
     
     async def _get_session(self, ctx=None):
-        """Get authenticated session"""
+        """Get authenticated session with proper headers"""
         cookie_manager = self.bot.get_cog("CookieManager")
         if not cookie_manager:
             await self._debug_log("❌ CookieManager not loaded", ctx)
@@ -208,7 +208,14 @@ class MembersScraper(commands.Cog):
             session = await cookie_manager.get_session()
             if not session:
                 return None
-            await self._debug_log("✅ Session obtained", ctx)
+            
+            # CRITICAL FIX: Add User-Agent header like alliance_scraper does!
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            session.headers.update(headers)
+            
+            await self._debug_log("✅ Session obtained with headers", ctx)
             return session
         except Exception as e:
             await self._debug_log(f"❌ Session error: {e}", ctx)
@@ -390,30 +397,37 @@ class MembersScraper(commands.Cog):
         url = f"{self.members_url}?page={page}"
         
         try:
+            await self._debug_log(f"🌐 Requesting: {url}", ctx)
+            
             async with session.get(url, allow_redirects=True) as response:
+                status = response.status
+                final_url = str(response.url)
+                
+                await self._debug_log(f"📡 Status: {status}, Final URL: {final_url}", ctx)
+                
                 if response.status != 200:
                     await self._debug_log(f"❌ Page {page}: HTTP {response.status}", ctx)
                     return []
                 
                 html = await response.text()
-                final_url = str(response.url)
+                await self._debug_log(f"📄 HTML length: {len(html)} chars", ctx)
                 
-                # Check for redirect
+                # Check for redirect to wrong page
                 if 'mitglieder' not in final_url and 'members' not in final_url:
                     await self._debug_log(f"❌ Page {page}: REDIRECTED to {final_url}", ctx)
                     if ctx:
-                        await ctx.send(f"⚠️ REDIRECT DETECTED - Session expired!\nRun: `[p]cookie login`")
+                        await ctx.send(f"⚠️ REDIRECT DETECTED to: {final_url}\nSession may be invalid!")
                     return []
                 
-                # Check for homepage
+                # Check for homepage FIRST (before parsing)
                 if '<title>MISSIONCHIEF.COM - Create your own' in html:
-                    await self._debug_log(f"❌ Page {page}: Got homepage", ctx)
+                    await self._debug_log(f"❌ Page {page}: Got homepage HTML", ctx)
                     if ctx:
-                        await ctx.send(f"⚠️ HOMEPAGE DETECTED - Session invalid!\nRun: `[p]cookie login`")
+                        await ctx.send(f"⚠️ HOMEPAGE DETECTED\nURL requested: {url}\nFinal URL: {final_url}")
                     return []
                 
                 if not await self._check_logged_in(html, ctx):
-                    await self._debug_log(f"❌ Page {page}: Not logged in", ctx)
+                    await self._debug_log(f"❌ Page {page}: Login check failed", ctx)
                     return []
                 
                 members, skipped, stats = self._extract_member_rows_safe(html, page)
