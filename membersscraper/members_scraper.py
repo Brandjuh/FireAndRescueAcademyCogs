@@ -215,34 +215,50 @@ class MembersScraper(commands.Cog):
             return None
     
     async def _check_logged_in(self, html_content, ctx=None):
-        """Check login status"""
+        """Check if still logged in by looking for multiple indicators"""
         soup = BeautifulSoup(html_content, 'html.parser')
         
-        # Check for homepage
+        # Check for homepage (definite NOT logged in)
         title = soup.find('title')
         if title and 'Create your own 911-Dispatch-Center' in title.get_text():
             await self._debug_log("❌ On homepage - NOT logged in", ctx)
             return False
         
-        # Check for login form
+        # Check for login form (definite NOT logged in)
         if soup.find('form', action=lambda x: x and 'sign_in' in str(x)):
             await self._debug_log("❌ Login form detected", ctx)
             return False
         
-        # Check for member data indicators
-        member_links = soup.find_all('a', href=lambda x: x and '/users/' in str(x))
-        if len(member_links) >= 5:
-            await self._debug_log(f"✅ Logged in ({len(member_links)} member links)", ctx)
-            return True
+        # Check MULTIPLE positive indicators (ANY of these means logged in!)
+        logout_button = soup.find('a', href='/users/sign_out')
+        user_menu = soup.find('li', class_='dropdown user-menu')
+        profile_link = soup.find('a', href=lambda x: x and '/profile' in str(x))
+        settings_link = soup.find('a', href='/settings')
         
-        # Check for data tables
-        tables = soup.find_all('table')
-        if any(len(t.find_all('tr')) > 5 for t in tables):
-            await self._debug_log("✅ Logged in (data tables found)", ctx)
-            return True
+        # KEY FIX: If we can see member data, we're logged in!
+        has_member_links = bool(soup.find('a', href=lambda x: x and '/users/' in str(x)))
         
-        await self._debug_log("❌ Login status unclear, assuming NOT logged in", ctx)
-        return False
+        # Check for data tables with content
+        has_data_tables = any(len(t.find_all('tr')) > 3 for t in soup.find_all('table'))
+        
+        # If ANY indicator is present, we're logged in
+        is_logged_in = (logout_button is not None or 
+                        user_menu is not None or 
+                        profile_link is not None or
+                        settings_link is not None or
+                        has_member_links or
+                        has_data_tables)
+        
+        # Debug logging
+        await self._debug_log(f"Login check: {'✅ Logged in' if is_logged_in else '❌ NOT logged in'}", ctx)
+        await self._debug_log(f"  Logout button: {logout_button is not None}", ctx)
+        await self._debug_log(f"  User menu: {user_menu is not None}", ctx)
+        await self._debug_log(f"  Profile link: {profile_link is not None}", ctx)
+        await self._debug_log(f"  Settings link: {settings_link is not None}", ctx)
+        await self._debug_log(f"  Has member links: {has_member_links}", ctx)
+        await self._debug_log(f"  Has data tables: {has_data_tables}", ctx)
+        
+        return is_logged_in
     
     def _extract_member_rows_safe(self, html: str, page: int) -> tuple:
         """SAFE extraction using header-based column mapping"""
