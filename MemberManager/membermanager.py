@@ -2,14 +2,12 @@
 MemberManager - Comprehensive member tracking and management
 Fire & Rescue Academy Alliance
 
-FIXED:
-- Verification status now checks link_status='approved' + role
-- Better contribution display
-- Proper database integration
-- Error handling for infractions
-- Using regular commands instead of hybrid for compatibility
-- ✅ contribution_rate now properly read from members_v2.db
-- ✅ Direct MC ID lookup in members_v2.db (no link required)
+COMPLETE VERSION v2.0 - WITH SANCTIONS INTEGRATION
+- Full SanctionManager integration
+- Warning expiry system (30 days)
+- Unified sanctions display
+- Contribution monitoring
+- Role drift detection
 """
 
 from __future__ import annotations
@@ -17,7 +15,7 @@ import asyncio
 import logging
 from pathlib import Path
 from typing import Optional, Dict, Any, List
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import discord
 from redbot.core import commands, Config, checks
@@ -34,7 +32,7 @@ from .config_commands import ConfigCommands
 
 log = logging.getLogger("red.FARA.MemberManager")
 
-__version__ = "1.1.2"
+__version__ = "2.0.0"
 
 DEFAULTS = {
     "contribution_threshold": 5.0,
@@ -56,9 +54,10 @@ class MemberManager(ConfigCommands, commands.Cog):
     
     Provides comprehensive tracking of:
     - Discord and MissionChief member data
-    - Notes and infractions
+    - Notes and sanctions
     - Contribution monitoring
     - Audit trails
+    - Warning expiry (30 days automatic)
     """
     
     __version__ = __version__
@@ -79,13 +78,16 @@ class MemberManager(ConfigCommands, commands.Cog):
         
         # Integration references
         self.membersync: Optional[commands.Cog] = None
-        self.alliance_scraper: Optional[commands.Cog] = None  # Legacy support
-        self.members_scraper: Optional[commands.Cog] = None  # 🔧 NEW: Primary source
+        self.alliance_scraper: Optional[commands.Cog] = None
+        self.members_scraper: Optional[commands.Cog] = None
         self.sanction_manager: Optional[commands.Cog] = None
         
         # Automation
         self.contribution_monitor: Optional[ContributionMonitor] = None
         self._automation_task: Optional[asyncio.Task] = None
+        
+        # 🔧 NEW: Warning expiry task
+        self._expiry_task: Optional[asyncio.Task] = None
         
         # Persistent views
         self._register_views()
@@ -105,6 +107,10 @@ class MemberManager(ConfigCommands, commands.Cog):
         # Start automation after bot is ready
         asyncio.create_task(self._delayed_start())
         
+        # 🔧 NEW: Start warning expiry task
+        self._expiry_task = asyncio.create_task(self._run_warning_expiry_task())
+        log.info("Warning expiry task started")
+        
         log.info("MemberManager loaded successfully")
     
     async def cog_unload(self) -> None:
@@ -115,6 +121,14 @@ class MemberManager(ConfigCommands, commands.Cog):
             self._automation_task.cancel()
             try:
                 await self._automation_task
+            except asyncio.CancelledError:
+                pass
+        
+        # 🔧 NEW: Stop warning expiry task
+        if self._expiry_task:
+            self._expiry_task.cancel()
+            try:
+                await self._expiry_task
             except asyncio.CancelledError:
                 pass
         
@@ -148,9 +162,9 @@ class MemberManager(ConfigCommands, commands.Cog):
     async def _connect_integrations(self):
         """Detect and connect to other cogs."""
         self.membersync = self.bot.get_cog("MemberSync")
-        self.alliance_scraper = self.bot.get_cog("AllianceScraper")  # Keep for compatibility
-        self.members_scraper = self.bot.get_cog("MembersScraper")  # 🔧 NEW: Use MembersScraper
-        self.sanction_manager = self.bot.get_cog("SanctionManager")
+        self.alliance_scraper = self.bot.get_cog("AllianceScraper")
+        self.members_scraper = self.bot.get_cog("MembersScraper")
+        self.sanction_manager = self.bot.get_cog("SanctionsManager")  # 🔧 CRITICAL
         
         integrations = []
         if self.membersync:
@@ -158,14 +172,143 @@ class MemberManager(ConfigCommands, commands.Cog):
         if self.alliance_scraper:
             integrations.append("AllianceScraper")
         if self.members_scraper:
-            integrations.append("MembersScraper")  # 🔧 NEW
+            integrations.append("MembersScraper")
         if self.sanction_manager:
-            integrations.append("SanctionManager")
+            integrations.append("SanctionsManager")
         
         if integrations:
             log.info(f"Connected to: {', '.join(integrations)}")
         else:
             log.warning("No integrations found - some features may not work")
+    
+    # ==================== 🔧 NEW: WARNING EXPIRY SYSTEM ====================
+    
+    async def _run_warning_expiry_task(self):
+        """
+        Daily task to expire old warnings.
+        
+        Runs at 3 AM UTC daily.
+        """
+        await self.bot.wait_until_red_ready()
+        
+        while True:
+            try:
+                # Wait until 3 AM UTC
+                now = datetime.now(timezone.utc)
+                target_time = now.replace(hour=3, minute=0, second=0, microsecond=0)
+                
+                if now >= target_time:
+                    # Already past 3 AM today, schedule for tomorrow
+                    target_time += timedelta(days=1)
+                
+                wait_seconds = (target_time - now).total_seconds()
+                log.info(f"Warning expiry task scheduled in {wait_seconds/3600:.1f} hours")
+                
+                await asyncio.sleep(wait_seconds)
+                
+                # Run expiry check
+                await self._expire_old_warnings()
+                
+            except asyncio.CancelledError:
+                log.info("Warning expiry task stopped")
+                break
+            except Exception as e:
+                log.error(f"Error in warning expiry task: {e}", exc_info=True)
+                # Wait 1 hour before retrying on error
+                await asyncio.sleep(3600)
+    
+    async def _expire_old_warnings(self):
+        """
+        Expire warnings older than 30 days.
+        
+        Updates status to 'expired' in database.
+        """
+        if not self.sanction_manager:
+            log.warning("SanctionManager not available for warning expiry")
+            return
+        
+        log.info("Running warning expiry check...")
+        
+        try:
+            total_expired = 0
+            
+            # Get all guilds
+            for guild in self.bot.guilds:
+                try:
+                    expired_count = await self._expire_guild_warnings(guild.id)
+                    total_expired += expired_count
+                    
+                    if expired_count > 0:
+                        log.info(f"Expired {expired_count} warnings in guild {guild.name}")
+                
+                except Exception as e:
+                    log.error(f"Error expiring warnings for guild {guild.id}: {e}")
+            
+            log.info(f"Warning expiry complete. Total expired: {total_expired}")
+        
+        except Exception as e:
+            log.error(f"Error in warning expiry: {e}", exc_info=True)
+    
+    async def _expire_guild_warnings(self, guild_id: int) -> int:
+        """
+        Expire warnings for a specific guild.
+        
+        Returns number of warnings expired.
+        """
+        if not self.sanction_manager:
+            return 0
+        
+        try:
+            import sqlite3
+            
+            # Calculate 30 days ago
+            now = int(datetime.now(timezone.utc).timestamp())
+            thirty_days_ago = now - (30 * 86400)
+            
+            # Update warnings in database
+            conn = sqlite3.connect(self.sanction_manager.db.db_path)
+            cursor = conn.cursor()
+            
+            # Find warnings to expire
+            cursor.execute("""
+                UPDATE sanctions
+                SET status = 'expired'
+                WHERE guild_id = ?
+                AND status = 'active'
+                AND sanction_type LIKE '%Warning%'
+                AND created_at < ?
+            """, (guild_id, thirty_days_ago))
+            
+            expired_count = cursor.rowcount
+            
+            # Also log the expiry in sanction_history
+            if expired_count > 0:
+                cursor.execute("""
+                    SELECT sanction_id FROM sanctions
+                    WHERE guild_id = ?
+                    AND status = 'expired'
+                    AND sanction_type LIKE '%Warning%'
+                    AND created_at < ?
+                """, (guild_id, thirty_days_ago))
+                
+                expired_ids = [row[0] for row in cursor.fetchall()]
+                
+                # Log each expiry
+                for sanction_id in expired_ids:
+                    cursor.execute("""
+                        INSERT INTO sanction_history
+                        (sanction_id, action_type, action_by, action_at, notes)
+                        VALUES (?, 'auto_expired', 0, ?, 'Auto-expired after 30 days')
+                    """, (sanction_id, now))
+            
+            conn.commit()
+            conn.close()
+            
+            return expired_count
+        
+        except Exception as e:
+            log.error(f"Error expiring guild warnings: {e}", exc_info=True)
+            return 0
     
     # ==================== PERMISSIONS ====================
     
@@ -199,8 +342,6 @@ class MemberManager(ConfigCommands, commands.Cog):
         1. Discord mention/ID
         2. MC ID (direct database lookup)
         3. Fuzzy search on names
-        
-        🔧 FIXED: Now searches members_v2.db directly for MC IDs, not just MemberSync links
         """
         # Try Discord mention/ID
         discord_member = None
@@ -222,9 +363,8 @@ class MemberManager(ConfigCommands, commands.Cog):
                 discord_id=discord_member.id
             )
         
-        # 🔧 NEW: Try MC ID (direct database lookup in members_v2.db)
+        # Try MC ID (direct database lookup in members_v2.db)
         if target.isdigit():
-            # First check if this MC ID exists in the database
             mc_data = await self._get_mc_data(target)
             
             if mc_data:
@@ -268,7 +408,7 @@ class MemberManager(ConfigCommands, commands.Cog):
         """
         Build a complete MemberData object from available sources.
         
-        🔧 FIXED: Now properly checks link_status='approved' for verification
+        🔧 UPDATED: Now includes sanctions from SanctionManager with expiry logic
         """
         data = MemberData(
             discord_id=discord_id,
@@ -283,7 +423,7 @@ class MemberManager(ConfigCommands, commands.Cog):
                 data.discord_roles = [r.name for r in member.roles if r.name != "@everyone"]
                 data.discord_joined = member.joined_at
         
-        # 🔧 FIX: Get MC data and link status from MemberSync
+        # Get MC data and link status from MemberSync
         if self.membersync:
             link = None
             
@@ -304,7 +444,7 @@ class MemberManager(ConfigCommands, commands.Cog):
                 if link:
                     data.link_status = link.get("status", "none")
             
-            # 🔧 FIX: Set is_verified ONLY if link exists AND is approved
+            # Set is_verified ONLY if link exists AND is approved
             if link and link.get("status") == "approved":
                 data.is_verified = True
                 
@@ -316,14 +456,12 @@ class MemberManager(ConfigCommands, commands.Cog):
                         if verified_role_id:
                             verified_role = guild.get_role(verified_role_id)
                             if verified_role and verified_role not in member.roles:
-                                # Linked but missing role - flag this
                                 log.warning(f"Member {discord_id} is linked but missing verified role")
             else:
-                # 🔧 NEW: No link or not approved = not verified
                 data.is_verified = False
                 data.link_status = link.get("status", "none") if link else "none"
         
-        # 🔧 FIX: Get MC data from MembersScraper - verify member is actually in alliance
+        # Get MC data from MembersScraper
         mc_in_alliance = False
         if data.mc_user_id and self.members_scraper:
             try:
@@ -333,17 +471,15 @@ class MemberManager(ConfigCommands, commands.Cog):
                     data.mc_role = mc_data.get("role")
                     data.contribution_rate = mc_data.get("contribution_rate")
                     mc_in_alliance = True
-                    
-                    log.info(f"✅ Found {data.mc_username} in members_v2.db")
             except Exception as e:
                 log.error(f"Failed to get MC data for {data.mc_user_id}: {e}")
         
-        # 🔧 NEW: If has MC ID but not in alliance, they're not active
+        # If has MC ID but not in alliance, they're not active
         if data.mc_user_id and not mc_in_alliance:
             data.mc_username = f"Former member ({data.mc_user_id})"
             data.mc_role = "Left alliance"
         
-        # 🔧 FIX: Get notes count with error handling
+        # Get notes count
         if self.db:
             try:
                 notes = await self.db.get_notes(
@@ -355,63 +491,73 @@ class MemberManager(ConfigCommands, commands.Cog):
                 log.error(f"Failed to get notes: {e}")
                 data.notes_count = 0
         
-        # 🔧 FIX: Get infractions count with error handling
-        if self.db:
-            try:
-                infractions = await self.db.get_infractions(
-                    discord_id=data.discord_id,
-                    mc_user_id=data.mc_user_id
-                )
-                data.infractions_count = len([i for i in infractions if i["status"] == "active"])
-                
-                # Calculate severity score
-                data.severity_score = sum(
-                    i.get("severity_score", 1) 
-                    for i in infractions 
-                    if i["status"] == "active"
-                )
-            except Exception as e:
-                log.error(f"Failed to get infractions: {e}")
-                data.infractions_count = 0
-                data.severity_score = 0
-        
-        # 🆕 NEW: Get sanctions from SanctionManager
+        # 🔧 UPDATED: Get sanctions from SanctionManager with expiry logic
         if self.sanction_manager:
             try:
                 sanctions = self.sanction_manager.db.get_user_sanctions(
-                    guild.id,
-                    discord_id=data.discord_id,
+                    guild_id=guild.id,
+                    discord_user_id=data.discord_id,
                     mc_user_id=data.mc_user_id
                 )
-                # Add active sanctions to infraction count
-                active_sanctions = [s for s in sanctions if s.get("status") == "active"]
-                data.infractions_count += len(active_sanctions)
                 
-                # Increase severity for sanctions
+                # Calculate 30 days ago for expiry check
+                now = int(datetime.now(timezone.utc).timestamp())
+                thirty_days_ago = now - (30 * 86400)
+                
+                # Count only active sanctions (not expired)
+                active_sanctions = []
+                for sanction in sanctions:
+                    status = sanction.get("status", "active")
+                    is_warning = "Warning" in sanction.get("sanction_type", "")
+                    created_at = sanction.get("created_at", 0)
+                    
+                    # Count as active if:
+                    # 1. Status is active AND
+                    # 2. Either not a warning OR warning is < 30 days old
+                    if status == "active":
+                        if not is_warning or created_at >= thirty_days_ago:
+                            active_sanctions.append(sanction)
+                
+                data.infractions_count = len(active_sanctions)
+                
+                # Calculate severity score
+                data.severity_score = 0
                 for sanction in active_sanctions:
-                    if "Warning" in sanction.get("sanction_type", ""):
-                        data.severity_score += 2
-                    elif "Kick" in sanction.get("sanction_type", ""):
-                        data.severity_score += 5
-                    elif "Ban" in sanction.get("sanction_type", ""):
+                    stype = sanction.get("sanction_type", "")
+                    if "Warning" in stype:
+                        if "1st" in stype:
+                            data.severity_score += 2
+                        elif "2nd" in stype:
+                            data.severity_score += 4
+                        elif "3rd" in stype:
+                            data.severity_score += 6
+                        else:
+                            data.severity_score += 1
+                    elif "Kick" in stype:
+                        data.severity_score += 7
+                    elif "Ban" in stype:
                         data.severity_score += 10
+                    elif "Mute" in stype:
+                        data.severity_score += 3
+                    else:
+                        data.severity_score += 1
+            
             except Exception as e:
                 log.error(f"Failed to get sanctions: {e}")
+                data.infractions_count = 0
+                data.severity_score = 0
         
         return data
     
     async def _get_mc_data(self, mc_user_id: str) -> Optional[Dict[str, Any]]:
         """
         Get MC member data from MembersScraper (members_v2.db).
-        
-        🔧 FIXED: Now includes contribution_rate column!
         """
         if not self.members_scraper:
             log.warning("MembersScraper not available")
             return None
         
         try:
-            # 🔧 FIX: Query members_v2.db with correct column names
             import sqlite3
             from pathlib import Path
             
@@ -422,13 +568,11 @@ class MemberManager(ConfigCommands, commands.Cog):
                 log.error(f"Database not found: {db_path}")
                 return None
             
-            log.debug(f"Querying members_v2.db for member_id: {mc_user_id}")
-            
             conn = sqlite3.connect(str(db_path))
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             
-            # 🔧 FIX: Get most recent record INCLUDING contribution_rate
+            # Get most recent record INCLUDING contribution_rate
             cursor.execute("""
                 SELECT member_id, username, rank, earned_credits, contribution_rate, online_status, timestamp
                 FROM members
@@ -441,93 +585,20 @@ class MemberManager(ConfigCommands, commands.Cog):
             conn.close()
             
             if row:
-                # 🔧 FIX: Map to expected field names INCLUDING contribution_rate
                 result = {
                     "user_id": row["member_id"],
                     "name": row["username"],
                     "role": row["rank"],
                     "earned_credits": row["earned_credits"],
-                    "contribution_rate": row["contribution_rate"]  # 🔧 FIXED: Now reads from database!
+                    "contribution_rate": row["contribution_rate"]
                 }
-                log.info(f"✅ Found MC data for {mc_user_id}: {row['username']} (contrib: {row['contribution_rate']}%)")
                 return result
             else:
-                log.warning(f"❌ No MC data found for member_id {mc_user_id}")
                 return None
                 
         except Exception as e:
             log.error(f"Failed to get MC data for {mc_user_id}: {e}", exc_info=True)
             return None
-    
-    # ==================== DEBUG COMMAND ====================
-    
-    @commands.command(name="memberdebug")
-    @commands.is_owner()
-    async def member_debug(self, ctx, mc_id: str):
-        """Debug command to check what's in the members_v2.db for an MC ID."""
-        if not self.members_scraper:
-            await ctx.send("❌ MembersScraper not available")
-            return
-        
-        import sqlite3
-        import json
-        from pathlib import Path
-        
-        embed = discord.Embed(title=f"Debug: MC ID {mc_id}", color=discord.Color.blue())
-        
-        db_path = Path(self.members_scraper.db_path)
-        
-        if not db_path.exists():
-            embed.add_field(name="❌ Database", value=f"Not found: {db_path}", inline=False)
-            await ctx.send(embed=embed)
-            return
-        
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        # Check members table
-        cursor.execute("""
-            SELECT * FROM members 
-            WHERE member_id = ? 
-            ORDER BY timestamp DESC 
-            LIMIT 1
-        """, (mc_id,))
-        
-        row = cursor.fetchone()
-        if row:
-            data = dict(row)
-            embed.add_field(
-                name="✅ members table (exact match)",
-                value=f"```json\n{json.dumps(data, indent=2, default=str)}\n```"[:1024],
-                inline=False
-            )
-        else:
-            embed.add_field(name="❌ members table", value="No exact match", inline=False)
-        
-        # Get sample data
-        cursor.execute("SELECT member_id, username, rank FROM members ORDER BY timestamp DESC LIMIT 5")
-        rows = cursor.fetchall()
-        if rows:
-            sample = "\n".join([f"{r['member_id']}: {r['username']} ({r['rank']})" for r in rows])
-            embed.add_field(
-                name="ℹ️ Sample from members",
-                value=f"```\n{sample}\n```",
-                inline=False
-            )
-        
-        # Get stats
-        cursor.execute("SELECT COUNT(DISTINCT member_id) as total FROM members")
-        total = cursor.fetchone()["total"]
-        embed.add_field(name="📊 Total Members", value=str(total), inline=True)
-        
-        cursor.execute("SELECT MAX(timestamp) as latest FROM members")
-        latest = cursor.fetchone()["latest"]
-        embed.add_field(name="🕐 Latest Scrape", value=latest[:16] if latest else "N/A", inline=True)
-        
-        conn.close()
-        
-        await ctx.send(embed=embed)
     
     # ==================== COMMANDS ====================
     
@@ -650,15 +721,14 @@ class MemberManager(ConfigCommands, commands.Cog):
                     inline=True
                 )
                 
-                # Total infractions
-                infractions = await self.db.get_infractions(limit=9999)
-                active_infractions = len([i for i in infractions if i["status"] == "active"])
-                
-                embed.add_field(
-                    name="⚠️ Infractions",
-                    value=f"**Total:** {len(infractions)}\n**Active:** {active_infractions}",
-                    inline=True
-                )
+                # Total sanctions (from SanctionManager)
+                if self.sanction_manager:
+                    # This would need a method to get all sanctions
+                    embed.add_field(
+                        name="🚨 Sanctions",
+                        value="See `/sanction stats`",
+                        inline=True
+                    )
                 
                 # Events
                 events = await self.db.get_events(limit=9999)
