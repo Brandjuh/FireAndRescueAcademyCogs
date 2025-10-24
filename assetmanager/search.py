@@ -23,7 +23,6 @@ try:
     from rapidfuzz import fuzz  # type: ignore
 
     def _score(a: str, b: str) -> float:
-        # WRatio is tolerant and strong for short queries
         return float(fuzz.WRatio(a, b))
 except Exception:  # fallback to stdlib
     from difflib import SequenceMatcher
@@ -40,30 +39,41 @@ def _connect() -> sqlite3.Connection:
 def _try_match_query(con: sqlite3.Connection, q: str, t_filter: Optional[str]) -> Iterable[sqlite3.Row]:
     """
     Prefer FTS MATCH. If that fails (no FTS compiled or table not FTS), fallback to LIKE.
+    Correctly handles presence/absence of WHERE when appending conditions.
     """
     base = "SELECT type, ref_id, name, body FROM search_index"
+    conds: List[str] = []
     args: List[Any] = []
-    if t_filter and t_filter != "any":
-        # Restrict type in outer WHERE to allow FTS index usage when present
-        where_type = " WHERE type = ?"
-        args.append(t_filter)
-    else:
-        where_type = ""
 
-    # Try FTS MATCH
+    if t_filter and t_filter != "any":
+        conds.append("type = ?")
+        args.append(t_filter)
+
+    # FTS MATCH path
     try:
-        cur = con.execute(f"{base}{where_type} AND search_index MATCH ?", args + [q])
+        match_sql = base
+        if conds:
+            match_sql += " WHERE " + " AND ".join(conds) + " AND search_index MATCH ?"
+        else:
+            match_sql += " WHERE search_index MATCH ?"
+        cur = con.execute(match_sql, args + [q])
         for row in cur:
             yield row
         return
     except Exception:
-        # fall back below
-        pass
+        pass  # fall back
 
-    # LIKE fallback (looser, but works everywhere)
-    like = f"{base}{where_type} AND (name LIKE ? OR body LIKE ?)"
-    like_args = args + [f"%{q}%", f"%{q}%"]
-    cur = con.execute(like, like_args)
+    # LIKE fallback
+    like_sql = base
+    like_args = list(args)
+    like_cond = "(name LIKE ? OR body LIKE ?)"
+    like_args += [f"%{q}%", f"%{q}%"]
+    if conds:
+        like_sql += " WHERE " + " AND ".join(conds) + " AND " + like_cond
+    else:
+        like_sql += " WHERE " + like_cond
+
+    cur = con.execute(like_sql, like_args)
     for row in cur:
         yield row
 
@@ -74,7 +84,6 @@ def _best_excerpt(body: Optional[str], q: str, max_len: int = 160) -> str:
     ql = q.lower()
     i = b.lower().find(ql)
     if i < 0:
-        # no direct hit, just clip
         return (b[: max_len - 1] + "…") if len(b) > max_len else b
     start = max(0, i - 40)
     end = min(len(b), i + len(q) + 120)
@@ -101,9 +110,7 @@ def fuzzy_search(
     seen: set[Tuple[str, str]] = set()
 
     with _connect() as con:
-        # Pull a reasonably big candidate pool; scoring will filter
         pool = list(_try_match_query(con, query, type_filter))
-        # If MATCH yielded zero, LIKE fallback may have; but either way, cap the pool
         pool = pool[:1000]
 
         for row in pool:
@@ -117,9 +124,7 @@ def fuzzy_search(
                 continue
             seen.add(key)
 
-            # Compute fuzzy score using name and a small body slice
             s_name = _score(query, name)
-            # partial body score gives better hit for long descriptions; cheap slice
             s_body = _score(query, body[:512]) if body else 0.0
             score = max(s_name, s_body)
 
@@ -139,14 +144,10 @@ def fuzzy_search(
                 )
             )
 
-    # sort by score desc, then name asc for stability
     results.sort(key=lambda t: (-t[0], t[1]["name"].lower()))
     return [r for _, r in results[: max(1, int(limit))]]
 
 def get_vehicle(vehicle_id: int | str) -> Optional[Dict[str, Any]]:
-    """
-    Return a single vehicle row with joined roles and possible buildings bundled.
-    """
     vid = int(vehicle_id)
     with _connect() as con:
         row = con.execute(
@@ -161,7 +162,6 @@ def get_vehicle(vehicle_id: int | str) -> Optional[Dict[str, Any]]:
         if not row:
             return None
 
-        # roles
         roles = [
             r["role"]
             for r in con.execute(
@@ -175,16 +175,14 @@ def get_vehicle(vehicle_id: int | str) -> Optional[Dict[str, Any]]:
             )
         ]
 
-        # possible buildings
         buildings = [
-            dict(con.execute("SELECT id, name FROM buildings WHERE id = ?", (b_id,)).fetchone())
+            dict(con.execute("SELECT id, name, category FROM buildings WHERE id = ?", (b_id,)).fetchone())
             for (b_id,) in con.execute(
                 "SELECT building_id FROM vehicle_possible_buildings WHERE vehicle_id = ?",
                 (vid,),
             )
         ]
 
-        # required schoolings
         schoolings = [
             dict(
                 id=sid,
@@ -197,7 +195,6 @@ def get_vehicle(vehicle_id: int | str) -> Optional[Dict[str, Any]]:
             )
         ]
 
-        # equipment compatibility
         equipment = [
             dict(con.execute("SELECT id, name FROM equipment WHERE id = ?", (eid,)).fetchone())
             for (eid,) in con.execute(
@@ -213,3 +210,33 @@ def get_vehicle(vehicle_id: int | str) -> Optional[Dict[str, Any]]:
             "required_schoolings": schoolings,
             "equipment_compat": equipment,
         }
+
+def get_equipment(equipment_id: int | str) -> Optional[Dict[str, Any]]:
+    eid = int(equipment_id)
+    with _connect() as con:
+        row = con.execute(
+            "SELECT id, name, description, size, notes FROM equipment WHERE id = ?", (eid,)
+        ).fetchone()
+        if not row:
+            return None
+        return dict(row)
+
+def get_schooling(schooling_id: int | str) -> Optional[Dict[str, Any]]:
+    sid = int(schooling_id)
+    with _connect() as con:
+        row = con.execute(
+            "SELECT id, name, department, duration_days FROM schoolings WHERE id = ?", (sid,)
+        ).fetchone()
+        if not row:
+            return None
+        return dict(row)
+
+def get_building(building_id: int | str) -> Optional[Dict[str, Any]]:
+    bid = int(building_id)
+    with _connect() as con:
+        row = con.execute(
+            "SELECT id, name, category, notes FROM buildings WHERE id = ?", (bid,)
+        ).fetchone()
+        if not row:
+            return None
+        return dict(row)
