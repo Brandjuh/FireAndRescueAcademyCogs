@@ -1,150 +1,215 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from rapidfuzz import fuzz, process
-
-# ---- robust dual-mode import for cogs vs. standalone runs ----
+# Dual import (cog vs standalone)
 try:
-    # running as package (inside Red cog)
-    from .config import DB_PATH, FUZZY_MIN_SCORE
-except Exception:
-    # fallback when executed directly: `python assetmanager/search.py`
-    from config import DB_PATH, FUZZY_MIN_SCORE  # type: ignore
+    from .config import DB_PATH, FUZZY_MIN_SCORE as _CFG_MIN
+except Exception:  # pragma: no cover
+    from config import DB_PATH, FUZZY_MIN_SCORE as _CFG_MIN  # type: ignore
 
+# ---- Robust config handling ----
+def _to_int(val: Any, default: int) -> int:
+    try:
+        return int(val)
+    except Exception:
+        return default
 
-def _fetch_all(con: sqlite3.Connection, q: str, args: Iterable):
-    cur = con.execute(q, args)
-    cols = [d[0] for d in cur.description]
-    for row in cur.fetchall():
-        yield dict(zip(cols, row))
+MIN_SCORE: int = _to_int(_CFG_MIN, 60)
 
+# ---- Optional fuzzy engines ----
+try:
+    from rapidfuzz import fuzz  # type: ignore
 
-def fts_search(q: str, type_filter: str | None = None, limit: int = 25):
-    with sqlite3.connect(DB_PATH) as con:
-        con.row_factory = sqlite3.Row
-        if type_filter:
-            rows = list(_fetch_all(
-                con,
-                """
-                SELECT type, ref_id, name, body
-                FROM search_index
-                WHERE search_index MATCH ?
-                  AND type = ?
-                LIMIT ?
-                """,
-                (q, type_filter, limit),
-            ))
-        else:
-            rows = list(_fetch_all(
-                con,
-                """
-                SELECT type, ref_id, name, body
-                FROM search_index
-                WHERE search_index MATCH ?
-                LIMIT ?
-                """,
-                (q, limit),
-            ))
-    return rows
+    def _score(a: str, b: str) -> float:
+        # WRatio is tolerant and strong for short queries
+        return float(fuzz.WRatio(a, b))
+except Exception:  # fallback to stdlib
+    from difflib import SequenceMatcher
 
+    def _score(a: str, b: str) -> float:
+        return float(SequenceMatcher(None, a, b).ratio() * 100.0)
 
-def fuzzy_search(query: str, type_filter: str | None = None, limit: int = 20):
-    # Haal eerst een pool op (met of zonder type-filter), rank daarna met fuzzy.
-    with sqlite3.connect(DB_PATH) as con:
-        con.row_factory = sqlite3.Row
-        if type_filter:
-            pool = list(_fetch_all(
-                con,
-                """
-                SELECT type, ref_id, name, body
-                FROM search_index
-                WHERE type = ?
-                """,
-                (type_filter,),
-            ))
-        else:
-            pool = list(_fetch_all(
-                con,
-                """
-                SELECT type, ref_id, name, body
-                FROM search_index
-                """,
-                (),
-            ))
+# ---- DB helpers ----
+def _connect() -> sqlite3.Connection:
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    return con
 
-    choices = {f'{r["type"]}:{r["ref_id"]}': r["name"] for r in pool}
-    if not choices:
+def _try_match_query(con: sqlite3.Connection, q: str, t_filter: Optional[str]) -> Iterable[sqlite3.Row]:
+    """
+    Prefer FTS MATCH. If that fails (no FTS compiled or table not FTS), fallback to LIKE.
+    """
+    base = "SELECT type, ref_id, name, body FROM search_index"
+    args: List[Any] = []
+    if t_filter and t_filter != "any":
+        # Restrict type in outer WHERE to allow FTS index usage when present
+        where_type = " WHERE type = ?"
+        args.append(t_filter)
+    else:
+        where_type = ""
+
+    # Try FTS MATCH
+    try:
+        cur = con.execute(f"{base}{where_type} AND search_index MATCH ?", args + [q])
+        for row in cur:
+            yield row
+        return
+    except Exception:
+        # fall back below
+        pass
+
+    # LIKE fallback (looser, but works everywhere)
+    like = f"{base}{where_type} AND (name LIKE ? OR body LIKE ?)"
+    like_args = args + [f"%{q}%", f"%{q}%"]
+    cur = con.execute(like, like_args)
+    for row in cur:
+        yield row
+
+def _best_excerpt(body: Optional[str], q: str, max_len: int = 160) -> str:
+    if not body:
+        return ""
+    b = body.strip()
+    ql = q.lower()
+    i = b.lower().find(ql)
+    if i < 0:
+        # no direct hit, just clip
+        return (b[: max_len - 1] + "…") if len(b) > max_len else b
+    start = max(0, i - 40)
+    end = min(len(b), i + len(q) + 120)
+    snippet = b[start:end]
+    return ("…" if start > 0 else "") + snippet + ("…" if end < len(b) else "")
+
+# ---- Public API ----
+def fuzzy_search(
+    query: str,
+    type_filter: Optional[str] = None,  # 'vehicle' | 'equipment' | 'schooling' | 'building' | None
+    limit: int = 20,
+    min_score: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Returns a list of {type, id, name, score, snippet}
+    """
+    query = (query or "").strip()
+    if not query:
         return []
 
-    scored = process.extract(query, choices, scorer=fuzz.WRatio, limit=None)
-    out = []
-    for (key, _name, score) in scored:
-        if score < FUZZY_MIN_SCORE:
-            continue
-        typ, ref_id = key.split(":", 1)
-        rec = next((r for r in pool if r["type"] == typ and r["ref_id"] == ref_id), None)
-        if rec:
-            out.append({"type": typ, "ref_id": ref_id, "name": rec["name"], "score": score})
-        if len(out) >= limit:
-            break
-    return out
+    threshold = _to_int(min_score, MIN_SCORE)
 
+    results: List[Tuple[float, Dict[str, Any]]] = []
+    seen: set[Tuple[str, str]] = set()
 
-def get_vehicle(con: sqlite3.Connection, vid: int):
-    v = _fetch_all(con, "SELECT * FROM vehicles WHERE id=?", (vid,))
-    v = next(v, None)
-    if not v:
-        return None
+    with _connect() as con:
+        # Pull a reasonably big candidate pool; scoring will filter
+        pool = list(_try_match_query(con, query, type_filter))
+        # If MATCH yielded zero, LIKE fallback may have; but either way, cap the pool
+        pool = pool[:1000]
 
-    buildings = list(_fetch_all(
-        con,
-        """
-        SELECT b.id, b.name
-        FROM vehicle_possible_buildings pb
-        JOIN buildings b ON b.id = pb.building_id
-        WHERE pb.vehicle_id=? ORDER BY b.id
-        """,
-        (vid,),
-    ))
+        for row in pool:
+            typ = row["type"]
+            rid = str(row["ref_id"])
+            name = row["name"] or ""
+            body = row["body"] or ""
 
-    schoolings = list(_fetch_all(
-        con,
-        """
-        SELECT s.id, s.name, vrs.required_count
-        FROM vehicle_required_schoolings vrs
-        JOIN schoolings s ON s.id = vrs.schooling_id
-        WHERE vrs.vehicle_id=? ORDER BY s.id
-        """,
-        (vid,),
-    ))
+            key = (typ, rid)
+            if key in seen:
+                continue
+            seen.add(key)
 
-    equipment = list(_fetch_all(
-        con,
-        """
-        SELECT e.id, e.name
-        FROM vehicle_equipment_compat vec
-        JOIN equipment e ON e.id = vec.equipment_id
-        WHERE vec.vehicle_id=? AND vec.compatible=1 ORDER BY e.id
-        """,
-        (vid,),
-    ))
+            # Compute fuzzy score using name and a small body slice
+            s_name = _score(query, name)
+            # partial body score gives better hit for long descriptions; cheap slice
+            s_body = _score(query, body[:512]) if body else 0.0
+            score = max(s_name, s_body)
 
-    roles = list(_fetch_all(
-        con,
-        """
-        SELECT r.role
-        FROM vehicle_role_map vrm
-        JOIN vehicle_roles r ON r.id = vrm.role_id
-        WHERE vrm.vehicle_id=?
-        ORDER BY r.role
-        """,
-        (vid,),
-    ))
+            if score < float(threshold):
+                continue
 
-    v["possible_buildings"] = buildings
-    v["required_schoolings"] = schoolings
-    v["equipment_compat"] = equipment
-    v["roles"] = [r["role"] for r in roles]
-    return v
+            results.append(
+                (
+                    score,
+                    {
+                        "type": typ,
+                        "id": rid,
+                        "name": name,
+                        "score": round(float(score), 2),
+                        "snippet": _best_excerpt(body, query),
+                    },
+                )
+            )
+
+    # sort by score desc, then name asc for stability
+    results.sort(key=lambda t: (-t[0], t[1]["name"].lower()))
+    return [r for _, r in results[: max(1, int(limit))]]
+
+def get_vehicle(vehicle_id: int | str) -> Optional[Dict[str, Any]]:
+    """
+    Return a single vehicle row with joined roles and possible buildings bundled.
+    """
+    vid = int(vehicle_id)
+    with _connect() as con:
+        row = con.execute(
+            """
+            SELECT id, name, min_personnel, max_personnel, price_credits, price_coins,
+                   rank_required, water_tank, foam_tank, pump_gpm, speed, specials
+            FROM vehicles
+            WHERE id = ?
+            """,
+            (vid,),
+        ).fetchone()
+        if not row:
+            return None
+
+        # roles
+        roles = [
+            r["role"]
+            for r in con.execute(
+                """
+                SELECT vr.role
+                FROM vehicle_role_map vrm
+                JOIN vehicle_roles vr ON vrm.role_id = vr.id
+                WHERE vrm.vehicle_id = ?
+                """,
+                (vid,),
+            )
+        ]
+
+        # possible buildings
+        buildings = [
+            dict(con.execute("SELECT id, name FROM buildings WHERE id = ?", (b_id,)).fetchone())
+            for (b_id,) in con.execute(
+                "SELECT building_id FROM vehicle_possible_buildings WHERE vehicle_id = ?",
+                (vid,),
+            )
+        ]
+
+        # required schoolings
+        schoolings = [
+            dict(
+                id=sid,
+                name=con.execute("SELECT name FROM schoolings WHERE id = ?", (sid,)).fetchone()[0],
+                required_count=req,
+            )
+            for sid, req in con.execute(
+                "SELECT schooling_id, required_count FROM vehicle_required_schoolings WHERE vehicle_id = ?",
+                (vid,),
+            )
+        ]
+
+        # equipment compatibility
+        equipment = [
+            dict(con.execute("SELECT id, name FROM equipment WHERE id = ?", (eid,)).fetchone())
+            for (eid,) in con.execute(
+                "SELECT equipment_id FROM vehicle_equipment_compat WHERE vehicle_id = ? AND compatible = 1",
+                (vid,),
+            )
+        ]
+
+        return {
+            **dict(row),
+            "roles": roles,
+            "possible_buildings": buildings,
+            "required_schoolings": schoolings,
+            "equipment_compat": equipment,
+        }
