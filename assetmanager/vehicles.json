@@ -1,49 +1,9 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "LSSM vehicles.ts export",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "LSSM vehicles.ts (export default object map)",
   "type": "object",
-  "patternProperties": {
-    "^[0-9]+$": {
-      "type": "object",
-      "properties": {
-        "name": { "type": ["string", "null"] },
-        "min_personnel": { "type": ["integer", "null"] },
-        "max_personnel": { "type": ["integer", "null"] },
-        "price_credits": { "type": ["integer", "null"] },
-        "price_coins": { "type": ["integer", "null"] },
-        "rank_required": { "type": ["string", "null"] },
-        "water_tank": { "type": ["integer", "null"] },
-        "foam_tank": { "type": ["integer", "null"] },
-        "pump_gpm": { "type": ["integer", "null"] },
-        "speed": { "type": ["integer", "null"] },
-        "specials": { "type": ["string", "null"] },
-        "roles": {
-          "type": ["array", "null"],
-          "items": { "type": "string" }
-        },
-        "possible_buildings": {
-          "type": ["array", "null"],
-          "items": { "type": "integer" }
-        },
-        "required_schoolings": {
-          "type": ["array", "null"],
-          "items": {
-            "type": "object",
-            "properties": {
-              "schooling_id": { "type": "integer" },
-              "count": { "type": "integer" }
-            },
-            "required": ["schooling_id"],
-            "additionalProperties": false
-          }
-        },
-        "equipment_compat": {
-          "type": ["array", "null"],
-          "items": { "type": "integer" }
-        }
-      },
-      "additionalProperties": true
-    }
-  },
-  "additionalProperties": false
+  "additionalProperties": {
+    "type": "object",
+    "additionalProperties": true
+  }
 }
