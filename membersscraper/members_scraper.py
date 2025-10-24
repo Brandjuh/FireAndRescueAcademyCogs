@@ -198,7 +198,7 @@ class MembersScraper(commands.Cog):
                 pass
     
     async def _get_session(self, ctx=None):
-        """Get authenticated session with proper headers"""
+        """Get authenticated session - GEEN WIJZIGINGEN AAN HEADERS!"""
         cookie_manager = self.bot.get_cog("CookieManager")
         if not cookie_manager:
             await self._debug_log("❌ CookieManager not loaded", ctx)
@@ -208,64 +208,41 @@ class MembersScraper(commands.Cog):
             session = await cookie_manager.get_session()
             if not session:
                 return None
-            
-            # CRITICAL FIX: Add User-Agent header like alliance_scraper does!
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            }
-            session.headers.update(headers)
-            
-            await self._debug_log("✅ Session obtained with headers", ctx)
+            await self._debug_log("✅ Session obtained", ctx)
             return session
         except Exception as e:
             await self._debug_log(f"❌ Session error: {e}", ctx)
             return None
     
     async def _check_logged_in(self, html_content, ctx=None):
-        """Check if still logged in by looking for multiple indicators"""
+        """Check login status"""
         soup = BeautifulSoup(html_content, 'html.parser')
         
-        # Check for homepage (definite NOT logged in)
+        # Check for homepage
         title = soup.find('title')
         if title and 'Create your own 911-Dispatch-Center' in title.get_text():
             await self._debug_log("❌ On homepage - NOT logged in", ctx)
             return False
         
-        # Check for login form (definite NOT logged in)
+        # Check for login form
         if soup.find('form', action=lambda x: x and 'sign_in' in str(x)):
             await self._debug_log("❌ Login form detected", ctx)
             return False
         
-        # Check MULTIPLE positive indicators (ANY of these means logged in!)
-        logout_button = soup.find('a', href='/users/sign_out')
-        user_menu = soup.find('li', class_='dropdown user-menu')
-        profile_link = soup.find('a', href=lambda x: x and '/profile' in str(x))
-        settings_link = soup.find('a', href='/settings')
+        # Check for member data indicators
+        member_links = soup.find_all('a', href=lambda x: x and '/users/' in str(x))
+        if len(member_links) >= 5:
+            await self._debug_log(f"✅ Logged in ({len(member_links)} member links)", ctx)
+            return True
         
-        # KEY FIX: If we can see member data, we're logged in!
-        has_member_links = bool(soup.find('a', href=lambda x: x and '/users/' in str(x)))
+        # Check for data tables
+        tables = soup.find_all('table')
+        if any(len(t.find_all('tr')) > 5 for t in tables):
+            await self._debug_log("✅ Logged in (data tables found)", ctx)
+            return True
         
-        # Check for data tables with content
-        has_data_tables = any(len(t.find_all('tr')) > 3 for t in soup.find_all('table'))
-        
-        # If ANY indicator is present, we're logged in
-        is_logged_in = (logout_button is not None or 
-                        user_menu is not None or 
-                        profile_link is not None or
-                        settings_link is not None or
-                        has_member_links or
-                        has_data_tables)
-        
-        # Debug logging
-        await self._debug_log(f"Login check: {'✅ Logged in' if is_logged_in else '❌ NOT logged in'}", ctx)
-        await self._debug_log(f"  Logout button: {logout_button is not None}", ctx)
-        await self._debug_log(f"  User menu: {user_menu is not None}", ctx)
-        await self._debug_log(f"  Profile link: {profile_link is not None}", ctx)
-        await self._debug_log(f"  Settings link: {settings_link is not None}", ctx)
-        await self._debug_log(f"  Has member links: {has_member_links}", ctx)
-        await self._debug_log(f"  Has data tables: {has_data_tables}", ctx)
-        
-        return is_logged_in
+        await self._debug_log("❌ Login status unclear, assuming NOT logged in", ctx)
+        return False
     
     def _extract_member_rows_safe(self, html: str, page: int) -> tuple:
         """SAFE extraction using header-based column mapping"""
@@ -397,37 +374,30 @@ class MembersScraper(commands.Cog):
         url = f"{self.members_url}?page={page}"
         
         try:
-            await self._debug_log(f"🌐 Requesting: {url}", ctx)
-            
             async with session.get(url, allow_redirects=True) as response:
-                status = response.status
-                final_url = str(response.url)
-                
-                await self._debug_log(f"📡 Status: {status}, Final URL: {final_url}", ctx)
-                
                 if response.status != 200:
                     await self._debug_log(f"❌ Page {page}: HTTP {response.status}", ctx)
                     return []
                 
                 html = await response.text()
-                await self._debug_log(f"📄 HTML length: {len(html)} chars", ctx)
+                final_url = str(response.url)
                 
-                # Check for redirect to wrong page
+                # Check for redirect
                 if 'mitglieder' not in final_url and 'members' not in final_url:
                     await self._debug_log(f"❌ Page {page}: REDIRECTED to {final_url}", ctx)
                     if ctx:
-                        await ctx.send(f"⚠️ REDIRECT DETECTED to: {final_url}\nSession may be invalid!")
+                        await ctx.send(f"⚠️ REDIRECT DETECTED - Session expired!\nRun: `[p]cookie login`")
                     return []
                 
-                # Check for homepage FIRST (before parsing)
+                # Check for homepage
                 if '<title>MISSIONCHIEF.COM - Create your own' in html:
-                    await self._debug_log(f"❌ Page {page}: Got homepage HTML", ctx)
+                    await self._debug_log(f"❌ Page {page}: Got homepage", ctx)
                     if ctx:
-                        await ctx.send(f"⚠️ HOMEPAGE DETECTED\nURL requested: {url}\nFinal URL: {final_url}")
+                        await ctx.send(f"⚠️ HOMEPAGE DETECTED - Session invalid!\nRun: `[p]cookie login`")
                     return []
                 
                 if not await self._check_logged_in(html, ctx):
-                    await self._debug_log(f"❌ Page {page}: Login check failed", ctx)
+                    await self._debug_log(f"❌ Page {page}: Not logged in", ctx)
                     return []
                 
                 members, skipped, stats = self._extract_member_rows_safe(html, page)
