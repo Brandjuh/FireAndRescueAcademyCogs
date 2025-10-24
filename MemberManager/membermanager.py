@@ -77,7 +77,8 @@ class MemberManager(ConfigCommands, commands.Cog):
         
         # Integration references
         self.membersync: Optional[commands.Cog] = None
-        self.alliance_scraper: Optional[commands.Cog] = None
+        self.alliance_scraper: Optional[commands.Cog] = None  # Legacy support
+        self.members_scraper: Optional[commands.Cog] = None  # 🔧 NEW: Primary source
         self.sanction_manager: Optional[commands.Cog] = None
         
         # Automation
@@ -145,7 +146,8 @@ class MemberManager(ConfigCommands, commands.Cog):
     async def _connect_integrations(self):
         """Detect and connect to other cogs."""
         self.membersync = self.bot.get_cog("MemberSync")
-        self.alliance_scraper = self.bot.get_cog("AllianceScraper")
+        self.alliance_scraper = self.bot.get_cog("AllianceScraper")  # Keep for compatibility
+        self.members_scraper = self.bot.get_cog("MembersScraper")  # 🔧 NEW: Use MembersScraper
         self.sanction_manager = self.bot.get_cog("SanctionManager")
         
         integrations = []
@@ -153,6 +155,8 @@ class MemberManager(ConfigCommands, commands.Cog):
             integrations.append("MemberSync")
         if self.alliance_scraper:
             integrations.append("AllianceScraper")
+        if self.members_scraper:
+            integrations.append("MembersScraper")  # 🔧 NEW
         if self.sanction_manager:
             integrations.append("SanctionManager")
         
@@ -305,23 +309,18 @@ class MemberManager(ConfigCommands, commands.Cog):
                 data.is_verified = False
                 data.link_status = link.get("status", "none") if link else "none"
         
-        # 🔧 FIX: Get MC data from AllianceScraper - verify member is actually in alliance
+        # 🔧 FIX: Get MC data from MembersScraper - verify member is actually in alliance
         mc_in_alliance = False
-        if data.mc_user_id and self.alliance_scraper:
+        if data.mc_user_id and self.members_scraper:
             try:
                 mc_data = await self._get_mc_data(data.mc_user_id)
                 if mc_data:
                     data.mc_username = mc_data.get("name")
                     data.mc_role = mc_data.get("role")
-                    data.contribution_rate = mc_data.get("contribution_rate")
+                    data.contribution_rate = mc_data.get("contribution_rate")  # Will be None
                     mc_in_alliance = True
                     
-                    # 🔧 FIX: Ensure contribution_rate is properly formatted
-                    if data.contribution_rate is not None:
-                        try:
-                            data.contribution_rate = float(data.contribution_rate)
-                        except (ValueError, TypeError):
-                            data.contribution_rate = None
+                    log.info(f"✅ Found {data.mc_username} in members_v2.db")
             except Exception as e:
                 log.error(f"Failed to get MC data for {data.mc_user_id}: {e}")
         
@@ -388,109 +387,131 @@ class MemberManager(ConfigCommands, commands.Cog):
         return data
     
     async def _get_mc_data(self, mc_user_id: str) -> Optional[Dict[str, Any]]:
-        """Get MC member data from AllianceScraper."""
-        if not self.alliance_scraper:
-            log.warning("AllianceScraper not available")
+        """
+        Get MC member data from MembersScraper (members_v2.db).
+        
+        🔧 FIXED: Now uses the correct database and table structure!
+        """
+        if not self.members_scraper:
+            log.warning("MembersScraper not available")
             return None
         
         try:
-            # 🔧 FIX: Try exact match on user_id
-            log.debug(f"Querying alliance DB for MC ID: {mc_user_id}")
-            rows = await self.alliance_scraper._query_alliance(
-                "SELECT user_id, name, role, contribution_rate, earned_credits "
-                "FROM members_current WHERE user_id=?",
-                (mc_user_id,)
-            )
+            # 🔧 FIX: Query members_v2.db with correct column names
+            import sqlite3
+            from pathlib import Path
             
-            if rows:
-                log.info(f"Found MC data in members_current for {mc_user_id}: {dict(rows[0])}")
-                return dict(rows[0])
+            # Get database path from MembersScraper
+            db_path = Path(self.members_scraper.db_path)
             
-            # 🔧 FIX: Try searching by profile_href as fallback
-            log.debug(f"No exact match, trying profile_href search for {mc_user_id}")
-            rows = await self.alliance_scraper._query_alliance(
-                "SELECT user_id, name, role, contribution_rate, earned_credits "
-                "FROM members_current WHERE profile_href LIKE ?",
-                (f"%/users/{mc_user_id}%",)
-            )
+            if not db_path.exists():
+                log.error(f"Database not found: {db_path}")
+                return None
             
-            if rows:
-                log.info(f"Found MC data via profile_href for {mc_user_id}: {dict(rows[0])}")
-                return dict(rows[0])
+            log.debug(f"Querying members_v2.db for member_id: {mc_user_id}")
             
-            # 🔧 FIX: Also try members_history as last resort
-            log.debug(f"Not in members_current, trying members_history for {mc_user_id}")
-            rows = await self.alliance_scraper._query_alliance(
-                "SELECT user_id, name, role, contribution_rate, earned_credits "
-                "FROM members_history WHERE user_id=? "
-                "ORDER BY scraped_at DESC LIMIT 1",
-                (mc_user_id,)
-            )
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
             
-            if rows:
-                log.warning(f"Found MC data in members_history (not current!) for {mc_user_id}")
-                return dict(rows[0])
+            # 🔧 FIX: Get most recent record for this member_id
+            cursor.execute("""
+                SELECT member_id, username, rank, earned_credits, online_status, timestamp
+                FROM members
+                WHERE member_id = ?
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """, (mc_user_id,))
             
-            log.warning(f"No MC data found anywhere for {mc_user_id}")
+            row = cursor.fetchone()
+            conn.close()
+            
+            if row:
+                # 🔧 FIX: Map to expected field names
+                result = {
+                    "user_id": row["member_id"],  # Map member_id to user_id
+                    "name": row["username"],
+                    "role": row["rank"],
+                    "earned_credits": row["earned_credits"],
+                    "contribution_rate": None  # 🔧 NOTE: members table doesn't have contribution!
+                }
+                log.info(f"✅ Found MC data for {mc_user_id}: {row['username']}")
+                return result
+            else:
+                log.warning(f"❌ No MC data found for member_id {mc_user_id}")
+                return None
                 
         except Exception as e:
             log.error(f"Failed to get MC data for {mc_user_id}: {e}", exc_info=True)
-        
-        return None
+            return None
     
     # ==================== DEBUG COMMAND ====================
     
     @commands.command(name="memberdebug")
     @commands.is_owner()
     async def member_debug(self, ctx, mc_id: str):
-        """Debug command to check what's in the database for an MC ID."""
-        if not self.alliance_scraper:
-            await ctx.send("❌ AllianceScraper not available")
+        """Debug command to check what's in the members_v2.db for an MC ID."""
+        if not self.members_scraper:
+            await ctx.send("❌ MembersScraper not available")
             return
+        
+        import sqlite3
+        import json
+        from pathlib import Path
         
         embed = discord.Embed(title=f"Debug: MC ID {mc_id}", color=discord.Color.blue())
         
-        # Check members_current
-        rows = await self.alliance_scraper._query_alliance(
-            "SELECT * FROM members_current WHERE user_id=?",
-            (mc_id,)
-        )
-        if rows:
-            data = dict(rows[0])
+        db_path = Path(self.members_scraper.db_path)
+        
+        if not db_path.exists():
+            embed.add_field(name="❌ Database", value=f"Not found: {db_path}", inline=False)
+            await ctx.send(embed=embed)
+            return
+        
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # Check members table
+        cursor.execute("""
+            SELECT * FROM members 
+            WHERE member_id = ? 
+            ORDER BY timestamp DESC 
+            LIMIT 1
+        """, (mc_id,))
+        
+        row = cursor.fetchone()
+        if row:
+            data = dict(row)
             embed.add_field(
-                name="✅ members_current (exact match)",
+                name="✅ members table (exact match)",
                 value=f"```json\n{json.dumps(data, indent=2)}\n```"[:1024],
                 inline=False
             )
         else:
-            embed.add_field(name="❌ members_current", value="No exact match", inline=False)
+            embed.add_field(name="❌ members table", value="No exact match", inline=False)
         
-        # Check profile_href
-        rows = await self.alliance_scraper._query_alliance(
-            "SELECT * FROM members_current WHERE profile_href LIKE ?",
-            (f"%/users/{mc_id}%",)
-        )
+        # Get sample data
+        cursor.execute("SELECT member_id, username, rank FROM members ORDER BY timestamp DESC LIMIT 5")
+        rows = cursor.fetchall()
         if rows:
-            data = dict(rows[0])
+            sample = "\n".join([f"{r['member_id']}: {r['username']} ({r['rank']})" for r in rows])
             embed.add_field(
-                name="✅ members_current (profile_href)",
-                value=f"```json\n{json.dumps(data, indent=2)}\n```"[:1024],
-                inline=False
-            )
-        else:
-            embed.add_field(name="❌ profile_href search", value="No match", inline=False)
-        
-        # Check all members_current for similar IDs
-        rows = await self.alliance_scraper._query_alliance(
-            "SELECT user_id, name FROM members_current LIMIT 5"
-        )
-        if rows:
-            sample = "\n".join([f"{r['user_id']}: {r['name']}" for r in rows])
-            embed.add_field(
-                name="ℹ️ Sample from members_current",
+                name="ℹ️ Sample from members",
                 value=f"```\n{sample}\n```",
                 inline=False
             )
+        
+        # Get stats
+        cursor.execute("SELECT COUNT(DISTINCT member_id) as total FROM members")
+        total = cursor.fetchone()["total"]
+        embed.add_field(name="📊 Total Members", value=str(total), inline=True)
+        
+        cursor.execute("SELECT MAX(timestamp) as latest FROM members")
+        latest = cursor.fetchone()["latest"]
+        embed.add_field(name="🕐 Latest Scrape", value=latest[:16] if latest else "N/A", inline=True)
+        
+        conn.close()
         
         await ctx.send(embed=embed)
     
