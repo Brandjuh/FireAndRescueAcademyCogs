@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
 import sqlite3
@@ -24,8 +23,7 @@ except Exception:  # pragma: no cover
             self.headers = headers
 
         def raise_for_status(self):
-            # urllib raises HTTPError on non-2xx by itself
-            return
+            return  # urllib raises HTTPError on its own
 
         @property
         def text(self) -> str:
@@ -45,10 +43,10 @@ from jsonschema import validate, ValidationError
 # ---- robust dual-mode import for cogs vs. standalone runs ----
 try:
     # running as package (inside Red cog)
-    from .config import DB_PATH, DATA_DIR, SRC_FILES, TS_TO_JSON, NODE_BIN, SCHEMA_DIR
+    from .config import DB_PATH, SRC_FILES, TS_TO_JSON, NODE_BIN, SCHEMA_DIR
 except Exception:
     # fallback when executed directly: `python assetmanager/etl.py`
-    from config import DB_PATH, DATA_DIR, SRC_FILES, TS_TO_JSON, NODE_BIN, SCHEMA_DIR  # type: ignore
+    from config import DB_PATH, SRC_FILES, TS_TO_JSON, NODE_BIN, SCHEMA_DIR  # type: ignore
 
 # --------------- Utilities ---------------
 
@@ -59,18 +57,10 @@ def utcnow_iso() -> str:
 
 def ensure_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    schema_path = Path(__file__).with_name("db_schema.sql")
     with sqlite3.connect(DB_PATH) as con:
-        con.executescript(Path(__file__).with_name("db_schema.sql").read_text(encoding="utf-8"))
+        con.executescript(schema_path.read_text(encoding="utf-8"))
         con.commit()
-
-def _which_node() -> str:
-    node = shutil.which(str(NODE_BIN)) if NODE_BIN else None
-    if not node:
-        raise RuntimeError(
-            "Node.js niet gevonden. Installeer Node 18+ en zorg dat 'node' in PATH staat, "
-            "of pas NODE_BIN aan in config.py."
-        )
-    return node
 
 def fetch_raw(url: str, out_path: Path, *, retries: int = 3, backoff: float = 1.5) -> str:
     last_err = None
@@ -92,21 +82,86 @@ def fetch_raw(url: str, out_path: Path, *, retries: int = 3, backoff: float = 1.
             if attempt >= retries:
                 break
             time.sleep(backoff ** attempt)
-    raise RuntimeError(f"Download mislukt voor {url}: {last_err}")
+    raise RuntimeError(f"Download failed for {url}: {last_err}")
+
+# ---------- TS -> JSON conversion (pure Python first, Node fallback optional) ----------
+
+_PLAIN_KEY = re.compile(r'([,{]\s*)([A-Za-z0-9_]+)\s*:', re.M)
+_SINGLE_STR = re.compile(r"'([^'\\]*?)'")
+_TRAIL_COMMA = re.compile(r",\s*([}\]])")
+_EXPORT_DEFAULT = re.compile(r"^\s*export\s+default\s+", re.M)
+
+def _ts_like_to_json_text(ts_source: str) -> str:
+    """
+    Convert a TS `export default { ... }` object into JSON text using tolerant string surgery.
+    Assumptions:
+      - no functions, only values/objects/arrays/strings/numbers/booleans/null
+      - strings may be single-quoted
+      - unquoted keys are simple identifiers
+      - trailing commas may exist
+    """
+    s = _EXPORT_DEFAULT.sub("", ts_source).strip()
+    if s.endswith(";"):
+        s = s[:-1]
+
+    # Replace single-quoted strings with double-quoted JSON strings
+    s = _SINGLE_STR.sub(lambda m: '"' + m.group(1).replace('"', '\\"') + '"', s)
+
+    # Quote unquoted keys: foo: -> "foo":
+    s = _PLAIN_KEY.sub(r'\1"\2":', s)
+
+    # Remove trailing commas before } or ]
+    s = _TRAIL_COMMA.sub(r"\1", s)
+
+    return s
+
+def ts_to_json_py(ts_path: Path, json_path: Path) -> None:
+    raw = ts_path.read_text(encoding="utf-8")
+    text = _ts_like_to_json_text(raw)
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError as e:
+        # Provide a short context to help debugging mapping if LSSM format changes.
+        snippet = text[max(0, e.pos - 200): e.pos + 200]
+        raise RuntimeError(f"TS->JSON conversion failed (pure Python) at pos {e.pos}: {e.msg}\nContext: {snippet}")
+    json_path.write_text(json.dumps(obj), encoding="utf-8")
+
+def _which_node() -> str | None:
+    try:
+        node = shutil.which(str(NODE_BIN)) if NODE_BIN else shutil.which("node")
+    except Exception:
+        node = None
+    return node
 
 def ts_to_json(ts_path: Path, json_path: Path) -> None:
-    node = _which_node()
-    # Node script print JSON naar stdout
-    res = subprocess.run([node, str(TS_TO_JSON), str(ts_path)], capture_output=True, text=True)
-    if res.returncode != 0:
-        snippet = (res.stderr or res.stdout or "").strip()
-        if len(snippet) > 600:
-            snippet = snippet[:600] + " …"
-        raise RuntimeError(
-            f"ts_to_json faalde voor {ts_path.name}. Controleer ts_to_json.mjs en Node-installatie. "
-            f"Details: {snippet}"
-        )
-    json_path.write_text(res.stdout, encoding="utf-8")
+    """
+    Prefer the pure-Python converter. If that ever fails, and Node is available,
+    fall back to the original ts_to_json.mjs. This removes the hard dependency on Node.
+    """
+    try:
+        ts_to_json_py(ts_path, json_path)
+        return
+    except Exception as py_err:
+        node_bin = _which_node()
+        if not node_bin:
+            # No Node present, re-raise Python error
+            raise py_err
+
+        # Node fallback path (optional)
+        mjs = Path(__file__).with_name("ts_to_json.mjs")
+        if not mjs.exists():
+            # If the JS helper is not shipped, still raise the Python error
+            raise py_err
+
+        res = subprocess.run([node_bin, str(mjs), str(ts_path)], capture_output=True, text=True)
+        if res.returncode != 0:
+            snippet = (res.stderr or res.stdout or "").strip()
+            if len(snippet) > 600:
+                snippet = snippet[:600] + " …"
+            raise RuntimeError(
+                f"TS->JSON conversion failed (node fallback) for {ts_path.name}. Details: {snippet}"
+            )
+        json_path.write_text(res.stdout, encoding="utf-8")
 
 def load_and_validate(json_path: Path, schema_name: str) -> Dict[str, Any]:
     obj = json.loads(json_path.read_text(encoding="utf-8"))
@@ -114,7 +169,7 @@ def load_and_validate(json_path: Path, schema_name: str) -> Dict[str, Any]:
     try:
         validate(obj, schema)
     except ValidationError as e:
-        raise RuntimeError(f"Validatie faalde voor {schema_name}: {e.message}")
+        raise RuntimeError(f"Validation failed for {schema_name}: {e.message}")
     return obj
 
 # --------------- Mapping / Transform ---------------
@@ -240,7 +295,7 @@ def transform_vehicles(src: Dict[str, Any]) -> Tuple[
         if isinstance(pbs, list):
             vp_buildings[vid] = set(int(x) for x in pbs if isinstance(x, (int, str)) and str(x).isdigit())
 
-        # Required schoolings (array of {schooling_id, count})
+        # Required schoolings
         reqs = v.get("required_schoolings") or v.get("schoolings") or []
         arr = []
         if isinstance(reqs, list):
@@ -263,13 +318,12 @@ def transform_vehicles(src: Dict[str, Any]) -> Tuple[
         if isinstance(ec, list):
             v_equipment[vid] = set(int(x) for x in ec if isinstance(x, (int, str)) and str(x).isdigit())
 
-        # Roles (multi-role behavior)
+        # Roles (multi-role)
         roles = v.get("roles") or v.get("acts_as") or v.get("role")
         role_set = set()
         if isinstance(roles, list):
             role_set = set(str(r).strip() for r in roles if r)
         elif isinstance(roles, str):
-            # maybe "Heavy Rescue + Engine"
             parts = re.split(r"[+,/]|and", roles, flags=re.I)
             role_set = set(p.strip() for p in parts if p.strip())
         if role_set:
@@ -393,20 +447,28 @@ def rebuild_fts(con: sqlite3.Connection):
     # vehicles
     for row in con.execute("SELECT id, name, specials FROM vehicles"):
         body = row[2] or ""
-        con.execute("INSERT INTO search_index (type, ref_id, name, body) VALUES ('vehicle', ?, ?, ?)",
-                    (str(row[0]), row[1], body))
+        con.execute(
+            "INSERT INTO search_index (type, ref_id, name, body) VALUES ('vehicle', ?, ?, ?)",
+            (str(row[0]), row[1], body),
+        )
     # equipment
     for row in con.execute("SELECT id, name, description FROM equipment"):
-        con.execute("INSERT INTO search_index (type, ref_id, name, body) VALUES ('equipment', ?, ?, ?)",
-                    (str(row[0]), row[1], row[2] or ""))
+        con.execute(
+            "INSERT INTO search_index (type, ref_id, name, body) VALUES ('equipment', ?, ?, ?)",
+            (str(row[0]), row[1], row[2] or ""),
+        )
     # schoolings
     for row in con.execute("SELECT id, name, department FROM schoolings"):
-        con.execute("INSERT INTO search_index (type, ref_id, name, body) VALUES ('schooling', ?, ?, ?)",
-                    (str(row[0]), row[1], row[2] or ""))
+        con.execute(
+            "INSERT INTO search_index (type, ref_id, name, body) VALUES ('schooling', ?, ?, ?)",
+            (str(row[0]), row[1], row[2] or ""),
+        )
     # buildings
     for row in con.execute("SELECT id, name, category FROM buildings"):
-        con.execute("INSERT INTO search_index (type, ref_id, name, body) VALUES ('building', ?, ?, ?)",
-                    (str(row[0]), row[1], row[2] or ""))
+        con.execute(
+            "INSERT INTO search_index (type, ref_id, name, body) VALUES ('building', ?, ?, ?)",
+            (str(row[0]), row[1], row[2] or ""),
+        )
 
 # --------------- Main ETL ---------------
 
@@ -420,7 +482,7 @@ def run_etl():
             ts_path = tmpdir / f"{key}.ts"
             commit_sha = fetch_raw(url, ts_path)
             json_path = tmpdir / f"{key}.json"
-            ts_to_json(ts_path, json_path)
+            ts_to_json(ts_path, json_path)  # now pure Python by default
             obj = load_and_validate(json_path, key)
             results[key] = (obj, commit_sha)
 
