@@ -375,11 +375,15 @@ class MemberOverviewView(discord.ui.View):
             inline=False
         )
         
-        # Link status
+        # Link status footer
         if data.is_linked():
-            embed.set_footer(text="✅ Discord and MC accounts are linked")
+            embed.set_footer(text="✅ Discord and MC accounts are linked • Member active in alliance")
+        elif data.has_discord() and data.has_mc() and data.link_status == "approved":
+            embed.set_footer(text="⚠️ Linked but not active in alliance")
         elif data.has_discord() and data.has_mc():
             embed.set_footer(text="⚠️ Accounts not linked or pending verification")
+        else:
+            embed.set_footer(text="❌ Incomplete information")
         
         return embed
     
