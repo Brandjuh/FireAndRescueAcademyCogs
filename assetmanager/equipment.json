@@ -1,18 +1,9 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "LSSM equipment.ts export",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "LSSM equipment.ts (export default object map)",
   "type": "object",
-  "patternProperties": {
-    "^[0-9]+$": {
-      "type": "object",
-      "properties": {
-        "name": { "type": ["string", "null"] },
-        "description": { "type": ["string", "null"] },
-        "size": { "type": ["string", "number", "null"] },
-        "notes": { "type": ["string", "null"] }
-      },
-      "additionalProperties": true
-    }
-  },
-  "additionalProperties": false
+  "additionalProperties": {
+    "type": "object",
+    "additionalProperties": true
+  }
 }
