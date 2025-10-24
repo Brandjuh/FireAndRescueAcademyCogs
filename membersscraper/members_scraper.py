@@ -158,7 +158,7 @@ class MembersScraper(commands.Cog):
             print(f"[DEBUG] {message}")
     
     async def _scrape_members_page(self, session, page, ctx=None):
-        """Scrape a single page of members - WERKENDE VERSIE"""
+        """Scrape a single page of members - WERKENDE VERSIE met DEBUG"""
         url = f"{self.members_url}?page={page}"
         
         try:
@@ -168,12 +168,29 @@ class MembersScraper(commands.Cog):
                     return []
                 
                 html = await response.text()
+                await self._debug_log(f"📄 Page {page}: Got {len(html)} chars HTML", ctx)
+                
                 soup = BeautifulSoup(html, 'html.parser')
+                
+                # DEBUG: Check wat voor tables we hebben
+                all_tables = soup.find_all('table')
+                await self._debug_log(f"🔍 Page {page}: Found {len(all_tables)} table(s)", ctx)
+                
+                if all_tables and ctx:
+                    for i, t in enumerate(all_tables[:3]):
+                        classes = t.get('class', [])
+                        rows = len(t.find_all('tr'))
+                        await self._debug_log(f"  Table {i+1}: classes={classes}, rows={rows}", ctx)
                 
                 table = soup.find('table', class_='table')
                 if not table:
-                    await self._debug_log(f"⚠️ Page {page}: No table found", ctx)
-                    return []
+                    await self._debug_log(f"⚠️ Page {page}: No table with class='table' found", ctx)
+                    # Probeer ALLE tables
+                    if all_tables:
+                        await self._debug_log(f"⚠️ Trying first table without class check...", ctx)
+                        table = all_tables[0]
+                    else:
+                        return []
                 
                 members_data = []
                 timestamp = datetime.utcnow().isoformat()
