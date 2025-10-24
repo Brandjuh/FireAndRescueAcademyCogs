@@ -7,6 +7,7 @@ Tab-based interface with buttons for navigation
 - Audit log tab showing all edits
 - Note editing shows editor name
 - Better error handling
+- updated_by_name parameter included
 """
 
 import discord
@@ -58,7 +59,7 @@ class MemberOverviewView(discord.ui.View):
         """🔧 FIX: Only allow the command invoker to use buttons."""
         if interaction.user.id != self.invoker_id:
             await interaction.response.send_message(
-                "❌ This is not your member info panel. Use `/member` to create your own.",
+                "❌ This is not your member info panel. Use `[p]member` to create your own.",
                 ephemeral=True
             )
             return False
@@ -637,8 +638,9 @@ class MemberOverviewView(discord.ui.View):
             color=discord.Color.dark_gray()
         )
         
+        # 🔧 NOTE: Using member_events as audit log
         try:
-            audit_entries = await self.db.get_audit_log(
+            events = await self.db.get_events(
                 discord_id=data.discord_id,
                 mc_user_id=data.mc_user_id,
                 limit=20
@@ -648,44 +650,60 @@ class MemberOverviewView(discord.ui.View):
             embed.description = "⚠️ Error loading audit log"
             return embed
         
-        if not audit_entries:
+        if not events:
             embed.description = "*No audit entries for this member.*"
             return embed
         
+        # Filter for edit/admin actions only
+        admin_actions = [
+            "note_created", "note_edited", "note_deleted",
+            "infraction_added", "infraction_revoked",
+            "link_created", "link_approved", "link_denied",
+            "role_changed"
+        ]
+        
+        audit_events = [e for e in events if e.get("event_type") in admin_actions]
+        
+        if not audit_events:
+            embed.description = "*No administrative actions recorded.*"
+            return embed
+        
         lines = []
-        for entry in audit_entries:
-            action_type = entry.get("action_type", "unknown")
-            action_target = entry.get("action_target", "")
-            actor_name = entry.get("actor_name", "Unknown")
+        for entry in audit_events[:15]:
+            event_type = entry.get("event_type", "unknown")
             timestamp = format_timestamp(entry.get("timestamp", 0), "R")
+            triggered_by = entry.get("triggered_by", "system")
             
-            # Format action type with emoji
+            # Action emoji mapping
             action_emoji = {
                 "note_created": "📝",
                 "note_edited": "✏️",
                 "note_deleted": "🗑️",
                 "infraction_added": "⚠️",
                 "infraction_revoked": "✅",
-            }.get(action_type, "•")
+                "link_created": "🔗",
+                "link_approved": "✅",
+                "link_denied": "❌",
+                "role_changed": "👔"
+            }.get(event_type, "•")
             
-            action_display = action_type.replace("_", " ").title()
+            action_display = event_type.replace("_", " ").title()
             
-            line = f"{action_emoji} **{action_display}** | `{action_target}`"
-            lines.append(line)
-            lines.append(f"  *By {actor_name} • {timestamp}*")
+            lines.append(f"{action_emoji} **{action_display}**")
+            lines.append(f"  *By {triggered_by} • {timestamp}*")
             
-            # Show old/new values for edits
-            if action_type == "note_edited":
-                old_val = entry.get("old_value")
-                new_val = entry.get("new_value")
-                if old_val and new_val:
-                    lines.append(f"  📄 {truncate_text(old_val, 50)}")
-                    lines.append(f"  ➡️ {truncate_text(new_val, 50)}")
+            # Show event data if present
+            event_data = entry.get("event_data", {})
+            if isinstance(event_data, dict):
+                if "ref_code" in event_data:
+                    lines.append(f"  📄 Ref: `{event_data['ref_code']}`")
+                if "reason" in event_data:
+                    lines.append(f"  💬 {truncate_text(event_data['reason'], 60)}")
             
             lines.append("")
         
         embed.description = "\n".join(lines)
-        embed.set_footer(text=f"Showing last {len(audit_entries)} actions")
+        embed.set_footer(text=f"Showing last {len(audit_events)} administrative actions")
         
         return embed
 
@@ -750,6 +768,17 @@ class AddNoteModal(discord.ui.Modal, title="Add Note"):
                 expires_days=expires_days
             )
             
+            # Log event
+            await self.parent_view.db.add_event(
+                guild_id=interaction.guild.id,
+                discord_id=self.parent_view.member_data.discord_id,
+                mc_user_id=self.parent_view.member_data.mc_user_id,
+                event_type="note_created",
+                event_data={"ref_code": ref_code},
+                triggered_by="admin",
+                actor_id=interaction.user.id
+            )
+            
             # Update member data
             self.parent_view.member_data.notes_count += 1
             
@@ -798,7 +827,7 @@ class EditNoteModal(discord.ui.Modal, title="Edit Note"):
     async def on_submit(self, interaction: discord.Interaction):
         """Handle note edit."""
         try:
-            # 🔧 NEW: Update note with editor tracking
+            # 🔧 FIXED: Update note with editor tracking
             success = await self.parent_view.db.update_note(
                 ref_code=self.ref_code.value,
                 new_text=self.new_text.value,
@@ -807,6 +836,17 @@ class EditNoteModal(discord.ui.Modal, title="Edit Note"):
             )
             
             if success:
+                # Log event
+                await self.parent_view.db.add_event(
+                    guild_id=interaction.guild.id,
+                    discord_id=self.parent_view.member_data.discord_id,
+                    mc_user_id=self.parent_view.member_data.mc_user_id,
+                    event_type="note_edited",
+                    event_data={"ref_code": self.ref_code.value},
+                    triggered_by="admin",
+                    actor_id=interaction.user.id
+                )
+                
                 await interaction.response.send_message(
                     f"✅ Note `{self.ref_code.value}` updated successfully!",
                     ephemeral=True
@@ -862,14 +902,21 @@ class DeleteNoteModal(discord.ui.Modal, title="Delete Note"):
             return
         
         try:
-            # 🔧 NEW: Delete note with actor tracking
-            success = await self.parent_view.db.delete_note(
-                ref_code=self.ref_code.value,
-                deleted_by=interaction.user.id,
-                deleted_by_name=str(interaction.user)
-            )
+            # Delete note
+            success = await self.parent_view.db.delete_note(self.ref_code.value)
             
             if success:
+                # Log event
+                await self.parent_view.db.add_event(
+                    guild_id=interaction.guild.id,
+                    discord_id=self.parent_view.member_data.discord_id,
+                    mc_user_id=self.parent_view.member_data.mc_user_id,
+                    event_type="note_deleted",
+                    event_data={"ref_code": self.ref_code.value},
+                    triggered_by="admin",
+                    actor_id=interaction.user.id
+                )
+                
                 # Update member data
                 self.parent_view.member_data.notes_count -= 1
                 
