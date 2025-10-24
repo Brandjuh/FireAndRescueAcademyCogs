@@ -8,6 +8,7 @@ FIXED:
 - Proper database integration
 - Error handling for infractions
 - Using regular commands instead of hybrid for compatibility
+- ✅ contribution_rate now properly read from members_v2.db
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ from .config_commands import ConfigCommands
 
 log = logging.getLogger("red.FARA.MemberManager")
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 DEFAULTS = {
     "contribution_threshold": 5.0,
@@ -317,7 +318,7 @@ class MemberManager(ConfigCommands, commands.Cog):
                 if mc_data:
                     data.mc_username = mc_data.get("name")
                     data.mc_role = mc_data.get("role")
-                    data.contribution_rate = mc_data.get("contribution_rate")  # Will be None
+                    data.contribution_rate = mc_data.get("contribution_rate")
                     mc_in_alliance = True
                     
                     log.info(f"✅ Found {data.mc_username} in members_v2.db")
@@ -390,7 +391,7 @@ class MemberManager(ConfigCommands, commands.Cog):
         """
         Get MC member data from MembersScraper (members_v2.db).
         
-        🔧 FIXED: Now uses the correct database and table structure!
+        🔧 FIXED: Now includes contribution_rate column!
         """
         if not self.members_scraper:
             log.warning("MembersScraper not available")
@@ -414,9 +415,9 @@ class MemberManager(ConfigCommands, commands.Cog):
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             
-            # 🔧 FIX: Get most recent record for this member_id
+            # 🔧 FIX: Get most recent record INCLUDING contribution_rate
             cursor.execute("""
-                SELECT member_id, username, rank, earned_credits, online_status, timestamp
+                SELECT member_id, username, rank, earned_credits, contribution_rate, online_status, timestamp
                 FROM members
                 WHERE member_id = ?
                 ORDER BY timestamp DESC
@@ -427,15 +428,15 @@ class MemberManager(ConfigCommands, commands.Cog):
             conn.close()
             
             if row:
-                # 🔧 FIX: Map to expected field names
+                # 🔧 FIX: Map to expected field names INCLUDING contribution_rate
                 result = {
-                    "user_id": row["member_id"],  # Map member_id to user_id
+                    "user_id": row["member_id"],
                     "name": row["username"],
                     "role": row["rank"],
                     "earned_credits": row["earned_credits"],
-                    "contribution_rate": None  # 🔧 NOTE: members table doesn't have contribution!
+                    "contribution_rate": row["contribution_rate"]  # 🔧 FIXED: Now reads from database!
                 }
-                log.info(f"✅ Found MC data for {mc_user_id}: {row['username']}")
+                log.info(f"✅ Found MC data for {mc_user_id}: {row['username']} (contrib: {row['contribution_rate']}%)")
                 return result
             else:
                 log.warning(f"❌ No MC data found for member_id {mc_user_id}")
@@ -485,7 +486,7 @@ class MemberManager(ConfigCommands, commands.Cog):
             data = dict(row)
             embed.add_field(
                 name="✅ members table (exact match)",
-                value=f"```json\n{json.dumps(data, indent=2)}\n```"[:1024],
+                value=f"```json\n{json.dumps(data, indent=2, default=str)}\n```"[:1024],
                 inline=False
             )
         else:
@@ -661,6 +662,11 @@ class MemberManager(ConfigCommands, commands.Cog):
                     integrations.append("✅ MemberSync")
                 else:
                     integrations.append("❌ MemberSync")
+                
+                if self.members_scraper:
+                    integrations.append("✅ MembersScraper")
+                else:
+                    integrations.append("❌ MembersScraper")
                 
                 if self.alliance_scraper:
                     integrations.append("✅ AllianceScraper")
