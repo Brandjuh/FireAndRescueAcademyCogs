@@ -888,6 +888,148 @@ class MemberSync(commands.Cog):
         
         await ctx.send(embed=embed)
 
+    @bulk_group.command(name="restoreroles")
+    async def bulk_restore_roles(self, ctx: commands.Context):
+        """
+        Restore Verified role to all members who have approved links in the database.
+        
+        Use this after a prune or when members lost their Verified role.
+        This checks everyone who is linked in the database and gives them back the role.
+        """
+        role_id = await self.config.verified_role_id()
+        role = ctx.guild.get_role(int(role_id)) if role_id else None
+        
+        if not role:
+            await ctx.send("❌ Verified role not configured!")
+            return
+        
+        await ctx.send("🔄 Scanning database for approved links...")
+        
+        # Get all approved links from database
+        def _run():
+            con = sqlite3.connect(self.links_db)
+            con.row_factory = sqlite3.Row
+            try:
+                return [dict(r) for r in con.execute("SELECT * FROM links WHERE status='approved'")]
+            finally:
+                con.close()
+        
+        links = await asyncio.get_running_loop().run_in_executor(None, _run)
+        
+        if not links:
+            await ctx.send("❌ No approved links found in database!")
+            return
+        
+        await ctx.send(f"📊 Found {len(links)} approved links. Checking roles...")
+        
+        restored = 0
+        already_has = 0
+        not_in_server = 0
+        errors = 0
+        
+        for link in links:
+            discord_id = int(link["discord_id"])
+            mc_id = link["mc_user_id"]
+            
+            # Get Discord member
+            member = ctx.guild.get_member(discord_id)
+            
+            if not member:
+                not_in_server += 1
+                continue
+            
+            # Check if they already have the role
+            if role in member.roles:
+                already_has += 1
+                continue
+            
+            # Give them the role back
+            try:
+                await member.add_roles(role, reason="MemberSync: Restore verified role from database")
+                restored += 1
+                
+                # Progress update every 10 members
+                if restored % 10 == 0:
+                    await ctx.send(f"⏳ Progress: {restored} roles restored...")
+                
+            except Exception as e:
+                log.error(f"Failed to restore role for {member.name}: {e}")
+                errors += 1
+        
+        # Final results
+        embed = discord.Embed(
+            title="✅ Role Restoration Complete",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="✅ Roles Restored", value=f"{restored} members", inline=True)
+        embed.add_field(name="⏭️ Already Had Role", value=f"{already_has} members", inline=True)
+        embed.add_field(name="❌ Not in Server", value=f"{not_in_server} members", inline=True)
+        
+        if errors > 0:
+            embed.add_field(name="⚠️ Errors", value=f"{errors} members", inline=True)
+            embed.color = discord.Color.orange()
+        
+        embed.set_footer(text=f"Total links in database: {len(links)}")
+        
+        await ctx.send(embed=embed)
+
+    @bulk_group.command(name="checkroles")
+    async def bulk_check_roles(self, ctx: commands.Context):
+        """
+        Check how many linked members are missing their Verified role.
+        
+        Use this to see if you need to run restoreroles.
+        """
+        role_id = await self.config.verified_role_id()
+        role = ctx.guild.get_role(int(role_id)) if role_id else None
+        
+        if not role:
+            await ctx.send("❌ Verified role not configured!")
+            return
+        
+        await ctx.send("🔍 Checking roles for all linked members...")
+        
+        # Get all approved links
+        def _run():
+            con = sqlite3.connect(self.links_db)
+            con.row_factory = sqlite3.Row
+            try:
+                return [dict(r) for r in con.execute("SELECT * FROM links WHERE status='approved'")]
+            finally:
+                con.close()
+        
+        links = await asyncio.get_running_loop().run_in_executor(None, _run)
+        
+        has_role = 0
+        missing_role = 0
+        not_in_server = 0
+        
+        for link in links:
+            discord_id = int(link["discord_id"])
+            member = ctx.guild.get_member(discord_id)
+            
+            if not member:
+                not_in_server += 1
+                continue
+            
+            if role in member.roles:
+                has_role += 1
+            else:
+                missing_role += 1
+        
+        embed = discord.Embed(
+            title="📊 Role Status Check",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="✅ Has Role", value=f"{has_role} members", inline=True)
+        embed.add_field(name="❌ Missing Role", value=f"{missing_role} members", inline=True)
+        embed.add_field(name="👻 Not in Server", value=f"{not_in_server} members", inline=True)
+        
+        if missing_role > 0:
+            embed.set_footer(text=f"Use [p]membersync bulk restoreroles to restore {missing_role} roles")
+        
+        await ctx.send(embed=embed)
+
     @membersync_group.command(name="link")
     async def link(self, ctx: commands.Context, member: discord.Member, mc_id: str, *, display_name: Optional[str] = None):
         """Manually link a Discord member to an MC-ID as approved."""
