@@ -7,39 +7,103 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
-import requests
+# --- optional stdlib fallback if 'requests' is missing during first import ---
+try:
+    import requests  # type: ignore
+except Exception:  # pragma: no cover
+    import urllib.request as _ul
+
+    class _Resp:
+        def __init__(self, data: bytes, headers: dict[str, str]):
+            self._data = data
+            self.headers = headers
+
+        def raise_for_status(self):
+            # urllib throws on HTTP errors already via HTTPError, so nothing to do.
+            return
+
+        @property
+        def text(self) -> str:
+            return self._data.decode("utf-8", errors="replace")
+
+    class requests:  # tiny shim with get()
+        @staticmethod
+        def get(url: str, timeout: int = 30, headers: dict[str, str] | None = None):
+            req = _ul.Request(url, headers=headers or {})
+            with _ul.urlopen(req, timeout=timeout) as r:
+                data = r.read()
+                # Normalize headers to a plain dict with lower-cased keys
+                hdrs = {k.lower(): v for k, v in r.headers.items()}
+                return _Resp(data, hdrs)
+
 from jsonschema import validate, ValidationError
 
 from config import DB_PATH, DATA_DIR, SRC_FILES, TS_TO_JSON, NODE_BIN, SCHEMA_DIR
 
 # --------------- Utilities ---------------
 
+UA = "FARA-AssetManager/1.0 (+https://missionchief.local)"
+
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 def ensure_db():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(DB_PATH) as con:
-        con.executescript(Path(__file__).with_name("db_schema.sql").read_text())
+        con.executescript(Path(__file__).with_name("db_schema.sql").read_text(encoding="utf-8"))
         con.commit()
 
-def fetch_raw(url: str, out_path: Path) -> str:
-    r = requests.get(url, timeout=30)
-    r.raise_for_status()
-    out_path.write_text(r.text, encoding="utf-8")
-    # Extract commit SHA from X- headers if possible (GitHub raw may not include it).
-    # We fallback to ETag or "dev" literal.
-    commit = r.headers.get("x-github-request-id") or r.headers.get("etag") or "dev"
-    return str(commit)
+def _which_node() -> str:
+    # Respect NODE_BIN from config, but verify it exists
+    node = shutil.which(str(NODE_BIN)) if NODE_BIN else None
+    if not node:
+        raise RuntimeError(
+            "Node.js niet gevonden. Installeer Node 18+ en zorg dat 'node' in PATH staat, "
+            "of pas NODE_BIN aan in config.py."
+        )
+    return node
+
+def fetch_raw(url: str, out_path: Path, *, retries: int = 3, backoff: float = 1.5) -> str:
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            r = requests.get(url, timeout=30, headers={"User-Agent": UA, "Accept": "text/plain"})
+            r.raise_for_status()
+            out_path.write_text(r.text, encoding="utf-8")
+            # GitHub raw geeft zelden commit mee; pak wat we kunnen krijgen.
+            # We proberen eerst iets unieks, anders 'dev'.
+            headers = {k.lower(): v for k, v in (getattr(r, "headers", {}) or {}).items()}
+            commit = (
+                headers.get("x-github-request-id")
+                or headers.get("etag")
+                or headers.get("x-cache")
+                or "dev"
+            )
+            return str(commit)
+        except Exception as e:
+            last_err = e
+            if attempt >= retries:
+                break
+            time.sleep(backoff ** attempt)
+    raise RuntimeError(f"Download mislukt voor {url}: {last_err}")
 
 def ts_to_json(ts_path: Path, json_path: Path) -> None:
-    # Node script prints JSON to stdout
-    res = subprocess.run([NODE_BIN, str(TS_TO_JSON), str(ts_path)], capture_output=True, text=True)
+    node = _which_node()
+    # Node script print JSON naar stdout
+    res = subprocess.run([node, str(TS_TO_JSON), str(ts_path)], capture_output=True, text=True)
     if res.returncode != 0:
-        raise RuntimeError(f"ts_to_json failed for {ts_path.name}: {res.stderr.strip()}")
+        snippet = (res.stderr or res.stdout or "").strip()
+        if len(snippet) > 600:
+            snippet = snippet[:600] + " …"
+        raise RuntimeError(
+            f"ts_to_json faalde voor {ts_path.name}. Controleer ts_to_json.mjs en Node-installatie. "
+            f"Details: {snippet}"
+        )
     json_path.write_text(res.stdout, encoding="utf-8")
 
 def load_and_validate(json_path: Path, schema_name: str) -> Dict[str, Any]:
@@ -48,7 +112,7 @@ def load_and_validate(json_path: Path, schema_name: str) -> Dict[str, Any]:
     try:
         validate(obj, schema)
     except ValidationError as e:
-        raise RuntimeError(f"Validation failed for {schema_name}: {e.message}")
+        raise RuntimeError(f"Validatie faalde voor {schema_name}: {e.message}")
     return obj
 
 # --------------- Mapping / Transform ---------------
@@ -123,11 +187,11 @@ def transform_equipment(src: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
 
 def transform_vehicles(src: Dict[str, Any]) -> Tuple[
     Dict[int, Dict[str, Any]],
-    Dict[int, set],                # vehicle -> building ids
-    Dict[int, list],               # vehicle -> [{"schooling_id": int, "count": int}]
-    Dict[int, set],                # vehicle -> equipment ids (compatible)
-    Dict[str, int],                # role name -> role id temp index (0 placeholder)
-    Dict[int, set]                 # vehicle -> role names
+    Dict[int, set],
+    Dict[int, list],
+    Dict[int, set],
+    Dict[str, int],
+    Dict[int, set]
 ]:
     vehicles = {}
     vp_buildings = {}
@@ -174,7 +238,7 @@ def transform_vehicles(src: Dict[str, Any]) -> Tuple[
         if isinstance(pbs, list):
             vp_buildings[vid] = set(int(x) for x in pbs if isinstance(x, (int, str)) and str(x).isdigit())
 
-        # Required schoolings (array of {schooling_id, count})
+        # Required schoolings
         reqs = v.get("required_schoolings") or v.get("schoolings") or []
         arr = []
         if isinstance(reqs, list):
@@ -203,7 +267,6 @@ def transform_vehicles(src: Dict[str, Any]) -> Tuple[
         if isinstance(roles, list):
             role_set = set(str(r).strip() for r in roles if r)
         elif isinstance(roles, str):
-            # maybe "Heavy Rescue + Engine"
             parts = re.split(r"[+,/]|and", roles, flags=re.I)
             role_set = set(p.strip() for p in parts if p.strip())
         if role_set:
@@ -305,11 +368,9 @@ def replace_relations(con: sqlite3.Connection,
             """, (vid, eid))
 
     # roles
-    # Upsert roles, collect id map
     role_id_map = {}
     for role_name in role_index.keys():
-        cur = con.execute("INSERT INTO vehicle_roles (role) VALUES (?) ON CONFLICT(role) DO NOTHING", (role_name,))
-        # fetch id
+        con.execute("INSERT INTO vehicle_roles (role) VALUES (?) ON CONFLICT(role) DO NOTHING", (role_name,))
         cur = con.execute("SELECT id FROM vehicle_roles WHERE role=?", (role_name,))
         rid = cur.fetchone()[0]
         role_id_map[role_name] = rid
