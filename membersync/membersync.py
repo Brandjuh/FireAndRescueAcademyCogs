@@ -721,6 +721,173 @@ class MemberSync(commands.Cog):
             count += 1
         await ctx.send(f"Retro applied: {count} link(s).")
 
+    @membersync_group.group(name="bulk")
+    async def bulk_group(self, ctx: commands.Context):
+        """Bulk verification tools - scan ALL server members (not just verified)."""
+        pass
+
+    @bulk_group.command(name="scan")
+    async def bulk_scan(self, ctx: commands.Context):
+        """
+        Scan ALL server members to see how many can be auto-verified by nickname match.
+        
+        This scans everyone on the server, not just those with the Verified role.
+        Use this after a prune or when setting up MemberSync for the first time.
+        """
+        await ctx.send("🔍 Scanning all server members... this may take a moment.")
+        
+        matchable = 0
+        already_linked = 0
+        
+        for member in ctx.guild.members:
+            if member.bot:
+                continue
+            
+            # Check if already linked
+            if await self.get_link_for_discord(member.id):
+                already_linked += 1
+                continue
+            
+            # Check if nickname matches database
+            name = member.nick or member.name
+            hit = await self._find_by_exact_name(name)
+            if hit:
+                matchable += 1
+        
+        embed = discord.Embed(
+            title="📊 Bulk Verification Scan Results",
+            color=discord.Color.blue(),
+            description=f"Scanned {len([m for m in ctx.guild.members if not m.bot])} members"
+        )
+        embed.add_field(name="✅ Already Linked", value=f"{already_linked} members", inline=True)
+        embed.add_field(name="🎯 Can Auto-Verify", value=f"{matchable} members", inline=True)
+        embed.add_field(name="❓ No Match", value=f"{len([m for m in ctx.guild.members if not m.bot]) - already_linked - matchable} members", inline=True)
+        
+        if matchable > 0:
+            embed.set_footer(text=f"Use [p]membersync bulk apply to auto-verify {matchable} members")
+        
+        await ctx.send(embed=embed)
+
+    @bulk_group.command(name="apply")
+    async def bulk_apply(self, ctx: commands.Context, confirm: str = None):
+        """
+        Auto-verify ALL server members with matching nicknames.
+        
+        This will grant the Verified role to everyone whose nickname exactly matches
+        a name in the alliance database.
+        
+        Usage: [p]membersync bulk apply CONFIRM
+        """
+        if confirm != "CONFIRM":
+            await ctx.send(
+                "⚠️ **Warning:** This will auto-verify ALL matching server members!\n\n"
+                f"To proceed, run: `{ctx.prefix}membersync bulk apply CONFIRM`"
+            )
+            return
+        
+        await ctx.send("🔄 Starting bulk verification... this may take a minute.")
+        
+        verified = 0
+        skipped_already_linked = 0
+        skipped_no_match = 0
+        errors = 0
+        
+        for member in ctx.guild.members:
+            if member.bot:
+                continue
+            
+            # Check if already linked
+            if await self.get_link_for_discord(member.id):
+                skipped_already_linked += 1
+                continue
+            
+            # Check if nickname matches database
+            name = member.nick or member.name
+            hit = await self._find_by_exact_name(name)
+            
+            if not hit:
+                skipped_no_match += 1
+                continue
+            
+            mc_name, mcid = hit
+            
+            try:
+                await self._approve_link(ctx.guild, member, mcid, approver=ctx.author if isinstance(ctx.author, discord.Member) else None)
+                verified += 1
+                
+                # Progress update every 10 members
+                if verified % 10 == 0:
+                    await ctx.send(f"⏳ Progress: {verified} members verified...")
+            except Exception as e:
+                log.error(f"Failed to verify {member.name}: {e}")
+                errors += 1
+        
+        # Final results
+        embed = discord.Embed(
+            title="✅ Bulk Verification Complete",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="✅ Verified", value=f"{verified} members", inline=True)
+        embed.add_field(name="⏭️ Already Linked", value=f"{skipped_already_linked} members", inline=True)
+        embed.add_field(name="❌ No Match", value=f"{skipped_no_match} members", inline=True)
+        
+        if errors > 0:
+            embed.add_field(name="⚠️ Errors", value=f"{errors} members", inline=True)
+            embed.color = discord.Color.orange()
+        
+        await ctx.send(embed=embed)
+
+    @bulk_group.command(name="list")
+    async def bulk_list(self, ctx: commands.Context):
+        """
+        Show a list of server members who can be auto-verified.
+        
+        Lists up to 20 members whose nicknames match the database.
+        """
+        await ctx.send("🔍 Finding matchable members...")
+        
+        matches = []
+        
+        for member in ctx.guild.members:
+            if member.bot:
+                continue
+            
+            # Check if already linked
+            if await self.get_link_for_discord(member.id):
+                continue
+            
+            # Check if nickname matches database
+            name = member.nick or member.name
+            hit = await self._find_by_exact_name(name)
+            
+            if hit:
+                mc_name, mcid = hit
+                matches.append((member, mc_name, mcid))
+                
+                # Limit to 20 to avoid message too long
+                if len(matches) >= 20:
+                    break
+        
+        if not matches:
+            await ctx.send("No matchable members found.")
+            return
+        
+        embed = discord.Embed(
+            title=f"🎯 Matchable Members (showing {len(matches)})",
+            color=discord.Color.blue()
+        )
+        
+        description = []
+        for member, mc_name, mcid in matches:
+            description.append(f"• {member.mention} ↔️ **{mc_name}** (`{mcid}`)")
+        
+        embed.description = "\n".join(description)
+        
+        if len(matches) >= 20:
+            embed.set_footer(text="Showing first 20 matches only. Use bulk scan for full count.")
+        
+        await ctx.send(embed=embed)
+
     @membersync_group.command(name="link")
     async def link(self, ctx: commands.Context, member: discord.Member, mc_id: str, *, display_name: Optional[str] = None):
         """Manually link a Discord member to an MC-ID as approved."""
