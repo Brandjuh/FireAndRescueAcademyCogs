@@ -1,7 +1,14 @@
 """
-members_scraper.py - UPDATED VERSION met contribution_rate support
+members_scraper.py - COMPLETE VERSION
+Versie: 3.0 - Met contribution_rate support + full troubleshooting
 
-Voeg deze code toe aan je bestaande members_scraper.py
+Features:
+- Scrapes member data inclusief contribution_rate
+- Database met contribution_rate kolom
+- Backfill support voor historische data
+- Complete troubleshooting commands
+- Debug logging
+- Automatic migration van oude database schema
 """
 
 import discord
@@ -13,13 +20,17 @@ from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from pathlib import Path
 import re
+import logging
+
+# Setup logging
+log = logging.getLogger("red.FARA.MembersScraper")
 
 # SQLite INTEGER limits
 INT64_MAX = 9223372036854775807
 INT64_MIN = -9223372036854775808
 
 class MembersScraper(commands.Cog):
-    """Scrapes alliance members data from MissionChief"""
+    """Scrapes alliance members data from MissionChief with contribution rate tracking"""
     
     def __init__(self, bot):
         self.bot = bot
@@ -40,11 +51,13 @@ class MembersScraper(commands.Cog):
     def cog_load(self):
         """Start background task when cog loads"""
         self.scraping_task = self.bot.loop.create_task(self._background_scraper())
+        log.info("MembersScraper loaded - background task started")
         
     def cog_unload(self):
         """Cancel background task when cog unloads"""
         if self.scraping_task:
             self.scraping_task.cancel()
+        log.info("MembersScraper unloaded")
     
     def _init_database(self):
         """Initialize SQLite database with schema - UPDATED WITH CONTRIBUTION_RATE"""
@@ -70,15 +83,16 @@ class MembersScraper(commands.Cog):
                     )
                 ''')
                 
-                # Check if contribution_rate column exists, if not add it
+                # Check if contribution_rate column exists, if not add it (MIGRATION)
                 cursor.execute("PRAGMA table_info(members)")
                 columns = [col[1] for col in cursor.fetchall()]
                 
                 if 'contribution_rate' not in columns:
-                    print("🔧 MIGRATION: Adding contribution_rate column to members table...")
+                    log.info("MIGRATION: Adding contribution_rate column to members table...")
                     cursor.execute('ALTER TABLE members ADD COLUMN contribution_rate REAL DEFAULT 0.0')
-                    print("✅ Migration complete!")
+                    log.info("Migration complete!")
                 
+                # Create indices
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON members(timestamp)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_member_id ON members(member_id)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_contribution_rate ON members(contribution_rate)')
@@ -99,39 +113,75 @@ class MembersScraper(commands.Cog):
                 
                 conn.commit()
                 conn.close()
+                log.info(f"Database initialized at {self.db_path}")
                 break
                 
             except sqlite3.OperationalError as e:
-                if "locked" in str(e).lower():
-                    time.sleep(1)
-                    continue
-                raise
+                if "locked" in str(e).lower() and attempt < max_retries - 1:
+                    log.warning(f"Database locked, retrying... ({attempt + 1}/{max_retries})")
+                    time.sleep(0.5)
+                else:
+                    log.error(f"Failed to initialize database after {max_retries} attempts")
+                    raise
+    
+    async def _debug_log(self, message, ctx=None):
+        """Log debug messages to console AND Discord"""
+        log.debug(message)
+        
+        # Also send to Discord if debug mode is on
+        if self.debug_mode and (ctx or self.debug_channel):
+            try:
+                channel = ctx.channel if ctx else self.debug_channel
+                if channel:
+                    await channel.send(f"🐛 `{message}`")
+            except Exception as e:
+                log.error(f"Failed to send debug message to Discord: {e}")
     
     async def _get_session(self, ctx=None):
-        """Get authenticated session from CookieManager"""
-        cookie_manager = self.bot.get_cog('CookieManager')
+        """Get authenticated session from CookieManager cog"""
+        cookie_manager = self.bot.get_cog("CookieManager")
         if not cookie_manager:
+            await self._debug_log("❌ CookieManager cog not loaded!", ctx)
             if ctx:
-                await self._debug_log("❌ CookieManager not loaded", ctx)
+                await ctx.send("❌ CookieManager cog not loaded! Load it with: `[p]load cookiemanager`")
             return None
         
         try:
             session = await cookie_manager.get_session()
+            if not session:
+                await self._debug_log("❌ Failed to get session from CookieManager", ctx)
+                return None
+            await self._debug_log("✅ Session obtained successfully", ctx)
             return session
         except Exception as e:
+            await self._debug_log(f"❌ Failed to get session: {e}", ctx)
             if ctx:
-                await self._debug_log(f"❌ Failed to get session: {e}", ctx)
+                await ctx.send(f"❌ Error getting session: {e}")
             return None
     
-    async def _debug_log(self, message, ctx=None):
-        """Send debug message to channel if debug mode enabled"""
-        if self.debug_mode and self.debug_channel:
-            try:
-                await self.debug_channel.send(message)
-            except:
-                pass
-        if ctx:
-            print(f"[DEBUG] {message}")
+    async def _check_logged_in(self, html_content, ctx=None):
+        """Check if still logged in by looking for logout button or user menu"""
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Check multiple indicators
+        logout_button = soup.find('a', href='/users/sign_out')
+        user_menu = soup.find('li', class_='dropdown user-menu')
+        profile_link = soup.find('a', href=lambda x: x and '/profile' in str(x))
+        settings_link = soup.find('a', href='/settings')
+        
+        # Check if we have member data (if we can see members, we're logged in!)
+        has_member_links = bool(soup.find('a', href=lambda x: x and '/users/' in str(x)))
+        
+        is_logged_in = (logout_button is not None or 
+                        user_menu is not None or 
+                        profile_link is not None or
+                        settings_link is not None or
+                        has_member_links)
+        
+        if self.debug_mode:
+            await self._debug_log(f"Login check: {'✅ Logged in' if is_logged_in else '❌ NOT logged in'}", ctx)
+        
+        return is_logged_in
     
     async def _scrape_members_page(self, session, page, ctx=None):
         """Scrape a single page of members - UPDATED TO PARSE CONTRIBUTION_RATE"""
@@ -144,6 +194,12 @@ class MembersScraper(commands.Cog):
                     return []
                 
                 html = await response.text()
+                
+                # Check if logged in
+                if not await self._check_logged_in(html, ctx):
+                    await self._debug_log(f"❌ Page {page}: Not logged in!", ctx)
+                    return []
+                
                 soup = BeautifulSoup(html, 'html.parser')
                 
                 table = soup.find('table', class_='table')
@@ -203,7 +259,7 @@ class MembersScraper(commands.Cog):
                                     except:
                                         credits = -1
                             
-                            # Contribution rate: percentage - THIS IS THE KEY PART!
+                            # Contribution rate: percentage - KEY FEATURE!
                             if "%" in txt and rate == 0.0:
                                 match = re.search(r'(\d+(?:\.\d+)?)\s*%', txt)
                                 if match:
@@ -237,7 +293,7 @@ class MembersScraper(commands.Cog):
                                 'username': name,
                                 'rank': role,
                                 'earned_credits': credits if credits > 0 else 0,
-                                'contribution_rate': rate,  # ADDED!
+                                'contribution_rate': rate,
                                 'online_status': online_status,
                                 'timestamp': timestamp,
                                 'suspicious': True,
@@ -245,13 +301,13 @@ class MembersScraper(commands.Cog):
                                 'raw_html': str(tr)[:500]
                             })
                         else:
-                            # Normal entry - NOW WITH CONTRIBUTION_RATE!
+                            # Normal entry - WITH CONTRIBUTION_RATE!
                             members_data.append({
                                 'member_id': int(user_id),
                                 'username': name,
                                 'rank': role,
                                 'earned_credits': credits,
-                                'contribution_rate': rate,  # ADDED!
+                                'contribution_rate': rate,  # ← KEY FIELD
                                 'online_status': online_status,
                                 'timestamp': timestamp,
                                 'suspicious': False
@@ -304,10 +360,11 @@ class MembersScraper(commands.Cog):
                 await self._debug_log(f"✅ Page {page}: {len(members)} members (total so far: {len(all_members)})", ctx)
             
             page += 1
+            await asyncio.sleep(0.5)  # Rate limiting
         
         await self._debug_log(f"📊 Total members scraped: {len(all_members)} across {page - 1} pages", ctx)
         
-        # Save to database - UPDATED INSERT TO INCLUDE CONTRIBUTION_RATE
+        # Save to database - WITH CONTRIBUTION_RATE!
         if all_members:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -340,7 +397,7 @@ class MembersScraper(commands.Cog):
                         ))
                         suspicious_count += 1
                     else:
-                        # Normal insert - NOW WITH CONTRIBUTION_RATE!
+                        # Normal insert - WITH CONTRIBUTION_RATE!
                         credits = max(0, min(INT64_MAX, int(member['earned_credits'])))
                         contribution_rate = float(member.get('contribution_rate', 0.0))
                         
@@ -353,7 +410,7 @@ class MembersScraper(commands.Cog):
                             member['username'],
                             member['rank'],
                             credits,
-                            contribution_rate,  # ADDED!
+                            contribution_rate,  # ← SAVED TO DATABASE
                             member['online_status'],
                             member['timestamp']
                         ))
@@ -379,6 +436,24 @@ class MembersScraper(commands.Cog):
                 
         return True
     
+    async def _background_scraper(self):
+        """Background task that runs every hour"""
+        await self.bot.wait_until_ready()
+        
+        log.info("Background scraper started")
+        
+        while not self.bot.is_closed():
+            try:
+                await asyncio.sleep(3600)  # Wait 1 hour
+                log.info("Running background member scrape...")
+                await self._scrape_all_members()
+                log.info("Background scrape completed")
+            except asyncio.CancelledError:
+                log.info("Background scraper stopped")
+                break
+            except Exception as e:
+                log.error(f"Error in background scraper: {e}", exc_info=True)
+    
     # ============== COMMANDS ==============
     
     @commands.group(name="members")
@@ -398,7 +473,7 @@ class MembersScraper(commands.Cog):
     async def backfill_members(self, ctx, days: int = 30):
         """
         Back-fill historical data by creating snapshots for past days.
-        This uses CURRENT member data with past timestamps.
+        Uses CURRENT member data with past timestamps.
         
         Usage: [p]members backfill 30
         """
@@ -407,10 +482,11 @@ class MembersScraper(commands.Cog):
             return
         
         await ctx.send(f"🔄 Starting back-fill for {days} days of historical data...")
+        await ctx.send(f"⚠️ Note: This uses current member data with past timestamps to create historical baseline")
         
         session = await self._get_session(ctx)
         if not session:
-            await ctx.send("❌ Failed to get session")
+            await ctx.send("❌ Failed to get session. Is CookieManager loaded and logged in?")
             return
         
         # Get current member data once
@@ -425,6 +501,7 @@ class MembersScraper(commands.Cog):
                 break
             all_members.extend(members)
             page += 1
+            await asyncio.sleep(0.3)
         
         if not all_members:
             await ctx.send("❌ Failed to fetch member data")
@@ -445,7 +522,6 @@ class MembersScraper(commands.Cog):
             
             for member in all_members:
                 try:
-                    # INSERT WITH CONTRIBUTION_RATE!
                     cursor.execute('''
                         INSERT OR IGNORE INTO members 
                         (member_id, username, rank, earned_credits, contribution_rate, online_status, timestamp)
@@ -455,7 +531,7 @@ class MembersScraper(commands.Cog):
                         member['username'],
                         member['rank'],
                         member['earned_credits'],
-                        member.get('contribution_rate', 0.0),  # ADDED!
+                        member.get('contribution_rate', 0.0),
                         member['online_status'],
                         timestamp
                     ))
@@ -464,7 +540,7 @@ class MembersScraper(commands.Cog):
                 except Exception as e:
                     pass
             
-            if day_offset % 5 == 0:  # Progress update every 5 days
+            if day_offset % 5 == 0:
                 await ctx.send(f"📈 Progress: {days - day_offset}/{days} days completed...")
         
         conn.commit()
@@ -592,18 +668,293 @@ class MembersScraper(commands.Cog):
         embed.set_footer(text=f"Database: {self.db_path}")
         await ctx.send(embed=embed)
     
-    async def _background_scraper(self):
-        """Background task that runs every hour"""
-        await self.bot.wait_until_ready()
+    # ============== TROUBLESHOOTING COMMANDS ==============
+    
+    @members_group.command(name="debug")
+    async def debug_scrape(self, ctx):
+        """Full diagnostic test for member scraping problems"""
+        embed = discord.Embed(
+            title="🔍 Member Scraper Diagnostics",
+            color=discord.Color.blue()
+        )
         
-        while not self.bot.is_closed():
+        # Test 1: CookieManager loaded?
+        cookie_manager = self.bot.get_cog("CookieManager")
+        if cookie_manager:
+            embed.add_field(
+                name="✅ CookieManager",
+                value="Loaded successfully",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="❌ CookieManager",
+                value="**NOT LOADED** - Run: `[p]load cookiemanager`",
+                inline=False
+            )
+            await ctx.send(embed=embed)
+            return
+        
+        # Test 2: Session
+        try:
+            session = await cookie_manager.get_session()
+            if session and not session.closed:
+                embed.add_field(
+                    name="✅ Session",
+                    value="Session obtained successfully",
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="❌ Session",
+                    value="Session is None or closed",
+                    inline=False
+                )
+                await ctx.send(embed=embed)
+                return
+        except Exception as e:
+            embed.add_field(
+                name="❌ Session Error",
+                value=f"```{str(e)}```",
+                inline=False
+            )
+            await ctx.send(embed=embed)
+            return
+        
+        # Test 3: URL request
+        await ctx.send("🔄 Testing connection to MissionChief...")
+        test_url = f"{self.members_url}?page=1"
+        
+        try:
+            async with session.get(test_url) as response:
+                status = response.status
+                html = await response.text()
+                final_url = str(response.url)
+                
+                embed.add_field(
+                    name=f"📡 HTTP Response",
+                    value=f"Status: `{status}`\nFinal URL: `{final_url}`\nHTML Length: `{len(html)}` chars",
+                    inline=False
+                )
+                
+                # Test 4: Login check
+                soup = BeautifulSoup(html, 'html.parser')
+                
+                logout_link = soup.find('a', href='/users/sign_out')
+                login_form = soup.find('form', action=lambda x: x and 'sign_in' in str(x))
+                member_links = soup.find_all('a', href=lambda x: x and '/users/' in str(x))
+                
+                if login_form:
+                    embed.add_field(
+                        name="❌ Login Status",
+                        value="**NOT LOGGED IN** - Login form detected!\nRun: `[p]cookie login`",
+                        inline=False
+                    )
+                elif logout_link or len(member_links) > 5:
+                    embed.add_field(
+                        name="✅ Login Status",
+                        value=f"Logged in successfully\nFound {len(member_links)} member links",
+                        inline=False
+                    )
+                else:
+                    embed.add_field(
+                        name="⚠️ Login Status",
+                        value="Unclear - page loaded but no clear indicators",
+                        inline=False
+                    )
+                
+                # Test 5: Member table
+                table = soup.find('table', class_='table')
+                if table:
+                    rows = table.find_all('tr')[1:]
+                    embed.add_field(
+                        name="✅ Member Table",
+                        value=f"Found table with {len(rows)} rows",
+                        inline=False
+                    )
+                    
+                    if rows:
+                        first_row = rows[0]
+                        user_link = first_row.find('a', href=lambda x: x and '/users/' in x)
+                        if user_link:
+                            sample_name = user_link.get_text(strip=True)
+                            sample_href = user_link['href']
+                            embed.add_field(
+                                name="👤 Sample Member",
+                                value=f"Name: `{sample_name}`\nLink: `{sample_href}`",
+                                inline=False
+                            )
+                else:
+                    embed.add_field(
+                        name="❌ Member Table",
+                        value="No table found on page!",
+                        inline=False
+                    )
+                
+        except aiohttp.ClientError as e:
+            embed.add_field(
+                name="❌ Connection Error",
+                value=f"```{str(e)}```",
+                inline=False
+            )
+        except Exception as e:
+            embed.add_field(
+                name="❌ Unexpected Error",
+                value=f"```{type(e).__name__}: {str(e)}```",
+                inline=False
+            )
+        
+        await ctx.send(embed=embed)
+    
+    @members_group.command(name="testpage")
+    async def test_page(self, ctx, page: int = 1):
+        """Test scraping a specific page with detailed output"""
+        await ctx.send(f"🔍 Testing page {page}...")
+        
+        # Enable debug mode temporarily
+        old_debug = self.debug_mode
+        old_channel = self.debug_channel
+        self.debug_mode = True
+        self.debug_channel = ctx.channel
+        
+        try:
+            session = await self._get_session(ctx)
+            if not session:
+                await ctx.send("❌ Failed to get session")
+                return
+            
+            members = await self._scrape_members_page(session, page, ctx)
+            
+            if not members:
+                await ctx.send(f"❌ Page {page} returned 0 members")
+            else:
+                # Show first 3 members
+                embed = discord.Embed(
+                    title=f"📊 Page {page} Results",
+                    description=f"Found {len(members)} members",
+                    color=discord.Color.green()
+                )
+                
+                for i, member in enumerate(members[:3], 1):
+                    value_text = (
+                        f"**ID:** {member['member_id']}\n"
+                        f"**Rank:** {member['rank']}\n"
+                        f"**Credits:** {member['earned_credits']:,}\n"
+                        f"**Contribution:** {member.get('contribution_rate', 0)}%\n"
+                        f"**Status:** {member['online_status']}"
+                    )
+                    if member.get('suspicious'):
+                        value_text += f"\n⚠️ **Suspicious:** {member.get('reason', 'Unknown')}"
+                    
+                    embed.add_field(
+                        name=f"{i}. {member['username']}",
+                        value=value_text,
+                        inline=False
+                    )
+                
+                if len(members) > 3:
+                    embed.set_footer(text=f"... and {len(members) - 3} more members")
+                
+                await ctx.send(embed=embed)
+        
+        finally:
+            # Restore debug settings
+            self.debug_mode = old_debug
+            self.debug_channel = old_channel
+    
+    @members_group.command(name="checklogin")
+    async def check_login(self, ctx):
+        """Check if we're logged in to MissionChief"""
+        async with ctx.typing():
             try:
-                await asyncio.sleep(3600)  # Wait 1 hour
-                await self._scrape_all_members()
-            except asyncio.CancelledError:
-                break
+                cookie_manager = self.bot.get_cog("CookieManager")
+                if not cookie_manager:
+                    await ctx.send("❌ CookieManager not loaded! Run: `[p]load cookiemanager`")
+                    return
+                
+                session = await cookie_manager.get_session()
+                test_url = self.members_url
+                
+                async with session.get(test_url) as response:
+                    html = await response.text()
+                    final_url = str(response.url)
+                
+                soup = BeautifulSoup(html, 'html.parser')
+                
+                # Check indicators
+                logout_link = soup.find('a', href='/users/sign_out')
+                login_form = soup.find('form', action=lambda x: x and 'sign_in' in str(x))
+                member_links = soup.find_all('a', href=lambda x: x and '/users/' in str(x))
+                
+                embed = discord.Embed(title="🔐 Login Status Check")
+                
+                if login_form:
+                    embed.color = discord.Color.red()
+                    embed.description = "**❌ NOT LOGGED IN**"
+                    embed.add_field(
+                        name="Action Required",
+                        value="Run: `[p]cookie login`",
+                        inline=False
+                    )
+                elif logout_link or len(member_links) > 5:
+                    embed.color = discord.Color.green()
+                    embed.description = "**✅ LOGGED IN**"
+                    embed.add_field(
+                        name="Details",
+                        value=f"Found {len(member_links)} member links\nFinal URL: `{final_url}`",
+                        inline=False
+                    )
+                else:
+                    embed.color = discord.Color.orange()
+                    embed.description = "**⚠️ UNCLEAR STATUS**"
+                    embed.add_field(
+                        name="Details",
+                        value=f"Page loaded but unclear if logged in\nFinal URL: `{final_url}`\nTry: `[p]cookie status`",
+                        inline=False
+                    )
+                
+                await ctx.send(embed=embed)
+                
             except Exception as e:
-                print(f"Error in background scraper: {e}")
+                await ctx.send(f"❌ Error checking login: {e}")
+    
+    @members_group.command(name="fixsession")
+    async def fix_session(self, ctx):
+        """Force refresh the session/cookies"""
+        await ctx.send("🔄 Attempting to refresh session...")
+        
+        try:
+            cookie_manager = self.bot.get_cog("CookieManager")
+            if not cookie_manager:
+                await ctx.send("❌ CookieManager not loaded!")
+                return
+            
+            # Force re-login
+            await ctx.send("🔐 Forcing re-login...")
+            success = await cookie_manager._perform_login()
+            
+            if success:
+                await ctx.send("✅ Session refreshed successfully! Try scraping again.")
+            else:
+                await ctx.send("❌ Login failed. Check `[p]cookie debug trace` for details.")
+        
+        except Exception as e:
+            await ctx.send(f"❌ Error: {e}")
+    
+    @members_group.command(name="enabledebug")
+    async def enable_debug(self, ctx):
+        """Enable debug mode - shows detailed logging in this channel"""
+        self.debug_mode = True
+        self.debug_channel = ctx.channel
+        await ctx.send("✅ Debug mode **ENABLED** for this channel.\nAll scraping operations will show detailed logs here.")
+    
+    @members_group.command(name="disabledebug")
+    async def disable_debug(self, ctx):
+        """Disable debug mode"""
+        self.debug_mode = False
+        self.debug_channel = None
+        await ctx.send("✅ Debug mode **DISABLED**")
+
 
 async def setup(bot):
     await bot.add_cog(MembersScraper(bot))
