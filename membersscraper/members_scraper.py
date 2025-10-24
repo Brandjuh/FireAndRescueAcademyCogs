@@ -1,13 +1,3 @@
-"""
-members_scraper.py - WERKENDE VERSIE + MemberSync VIEW
-Gebaseerd op document 4 (de werkende code) met ALLEEN MemberSync VIEW toegevoegd
-
-✅ Members_v2.db
-✅ Contribution rates
-✅ Geen rare member namen
-✅ MemberSync compatible
-"""
-
 import discord
 from redbot.core import commands, Config, data_manager
 import aiohttp
@@ -32,22 +22,22 @@ class MembersScraper(commands.Cog):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=1621001, force_registration=True)
         
-        # Setup database path in shared location
+        # Setup database path in shared location - USE DIFFERENT NAME!
         base_path = data_manager.cog_data_path(raw_name="scraper_databases")
         base_path.mkdir(parents=True, exist_ok=True)
-        self.db_path = str(base_path / "members_v2.db")
+        self.db_path = str(base_path / "members_v2.db")  # Changed from members.db
         
         self.base_url = "https://www.missionchief.com"
         self.members_url = f"{self.base_url}/verband/mitglieder/1621"
         self.scraping_task = None
         self.debug_mode = False
-        self.debug_channel = None
+        self.debug_channel = None  # Will be set when debug command is used
         self._init_database()
         
     def cog_load(self):
         """Start background task when cog loads"""
         self.scraping_task = self.bot.loop.create_task(self._background_scraper())
-        log.info("MembersScraper loaded - WERKENDE VERSIE")
+        log.info("MembersScraper loaded - WITH contribution_rate + MemberSync")
         
     def cog_unload(self):
         """Cancel background task when cog unloads"""
@@ -55,16 +45,17 @@ class MembersScraper(commands.Cog):
             self.scraping_task.cancel()
     
     def _init_database(self):
-        """Initialize SQLite database with schema - UPDATED WITH CONTRIBUTION_RATE + MEMBERSYNC VIEW"""
+        """Initialize SQLite database with schema"""
         import time
         
+        # Retry logic for locked database
         max_retries = 5
         for attempt in range(max_retries):
             try:
                 conn = sqlite3.connect(self.db_path, timeout=10.0)
                 cursor = conn.cursor()
                 
-                # Create main members table with contribution_rate
+                # ========== TOEVOEGING 1: contribution_rate kolom ==========
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS members (
                         member_id INTEGER,
@@ -78,20 +69,21 @@ class MembersScraper(commands.Cog):
                     )
                 ''')
                 
-                # Check if contribution_rate column exists, if not add it
+                # Auto-migration: voeg contribution_rate toe als deze niet bestaat
                 cursor.execute("PRAGMA table_info(members)")
                 columns = [col[1] for col in cursor.fetchall()]
                 
                 if 'contribution_rate' not in columns:
-                    log.info("🔧 MIGRATION: Adding contribution_rate column to members table...")
+                    log.info("🔧 MIGRATION: Adding contribution_rate column")
                     cursor.execute('ALTER TABLE members ADD COLUMN contribution_rate REAL DEFAULT 0.0')
-                    log.info("✅ Migration complete!")
+                    log.info("✅ Migration complete")
+                # ===========================================================
                 
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON members(timestamp)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_member_id ON members(member_id)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_contribution_rate ON members(contribution_rate)')
                 
-                # Suspicious members table
+                # New table for suspicious entries
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS suspicious_members (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,7 +97,7 @@ class MembersScraper(commands.Cog):
                     )
                 ''')
                 
-                # ============== ENIGE TOEVOEGING: MEMBERSYNC VIEW ==============
+                # ========== TOEVOEGING 3: MemberSync VIEW ==========
                 cursor.execute('DROP VIEW IF EXISTS members_current')
                 cursor.execute('''
                     CREATE VIEW members_current AS
@@ -122,86 +114,132 @@ class MembersScraper(commands.Cog):
                     WHERE DATE(timestamp) = (SELECT MAX(DATE(timestamp)) FROM members)
                 ''')
                 log.info("✅ MemberSync VIEW created")
-                # ===============================================================
+                # ===================================================
                 
                 conn.commit()
                 conn.close()
-                break
-                
+                break  # Success!
             except sqlite3.OperationalError as e:
-                if "locked" in str(e).lower():
-                    time.sleep(1)
-                    continue
-                raise
+                if attempt < max_retries - 1:
+                    print(f"[MembersScraper] Database locked, retrying... ({attempt + 1}/{max_retries})")
+                    time.sleep(0.5)
+                else:
+                    print(f"[MembersScraper] Failed to initialize database after {max_retries} attempts")
+                    raise
+    
+    async def _debug_log(self, message, ctx=None):
+        """Log debug messages to console AND Discord"""
+        print(f"[MembersScraper DEBUG] {message}")
+        
+        # Also send to Discord if debug mode is on and we have a channel
+        if self.debug_mode and (ctx or self.debug_channel):
+            try:
+                channel = ctx.channel if ctx else self.debug_channel
+                if channel:
+                    await channel.send(f"🐛 `{message}`")
+            except Exception as e:
+                print(f"[MembersScraper DEBUG] Failed to send to Discord: {e}")
+    
+    async def _get_cookie_manager(self):
+        """Get CookieManager cog instance"""
+        return self.bot.get_cog("CookieManager")
     
     async def _get_session(self, ctx=None):
-        """Get authenticated session from CookieManager"""
-        cookie_manager = self.bot.get_cog('CookieManager')
+        """Get authenticated session from CookieManager cog"""
+        cookie_manager = await self._get_cookie_manager()
         if not cookie_manager:
-            if ctx:
-                await self._debug_log("❌ CookieManager not loaded", ctx)
+            await self._debug_log("❌ CookieManager cog not loaded!", ctx)
             return None
         
         try:
             session = await cookie_manager.get_session()
+            await self._debug_log("✅ Session obtained successfully", ctx)
             return session
         except Exception as e:
-            if ctx:
-                await self._debug_log(f"❌ Failed to get session: {e}", ctx)
+            await self._debug_log(f"❌ Failed to get session: {e}", ctx)
             return None
     
-    async def _debug_log(self, message, ctx=None):
-        """Send debug message to channel if debug mode enabled"""
-        if self.debug_mode and self.debug_channel:
-            try:
-                await self.debug_channel.send(message)
-            except:
-                pass
-        if ctx:
-            print(f"[DEBUG] {message}")
-    
-    async def _scrape_members_page(self, session, page, ctx=None):
-        """Scrape a single page of members - WERKENDE VERSIE"""
-        url = f"{self.members_url}?page={page}"
+    async def _check_logged_in(self, html_content, ctx=None):
+        """Check if still logged in by looking for logout button or user menu"""
+        soup = BeautifulSoup(html_content, 'html.parser')
         
-        try:
-            async with session.get(url) as response:
-                if response.status != 200:
-                    await self._debug_log(f"❌ Page {page}: HTTP {response.status}", ctx)
-                    return []
+        # Check multiple indicators
+        logout_button = soup.find('a', href='/users/sign_out')
+        user_menu = soup.find('li', class_='dropdown user-menu')
+        profile_link = soup.find('a', href=lambda x: x and '/profile' in str(x))
+        settings_link = soup.find('a', href='/settings')
+        
+        # ALSO: Check if we have member data (if we can see members, we're logged in!)
+        has_member_links = bool(soup.find('a', href=lambda x: x and '/users/' in str(x)))
+        
+        is_logged_in = (logout_button is not None or 
+                        user_menu is not None or 
+                        profile_link is not None or
+                        settings_link is not None or
+                        has_member_links)  # <-- KEY FIX!
+        
+        await self._debug_log(f"Login check: {'✅ Logged in' if is_logged_in else '❌ NOT logged in'}", ctx)
+        await self._debug_log(f"Logout button: {logout_button is not None}", ctx)
+        await self._debug_log(f"User menu: {user_menu is not None}", ctx)
+        await self._debug_log(f"Profile link: {profile_link is not None}", ctx)
+        await self._debug_log(f"Settings link: {settings_link is not None}", ctx)
+        await self._debug_log(f"Has member links: {has_member_links}", ctx)
+        
+        return is_logged_in
+    
+    async def _scrape_members_page(self, session, page_num, ctx=None):
+        """Scrape a single page of members"""
+        url = f"{self.members_url}?page={page_num}"
+        await self._debug_log(f"🌐 Scraping page {page_num}: {url}", ctx)
+        
+        for attempt in range(3):
+            try:
+                await asyncio.sleep(1.5)  # Rate limiting
                 
-                html = await response.text()
-                soup = BeautifulSoup(html, 'html.parser')
-                
-                table = soup.find('table', class_='table')
-                if not table:
-                    await self._debug_log(f"⚠️ Page {page}: No table found", ctx)
-                    return []
-                
-                members_data = []
-                timestamp = datetime.utcnow().isoformat()
-                
-                for tr in table.find_all('tr')[1:]:  # Skip header
-                    try:
-                        # Find user link
-                        user_link = tr.find('a', href=lambda x: x and '/users/' in x)
-                        if not user_link:
+                async with session.get(url) as response:
+                    await self._debug_log(f"📡 Response status: {response.status}", ctx)
+                    
+                    if response.status != 200:
+                        await self._debug_log(f"❌ Page {page_num} returned status {response.status}", ctx)
+                        return []
+                    
+                    html = await response.text()
+                    await self._debug_log(f"📄 HTML length: {len(html)} chars", ctx)
+                    
+                    # Check if still logged in
+                    if not await self._check_logged_in(html, ctx):
+                        await self._debug_log(f"❌ Session expired on page {page_num}", ctx)
+                        return []
+                    
+                    soup = BeautifulSoup(html, 'html.parser')
+                    members_data = []
+                    timestamp = datetime.utcnow().isoformat()
+                    
+                    # USE SAME METHOD AS WORKING ALLIANCE SCRAPER
+                    # Just find ALL <tr> tags with links in them
+                    await self._debug_log(f"🔍 Searching for all <tr> tags with links...", ctx)
+                    
+                    for tr in soup.find_all("tr"):
+                        a = tr.find("a", href=True)
+                        if not a:
                             continue
                         
-                        name = user_link.get_text(strip=True)
-                        href = user_link['href']
-                        
-                        # Extract member ID
-                        match = re.search(r'/users/(\d+)', href)
-                        if not match:
-                            continue
-                        user_id = match.group(1)
-                        
-                        tds = tr.find_all('td')
-                        if len(tds) < 3:
+                        name = a.get_text(strip=True)
+                        if not name:
                             continue
                         
-                        # Initialize variables
+                        href = a["href"]
+                        # Extract user ID from href
+                        user_id = ""
+                        for pattern in [r"/users/(\d+)", r"/profile/(\d+)"]:
+                            match = re.search(pattern, href)
+                            if match:
+                                user_id = match.group(1)
+                                break
+                        
+                        # Get all <td> elements
+                        tds = tr.find_all("td")
+                        
                         role = ""
                         credits = 0
                         credits_raw = ""
@@ -215,20 +253,23 @@ class MembersScraper(commands.Cog):
                             if not role and txt and not any(ch.isdigit() for ch in txt) and name not in txt:
                                 role = txt
                             
-                            # Credits: ONLY accept "X,XXX Credits" format
+                            # Credits: ONLY accept "X,XXX Credits" format (case insensitive)
                             if credits == 0:
+                                # Match: "4,844,886 Credits" or "2,549 Credits"
                                 credits_match = re.search(r'([\d,]+)\s+Credits?\b', txt, re.I)
                                 if credits_match:
-                                    credits_raw = credits_match.group(0)
+                                    credits_raw = credits_match.group(0)  # Save raw for debugging
                                     cleaned = credits_match.group(1).replace(',', '')
                                     try:
                                         val = int(cleaned)
+                                        # Sanity check: reasonable range
                                         if 0 <= val <= 50000000000:  # Max 50 billion
                                             credits = val
                                         else:
+                                            # Suspicious!
                                             credits = -1  # Flag as suspicious
                                     except:
-                                        credits = -1
+                                        credits = -1  # Flag as suspicious
                             
                             # Contribution rate: percentage
                             if "%" in txt and rate == 0.0:
@@ -257,10 +298,13 @@ class MembersScraper(commands.Cog):
                             reason = f"Unusually high credits: {credits:,}"
                         
                         if is_suspicious:
+                            # Log suspicious entry
                             await self._debug_log(f"🚨 SUSPICIOUS: {name} - {reason}", ctx)
                             
+                            # ========== TOEVOEGING 2a: contribution_rate in suspicious dict ==========
+                            # Store in suspicious table
                             members_data.append({
-                                'member_id': int(user_id),
+                                'member_id': int(user_id) if user_id else 0,
                                 'username': name,
                                 'rank': role,
                                 'earned_credits': credits if credits > 0 else 0,
@@ -269,12 +313,14 @@ class MembersScraper(commands.Cog):
                                 'timestamp': timestamp,
                                 'suspicious': True,
                                 'reason': reason,
-                                'raw_html': str(tr)[:500]
+                                'raw_html': str(tr)[:500]  # First 500 chars of HTML
                             })
+                            # ==========================================================================
                         else:
+                            # ========== TOEVOEGING 2b: contribution_rate in normal dict ==========
                             # Normal entry
                             members_data.append({
-                                'member_id': int(user_id),
+                                'member_id': int(user_id) if user_id else 0,
                                 'username': name,
                                 'rank': role,
                                 'earned_credits': credits,
@@ -283,19 +329,26 @@ class MembersScraper(commands.Cog):
                                 'timestamp': timestamp,
                                 'suspicious': False
                             })
+                            # ======================================================================
+                            
+                            await self._debug_log(f"👤 Found: {name} (ID: {user_id}, Credits: {credits:,}, Rate: {rate}%, Role: {role})", ctx)
                     
-                    except Exception as e:
-                        await self._debug_log(f"⚠️ Error parsing row on page {page}: {e}", ctx)
-                        continue
-                
-                return members_data
-                
-        except Exception as e:
-            await self._debug_log(f"❌ Error scraping page {page}: {e}", ctx)
-            return []
+                    await self._debug_log(f"✅ Parsed {len(members_data)} members from page {page_num}", ctx)
+                    return members_data
+                    
+            except asyncio.TimeoutError:
+                await self._debug_log(f"⏱️ Timeout on page {page_num}, attempt {attempt + 1}/3", ctx)
+                if attempt == 2:
+                    return []
+            except Exception as e:
+                await self._debug_log(f"❌ Error scraping page {page_num}: {e}", ctx)
+                if attempt == 2:
+                    return []
+        
+        return []
     
     async def _scrape_all_members(self, ctx=None, custom_timestamp=None):
-        """Scrape all members pages - WERKENDE VERSIE"""
+        """Scrape all pages of members"""
         session = await self._get_session(ctx)
         if not session:
             if ctx:
@@ -304,11 +357,11 @@ class MembersScraper(commands.Cog):
         
         all_members = []
         page = 1
-        max_pages = 100
+        max_pages = 100  # Increased from 50 to 100 for larger alliances
         
         await self._debug_log(f"🚀 Starting member scrape (max {max_pages} pages)", ctx)
         
-        empty_page_count = 0
+        empty_page_count = 0  # Track consecutive empty pages
         
         while page <= max_pages:
             members = await self._scrape_members_page(session, page, ctx)
@@ -317,12 +370,14 @@ class MembersScraper(commands.Cog):
                 empty_page_count += 1
                 await self._debug_log(f"⚠️ Page {page} returned 0 members (empty count: {empty_page_count})", ctx)
                 
+                # Stop if we get 3 consecutive empty pages
                 if empty_page_count >= 3:
                     await self._debug_log(f"⛔ Stopped after {empty_page_count} consecutive empty pages", ctx)
                     break
             else:
-                empty_page_count = 0
+                empty_page_count = 0  # Reset counter if we find members
                 
+                # Override timestamp if provided (for back-filling)
                 if custom_timestamp:
                     for member in members:
                         member['timestamp'] = custom_timestamp
@@ -346,9 +401,10 @@ class MembersScraper(commands.Cog):
             for member in all_members:
                 try:
                     if member.get('suspicious', False):
+                        # Store in suspicious table with clamped credits
                         suspect_credits = member['earned_credits']
                         if suspect_credits == -1:
-                            suspect_credits = 0
+                            suspect_credits = 0  # Flag value, store as 0
                         else:
                             suspect_credits = max(0, min(INT64_MAX, int(suspect_credits)))
                         
@@ -360,13 +416,14 @@ class MembersScraper(commands.Cog):
                             member['member_id'],
                             member['username'],
                             member['rank'],
-                            suspect_credits,
+                            suspect_credits,  # Use clamped value
                             member.get('raw_html', ''),
                             member.get('reason', ''),
                             member['timestamp']
                         ))
                         suspicious_count += 1
                     else:
+                        # ========== TOEVOEGING 2c: contribution_rate in INSERT ==========
                         # Normal insert
                         credits = max(0, min(INT64_MAX, int(member['earned_credits'])))
                         contribution_rate = float(member.get('contribution_rate', 0.0))
@@ -384,6 +441,7 @@ class MembersScraper(commands.Cog):
                             member['online_status'],
                             member['timestamp']
                         ))
+                        # =================================================================
                         if cursor.rowcount > 0:
                             inserted += 1
                 except sqlite3.IntegrityError:
@@ -401,55 +459,61 @@ class MembersScraper(commands.Cog):
                 msg = f"✅ Scraped {len(all_members)} members across {page - 1} pages\n"
                 msg += f"💾 Database: {inserted} new records, {duplicates} duplicates"
                 if suspicious_count > 0:
-                    msg += f"\n🚨 **WARNING**: {suspicious_count} suspicious entries detected!"
+                    msg += f"\n🚨 **WARNING**: {suspicious_count} suspicious entries detected! Check `suspicious_members` table."
                 await ctx.send(msg)
-                
-        return True
+            return True
+        else:
+            if ctx:
+                await ctx.send("⚠️ No members data found")
+            return False
     
     async def _background_scraper(self):
         """Background task that runs every hour"""
         await self.bot.wait_until_ready()
-        log.info("Background scraper started")
         
         while not self.bot.is_closed():
             try:
-                await asyncio.sleep(3600)  # Wait 1 hour
-                log.info("Running background scrape")
+                print(f"[MembersScraper] Starting automatic scrape at {datetime.utcnow()}")
                 await self._scrape_all_members()
-                log.info("Background scrape complete")
-            except asyncio.CancelledError:
-                log.info("Background scraper stopped")
-                break
+                print(f"[MembersScraper] Automatic scrape completed")
             except Exception as e:
-                log.error(f"Error in background scraper: {e}", exc_info=True)
-    
-    # ============== COMMANDS ==============
+                print(f"[MembersScraper] Background task error: {e}")
+            
+            await asyncio.sleep(3600)  # Wait 1 hour
     
     @commands.group(name="members")
     @commands.is_owner()
     async def members_group(self, ctx):
-        """Alliance members scraper commands"""
+        """Members scraper commands"""
         if ctx.invoked_subcommand is None:
             await ctx.send_help(ctx.command)
     
     @members_group.command(name="scrape")
     async def scrape_members(self, ctx):
-        """Manually trigger a member scrape"""
-        async with ctx.typing():
-            await self._scrape_all_members(ctx)
+        """Manually trigger members scraping"""
+        await ctx.send("🔄 Starting members scrape...")
+        success = await self._scrape_all_members(ctx)
+        if success:
+            await ctx.send("✅ Members scrape completed successfully")
     
     @members_group.command(name="backfill")
     async def backfill_members(self, ctx, days: int = 30):
-        """Back-fill historical data"""
+        """
+        Back-fill historical data by scraping current data with past timestamps.
+        This simulates daily snapshots for the past X days.
+        
+        Usage: [p]members backfill 30
+        """
         if days < 1 or days > 365:
             await ctx.send("❌ Days must be between 1 and 365")
             return
         
         await ctx.send(f"🔄 Starting back-fill for {days} days of historical data...")
+        await ctx.send(f"⚠️ Note: This uses current member data with past timestamps to create historical baseline")
         
         session = await self._get_session(ctx)
         if not session:
-            await ctx.send("❌ Failed to get session")
+            await ctx.send("❌ Failed to get session. Is CookieManager loaded and logged in?")
             return
         
         # Get current member data once
@@ -484,6 +548,7 @@ class MembersScraper(commands.Cog):
             
             for member in all_members:
                 try:
+                    # ========== TOEVOEGING 2d: contribution_rate in backfill ==========
                     cursor.execute('''
                         INSERT OR IGNORE INTO members 
                         (member_id, username, rank, earned_credits, contribution_rate, online_status, timestamp)
@@ -497,106 +562,31 @@ class MembersScraper(commands.Cog):
                         member['online_status'],
                         timestamp
                     ))
+                    # ===================================================================
                     if cursor.rowcount > 0:
                         total_inserted += 1
-                except Exception as e:
+                except sqlite3.IntegrityError:
                     pass
             
-            if day_offset % 5 == 0:
-                await ctx.send(f"📈 Progress: {days - day_offset}/{days} days completed...")
+            if day_offset % 10 == 0:
+                conn.commit()
+                await ctx.send(f"⏳ Progress: {days - day_offset}/{days} days completed...")
         
         conn.commit()
         conn.close()
         
-        await ctx.send(f"✅ Back-fill complete! Inserted {total_inserted} historical records across {days} days")
+        await self._debug_log(f"Back-fill completed: {total_inserted} records inserted", ctx)
+        await ctx.send(f"✅ Back-fill completed!\n"
+                      f"📊 Inserted {total_inserted} historical records across {days} days\n"
+                      f"💡 You now have baseline data for trend analysis")
     
-    @members_group.command(name="testcontrib")
-    async def test_contribution(self, ctx):
-        """Test contribution rate data"""
-        async with ctx.typing():
-            try:
-                conn = sqlite3.connect(self.db_path)
-                conn.row_factory = sqlite3.Row
-                cursor = conn.cursor()
-                
-                # Get latest date
-                cursor.execute("SELECT MAX(DATE(timestamp)) as latest_date FROM members")
-                latest_date_row = cursor.fetchone()
-                
-                if not latest_date_row or not latest_date_row['latest_date']:
-                    await ctx.send("❌ No data in database. Run `[p]members scrape` first!")
-                    conn.close()
-                    return
-                
-                latest_date = latest_date_row['latest_date']
-                
-                # Get statistics
-                cursor.execute("""
-                    SELECT 
-                        COUNT(*) as total,
-                        COUNT(CASE WHEN contribution_rate > 0 THEN 1 END) as with_contrib,
-                        AVG(contribution_rate) as avg_rate,
-                        MAX(contribution_rate) as max_rate,
-                        MIN(contribution_rate) as min_rate
-                    FROM members
-                    WHERE DATE(timestamp) = ?
-                """, (latest_date,))
-                stats = cursor.fetchone()
-                
-                # Get top contributors
-                cursor.execute("""
-                    SELECT username, contribution_rate, earned_credits
-                    FROM members
-                    WHERE DATE(timestamp) = ?
-                    ORDER BY contribution_rate DESC
-                    LIMIT 10
-                """, (latest_date,))
-                top_contrib = cursor.fetchall()
-                
-                conn.close()
-                
-                # Build response
-                embed = discord.Embed(
-                    title="🔍 Contribution Rate Test Results",
-                    description=f"Data from: {latest_date}",
-                    color=discord.Color.green(),
-                    timestamp=datetime.utcnow()
-                )
-                
-                if stats:
-                    stats_text = (
-                        f"**Total Members:** {stats['total']}\n"
-                        f"**With Contribution Data:** {stats['with_contrib']}\n"
-                        f"**Average Rate:** {stats['avg_rate']:.2f}%\n"
-                        f"**Max Rate:** {stats['max_rate']:.2f}%\n"
-                        f"**Min Rate:** {stats['min_rate']:.2f}%"
-                    )
-                    embed.add_field(name="📊 Statistics", value=stats_text, inline=False)
-                
-                if top_contrib:
-                    contrib_text = "\n".join([
-                        f"**{row['username']}**: {row['contribution_rate']:.1f}% ({row['earned_credits']:,} credits)"
-                        for row in top_contrib[:5]
-                    ])
-                    embed.add_field(
-                        name="🏆 Top 5 Contributors",
-                        value=contrib_text,
-                        inline=False
-                    )
-                
-                zero_count = stats['total'] - stats['with_contrib'] if stats else 0
-                if zero_count > 0:
-                    embed.add_field(
-                        name="ℹ️ Info",
-                        value=f"{zero_count} members have 0% contribution rate (this can be normal)",
-                        inline=False
-                    )
-                
-                await ctx.send(embed=embed)
-                
-            except Exception as e:
-                await ctx.send(f"❌ Error: {e}")
-                log.exception("Error in testcontrib")
+    @members_group.command(name="debug")
+    async def debug_members(self, ctx, enable: bool = True):
+        """Enable or disable debug logging to Discord"""
+        self.debug_mode = enable
+        self.debug_channel = ctx.channel if enable else None
+        await ctx.send(f"🐛 Debug mode: {'**ENABLED**' if enable else '**DISABLED**'}\n"
+                      f"Debug messages will be sent to this channel.")
     
     @members_group.command(name="stats")
     async def stats_members(self, ctx):
@@ -613,13 +603,7 @@ class MembersScraper(commands.Cog):
         cursor.execute("SELECT MIN(timestamp), MAX(timestamp) FROM members")
         date_range = cursor.fetchone()
         
-        cursor.execute("""
-            SELECT COUNT(*), timestamp 
-            FROM members 
-            GROUP BY timestamp 
-            ORDER BY timestamp DESC 
-            LIMIT 1
-        """)
+        cursor.execute("SELECT COUNT(*), timestamp FROM members GROUP BY timestamp ORDER BY timestamp DESC LIMIT 1")
         latest = cursor.fetchone()
         
         # Check if members_current VIEW exists
@@ -638,60 +622,14 @@ class MembersScraper(commands.Cog):
             embed.add_field(name="Last Record", value=date_range[1][:10], inline=True)
         
         if latest:
-            embed.add_field(
-                name="Latest Scrape", 
-                value=f"{latest[0]} members\n{latest[1][:16]}", 
-                inline=False
-            )
+            embed.add_field(name="Latest Scrape", value=f"{latest[0]} members\n{latest[1][:16]}", inline=False)
         
-        # MemberSync compatibility
+        # MemberSync compatibility indicator
         sync_status = "✅ Active" if view_exists else "❌ Missing"
         embed.add_field(name="MemberSync Compatibility", value=sync_status, inline=False)
         
         embed.set_footer(text=f"Database: {self.db_path}")
         await ctx.send(embed=embed)
-    
-    @members_group.command(name="testpage")
-    async def test_page(self, ctx, page: int = 1):
-        """Test specific page"""
-        await ctx.send(f"🔍 Testing page {page}...")
-        
-        session = await self._get_session(ctx)
-        if not session:
-            await ctx.send("❌ No session")
-            return
-        
-        members = await self._scrape_members_page(session, page, ctx)
-        
-        if not members:
-            await ctx.send(f"❌ Page {page} returned 0 members")
-        else:
-            embed = discord.Embed(
-                title=f"📊 Page {page} Results",
-                description=f"Found {len(members)} members",
-                color=discord.Color.green()
-            )
-            
-            for i, member in enumerate(members[:3], 1):
-                value = (
-                    f"**ID:** {member['member_id']}\n"
-                    f"**Rank:** {member['rank']}\n"
-                    f"**Credits:** {member['earned_credits']:,}\n"
-                    f"**Contribution:** {member.get('contribution_rate', 0)}%\n"
-                    f"**Status:** {member['online_status']}"
-                )
-                
-                embed.add_field(
-                    name=f"{i}. {member['username']}",
-                    value=value,
-                    inline=False
-                )
-            
-            if len(members) > 3:
-                embed.set_footer(text=f"... and {len(members) - 3} more")
-            
-            await ctx.send(embed=embed)
-
 
 async def setup(bot):
     await bot.add_cog(MembersScraper(bot))
