@@ -1,7 +1,11 @@
 """
-members_scraper.py - WERKENDE VERSIE met contribution_rate + MemberSync VIEW
+members_scraper.py - WERKENDE VERSIE + MemberSync VIEW
+Gebaseerd op document 4 (de werkende code) met ALLEEN MemberSync VIEW toegevoegd
 
-Deze versie gebruikt de BEWEZEN WERKENDE code met ALLEEN MemberSync VIEW toegevoegd
+✅ Members_v2.db
+✅ Contribution rates
+✅ Geen rare member namen
+✅ MemberSync compatible
 """
 
 import discord
@@ -43,7 +47,7 @@ class MembersScraper(commands.Cog):
     def cog_load(self):
         """Start background task when cog loads"""
         self.scraping_task = self.bot.loop.create_task(self._background_scraper())
-        log.info("MembersScraper loaded - WERKENDE VERSIE met MemberSync")
+        log.info("MembersScraper loaded - WERKENDE VERSIE")
         
     def cog_unload(self):
         """Cancel background task when cog unloads"""
@@ -101,8 +105,7 @@ class MembersScraper(commands.Cog):
                     )
                 ''')
                 
-                # ============== ENIGE NIEUWE TOEVOEGING: MEMBERSYNC VIEW ==============
-                # Create VIEW for MemberSync compatibility
+                # ============== ENIGE TOEVOEGING: MEMBERSYNC VIEW ==============
                 cursor.execute('DROP VIEW IF EXISTS members_current')
                 cursor.execute('''
                     CREATE VIEW members_current AS
@@ -119,7 +122,7 @@ class MembersScraper(commands.Cog):
                     WHERE DATE(timestamp) = (SELECT MAX(DATE(timestamp)) FROM members)
                 ''')
                 log.info("✅ MemberSync VIEW created")
-                # ====================================================================
+                # ===============================================================
                 
                 conn.commit()
                 conn.close()
@@ -132,7 +135,7 @@ class MembersScraper(commands.Cog):
                 raise
     
     async def _get_session(self, ctx=None):
-        """Get authenticated session from CookieManager - WERKENDE VERSIE"""
+        """Get authenticated session from CookieManager"""
         cookie_manager = self.bot.get_cog('CookieManager')
         if not cookie_manager:
             if ctx:
@@ -158,7 +161,7 @@ class MembersScraper(commands.Cog):
             print(f"[DEBUG] {message}")
     
     async def _scrape_members_page(self, session, page, ctx=None):
-        """Scrape a single page of members - WERKENDE VERSIE met DEBUG"""
+        """Scrape a single page of members - WERKENDE VERSIE"""
         url = f"{self.members_url}?page={page}"
         
         try:
@@ -168,29 +171,12 @@ class MembersScraper(commands.Cog):
                     return []
                 
                 html = await response.text()
-                await self._debug_log(f"📄 Page {page}: Got {len(html)} chars HTML", ctx)
-                
                 soup = BeautifulSoup(html, 'html.parser')
-                
-                # DEBUG: Check wat voor tables we hebben
-                all_tables = soup.find_all('table')
-                await self._debug_log(f"🔍 Page {page}: Found {len(all_tables)} table(s)", ctx)
-                
-                if all_tables and ctx:
-                    for i, t in enumerate(all_tables[:3]):
-                        classes = t.get('class', [])
-                        rows = len(t.find_all('tr'))
-                        await self._debug_log(f"  Table {i+1}: classes={classes}, rows={rows}", ctx)
                 
                 table = soup.find('table', class_='table')
                 if not table:
-                    await self._debug_log(f"⚠️ Page {page}: No table with class='table' found", ctx)
-                    # Probeer ALLE tables
-                    if all_tables:
-                        await self._debug_log(f"⚠️ Trying first table without class check...", ctx)
-                        table = all_tables[0]
-                    else:
-                        return []
+                    await self._debug_log(f"⚠️ Page {page}: No table found", ctx)
+                    return []
                 
                 members_data = []
                 timestamp = datetime.utcnow().isoformat()
@@ -446,7 +432,7 @@ class MembersScraper(commands.Cog):
         if ctx.invoked_subcommand is None:
             await ctx.send_help(ctx.command)
     
-    @commands.command(name="scrape")
+    @members_group.command(name="scrape")
     async def scrape_members(self, ctx):
         """Manually trigger a member scrape"""
         async with ctx.typing():
@@ -454,12 +440,7 @@ class MembersScraper(commands.Cog):
     
     @members_group.command(name="backfill")
     async def backfill_members(self, ctx, days: int = 30):
-        """
-        Back-fill historical data by creating snapshots for past days.
-        This uses CURRENT member data with past timestamps.
-        
-        Usage: [p]members backfill 30
-        """
+        """Back-fill historical data"""
         if days < 1 or days > 365:
             await ctx.send("❌ Days must be between 1 and 365")
             return
@@ -521,7 +502,7 @@ class MembersScraper(commands.Cog):
                 except Exception as e:
                     pass
             
-            if day_offset % 5 == 0:  # Progress update every 5 days
+            if day_offset % 5 == 0:
                 await ctx.send(f"📈 Progress: {days - day_offset}/{days} days completed...")
         
         conn.commit()
@@ -531,7 +512,7 @@ class MembersScraper(commands.Cog):
     
     @members_group.command(name="testcontrib")
     async def test_contribution(self, ctx):
-        """Test command to verify contribution rates are being scraped and stored"""
+        """Test contribution rate data"""
         async with ctx.typing():
             try:
                 conn = sqlite3.connect(self.db_path)
@@ -663,26 +644,12 @@ class MembersScraper(commands.Cog):
                 inline=False
             )
         
-        # MemberSync compatibility indicator
+        # MemberSync compatibility
         sync_status = "✅ Active" if view_exists else "❌ Missing"
         embed.add_field(name="MemberSync Compatibility", value=sync_status, inline=False)
         
         embed.set_footer(text=f"Database: {self.db_path}")
         await ctx.send(embed=embed)
-    
-    @members_group.command(name="enabledebug")
-    async def enable_debug(self, ctx):
-        """Enable debug mode"""
-        self.debug_mode = True
-        self.debug_channel = ctx.channel
-        await ctx.send("✅ Debug mode **ENABLED**")
-    
-    @members_group.command(name="disabledebug")
-    async def disable_debug(self, ctx):
-        """Disable debug mode"""
-        self.debug_mode = False
-        self.debug_channel = None
-        await ctx.send("✅ Debug mode **DISABLED**")
     
     @members_group.command(name="testpage")
     async def test_page(self, ctx, page: int = 1):
@@ -724,6 +691,7 @@ class MembersScraper(commands.Cog):
                 embed.set_footer(text=f"... and {len(members) - 3} more")
             
             await ctx.send(embed=embed)
+
 
 async def setup(bot):
     await bot.add_cog(MembersScraper(bot))
