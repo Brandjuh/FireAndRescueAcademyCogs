@@ -1,29 +1,21 @@
-from __future__ import annotations
+from pathlib import Path
 
-import pathlib
+BASE_DIR = Path(__file__).parent  # .../assetmanager
+DB_PATH = BASE_DIR / "assets.db"
 
-# SQLite database file
-DB_PATH = pathlib.Path(__file__).parent / "assets.db"
+# Directory that will contain JSON schemas
+SCHEMA_DIR = BASE_DIR / "schemas"
 
-# Raw URLs on dev branch (we fetch the raw TS)
-RAW_BASE = "https://raw.githubusercontent.com/LSS-Manager/LSSM-V.4/dev/src/i18n/en_US"
+# Node binary (absolute path, because services love to forget PATH)
+NODE_BIN = "/usr/bin/node"
+
+# Source TS files we fetch
 SRC_FILES = {
-    "buildings":  f"{RAW_BASE}/buildings.ts",
-    "equipment":  f"{RAW_BASE}/equipment.ts",
-    "schoolings": f"{RAW_BASE}/schoolings.ts",
-    "vehicles":   f"{RAW_BASE}/vehicles.ts",
+    "buildings": "https://raw.githubusercontent.com/LSS-Manager/LSSM-V.4/dev/src/i18n/en_US/buildings.ts",
+    "equipment": "https://raw.githubusercontent.com/LSS-Manager/LSSM-V.4/dev/src/i18n/en_US/equipment.ts",
+    "schoolings": "https://raw.githubusercontent.com/LSS-Manager/LSSM-V.4/dev/src/i18n/en_US/schoolings.ts",
+    "vehicles":  "https://raw.githubusercontent.com/LSS-Manager/LSSM-V.4/dev/src/i18n/en_US/vehicles.ts",
 }
 
-# Local temp folder for fetched sources and JSON dumps
-DATA_DIR = pathlib.Path(__file__).parent / "_data"
-DATA_DIR.mkdir(exist_ok=True)
-
-# JSON Schemas
-SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
-
-# Node converter
-NODE_BIN = "/usr/bin/node"
-TS_TO_JSON = pathlib.Path(__file__).parent / "ts_to_json.mjs"
-
-# Simple search knobs
-FUZZY_MIN_SCORE = 55
+# Fuzzy threshold
+FUZZY_MIN_SCORE = 60
