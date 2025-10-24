@@ -1,319 +1,265 @@
 from __future__ import annotations
 
 import asyncio
-import logging
-import sqlite3
-from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 import discord
-from redbot.core import commands, checks, Config
+from redbot.core import commands, checks
+from redbot.core.utils.chat_formatting import box
 
-# Local modules
-from . import etl
-from .search import fuzzy_search, get_vehicle
-from .config import DB_PATH
+# Imports uit onze module
+try:
+    from .search import fuzzy_search, get_vehicle
+except Exception:  # pragma: no cover
+    from search import fuzzy_search, get_vehicle  # type: ignore
 
-log = logging.getLogger("red.FARA.AssetManager")
 
-DEFAULTS_GUILD = {
-    "enabled": True,
-    "interval_hours": 24,
-    "announce_channel_id": None,
-    "last_run_iso": None,
-    "last_ok_iso": None,
-    "last_error": None,
+def _fmt_score(s: float) -> str:
+    return f"{s:.0f}"
+
+# --- Agency inference --------------------------------------------------------
+
+AGENCY_ORDER = ("Fire", "Police", "EMS", "Rescue", "Tow", "FBI", "Other")
+
+_KEYWORDS = {
+    "Fire": (
+        "fire", "engine", "pumper", "ladder", "aerial", "quint", "tanker", "foam",
+        "brush", "wildland", "hazmat", "platform", "water", "rescue engine",
+    ),
+    "Police": (
+        "police", "sheriff", "patrol", "k9", "k-9", "swat", "riot", "traffic unit",
+        "highway", "interceptor", "law", "cop",
+    ),
+    "EMS": (
+        "ambulance", "ems", "paramedic", "hems", "medical", "icu", "rescue ambulance",
+    ),
+    "Rescue": (
+        "rescue", "heavy rescue", "technical rescue", "usar",
+    ),
+    "Tow": (
+        "tow", "wrecker", "flatbed", "recovery",
+    ),
+    "FBI": (
+        "fbi", "federal", "bureau",
+    ),
 }
 
+_BUILDING_HINTS = {
+    "Fire": ("fire", "aerial", "rescue", "wildland", "hazmat"),
+    "Police": ("police", "sheriff", "law"),
+    "EMS": ("ambulance", "clinic", "medical", "hospital", "ems"),
+    "Tow": ("tow", "recovery"),
+    "FBI": ("fbi", "federal"),
+}
+
+_ROLE_HINTS = {
+    "Fire": ("engine", "ladder", "hazmat", "foam", "tanker", "quint", "brush"),
+    "Police": ("patrol", "k9", "riot", "swat", "traffic"),
+    "EMS": ("ambulance", "paramedic", "medic"),
+    "Rescue": ("rescue", "usar"),
+    "Tow": ("tow",),
+    "FBI": ("fbi",),
+}
+
+def infer_agency(name: str, roles: List[str], building_names: List[str], building_categories: List[str]) -> str:
+    n_low = (name or "").lower()
+
+    # 1) keywords in vehicle name
+    hits: List[str] = []
+    for agency, kws in _KEYWORDS.items():
+        if any(k in n_low for k in kws):
+            hits.append(agency)
+    if hits:
+        # return the first according to preferred order
+        for a in AGENCY_ORDER:
+            if a in hits:
+                return a
+
+    # 2) roles
+    rl = " ".join(roles).lower() if roles else ""
+    if rl:
+        hits = []
+        for agency, rk in _ROLE_HINTS.items():
+            if any(k in rl for k in rk):
+                hits.append(agency)
+        if hits:
+            for a in AGENCY_ORDER:
+                if a in hits:
+                    return a
+
+    # 3) buildings: names + categories
+    b_text = " ".join(building_names + building_categories).lower()
+    if b_text:
+        hits = []
+        for agency, bk in _BUILDING_HINTS.items():
+            if any(k in b_text for k in bk):
+                hits.append(agency)
+        if hits:
+            for a in AGENCY_ORDER:
+                if a in hits:
+                    return a
+
+    # 4) last resort: try basic trigrams
+    if "pol" in n_low:
+        return "Police"
+    if "amb" in n_low or "med" in n_low:
+        return "EMS"
+    if "rescue" in n_low:
+        return "Rescue"
+
+    return "Other"
+
+# --- Cog ---------------------------------------------------------------------
 
 class AssetManager(commands.Cog):
-    """Keeps assets.db up-to-date and provides fuzzy search and details."""
+    """Asset database search and details."""
 
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xA55E7A, force_registration=True)
-        self.config.register_guild(**DEFAULTS_GUILD)
 
-        self._task: asyncio.Task | None = None
-        self._ready = asyncio.Event()
-
-    # ---------- Lifecycle ----------
-
-    async def cog_load(self):
-        self._task = asyncio.create_task(self._runner(), name="assetmanager_runner")
-
-    async def cog_unload(self):
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-
-    @commands.Cog.listener()
-    async def on_red_ready(self):
-        self._ready.set()
-
-    # ---------- DB helpers ----------
-
-    async def _ensure_schema(self):
-        await asyncio.to_thread(etl.ensure_db)
-
-    def _table_exists(self, table: str) -> bool:
-        try:
-            with sqlite3.connect(str(DB_PATH)) as con:
-                cur = con.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-                    (table,),
-                )
-                return cur.fetchone() is not None
-        except Exception:
-            return False
-
-    def _rowcount(self, table: str) -> int:
-        try:
-            with sqlite3.connect(str(DB_PATH)) as con:
-                cur = con.execute(f"SELECT COUNT(1) FROM {table}")
-                return int(cur.fetchone()[0])
-        except Exception:
-            return 0
-
-    # ---------- Background Runner ----------
-
-    async def _runner(self):
-        await self._ready.wait()
-        await asyncio.sleep(5)
-
-        # Ensure schema once on startup
-        try:
-            await self._ensure_schema()
-        except Exception:
-            log.exception("Could not initialize schema")
-
-        # Initial ETL if DB is empty or index is missing
-        need_initial = not self._table_exists("search_index") or self._rowcount("vehicles") == 0
-        if need_initial:
-            try:
-                await asyncio.to_thread(etl.run_etl)
-                log.info("AssetManager: initial ETL executed on startup")
-            except Exception:
-                log.exception("Initial ETL on startup failed")
-
-        while True:
-            try:
-                for guild in self.bot.guilds:
-                    try:
-                        await self._maybe_run_for_guild(guild)
-                    except Exception as e:
-                        log.exception("Guild ETL error in %s: %s", guild.id, e)
-                await asyncio.sleep(60)
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                log.exception("AssetManager runner loop error")
-
-    async def _maybe_run_for_guild(self, guild: discord.Guild):
-        conf = self.config.guild(guild)
-        enabled = await conf.enabled()
-        if not enabled:
-            return
-
-        interval_h = await conf.interval_hours()
-        last_iso = await conf.last_run_iso()
-        now = datetime.now(timezone.utc)
-
-        due = True
-        if last_iso:
-            try:
-                last = datetime.fromisoformat(last_iso)
-                due = (now - last) >= timedelta(hours=interval_h)
-            except Exception:
-                due = True
-
-        if not due:
-            return
-
-        await conf.last_run_iso.set(now.isoformat())
-        try:
-            await asyncio.to_thread(etl.run_etl)
-            await conf.last_ok_iso.set(datetime.now(timezone.utc).isoformat())
-            await conf.last_error.set(None)
-            await self._announce(guild, f"Assets ETL OK. DB `{DB_PATH.name}` is up-to-date.")
-        except Exception as e:
-            await conf.last_error.set(str(e))
-            await self._announce(guild, f"Assets ETL failed: `{e}`")
-
-    async def _announce(self, guild: discord.Guild, message: str):
-        channel_id = await self.config.guild(guild).announce_channel_id()
-        if not channel_id:
-            return
-        ch = guild.get_channel(channel_id)
-        if not ch:
-            return
-        try:
-            await ch.send(message)
-        except Exception:
-            log.debug("Failed to announce in %s", channel_id)
-
-    # ---------- Commands ----------
-
+    # Main group: default fuzzy search
     @commands.group(name="assets", invoke_without_command=True)
-    async def assets_group(self, ctx: commands.Context, *, query: str | None = None):
-        """
-        Main command: fuzzy search across all assets.
-        Usage: [p]assets <query>
-        Subcommands: status, enable, interval, announce, reload, vehicle
-        """
-        if query is None:
-            return await ctx.send("Usage: `[p]assets <query>` or `[p]assets status`.")
+    async def assets_group(self, ctx: commands.Context, *, query: str):
+        """Search assets (vehicles, equipment, schoolings, buildings)."""
+        q = (query or "").strip()
+        if not q:
+            await ctx.send("Give me something to search for.")
+            return
 
-        await self._ensure_schema()
-        if not self._table_exists("search_index"):
-            return await ctx.send("The assets database has not been built yet. Run `[p]assets reload` first.")
-
-        if self._rowcount("vehicles") == 0 and self._rowcount("buildings") == 0:
-            return await ctx.send("No assets found. Run `[p]assets reload` to fetch data.")
-
-        try:
-            items = await asyncio.to_thread(fuzzy_search, query, None, 20)
-        except sqlite3.OperationalError:
-            return await ctx.send("Search index missing or corrupt. Run `[p]assets reload` to rebuild.")
+        # Run fuzzy search in a thread
+        items = await asyncio.to_thread(fuzzy_search, q, None, 20)
 
         if not items:
-            return await ctx.send("No results.")
-        lines = [f"`{i['type']}` #{i['ref_id']} — **{i['name']}** (score {i['score']})" for i in items[:20]]
-        await ctx.send("\n".join(lines))
+            await ctx.send("No results.")
+            return
 
-    @assets_group.command(name="status")
-    @checks.admin_or_permissions(manage_guild=True)
-    async def assets_status(self, ctx: commands.Context):
-        """Show status and row counts."""
-        await self._ensure_schema()
-        conf = self.config.guild(ctx.guild)
+        # Build a compact embed list
+        embed = discord.Embed(title=f"Assets search: {q}", color=discord.Color.blurple())
+        # Show top 10 inline, rest as clipped footer line
+        top = items[:10]
+        for it in top:
+            typ = it["type"]
+            vid = it["id"]
+            name = it.get("name") or f"{typ.capitalize()} {vid}"
+            score = _fmt_score(float(it.get("score", 0)))
+            snippet = it.get("snippet") or ""
+            # Trim snippet to not break mobile
+            if len(snippet) > 180:
+                snippet = snippet[:177] + "…"
+            embed.add_field(
+                name=f"{name}  ·  {typ} #{vid}  ·  {score}",
+                value=snippet or "\u200b",
+                inline=False,
+            )
+        if len(items) > len(top):
+            embed.set_footer(text=f"{len(items)} results, showing first {len(top)}.")
 
-        counts = {
-            "vehicles": self._rowcount("vehicles"),
-            "equipment": self._rowcount("equipment"),
-            "schoolings": self._rowcount("schoolings"),
-            "buildings": self._rowcount("buildings"),
-            "search_index": self._rowcount("search_index") if self._table_exists("search_index") else 0,
-        }
-        data = {
-            "enabled": await conf.enabled(),
-            "interval_hours": await conf.interval_hours(),
-            "announce_channel_id": await conf.announce_channel_id(),
-            "last_run_iso": await conf.last_run_iso(),
-            "last_ok_iso": await conf.last_ok_iso(),
-            "last_error": await conf.last_error(),
-            "db_path": str(DB_PATH),
-            "counts": counts,
-        }
-        lines = [f"**{k}**: {v}" for k, v in data.items()]
-        await ctx.send("\n".join(lines))
+        await ctx.send(embed=embed)
 
-    @assets_group.command(name="enable")
-    @checks.admin_or_permissions(manage_guild=True)
-    async def assets_enable(self, ctx: commands.Context, value: bool):
-        """Enable or disable scheduled ETL."""
-        await self.config.guild(ctx.guild).enabled.set(value)
-        await ctx.send(f"Scheduled ETL is now {'enabled' if value else 'disabled'}.")
-
-    @assets_group.command(name="interval")
-    @checks.admin_or_permissions(manage_guild=True)
-    async def assets_interval(self, ctx: commands.Context, hours: int):
-        """Set ETL interval in hours (1..168)."""
-        hours = max(1, min(168, hours))
-        await self.config.guild(ctx.guild).interval_hours.set(hours)
-        await ctx.send(f"Interval set to {hours}h.")
-
-    @assets_group.command(name="announce")
-    @checks.admin_or_permissions(manage_guild=True)
-    async def assets_announce(self, ctx: commands.Context, channel: Optional[discord.TextChannel]):
-        """Set or clear an announce channel for ETL results."""
-        await self.config.guild(ctx.guild).announce_channel_id.set(channel.id if channel else None)
-        await ctx.send(f"Announce channel set to {channel.mention if channel else 'None'}.")
-
-    @assets_group.command(name="reload")
-    @checks.admin_or_permissions(manage_guild=True)
-    async def assets_reload(self, ctx: commands.Context):
-        """Run ETL now."""
-        await self._ensure_schema()
-        msg = await ctx.send("Running ETL...")
-        try:
-            await asyncio.to_thread(etl.run_etl)
-            await self.config.guild(ctx.guild).last_ok_iso.set(datetime.now(timezone.utc).isoformat())
-            await self.config.guild(ctx.guild).last_error.set(None)
-            await msg.edit(content="ETL done. DB updated.")
-        except Exception as e:
-            await self.config.guild(ctx.guild).last_error.set(str(e))
-            await msg.edit(content=f"ETL failed: {e}")
-
+    # Subcommand: vehicle details
     @assets_group.command(name="vehicle")
     async def assets_vehicle(self, ctx: commands.Context, vehicle_id: int):
-        """Show vehicle details by ID."""
-        await self._ensure_schema()
-        if not self._table_exists("vehicles"):
-            return await ctx.send("The assets database has not been built yet. Run `[p]assets reload` first.")
-        if self._rowcount("vehicles") == 0:
-            return await ctx.send("No vehicles found. Run `[p]assets reload` to fetch data.")
+        """Show detailed info about a vehicle by ID."""
+        def _get() -> Optional[Dict[str, Any]]:
+            return get_vehicle(vehicle_id)  # search.get_vehicle has single-arg signature
 
-        def _get():
-            con = sqlite3.connect(DB_PATH)
-            con.row_factory = sqlite3.Row
-            with con:
-                return get_vehicle(con, vehicle_id)
-
-        try:
-            v = await asyncio.to_thread(_get)
-        except sqlite3.OperationalError:
-            return await ctx.send("Database or index missing. Run `[p]assets reload` to rebuild.")
-
+        v = await asyncio.to_thread(_get)
         if not v:
-            return await ctx.send("Not found.")
+            await ctx.send(f"Vehicle {vehicle_id} not found.")
+            return
 
-        emb = discord.Embed(title=f"{v['name']} (#{v['id']})", colour=discord.Colour.blurple())
-        fields = [
-            ("Min Personnel", v["min_personnel"]),
-            ("Max Personnel", v["max_personnel"]),
-            ("Price (credits)", v.get("price_credits")),
-            ("Price (coins)", v.get("price_coins")),
-            ("Rank required", v.get("rank_required")),
-            ("Water tank", v.get("water_tank")),
-            ("Foam tank", v.get("foam_tank")),
-            ("Pump GPM", v.get("pump_gpm")),
-            ("Speed", v.get("speed")),
-            ("Specials", v.get("specials")),
-        ]
-        for k, val in fields:
-            if val not in (None, "", 0):
-                emb.add_field(name=k, value=str(val), inline=True)
+        name = v.get("name") or f"Vehicle {vehicle_id}"
+        roles = list(v.get("roles") or [])
+        buildings = list(v.get("possible_buildings") or [])
+        schoolings = list(v.get("required_schoolings") or [])
+        equipment = list(v.get("equipment_compat") or [])
 
-        roles = v.get("roles") or []
+        b_names = [b.get("name", "") for b in buildings if isinstance(b, dict)]
+        # some schemas may have category in building; if not, keep empty
+        b_cats = []
+        for b in buildings:
+            if isinstance(b, dict):
+                cat = b.get("category")
+                if cat:
+                    b_cats.append(str(cat))
+
+        agency = infer_agency(
+            name=name,
+            roles=roles,
+            building_names=b_names,
+            building_categories=b_cats,
+        )
+
+        em = discord.Embed(
+            title=f"{name}  ·  #{vehicle_id}",
+            color=discord.Color.dark_teal(),
+        )
+        em.add_field(name="Agency", value=agency, inline=True)
+        em.add_field(
+            name="Crew",
+            value=f"{v.get('min_personnel', 0)}–{v.get('max_personnel', 0)}",
+            inline=True,
+        )
+        price_parts = []
+        if v.get("price_credits") is not None:
+            price_parts.append(f"{v['price_credits']} credits")
+        if v.get("price_coins") is not None:
+            price_parts.append(f"{v['price_coins']} coins")
+        em.add_field(name="Price", value=", ".join(price_parts) or "—", inline=True)
+
+        tanks = []
+        if v.get("water_tank"):
+            tanks.append(f"Water {v['water_tank']}")
+        if v.get("foam_tank"):
+            tanks.append(f"Foam {v['foam_tank']}")
+        if v.get("pump_gpm"):
+            tanks.append(f"Pump {v['pump_gpm']} GPM")
+        em.add_field(name="Capabilities", value=", ".join(tanks) or "—", inline=True)
+
+        if v.get("rank_required"):
+            em.add_field(name="Rank required", value=str(v["rank_required"]), inline=True)
+        if v.get("speed"):
+            em.add_field(name="Speed", value=str(v["speed"]), inline=True)
+
+        if v.get("specials"):
+            em.add_field(name="Specials", value=str(v["specials"]), inline=False)
+
         if roles:
-            emb.add_field(name="Roles", value=", ".join(roles), inline=False)
+            em.add_field(name="Roles", value=", ".join(sorted(roles)), inline=False)
 
-        pbs = v.get("possible_buildings") or []
-        if pbs:
-            emb.add_field(
+        if buildings:
+            em.add_field(
                 name="Possible buildings",
-                value="\n".join(f"- #{b['id']} {b['name']}" for b in pbs[:12]) + ("…" if len(pbs) > 12 else ""),
+                value=", ".join(sorted(set(b_names))) or "—",
                 inline=False,
             )
 
-        reqs = v.get("required_schoolings") or []
-        if reqs:
-            emb.add_field(
+        if schoolings:
+            em.add_field(
                 name="Required schoolings",
-                value="\n".join(f"- #{s['id']} {s['name']} x{s['required_count']}" for s in reqs),
+                value=", ".join(f"{s.get('name','?')} ×{s.get('required_count',1)}" for s in schoolings),
                 inline=False,
             )
 
-        eq = v.get("equipment_compat") or []
-        if eq:
-            emb.add_field(
-                name="Compatible equipment",
-                value="\n".join(f"- #{e['id']} {e['name']}" for e in eq[:12]) + ("…" if len(eq) > 12 else ""),
+        if equipment:
+            em.add_field(
+                name="Equipment compat",
+                value=", ".join(sorted(e.get("name","?") for e in equipment)),
                 inline=False,
             )
 
-        await ctx.send(embed=emb)
+        await ctx.send(embed=em)
+
+    # Subcommand: status
+    @assets_group.command(name="status")
+    @checks.is_owner()
+    async def assets_status(self, ctx: commands.Context):
+        """Quick status to verify DB/FTS."""
+        # super lightweight check: ensure search returns at least something for a common term
+        probe = await asyncio.to_thread(fuzzy_search, "engine", None, 5)
+        ok = bool(probe)
+        lines = [
+            f"Search probe: {'OK' if ok else 'EMPTY'}",
+            "Try `assets vehicle 1` or another known ID if you expect data.",
+        ]
+        await ctx.send(box("\n".join(lines), "ini"))
