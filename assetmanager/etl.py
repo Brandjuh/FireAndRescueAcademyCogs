@@ -23,7 +23,8 @@ except Exception:  # pragma: no cover
             self.headers = headers
 
         def raise_for_status(self):
-            return  # urllib raises HTTPError on its own
+            # urllib raises HTTPError on non-2xx already
+            return
 
         @property
         def text(self) -> str:
@@ -43,10 +44,10 @@ from jsonschema import validate, ValidationError
 # ---- robust dual-mode import for cogs vs. standalone runs ----
 try:
     # running as package (inside Red cog)
-    from .config import DB_PATH, SRC_FILES, TS_TO_JSON, NODE_BIN, SCHEMA_DIR
+    from .config import DB_PATH, SRC_FILES, SCHEMA_DIR, NODE_BIN
 except Exception:
     # fallback when executed directly: `python assetmanager/etl.py`
-    from config import DB_PATH, SRC_FILES, TS_TO_JSON, NODE_BIN, SCHEMA_DIR  # type: ignore
+    from config import DB_PATH, SRC_FILES, SCHEMA_DIR, NODE_BIN  # type: ignore
 
 # --------------- Utilities ---------------
 
@@ -84,30 +85,170 @@ def fetch_raw(url: str, out_path: Path, *, retries: int = 3, backoff: float = 1.
             time.sleep(backoff ** attempt)
     raise RuntimeError(f"Download failed for {url}: {last_err}")
 
-# ---------- TS -> JSON conversion (pure Python first, Node fallback optional) ----------
+# ---------- TS -> JSON conversion (robust, no Node required) ----------
 
+# Loose transforms after extraction
 _PLAIN_KEY = re.compile(r'([,{]\s*)([A-Za-z0-9_]+)\s*:', re.M)
-_SINGLE_STR = re.compile(r"'([^'\\]*?)'")
+_SINGLE_STR = re.compile(r"'([^'\\]*(?:\\.[^'\\]*)*)'")  # tolerate escaped quotes
 _TRAIL_COMMA = re.compile(r",\s*([}\]])")
-_EXPORT_DEFAULT = re.compile(r"^\s*export\s+default\s+", re.M)
+_EXPORT_DEFAULT = re.compile(r"\bexport\s+default\b")
 
-def _ts_like_to_json_text(ts_source: str) -> str:
+def _strip_ts_comments(s: str) -> str:
+    """Remove // and /* */ comments while respecting strings."""
+    out = []
+    i, n = 0, len(s)
+    in_str = None  # '"', "'", '`'
+    esc = False
+    in_line = False
+    in_block = False
+
+    while i < n:
+        ch = s[i]
+        nxt = s[i + 1] if i + 1 < n else ""
+
+        if in_line:
+            if ch == "\n":
+                in_line = False
+                out.append(ch)
+            i += 1
+            continue
+
+        if in_block:
+            if ch == "*" and nxt == "/":
+                in_block = False
+                i += 2
+            else:
+                i += 1
+            continue
+
+        if in_str:
+            out.append(ch)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == in_str:
+                in_str = None
+            i += 1
+            continue
+
+        # not in comment or string
+        if ch == "/" and nxt == "/":
+            in_line = True
+            i += 2
+            continue
+        if ch == "/" and nxt == "*":
+            in_block = True
+            i += 2
+            continue
+        if ch in ('"', "'", "`"):
+            in_str = ch
+            out.append(ch)
+            i += 1
+            continue
+
+        out.append(ch)
+        i += 1
+
+    return "".join(out)
+
+def _extract_export_default_object(ts_source: str) -> str:
     """
-    Convert a TS `export default { ... }` object into JSON text using tolerant string surgery.
-    Assumptions:
-      - no functions, only values/objects/arrays/strings/numbers/booleans/null
-      - strings may be single-quoted
-      - unquoted keys are simple identifiers
-      - trailing commas may exist
+    Find `export default { ... }` and return the object literal text including braces.
+    Uses a brace counter and respects strings and comments.
     """
-    s = _EXPORT_DEFAULT.sub("", ts_source).strip()
-    if s.endswith(";"):
-        s = s[:-1]
+    m = _EXPORT_DEFAULT.search(ts_source)
+    if not m:
+        raise RuntimeError("No `export default` found in TS source.")
 
-    # Replace single-quoted strings with double-quoted JSON strings
-    s = _SINGLE_STR.sub(lambda m: '"' + m.group(1).replace('"', '\\"') + '"', s)
+    i = m.end()  # start after 'export default'
+    n = len(ts_source)
+    # skip whitespace and anything until first '{'
+    while i < n and ts_source[i] != "{":
+        i += 1
+    if i >= n or ts_source[i] != "{":
+        raise RuntimeError("Expected '{' after `export default`.")
 
-    # Quote unquoted keys: foo: -> "foo":
+    start = i
+    depth = 0
+    in_str = None
+    esc = False
+    in_line = False
+    in_block = False
+    i = start
+
+    while i < n:
+        ch = ts_source[i]
+        nxt = ts_source[i + 1] if i + 1 < n else ""
+
+        if in_line:
+            if ch == "\n":
+                in_line = False
+            i += 1
+            continue
+
+        if in_block:
+            if ch == "*" and nxt == "/":
+                in_block = False
+                i += 2
+            else:
+                i += 1
+            continue
+
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == in_str:
+                in_str = None
+            i += 1
+            continue
+
+        # outside strings/comments
+        if ch == "/" and nxt == "/":
+            in_line = True
+            i += 2
+            continue
+        if ch == "/" and nxt == "*":
+            in_block = True
+            i += 2
+            continue
+        if ch in ('"', "'", "`"):
+            in_str = ch
+            i += 1
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                return ts_source[start : end + 1]
+        i += 1
+
+    raise RuntimeError("Unbalanced braces while parsing exported object.")
+
+def _ts_object_to_json_text(obj_ts: str) -> str:
+    """
+    Convert a TS object literal string to JSON text.
+    - remove comments
+    - convert single to double-quoted strings
+    - quote unquoted keys
+    - remove trailing commas
+    """
+    s = _strip_ts_comments(obj_ts).strip()
+
+    # Replace single-quoted strings with JSON-compliant double-quoted strings
+    def _rep_single(m: re.Match[str]) -> str:
+        inner = m.group(1)
+        # keep existing escapes, escape any bare double-quotes in inner just in case
+        inner = inner.replace('"', '\\"')
+        return f'"{inner}"'
+
+    s = _SINGLE_STR.sub(_rep_single, s)
+
+    # Quote unquoted object keys: foo: -> "foo":
     s = _PLAIN_KEY.sub(r'\1"\2":', s)
 
     # Remove trailing commas before } or ]
@@ -115,53 +256,32 @@ def _ts_like_to_json_text(ts_source: str) -> str:
 
     return s
 
-def ts_to_json_py(ts_path: Path, json_path: Path) -> None:
-    raw = ts_path.read_text(encoding="utf-8")
-    text = _ts_like_to_json_text(raw)
-    try:
-        obj = json.loads(text)
-    except json.JSONDecodeError as e:
-        # Provide a short context to help debugging mapping if LSSM format changes.
-        snippet = text[max(0, e.pos - 200): e.pos + 200]
-        raise RuntimeError(f"TS->JSON conversion failed (pure Python) at pos {e.pos}: {e.msg}\nContext: {snippet}")
-    json_path.write_text(json.dumps(obj), encoding="utf-8")
-
-def _which_node() -> str | None:
-    try:
-        node = shutil.which(str(NODE_BIN)) if NODE_BIN else shutil.which("node")
-    except Exception:
-        node = None
-    return node
-
 def ts_to_json(ts_path: Path, json_path: Path) -> None:
     """
-    Prefer the pure-Python converter. If that ever fails, and Node is available,
-    fall back to the original ts_to_json.mjs. This removes the hard dependency on Node.
+    Robust TS -> JSON: extract the default-exported object, then normalize to JSON.
     """
+    raw = ts_path.read_text(encoding="utf-8")
     try:
-        ts_to_json_py(ts_path, json_path)
-        return
-    except Exception as py_err:
-        node_bin = _which_node()
-        if not node_bin:
-            # No Node present, re-raise Python error
-            raise py_err
+        obj_src = _extract_export_default_object(raw)
+        json_like = _ts_object_to_json_text(obj_src)
+        obj = json.loads(json_like)
+    except Exception as e:
+        # If everything fails and Node is available with a helper, optionally try fallback
+        node = shutil.which(str(NODE_BIN)) if NODE_BIN else shutil.which("node")
+        helper = Path(__file__).with_name("ts_to_json.mjs")
+        if node and helper.exists():
+            res = subprocess.run([node, str(helper), str(ts_path)], capture_output=True, text=True)
+            if res.returncode == 0:
+                json_path.write_text(res.stdout, encoding="utf-8")
+                return
+            else:
+                snippet = (res.stderr or res.stdout or "").strip()
+                raise RuntimeError(
+                    f"TS->JSON conversion failed (node fallback) for {ts_path.name}. Details: {snippet}"
+                )
+        raise RuntimeError(f"TS->JSON conversion failed: {e}")
 
-        # Node fallback path (optional)
-        mjs = Path(__file__).with_name("ts_to_json.mjs")
-        if not mjs.exists():
-            # If the JS helper is not shipped, still raise the Python error
-            raise py_err
-
-        res = subprocess.run([node_bin, str(mjs), str(ts_path)], capture_output=True, text=True)
-        if res.returncode != 0:
-            snippet = (res.stderr or res.stdout or "").strip()
-            if len(snippet) > 600:
-                snippet = snippet[:600] + " …"
-            raise RuntimeError(
-                f"TS->JSON conversion failed (node fallback) for {ts_path.name}. Details: {snippet}"
-            )
-        json_path.write_text(res.stdout, encoding="utf-8")
+    json_path.write_text(json.dumps(obj), encoding="utf-8")
 
 def load_and_validate(json_path: Path, schema_name: str) -> Dict[str, Any]:
     obj = json.loads(json_path.read_text(encoding="utf-8"))
@@ -295,7 +415,7 @@ def transform_vehicles(src: Dict[str, Any]) -> Tuple[
         if isinstance(pbs, list):
             vp_buildings[vid] = set(int(x) for x in pbs if isinstance(x, (int, str)) and str(x).isdigit())
 
-        # Required schoolings
+        # Required schoolings (array of {schooling_id, count})
         reqs = v.get("required_schoolings") or v.get("schoolings") or []
         arr = []
         if isinstance(reqs, list):
@@ -318,7 +438,7 @@ def transform_vehicles(src: Dict[str, Any]) -> Tuple[
         if isinstance(ec, list):
             v_equipment[vid] = set(int(x) for x in ec if isinstance(x, (int, str)) and str(x).isdigit())
 
-        # Roles (multi-role)
+        # Roles (multi-role behavior)
         roles = v.get("roles") or v.get("acts_as") or v.get("role")
         role_set = set()
         if isinstance(roles, list):
@@ -482,7 +602,7 @@ def run_etl():
             ts_path = tmpdir / f"{key}.ts"
             commit_sha = fetch_raw(url, ts_path)
             json_path = tmpdir / f"{key}.json"
-            ts_to_json(ts_path, json_path)  # now pure Python by default
+            ts_to_json(ts_path, json_path)
             obj = load_and_validate(json_path, key)
             results[key] = (obj, commit_sha)
 
