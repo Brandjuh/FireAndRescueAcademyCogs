@@ -24,8 +24,7 @@ except Exception:  # pragma: no cover
             self.headers = headers
 
         def raise_for_status(self):
-            # urllib raises HTTPError on non-2xx already
-            return
+            return  # urllib raises its own HTTPError
 
         @property
         def text(self) -> str:
@@ -86,188 +85,7 @@ def fetch_raw(url: str, out_path: Path, *, retries: int = 3, backoff: float = 1.
             time.sleep(backoff ** attempt)
     raise RuntimeError(f"Download failed for {url}: {last_err}")
 
-# ---------- TS -> JSON conversion helpers ----------
-
-# Heuristics that indicate "not a pure literal": spreads, function calls, template literals, identifiers in values etc.
-_NON_LITERAL_PATTERNS = [
-    r"\.\.\.",                      # spread
-    r"\bfunction\b",                # function
-    r"=>",                          # arrow function
-    r"[A-Za-z_]\w*\s*\(",           # call: foo( ... )
-    r"`",                           # template literal
-    r"\bimport\b",                  # import in object section
-    r"\bconst\b|\blet\b|\bvar\b",   # declarations inside exported region
-]
-
-_PLAIN_KEY = re.compile(r'([,{]\s*)([A-Za-z0-9_]+)\s*:', re.M)
-_SINGLE_STR = re.compile(r"'([^'\\]*(?:\\.[^'\\]*)*)'")
-_TRAIL_COMMA = re.compile(r",\s*([}\]])")
-_EXPORT_DEFAULT = re.compile(r"\bexport\s+default\b")
-
-def _strip_ts_comments(s: str) -> str:
-    """Remove // and /* */ comments while respecting strings."""
-    out = []
-    i, n = 0, len(s)
-    in_str = None  # '"', "'", '`'
-    esc = False
-    in_line = False
-    in_block = False
-
-    while i < n:
-        ch = s[i]
-        nxt = s[i + 1] if i + 1 < n else ""
-
-        if in_line:
-            if ch == "\n":
-                in_line = False
-                out.append(ch)
-            i += 1
-            continue
-
-        if in_block:
-            if ch == "*" and nxt == "/":
-                in_block = False
-                i += 2
-            else:
-                i += 1
-            continue
-
-        if in_str:
-            out.append(ch)
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == in_str:
-                in_str = None
-            i += 1
-            continue
-
-        # not in comment or string
-        if ch == "/" and nxt == "/":
-            in_line = True
-            i += 2
-            continue
-        if ch == "/" and nxt == "*":
-            in_block = True
-            i += 2
-            continue
-        if ch in ('"', "'", "`"):
-            in_str = ch
-            out.append(ch)
-            i += 1
-            continue
-
-        out.append(ch)
-        i += 1
-
-    return "".join(out)
-
-def _extract_export_default_object(ts_source: str) -> str:
-    """
-    Find `export default { ... }` and return the object literal text including braces.
-    Uses a brace counter and respects strings and comments.
-    """
-    m = _EXPORT_DEFAULT.search(ts_source)
-    if not m:
-        raise RuntimeError("No `export default` found in TS source.")
-
-    i = m.end()  # start after 'export default'
-    n = len(ts_source)
-    # skip whitespace and anything until first '{'
-    while i < n and ts_source[i] != "{":
-        i += 1
-    if i >= n or ts_source[i] != "{":
-        raise RuntimeError("Expected '{' after `export default`.")
-
-    start = i
-    depth = 0
-    in_str = None
-    esc = False
-    in_line = False
-    in_block = False
-    i = start
-
-    while i < n:
-        ch = ts_source[i]
-        nxt = ts_source[i + 1] if i + 1 < n else ""
-
-        if in_line:
-            if ch == "\n":
-                in_line = False
-            i += 1
-            continue
-
-        if in_block:
-            if ch == "*" and nxt == "/":
-                in_block = False
-                i += 2
-            else:
-                i += 1
-            continue
-
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == in_str:
-                in_str = None
-            i += 1
-            continue
-
-        # outside strings/comments
-        if ch == "/" and nxt == "/":
-            in_line = True
-            i += 2
-            continue
-        if ch == "/" and nxt == "*":
-            in_block = True
-            i += 2
-            continue
-        if ch in ('"', "'", "`"):
-            in_str = ch
-            i += 1
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                end = i
-                return ts_source[start : end + 1]
-        i += 1
-
-    raise RuntimeError("Unbalanced braces while parsing exported object.")
-
-def _ts_object_to_json_text(obj_ts: str) -> str:
-    """
-    Convert a TS object literal string to JSON text.
-    - remove comments
-    - convert single to double-quoted strings
-    - quote unquoted keys
-    - remove trailing commas
-    """
-    s = _strip_ts_comments(obj_ts).strip()
-
-    # Replace single-quoted strings with JSON-compliant double-quoted strings
-    def _rep_single(m: re.Match[str]) -> str:
-        inner = m.group(1).replace('"', '\\"')
-        return f'"{inner}"'
-
-    s = _SINGLE_STR.sub(_rep_single, s)
-
-    # Quote unquoted object keys: foo: -> "foo":
-    s = _PLAIN_KEY.sub(r'\1"\2":', s)
-
-    # Remove trailing commas before } or ]
-    s = _TRAIL_COMMA.sub(r"\1", s)
-
-    return s
-
-def _looks_non_literal(s: str) -> bool:
-    # Heuristic: if any of these patterns appear inside the exported object, we must evaluate TS.
-    return any(re.search(p, s) for p in _NON_LITERAL_PATTERNS)
+# ---------- TS -> JSON conversion (Node-only, deterministic) ----------
 
 def _node_bin() -> str | None:
     try:
@@ -277,19 +95,17 @@ def _node_bin() -> str | None:
 
 def _node_env_with_global_node_path() -> dict:
     """
-    Try to ensure Node can resolve global packages by setting NODE_PATH to `npm root -g` if available.
+    Ensure Node can resolve global packages by setting NODE_PATH to `npm root -g` if available.
     Falls back to existing environment unchanged.
     """
     env = os.environ.copy()
     if env.get("NODE_PATH"):
         return env
-    # Try to discover npm root -g
     try:
         res = subprocess.run(["npm", "root", "-g"], capture_output=True, text=True)
         if res.returncode == 0:
             g = res.stdout.strip()
             if g:
-                # Some systems need the directory itself, not .../node_modules
                 env["NODE_PATH"] = g
     except Exception:
         pass
@@ -297,45 +113,30 @@ def _node_env_with_global_node_path() -> dict:
 
 def ts_to_json(ts_path: Path, json_path: Path) -> None:
     """
-    If the exported object is a pure literal, convert with Python.
-    Otherwise, require Node and run ts_to_json.mjs to evaluate helpers/spreads.
+    Deterministic, boring, reliable:
+    Always convert TS -> JSON via the Node helper (ts_to_json.mjs).
+    No literal fast-path, no heuristics.
     """
-    raw = ts_path.read_text(encoding="utf-8")
-    try:
-        obj_src = _extract_export_default_object(raw)
-    except Exception as e:
-        raise RuntimeError(f"TS->JSON conversion failed: {e}")
-
-    if _looks_non_literal(obj_src):
-        node = _node_bin()
-        helper = Path(__file__).with_name("ts_to_json.mjs")
-        if not node:
-            raise RuntimeError(
-                "Source uses computed TypeScript (spreads/functions). Node.js is required for conversion. "
-                "Install Node 18+ and ensure `node` is in PATH, or set NODE_BIN in config.py."
-            )
-        if not helper.exists():
-            raise RuntimeError(
-                "ts_to_json.mjs helper not found next to etl.py. Create it and ensure it uses ts-node. "
-                "Example helper expects 'ts-node' and 'typescript' to be resolvable."
-            )
-        res = subprocess.run([node, str(helper), str(ts_path)],
-                             capture_output=True, text=True, env=_node_env_with_global_node_path())
-        if res.returncode != 0:
-            snippet = (res.stderr or res.stdout or "").strip()
-            if len(snippet) > 800:
-                snippet = snippet[:800] + " …"
-            raise RuntimeError(f"TS->JSON conversion failed (node): {snippet}")
-        json_path.write_text(res.stdout, encoding="utf-8")
-        return
-
-    # Pure literal path
-    try:
-        json_like = _ts_object_to_json_text(obj_src)
-        obj = json.loads(json_like)
-    except Exception as e:
-        raise RuntimeError(f"TS->JSON conversion failed (literal path): {e}")
-    json_path.write_text(json.dumps(obj), encoding="utf-8")
+    node = _node_bin()
+    helper = Path(__file__).with_name("ts_to_json.mjs")
+    if not node:
+        raise RuntimeError(
+            "Node.js is required for TS conversion but was not found. "
+            "Install Node 18+ and ensure `node` is in PATH, or set NODE_BIN in config.py."
+        )
+    if not helper.exists():
+        raise RuntimeError(
+            "Missing ts_to_json.mjs next to etl.py. Create the helper and make it executable. "
+            "It must be able to resolve 'ts-node' and 'typescript'."
+        )
+    res = subprocess.run([node, str(helper), str(ts_path)],
+                         capture_output=True, text=True, env=_node_env_with_global_node_path())
+    if res.returncode != 0:
+        snippet = (res.stderr or res.stdout or "").strip()
+        if len(snippet) > 800:
+            snippet = snippet[:800] + " …"
+        raise RuntimeError(f"TS->JSON conversion failed (node): {snippet}")
+    json_path.write_text(res.stdout, encoding="utf-8")
 
 def load_and_validate(json_path: Path, schema_name: str) -> Dict[str, Any]:
     obj = json.loads(json_path.read_text(encoding="utf-8"))
@@ -348,7 +149,6 @@ def load_and_validate(json_path: Path, schema_name: str) -> Dict[str, Any]:
     except Exception as e:
         print(f"[warn] Failed to read schema {schema_file}: {e} — skipping validation.")
         return obj
-
     try:
         validate(obj, schema)
     except ValidationError as e:
@@ -379,12 +179,7 @@ def transform_buildings(src: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
         name = v.get("name") or v.get("caption") or f"Building {bid}"
         category = v.get("category")
         notes = v.get("notes")
-        out[bid] = {
-            "id": bid,
-            "name": name,
-            "category": category,
-            "notes": notes,
-        }
+        out[bid] = {"id": bid, "name": name, "category": category, "notes": notes}
     return out
 
 def transform_schoolings(src: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
@@ -397,12 +192,7 @@ def transform_schoolings(src: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
         name = v.get("name") or f"Schooling {sid}"
         department = v.get("department") or v.get("dept")
         duration = norm_int(v.get("duration_days") or v.get("duration") or v.get("days"))
-        out[sid] = {
-            "id": sid,
-            "name": name,
-            "department": department,
-            "duration_days": duration,
-        }
+        out[sid] = {"id": sid, "name": name, "department": department, "duration_days": duration}
     return out
 
 def transform_equipment(src: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
@@ -416,13 +206,7 @@ def transform_equipment(src: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
         description = v.get("description") or v.get("desc")
         size = str(v.get("size")) if v.get("size") is not None else None
         notes = v.get("notes")
-        out[eid] = {
-            "id": eid,
-            "name": name,
-            "description": description,
-            "size": size,
-            "notes": notes,
-        }
+        out[eid] = {"id": eid, "name": name, "description": description, "size": size, "notes": notes}
     return out
 
 def transform_vehicles(src: Dict[str, Any]) -> Tuple[
@@ -473,12 +257,10 @@ def transform_vehicles(src: Dict[str, Any]) -> Tuple[
             "specials": specials,
         }
 
-        # Possible buildings
         pbs = v.get("possible_buildings") or v.get("possibleBuildings") or v.get("building_ids")
         if isinstance(pbs, list):
             vp_buildings[vid] = set(int(x) for x in pbs if isinstance(x, (int, str)) and str(x).isdigit())
 
-        # Required schoolings (array of {schooling_id, count})
         reqs = v.get("required_schoolings") or v.get("schoolings") or []
         arr = []
         if isinstance(reqs, list):
@@ -496,12 +278,10 @@ def transform_vehicles(src: Dict[str, Any]) -> Tuple[
         if arr:
             v_schoolings[vid] = arr
 
-        # Equipment compatibility
         ec = v.get("equipment_compat") or v.get("equipment") or []
         if isinstance(ec, list):
             v_equipment[vid] = set(int(x) for x in ec if isinstance(x, (int, str)) and str(x).isdigit())
 
-        # Roles (multi-role behavior)
         roles = v.get("roles") or v.get("acts_as") or v.get("role")
         role_set = set()
         if isinstance(roles, list):
@@ -580,7 +360,6 @@ def upsert_vehicles(con: sqlite3.Connection, rows: Dict[int, Dict[str, Any]]):
 def replace_relations(con: sqlite3.Connection,
                       vp_buildings, v_schoolings, v_equipment,
                       role_index, v_roles):
-    # vehicle_possible_buildings
     con.execute("DELETE FROM vehicle_possible_buildings")
     for vid, bids in vp_buildings.items():
         for b in bids:
@@ -589,7 +368,6 @@ def replace_relations(con: sqlite3.Connection,
                 VALUES (?, ?)
             """, (vid, b))
 
-    # vehicle_required_schoolings
     con.execute("DELETE FROM vehicle_required_schoolings")
     for vid, arr in v_schoolings.items():
         for it in arr:
@@ -598,7 +376,6 @@ def replace_relations(con: sqlite3.Connection,
                 VALUES (?, ?, ?)
             """, (vid, it["schooling_id"], it.get("count", 1)))
 
-    # vehicle_equipment_compat
     con.execute("DELETE FROM vehicle_equipment_compat")
     for vid, eids in v_equipment.items():
         for eid in eids:
@@ -607,7 +384,6 @@ def replace_relations(con: sqlite3.Connection,
                 VALUES (?, ?, 1)
             """, (vid, eid))
 
-    # roles
     role_id_map = {}
     for role_name in role_index.keys():
         con.execute("INSERT INTO vehicle_roles (role) VALUES (?) ON CONFLICT(role) DO NOTHING", (role_name,))
