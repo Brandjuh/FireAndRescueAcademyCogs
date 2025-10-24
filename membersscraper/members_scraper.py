@@ -1,12 +1,15 @@
 """
-members_scraper.py - PRODUCTION SAFE VERSION
-Versie: 3.2 - Header-based parsing + strict validation
+members_scraper.py - PRODUCTION SAFE VERSION met ALLE COMMANDS
+Versie: 3.2 FINAL - Header-based parsing + strict validation + complete commands
 
-BELANGRIJK: Deze versie voorkomt database vervuiling door:
-- Header-based column mapping
-- Strikte data validatie
-- Suspicious data isolation
-- Duidelijke logging van geskipte entries
+Features:
+✅ Header-based column mapping (voorkomt verkeerde data)
+✅ Strikte validatie (0 < credits < 50B, 0 < rate < 100)
+✅ Skipped entries logging (voor debugging)
+✅ Contribution rate scraping
+✅ Automatische database migratie
+✅ Complete troubleshooting commands
+✅ Backfill support
 """
 
 import discord
@@ -89,7 +92,7 @@ class MembersScraper(commands.Cog):
         
     def cog_load(self):
         self.scraping_task = self.bot.loop.create_task(self._background_scraper())
-        log.info("MembersScraper loaded")
+        log.info("MembersScraper loaded - SAFE VERSION")
         
     def cog_unload(self):
         if self.scraping_task:
@@ -143,7 +146,7 @@ class MembersScraper(commands.Cog):
                     )
                 ''')
                 
-                # Skipped entries log
+                # Skipped entries log for debugging
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS skipped_entries (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -516,34 +519,214 @@ class MembersScraper(commands.Cog):
         return True
     
     async def _background_scraper(self):
-        """Background task"""
+        """Background task - runs every hour"""
         await self.bot.wait_until_ready()
+        log.info("Background scraper started")
         
         while not self.bot.is_closed():
             try:
-                await asyncio.sleep(3600)
+                await asyncio.sleep(3600)  # 1 hour
                 log.info("Running background scrape")
                 await self._scrape_all_members()
+                log.info("Background scrape complete")
             except asyncio.CancelledError:
+                log.info("Background scraper stopped")
                 break
             except Exception as e:
                 log.error(f"Background scraper error: {e}", exc_info=True)
     
-    # Commands blijven hetzelfde als vorige versie...
-    # (scrape, backfill, testcontrib, stats, debug, testpage, checklogin, etc.)
+    # ============== COMMANDS ==============
     
     @commands.group(name="members")
     @commands.is_owner()
     async def members_group(self, ctx):
-        """Alliance members scraper"""
+        """Alliance members scraper commands"""
         if ctx.invoked_subcommand is None:
             await ctx.send_help(ctx.command)
     
     @members_group.command(name="scrape")
     async def scrape_members(self, ctx):
-        """Manual scrape"""
+        """Manually trigger member scrape"""
         async with ctx.typing():
             await self._scrape_all_members(ctx)
+    
+    @members_group.command(name="backfill")
+    async def backfill_members(self, ctx, days: int = 30):
+        """
+        Backfill historical data
+        Usage: [p]members backfill 30
+        """
+        if days < 1 or days > 365:
+            await ctx.send("❌ Days must be between 1-365")
+            return
+        
+        await ctx.send(f"🔄 Starting backfill for {days} days...")
+        
+        session = await self._get_session(ctx)
+        if not session:
+            await ctx.send("❌ No session")
+            return
+        
+        # Get current data
+        all_members = []
+        page = 1
+        
+        while page <= 50:
+            members = await self._scrape_members_page(session, page, ctx)
+            if not members:
+                break
+            all_members.extend(members)
+            page += 1
+            await asyncio.sleep(0.3)
+        
+        if not all_members:
+            await ctx.send("❌ Failed to fetch data")
+            return
+        
+        await ctx.send(f"📊 Got {len(all_members)} members, creating {days} snapshots...")
+        
+        # Insert historical snapshots
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        total_inserted = 0
+        
+        for day_offset in range(days, 0, -1):
+            past_date = datetime.utcnow() - timedelta(days=day_offset)
+            past_date = past_date.replace(hour=12, minute=0, second=0, microsecond=0)
+            timestamp = past_date.isoformat()
+            
+            for member in all_members:
+                try:
+                    cursor.execute('''
+                        INSERT OR IGNORE INTO members 
+                        (member_id, username, rank, earned_credits, contribution_rate, online_status, timestamp)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        member['member_id'],
+                        member['username'],
+                        member['rank'],
+                        member['earned_credits'],
+                        member.get('contribution_rate', 0.0),
+                        member['online_status'],
+                        timestamp
+                    ))
+                    if cursor.rowcount > 0:
+                        total_inserted += 1
+                except:
+                    pass
+            
+            if day_offset % 5 == 0:
+                await ctx.send(f"📈 Progress: {days - day_offset}/{days} days")
+        
+        conn.commit()
+        conn.close()
+        
+        await ctx.send(f"✅ Backfill complete! {total_inserted} records")
+    
+    @members_group.command(name="testcontrib")
+    async def test_contribution(self, ctx):
+        """Test contribution rate data"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total,
+                    COUNT(CASE WHEN contribution_rate > 0 THEN 1 END) as with_contrib,
+                    AVG(contribution_rate) as avg_rate,
+                    MAX(contribution_rate) as max_rate,
+                    MIN(contribution_rate) as min_rate
+                FROM members
+                WHERE timestamp = (SELECT MAX(timestamp) FROM members)
+            """)
+            stats = cursor.fetchone()
+            
+            cursor.execute("""
+                SELECT username, contribution_rate, earned_credits
+                FROM members
+                WHERE timestamp = (SELECT MAX(timestamp) FROM members)
+                ORDER BY contribution_rate DESC
+                LIMIT 10
+            """)
+            top_contrib = cursor.fetchall()
+            
+            conn.close()
+            
+            embed = discord.Embed(
+                title="🔍 Contribution Rate Test",
+                color=discord.Color.green(),
+                timestamp=datetime.utcnow()
+            )
+            
+            if stats:
+                stats_text = (
+                    f"**Total:** {stats['total']}\n"
+                    f"**With Contrib Data:** {stats['with_contrib']}\n"
+                    f"**Average:** {stats['avg_rate']:.2f}%\n"
+                    f"**Max:** {stats['max_rate']:.2f}%\n"
+                    f"**Min:** {stats['min_rate']:.2f}%"
+                )
+                embed.add_field(name="📊 Stats", value=stats_text, inline=False)
+            
+            if top_contrib:
+                contrib_text = "\n".join([
+                    f"**{row['username']}**: {row['contribution_rate']:.1f}% ({row['earned_credits']:,})"
+                    for row in top_contrib[:5]
+                ])
+                embed.add_field(name="🏆 Top 5", value=contrib_text, inline=False)
+            
+            await ctx.send(embed=embed)
+            
+        except Exception as e:
+            await ctx.send(f"❌ Error: {e}")
+    
+    @members_group.command(name="stats")
+    async def stats_members(self, ctx):
+        """Database statistics"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COUNT(*) FROM members")
+        total = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(DISTINCT member_id) FROM members")
+        unique = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT MIN(timestamp), MAX(timestamp) FROM members")
+        date_range = cursor.fetchone()
+        
+        cursor.execute("""
+            SELECT COUNT(*), timestamp 
+            FROM members 
+            GROUP BY timestamp 
+            ORDER BY timestamp DESC 
+            LIMIT 1
+        """)
+        latest = cursor.fetchone()
+        
+        cursor.execute("SELECT COUNT(*) FROM skipped_entries")
+        skipped_count = cursor.fetchone()[0]
+        
+        conn.close()
+        
+        embed = discord.Embed(title="📊 Database Stats", color=discord.Color.blue())
+        embed.add_field(name="Total Records", value=f"{total:,}", inline=True)
+        embed.add_field(name="Unique Members", value=f"{unique:,}", inline=True)
+        embed.add_field(name="Snapshots", value=f"{total // max(unique, 1):,}", inline=True)
+        
+        if date_range[0]:
+            embed.add_field(name="First", value=date_range[0][:10], inline=True)
+            embed.add_field(name="Last", value=date_range[1][:10], inline=True)
+        
+        if latest:
+            embed.add_field(name="Latest Scrape", value=f"{latest[0]} members\n{latest[1][:16]}", inline=False)
+        
+        if skipped_count > 0:
+            embed.add_field(name="⚠️ Skipped Entries", value=f"{skipped_count} (use `viewskipped` to see)", inline=False)
+        
+        await ctx.send(embed=embed)
     
     @members_group.command(name="viewskipped")
     async def view_skipped(self, ctx, limit: int = 10):
@@ -564,11 +747,12 @@ class MembersScraper(commands.Cog):
             conn.close()
             
             if not skipped:
-                await ctx.send("✅ No skipped entries found!")
+                await ctx.send("✅ No skipped entries found! All data parsed successfully.")
                 return
             
             embed = discord.Embed(
                 title=f"⚠️ Recently Skipped Entries ({len(skipped)})",
+                description="These entries were skipped during parsing - may indicate parsing issues",
                 color=discord.Color.orange()
             )
             
@@ -584,7 +768,339 @@ class MembersScraper(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Error: {e}")
     
-    # ... (rest of commands same as before)
+    @members_group.command(name="clearskipped")
+    async def clear_skipped(self, ctx):
+        """Clear skipped entries log"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM skipped_entries")
+            deleted = cursor.rowcount
+            conn.commit()
+            conn.close()
+            
+            await ctx.send(f"✅ Cleared {deleted} skipped entries")
+        except Exception as e:
+            await ctx.send(f"❌ Error: {e}")
+    
+    # ============== TROUBLESHOOTING ==============
+    
+    @members_group.command(name="debug")
+    async def debug_scrape(self, ctx):
+        """Full diagnostic"""
+        embed = discord.Embed(title="🔍 Diagnostics", color=discord.Color.blue())
+        
+        cookie_manager = self.bot.get_cog("CookieManager")
+        if not cookie_manager:
+            embed.add_field(name="❌ CookieManager", value="NOT LOADED", inline=False)
+            await ctx.send(embed=embed)
+            return
+        else:
+            embed.add_field(name="✅ CookieManager", value="Loaded", inline=False)
+        
+        try:
+            session = await cookie_manager.get_session()
+            if not session or session.closed:
+                embed.add_field(name="❌ Session", value="Failed", inline=False)
+                await ctx.send(embed=embed)
+                return
+            else:
+                embed.add_field(name="✅ Session", value="OK", inline=False)
+        except Exception as e:
+            embed.add_field(name="❌ Session Error", value=f"```{e}```", inline=False)
+            await ctx.send(embed=embed)
+            return
+        
+        await ctx.send("🔄 Testing connection...")
+        test_url = f"{self.members_url}?page=1"
+        
+        try:
+            async with session.get(test_url) as response:
+                status = response.status
+                html = await response.text()
+                final_url = str(response.url)
+                
+                embed.add_field(
+                    name="📡 HTTP",
+                    value=f"Status: `{status}`\nURL: `{final_url}`\nHTML: `{len(html)}` chars",
+                    inline=False
+                )
+                
+                soup = BeautifulSoup(html, 'html.parser')
+                login_form = soup.find('form', action=lambda x: x and 'sign_in' in str(x))
+                member_links = soup.find_all('a', href=lambda x: x and '/users/' in str(x))
+                
+                if login_form:
+                    embed.add_field(name="❌ Login", value="NOT LOGGED IN\nRun: `[p]cookie login`", inline=False)
+                elif len(member_links) >= 5:
+                    embed.add_field(name="✅ Login", value=f"Logged in ({len(member_links)} member links)", inline=False)
+                else:
+                    embed.add_field(name="⚠️ Login", value="Unclear", inline=False)
+                
+                # Count tables and rows
+                all_tables = soup.find_all('table')
+                total_rows = sum(len(table.find_all('tr')) for table in all_tables)
+                
+                embed.add_field(
+                    name="📋 Tables",
+                    value=f"Found {len(all_tables)} tables with {total_rows} total rows",
+                    inline=False
+                )
+                
+                # Test safe parsing
+                members, skipped, stats = self._extract_member_rows_safe(html, 1)
+                
+                embed.add_field(
+                    name="🔍 Parsing Test",
+                    value=(
+                        f"Parsed: {stats['members_parsed']}\n"
+                        f"Skipped (no link): {stats['skipped_no_link']}\n"
+                        f"Skipped (no ID): {stats['skipped_no_id']}\n"
+                        f"Skipped (invalid): {stats['skipped_invalid_data']}"
+                    ),
+                    inline=False
+                )
+                
+        except Exception as e:
+            embed.add_field(name="❌ Error", value=f"```{e}```", inline=False)
+        
+        await ctx.send(embed=embed)
+    
+    @members_group.command(name="testpage")
+    async def test_page(self, ctx, page: int = 1):
+        """Test specific page with detailed output"""
+        await ctx.send(f"🔍 Testing page {page}...")
+        
+        old_debug = self.debug_mode
+        old_channel = self.debug_channel
+        self.debug_mode = True
+        self.debug_channel = ctx.channel
+        
+        try:
+            session = await self._get_session(ctx)
+            if not session:
+                await ctx.send("❌ No session")
+                return
+            
+            members = await self._scrape_members_page(session, page, ctx)
+            
+            if not members:
+                await ctx.send(f"❌ Page {page} returned 0 members")
+            else:
+                embed = discord.Embed(
+                    title=f"📊 Page {page} Results",
+                    description=f"Found {len(members)} members",
+                    color=discord.Color.green()
+                )
+                
+                for i, member in enumerate(members[:3], 1):
+                    value = (
+                        f"**ID:** {member['member_id']}\n"
+                        f"**Rank:** {member['rank']}\n"
+                        f"**Credits:** {member['earned_credits']:,}\n"
+                        f"**Contribution:** {member.get('contribution_rate', 0)}%\n"
+                        f"**Status:** {member['online_status']}"
+                    )
+                    
+                    embed.add_field(
+                        name=f"{i}. {member['username']}",
+                        value=value,
+                        inline=False
+                    )
+                
+                if len(members) > 3:
+                    embed.set_footer(text=f"... and {len(members) - 3} more")
+                
+                await ctx.send(embed=embed)
+        finally:
+            self.debug_mode = old_debug
+            self.debug_channel = old_channel
+    
+    @members_group.command(name="checklogin")
+    async def check_login(self, ctx):
+        """Check login status"""
+        async with ctx.typing():
+            try:
+                cookie_manager = self.bot.get_cog("CookieManager")
+                if not cookie_manager:
+                    await ctx.send("❌ CookieManager not loaded")
+                    return
+                
+                session = await cookie_manager.get_session()
+                test_url = self.members_url
+                
+                async with session.get(test_url) as response:
+                    html = await response.text()
+                    final_url = str(response.url)
+                
+                soup = BeautifulSoup(html, 'html.parser')
+                login_form = soup.find('form', action=lambda x: x and 'sign_in' in str(x))
+                member_links = soup.find_all('a', href=lambda x: x and '/users/' in str(x))
+                
+                embed = discord.Embed(title="🔐 Login Status")
+                
+                if login_form:
+                    embed.color = discord.Color.red()
+                    embed.description = "**❌ NOT LOGGED IN**"
+                    embed.add_field(name="Action", value="Run: `[p]cookie login`", inline=False)
+                elif len(member_links) >= 5:
+                    embed.color = discord.Color.green()
+                    embed.description = "**✅ LOGGED IN**"
+                    embed.add_field(name="Details", value=f"Found {len(member_links)} member links", inline=False)
+                else:
+                    embed.color = discord.Color.orange()
+                    embed.description = "**⚠️ UNCLEAR**"
+                    embed.add_field(name="Details", value=f"URL: `{final_url}`", inline=False)
+                
+                await ctx.send(embed=embed)
+                
+            except Exception as e:
+                await ctx.send(f"❌ Error: {e}")
+    
+    @members_group.command(name="fixsession")
+    async def fix_session(self, ctx):
+        """Force refresh session"""
+        await ctx.send("🔄 Refreshing session...")
+        
+        try:
+            cookie_manager = self.bot.get_cog("CookieManager")
+            if not cookie_manager:
+                await ctx.send("❌ CookieManager not loaded")
+                return
+            
+            await ctx.send("🔐 Forcing re-login...")
+            success = await cookie_manager._perform_login()
+            
+            if success:
+                await ctx.send("✅ Session refreshed! Try scraping again.")
+            else:
+                await ctx.send("❌ Login failed. Check `[p]cookie debug trace`")
+        except Exception as e:
+            await ctx.send(f"❌ Error: {e}")
+    
+    @members_group.command(name="enabledebug")
+    async def enable_debug(self, ctx):
+        """Enable debug mode in this channel"""
+        self.debug_mode = True
+        self.debug_channel = ctx.channel
+        await ctx.send("✅ Debug mode **ENABLED** - All scraping will show detailed logs here")
+    
+    @members_group.command(name="disabledebug")
+    async def disable_debug(self, ctx):
+        """Disable debug mode"""
+        self.debug_mode = False
+        self.debug_channel = None
+        await ctx.send("✅ Debug mode **DISABLED**")
+    
+    @members_group.command(name="rawhtml")
+    async def raw_html(self, ctx, page: int = 1):
+        """Dump raw HTML for debugging (sends as file)"""
+        try:
+            session = await self._get_session(ctx)
+            if not session:
+                await ctx.send("❌ No session")
+                return
+            
+            url = f"{self.members_url}?page={page}"
+            async with session.get(url) as response:
+                html = await response.text()
+            
+            # Save to file and send
+            import io
+            buffer = io.BytesIO(html.encode('utf-8'))
+            file = discord.File(buffer, filename=f"page_{page}_raw.html")
+            
+            await ctx.send(f"📄 Raw HTML from page {page}:", file=file)
+            
+            # Also show summary
+            soup = BeautifulSoup(html, 'html.parser')
+            tables = soup.find_all('table')
+            all_trs = soup.find_all('tr')
+            user_links = soup.find_all('a', href=lambda x: x and '/users/' in str(x))
+            
+            summary = (
+                f"**Summary:**\n"
+                f"Tables: {len(tables)}\n"
+                f"Total <tr> tags: {len(all_trs)}\n"
+                f"User links: {len(user_links)}\n"
+                f"HTML size: {len(html):,} chars"
+            )
+            await ctx.send(summary)
+            
+        except Exception as e:
+            await ctx.send(f"❌ Error: {e}")
+    
+    @members_group.command(name="validate")
+    async def validate_data(self, ctx):
+        """Validate database data quality"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            # Get latest timestamp
+            cursor.execute("SELECT MAX(timestamp) FROM members")
+            latest = cursor.fetchone()[0]
+            
+            # Check for issues
+            issues = []
+            
+            # Check 1: Credits = 0
+            cursor.execute("""
+                SELECT COUNT(*) FROM members 
+                WHERE timestamp = ? AND earned_credits = 0
+            """, (latest,))
+            zero_credits = cursor.fetchone()[0]
+            if zero_credits > 0:
+                issues.append(f"⚠️ {zero_credits} members with 0 credits")
+            
+            # Check 2: Contribution rate = 0
+            cursor.execute("""
+                SELECT COUNT(*) FROM members 
+                WHERE timestamp = ? AND contribution_rate = 0
+            """, (latest,))
+            zero_rate = cursor.fetchone()[0]
+            
+            # Check 3: Contribution rate > 100
+            cursor.execute("""
+                SELECT COUNT(*) FROM members 
+                WHERE timestamp = ? AND contribution_rate > 100
+            """, (latest,))
+            high_rate = cursor.fetchone()[0]
+            if high_rate > 0:
+                issues.append(f"❌ {high_rate} members with rate > 100%")
+            
+            # Check 4: Negative credits
+            cursor.execute("""
+                SELECT COUNT(*) FROM members 
+                WHERE timestamp = ? AND earned_credits < 0
+            """, (latest,))
+            negative = cursor.fetchone()[0]
+            if negative > 0:
+                issues.append(f"❌ {negative} members with negative credits")
+            
+            conn.close()
+            
+            embed = discord.Embed(
+                title="🔍 Data Quality Validation",
+                color=discord.Color.green() if not issues else discord.Color.orange()
+            )
+            
+            if not issues:
+                embed.description = "✅ **All data looks good!**"
+            else:
+                embed.description = "**Issues found:**\n" + "\n".join(issues)
+            
+            embed.add_field(
+                name="Info",
+                value=f"Zero contrib rate: {zero_rate} (this is normal for some members)",
+                inline=False
+            )
+            
+            await ctx.send(embed=embed)
+            
+        except Exception as e:
+            await ctx.send(f"❌ Error: {e}")
 
 
 async def setup(bot):
