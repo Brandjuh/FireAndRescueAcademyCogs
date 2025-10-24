@@ -56,13 +56,23 @@ class MemberData:
         return self.mc_user_id is not None
     
     def is_linked(self) -> bool:
-        """Check if Discord and MC accounts are properly linked."""
-        return (
-            self.has_discord() and 
-            self.has_mc() and 
-            self.link_status == "approved" and
-            self.is_verified
-        )
+        """Check if Discord and MC accounts are properly linked AND member is active in alliance."""
+        # Must have both IDs
+        if not (self.has_discord() and self.has_mc()):
+            return False
+        
+        # Link must be approved
+        if self.link_status != "approved":
+            return False
+        
+        # 🔧 FIX: Member must be active in alliance (not a former member)
+        if self.mc_username and "Former member" in self.mc_username:
+            return False
+        
+        if self.mc_role and "Left alliance" in self.mc_role:
+            return False
+        
+        return True
     
     def get_display_name(self) -> str:
         """Get best available display name."""
