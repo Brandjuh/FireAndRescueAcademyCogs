@@ -393,17 +393,30 @@ class MemberManager(ConfigCommands, commands.Cog):
             return None
         
         try:
-            # Query alliance database
+            # 🔧 FIX: members_current table only has user_id, NOT mc_user_id
             rows = await self.alliance_scraper._query_alliance(
                 "SELECT name, role, contribution_rate, earned_credits "
-                "FROM members_current WHERE user_id=? OR mc_user_id=?",
-                (mc_user_id, mc_user_id)
+                "FROM members_current WHERE user_id=?",
+                (mc_user_id,)
             )
             
             if rows:
                 return dict(rows[0])
+            
+            # 🔧 FIX: Also try members_history as fallback
+            rows = await self.alliance_scraper._query_alliance(
+                "SELECT name, role, contribution_rate, earned_credits "
+                "FROM members_history WHERE user_id=? "
+                "ORDER BY scraped_at DESC LIMIT 1",
+                (mc_user_id,)
+            )
+            
+            if rows:
+                log.info(f"Found MC data in history for {mc_user_id}")
+                return dict(rows[0])
+                
         except Exception as e:
-            log.error(f"Error querying alliance data: {e}")
+            log.error(f"Failed to get MC data: {e}", exc_info=True)
         
         return None
     
