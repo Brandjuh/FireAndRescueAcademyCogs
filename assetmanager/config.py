@@ -22,7 +22,7 @@ DATA_DIR.mkdir(exist_ok=True)
 SCHEMA_DIR = pathlib.Path(__file__).parent / "schemas"
 
 # Node converter
-NODE_BIN = "node"
+NODE_BIN = "/usr/bin/node"
 TS_TO_JSON = pathlib.Path(__file__).parent / "ts_to_json.mjs"
 
 # Simple search knobs
