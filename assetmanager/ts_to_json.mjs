@@ -1,124 +1,55 @@
-#!/usr/bin/env node
-// assetmanager/ts_to_json.mjs
-// ESM wrapper that registers ts-node (transpile-only).
-// It works even when ts-node is only installed *globally*.
-// Node 18 compatible, no --loader flags needed.
+def ts_to_json(ts_path: Path, json_path: Path) -> None:
+    """
+    Convert TS -> JSON.
+    1) Try to detect a pure object literal and parse it fast in Python.
+    2) If the object looks computed OR the literal path fails for any reason,
+       automatically fall back to the Node helper (ts_to_json.mjs).
+    """
+    raw = ts_path.read_text(encoding="utf-8")
+    # Try to extract the exported object; if that already fails, go straight to Node.
+    try:
+        obj_src = _extract_export_default_object(raw)
+    except Exception:
+        obj_src = None  # force node fallback
 
-import { createRequire } from "module";
-import path from "path";
-import fs from "fs";
-import { execSync } from "child_process";
+    def _run_node():
+        node = _node_bin()
+        helper = Path(__file__).with_name("ts_to_json.mjs")
+        if not node:
+            raise RuntimeError(
+                "Node.js is required for TS conversion but was not found. "
+                "Install Node 18+ and ensure `node` is in PATH, or set NODE_BIN in config.py."
+            )
+        if not helper.exists():
+            raise RuntimeError(
+                "Missing ts_to_json.mjs next to etl.py. Create the helper and make it executable. "
+                "It must be able to require 'ts-node' and 'typescript'."
+            )
+        res = subprocess.run(
+            [node, str(helper), str(ts_path)],
+            capture_output=True,
+            text=True,
+            env=_node_env_with_global_node_path(),
+        )
+        if res.returncode != 0:
+            snippet = (res.stderr or res.stdout or "").strip()
+            if len(snippet) > 800:
+                snippet = snippet[:800] + " …"
+            raise RuntimeError(f"TS->JSON conversion failed (node): {snippet}")
+        json_path.write_text(res.stdout, encoding="utf-8")
 
-const require = createRequire(import.meta.url);
+    # If we couldn't extract or it obviously looks computed, just use Node.
+    if obj_src is None or _looks_non_literal(obj_src):
+        _run_node()
+        return
 
-function registerTsNodeOrDie() {
-  // 1) Try normal resolution (local node_modules)
-  try {
-    const tsnode = require("ts-node");
-    tsnode.register({
-      transpileOnly: true,
-      compilerOptions: {
-        module: "commonjs",
-        moduleResolution: "node",
-        target: "es2020",
-        esModuleInterop: true,
-        resolveJsonModule: true,
-        skipLibCheck: true
-      }
-    });
-    return;
-  } catch (_) {
-    // keep going
-  }
-
-  // 2) Try global npm root: `npm root -g`
-  let globalRoot = process.env.NPM_GLOBAL_ROOT;
-  if (!globalRoot) {
-    try {
-      globalRoot = execSync("npm root -g", { stdio: ["ignore", "pipe", "ignore"] })
-        .toString()
-        .trim();
-    } catch {
-      // ignore
-    }
-  }
-
-  if (globalRoot) {
-    try {
-      // Point a require at the global root. From there, normal "ts-node/..." resolution works.
-      const globalReq = createRequire(path.join(globalRoot, "node_modules", "._global_stub.js"));
-      const tsnode = globalReq("ts-node");
-      tsnode.register({
-        transpileOnly: true,
-        compilerOptions: {
-          module: "commonjs",
-          moduleResolution: "node",
-          target: "es2020",
-          esModuleInterop: true,
-          resolveJsonModule: true,
-          skipLibCheck: true
-        }
-      });
-      return;
-    } catch (_) {
-      // fallthrough to error
-    }
-  }
-
-  // 3) Give a crystal clear error with a fix
-  console.error(
-    "ts-node cannot be resolved in this environment.\n" +
-      "Fix options:\n" +
-      "  a) Install locally in your cog folder: npm i ts-node typescript\n" +
-      "  b) Or keep global and expose it by setting NODE_PATH to your global npm root, e.g.\n" +
-      "       export NODE_PATH=$(npm root -g)\n" +
-      "     and ensure the Red service inherits that env.\n" +
-      "  c) Or set NPM_GLOBAL_ROOT env var to the output of `npm root -g` for this process."
-  );
-  process.exit(1);
-}
-
-function requireTsModule(absTsPath) {
-  // After ts-node registration, require() can load TS files as CJS.
-  try {
-    return require(absTsPath);
-  } catch (e) {
-    console.error(`Failed to require TS module: ${absTsPath}`);
-    console.error(String(e && e.message ? e.message : e));
-    process.exit(1);
-  }
-}
-
-// -------- Main --------
-const file = process.argv[2];
-if (!file) {
-  console.error("Usage: ts_to_json.mjs <file.ts>");
-  process.exit(2);
-}
-
-const abs = path.resolve(file);
-if (!fs.existsSync(abs)) {
-  console.error(`File not found: ${abs}`);
-  process.exit(2);
-}
-
-registerTsNodeOrDie();
-
-const mod = requireTsModule(abs);
-const data =
-  (mod && (mod.default ?? mod.exports ?? mod)) !== undefined
-    ? mod.default ?? mod.exports ?? mod
-    : undefined;
-
-if (data === undefined) {
-  console.error("Module has no default export or usable value.");
-  process.exit(1);
-}
-
-try {
-  process.stdout.write(JSON.stringify(data));
-} catch (e) {
-  console.error("Failed to serialize module default export to JSON:");
-  console.error(String(e && e.message ? e.message : e));
-  process.exit(1);
-}
+    # Literal path first; if that blows up, we auto-fallback to Node.
+    try:
+        json_like = _ts_object_to_json_text(obj_src)
+        # Some LSSM maps sneak in values that still aren't valid JSON;
+        # if json.loads fails, we'll catch and fallback.
+        obj = json.loads(json_like)
+        json_path.write_text(json.dumps(obj), encoding="utf-8")
+    except Exception:
+        # Last resort: evaluate with Node.
+        _run_node()
