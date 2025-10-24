@@ -1,0 +1,14 @@
+{
+  "author": ["FARA"],
+  "install_msg": "AssetManager loaded. It will keep assets.db fresh on a schedule. Use [p]assets reload to run now.",
+  "name": "AssetManager",
+  "short": "Keeps a local MissionChief assets DB in sync and searchable.",
+  "description": "Fetches LSSM i18n (en_US) for vehicles/equipment/schoolings/buildings, stores in SQLite, adds fuzzy/FTS search, and runs on an internal schedule.",
+  "tags": ["missionchief", "assets", "database", "search", "lssm"],
+  "end_user_data_statement": "This cog stores no personal user data. It only maintains game asset metadata in a local SQLite database.",
+  "requirements": [],
+  "min_bot_version": "3.5.0",
+  "hidden": false,
+  "disabled": false,
+  "type": "COG"
+}
