@@ -42,7 +42,7 @@ def _mc_profile_url(mc_id: str) -> str:
 class MemberSync(commands.Cog):
     """Synchronises Missionchief members with Discord and handles verification workflow."""
 
-    __version__ = "1.0.2"
+    __version__ = "1.1.0"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -83,13 +83,36 @@ class MemberSync(commands.Cog):
             )""")
             await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_links_discord ON links(discord_id)")
             await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_links_mc ON links(mc_user_id)")
+            
             await db.execute("""
             CREATE TABLE IF NOT EXISTS queue (
                 discord_id   INTEGER PRIMARY KEY,
                 requested_at TEXT    NOT NULL,
                 attempts     INTEGER NOT NULL DEFAULT 0
             )""")
+            
+            # NEW: member_left_alliance table
+            await db.execute("""
+            CREATE TABLE IF NOT EXISTS member_left_alliance (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                mc_user_id     TEXT    NOT NULL,
+                username       TEXT,
+                discord_id     INTEGER,
+                rank_role      TEXT,
+                earned_credits INTEGER,
+                contribution_rate REAL,
+                last_seen_at   TEXT,
+                exit_detected_at TEXT NOT NULL,
+                reason         TEXT DEFAULT 'auto-detected',
+                role_removed   INTEGER DEFAULT 0,
+                notified       INTEGER DEFAULT 0
+            )""")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_exit_mc ON member_left_alliance(mc_user_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_exit_discord ON member_left_alliance(discord_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_exit_detected ON member_left_alliance(exit_detected_at)")
+            
             await db.commit()
+            log.info("✅ MemberSync database initialized with member_left_alliance table")
 
     def _guess_alliance_db(self) -> Optional[pathlib.Path]:
         """Try to find the members database - prioritize members_v2.db from scraper_databases."""
@@ -445,6 +468,17 @@ class MemberSync(commands.Cog):
             except Exception as e:
                 view_status = f"❌ Error: {e}"
         
+        # Check member_left_alliance table
+        def _check_exits():
+            con = sqlite3.connect(self.links_db)
+            try:
+                cur = con.execute("SELECT COUNT(*) FROM member_left_alliance")
+                return cur.fetchone()[0]
+            finally:
+                con.close()
+        
+        exit_count = await asyncio.get_running_loop().run_in_executor(None, _check_exits)
+        
         lines = [
             f"**MemberSync Status**",
             f"Version: `{self.__version__}`",
@@ -452,6 +486,7 @@ class MemberSync(commands.Cog):
             f"**Database:**",
             f"Path: `{cfg['alliance_db_path']}`",
             f"members_current VIEW: {view_status}",
+            f"Exit Records: {exit_count}",
             f"",
             f"**Channels:**",
             f"Review: <#{cfg['review_channel_id']}>",
@@ -549,29 +584,165 @@ class MemberSync(commands.Cog):
         else:
             await ctx.send(f"⚠️ No link found in MemberSync database\n")
         
-        # 6. Simulate prune check
+        # 6. Simulate prune check - FIXED VERSION
         await ctx.send(f"\n**Simulating prune logic for MC-ID `{mc_id}`:**")
         
-        # Get all current member IDs
-        current_ids: set[str] = set()
-        rows = await self._query_alliance("SELECT user_id, mc_user_id, profile_href FROM members_current")
+        try:
+            # Get all current member IDs
+            current_ids: set[str] = set()
+            rows = await self._query_alliance("SELECT user_id, mc_user_id, profile_href FROM members_current")
+            
+            for r in rows:
+                # FIXED: Convert sqlite3.Row to dict first
+                rd = dict(r)
+                mc = rd.get("user_id") or rd.get("mc_user_id")
+                if not mc:
+                    href = rd.get("profile_href") or ""
+                    m = re.search(r"/users/(\d+)", href or "")
+                    if m:
+                        mc = m.group(1)
+                if mc:
+                    current_ids.add(str(mc))
+            
+            if mc_id in current_ids:
+                await ctx.send(f"✅ MC-ID `{mc_id}` IS in prune whitelist (would NOT be removed)")
+            else:
+                await ctx.send(f"❌ MC-ID `{mc_id}` is NOT in prune whitelist (WOULD BE REMOVED!)")
+            
+            await ctx.send(f"\n**Total IDs in prune whitelist:** {len(current_ids)}")
+        except Exception as e:
+            await ctx.send(f"❌ **Prune simulation failed:** {e}")
+            log.exception("Prune simulation error")
         
-        for r in rows:
-            mc = r.get("user_id") or r.get("mc_user_id")
-            if not mc:
-                href = r.get("profile_href") or ""
-                m = re.search(r"/users/(\d+)", href or "")
-                if m:
-                    mc = m.group(1)
-            if mc:
-                current_ids.add(str(mc))
+        # 7. Check exit records
+        await ctx.send(f"\n**Checking exit records for MC-ID `{mc_id}`:**")
         
-        if mc_id in current_ids:
-            await ctx.send(f"✅ MC-ID `{mc_id}` IS in prune whitelist (would NOT be removed)")
+        def _check_exits():
+            con = sqlite3.connect(self.links_db)
+            con.row_factory = sqlite3.Row
+            try:
+                cur = con.execute("SELECT * FROM member_left_alliance WHERE mc_user_id=? ORDER BY exit_detected_at DESC", (mc_id,))
+                return [dict(r) for r in cur.fetchall()]
+            finally:
+                con.close()
+        
+        exit_records = await asyncio.get_running_loop().run_in_executor(None, _check_exits)
+        
+        if exit_records:
+            await ctx.send(f"✅ **Found {len(exit_records)} exit record(s):**")
+            for record in exit_records[:3]:  # Show max 3
+                await ctx.send(f"```json\n{json.dumps(record, indent=2, default=str)}\n```")
         else:
-            await ctx.send(f"❌ MC-ID `{mc_id}` is NOT in prune whitelist (WOULD BE REMOVED!)")
+            await ctx.send(f"⚠️ No exit records found")
+
+    @membersync_group.command(name="prune")
+    async def manual_prune(self, ctx: commands.Context, dry_run: bool = True):
+        """
+        Manually run the prune check to remove Verified role from members who left the alliance.
         
-        await ctx.send(f"\n**Total IDs in prune whitelist:** {len(current_ids)}")
+        dry_run: If True (default), only shows what would happen without actually doing it.
+        Set to False to actually remove roles.
+        
+        Usage:
+        [p]membersync prune           - Dry run (show what would happen)
+        [p]membersync prune False     - Actually remove roles
+        """
+        if dry_run:
+            await ctx.send("🔍 **DRY RUN MODE** - No roles will be removed\n")
+        else:
+            await ctx.send("⚠️ **LIVE MODE** - Roles WILL be removed!\n")
+        
+        await ctx.send("Starting prune check...")
+        
+        result = await self._prune_once(guild=ctx.guild, dry_run=dry_run, manual=True)
+        
+        embed = discord.Embed(
+            title="🔎 Prune Check Results",
+            color=discord.Color.blue() if dry_run else discord.Color.orange()
+        )
+        embed.add_field(name="Mode", value="DRY RUN" if dry_run else "LIVE", inline=True)
+        embed.add_field(name="Checked Links", value=str(result['checked']), inline=True)
+        embed.add_field(name="Left Alliance", value=str(result['left_alliance']), inline=True)
+        embed.add_field(name="Roles Removed", value=str(result['removed']), inline=True)
+        embed.add_field(name="Already Gone", value=str(result['already_gone']), inline=True)
+        embed.add_field(name="Errors", value=str(result['errors']), inline=True)
+        
+        if result['details']:
+            details_text = "\n".join(result['details'][:10])  # Max 10 lines
+            if len(result['details']) > 10:
+                details_text += f"\n... and {len(result['details']) - 10} more"
+            embed.add_field(name="Details", value=details_text, inline=False)
+        
+        if dry_run and result['left_alliance'] > 0:
+            embed.set_footer(text=f"Run '[p]membersync prune False' to actually remove {result['left_alliance']} roles")
+        
+        await ctx.send(embed=embed)
+
+    @membersync_group.command(name="exits")
+    async def show_exits(self, ctx: commands.Context, limit: int = 20):
+        """
+        Show recent members who left the alliance.
+        
+        limit: Number of recent exits to show (default 20, max 50)
+        """
+        limit = min(max(1, limit), 50)
+        
+        await ctx.send(f"📊 Fetching last {limit} exits...")
+        
+        def _get_exits():
+            con = sqlite3.connect(self.links_db)
+            con.row_factory = sqlite3.Row
+            try:
+                cur = con.execute("""
+                    SELECT * FROM member_left_alliance 
+                    ORDER BY exit_detected_at DESC 
+                    LIMIT ?
+                """, (limit,))
+                return [dict(r) for r in cur.fetchall()]
+            finally:
+                con.close()
+        
+        exits = await asyncio.get_running_loop().run_in_executor(None, _get_exits)
+        
+        if not exits:
+            await ctx.send("✅ No exit records found! Everyone is still in the alliance.")
+            return
+        
+        # Group by pages of 10
+        pages = []
+        for i in range(0, len(exits), 10):
+            chunk = exits[i:i+10]
+            
+            embed = discord.Embed(
+                title=f"📋 Members Who Left Alliance",
+                color=discord.Color.red(),
+                description=f"Showing exits {i+1}-{min(i+10, len(exits))} of {len(exits)}"
+            )
+            
+            for exit_record in chunk:
+                mc_id = exit_record['mc_user_id']
+                username = exit_record.get('username') or 'Unknown'
+                discord_id = exit_record.get('discord_id')
+                exit_time = exit_record['exit_detected_at'][:16]
+                role_removed = "✅" if exit_record.get('role_removed') else "❌"
+                
+                discord_mention = f"<@{discord_id}>" if discord_id else "Not linked"
+                
+                field_name = f"{username} (MC: {mc_id})"
+                field_value = f"Discord: {discord_mention}\nExit: {exit_time}\nRole Removed: {role_removed}"
+                
+                embed.add_field(name=field_name, value=field_value, inline=False)
+            
+            embed.set_footer(text=f"Page {(i//10)+1}/{(len(exits)-1)//10+1}")
+            pages.append(embed)
+        
+        # Send first page
+        await ctx.send(embed=pages[0])
+        
+        # If multiple pages, send rest too
+        if len(pages) > 1:
+            for page in pages[1:]:
+                await ctx.send(embed=page)
 
     @membersync_group.group(name="config")
     async def config_group(self, ctx: commands.Context):
@@ -1051,39 +1222,52 @@ class MemberSync(commands.Cog):
                 await asyncio.sleep(3600)
         asyncio.create_task(_loop())
 
-    async def _prune_once(self):
+    async def _prune_once(self, guild: Optional[discord.Guild] = None, dry_run: bool = False, manual: bool = False) -> Dict[str, Any]:
         """
-        Prune verified roles from members no longer in the alliance.
+        FIXED: Prune verified roles from members no longer in the alliance.
         
-        Uses members_current VIEW which works for both old and new databases!
+        Now with proper sqlite3.Row handling and exit tracking!
         """
-        guild = self.bot.guilds[0] if self.bot.guilds else None
         if not guild:
-            return
+            guild = self.bot.guilds[0] if self.bot.guilds else None
+        
+        if not guild:
+            return {'checked': 0, 'left_alliance': 0, 'removed': 0, 'already_gone': 0, 'errors': 0, 'details': []}
         
         role_id = await self.config.verified_role_id()
         role = guild.get_role(int(role_id)) if role_id else None
+        
         if not role:
-            return
+            log.warning("No verified role configured for prune check")
+            return {'checked': 0, 'left_alliance': 0, 'removed': 0, 'already_gone': 0, 'errors': 0, 'details': []}
 
         db_path = await self.config.alliance_db_path()
         if not db_path:
             log.warning("No alliance database configured for prune check")
-            return
+            return {'checked': 0, 'left_alliance': 0, 'removed': 0, 'already_gone': 0, 'errors': 0, 'details': []}
         
-        # Get current member IDs from members_current VIEW
+        # FIXED: Get current member IDs from members_current VIEW with proper dict conversion
         current_ids: set[str] = set()
-        rows = await self._query_alliance("SELECT user_id, mc_user_id, profile_href FROM members_current")
+        current_members_data: Dict[str, Dict] = {}
         
-        for r in rows:
-            mc = r.get("user_id") or r.get("mc_user_id")
-            if not mc:
-                href = r.get("profile_href") or ""
-                m = re.search(r"/users/(\d+)", href or "")
-                if m:
-                    mc = m.group(1)
-            if mc:
-                current_ids.add(str(mc))
+        try:
+            rows = await self._query_alliance("SELECT * FROM members_current")
+            
+            for r in rows:
+                # CRITICAL FIX: Convert sqlite3.Row to dict FIRST
+                rd = dict(r)
+                mc = rd.get("user_id") or rd.get("mc_user_id")
+                if not mc:
+                    href = rd.get("profile_href") or ""
+                    m = re.search(r"/users/(\d+)", href or "")
+                    if m:
+                        mc = m.group(1)
+                if mc:
+                    current_ids.add(str(mc))
+                    current_members_data[str(mc)] = rd
+        except Exception as e:
+            log.exception("Failed to query current members: %s", e)
+            return {'checked': 0, 'left_alliance': 0, 'removed': 0, 'already_gone': 0, 'errors': 0, 'details': [f"Database error: {e}"]}
 
         # Get all approved links
         def _run():
@@ -1093,29 +1277,132 @@ class MemberSync(commands.Cog):
                 return [dict(r) for r in con.execute("SELECT * FROM links WHERE status='approved'")]
             finally:
                 con.close()
+        
         links = await asyncio.get_running_loop().run_in_executor(None, _run)
 
         log_ch_id = await self.config.log_channel_id()
         ch = guild.get_channel(int(log_ch_id)) if log_ch_id else None
 
+        # Tracking
+        checked = len(links)
+        left_alliance = 0
         removed = 0
+        already_gone = 0
+        errors = 0
+        details = []
+        
+        now = utcnow_iso()
+
         for link in links:
             did = int(link["discord_id"])
             mcid = str(link["mc_user_id"])
+            
             if mcid not in current_ids:
+                # This person LEFT the alliance!
+                left_alliance += 1
                 member = guild.get_member(did)
-                if not member or not role or role not in member.roles:
-                    continue
+                
+                # Get last known data from old scrapes (if available)
+                last_known_data = current_members_data.get(mcid, {})
+                username = last_known_data.get("name") or link.get("mc_name") or "Unknown"
+                rank = last_known_data.get("role") or ""
+                credits = last_known_data.get("earned_credits") or 0
+                rate = last_known_data.get("contribution_rate") or 0.0
+                last_seen = last_known_data.get("scraped_at") or now
+                
+                # Record the exit in member_left_alliance table
+                def _record_exit():
+                    con = sqlite3.connect(self.links_db)
+                    try:
+                        # Check if already recorded
+                        cur = con.execute("SELECT id FROM member_left_alliance WHERE mc_user_id=? AND discord_id=?", (mcid, did))
+                        existing = cur.fetchone()
+                        
+                        if not existing:
+                            con.execute("""
+                                INSERT INTO member_left_alliance 
+                                (mc_user_id, username, discord_id, rank_role, earned_credits, contribution_rate, 
+                                 last_seen_at, exit_detected_at, reason, role_removed, notified)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (mcid, username, did, rank, credits, rate, last_seen, now, "auto-detected", 0, 0))
+                        else:
+                            # Update existing record
+                            con.execute("""
+                                UPDATE member_left_alliance 
+                                SET exit_detected_at=?, role_removed=?, username=?, rank_role=?, earned_credits=?, contribution_rate=?
+                                WHERE id=?
+                            """, (now, 0, username, rank, credits, rate, existing[0]))
+                        
+                        con.commit()
+                    finally:
+                        con.close()
+                
                 try:
-                    await member.remove_roles(role, reason="MemberSync auto-prune: not in alliance anymore")
-                    removed += 1
-                except Exception:
-                    pass
-                if isinstance(ch, discord.TextChannel):
-                    await ch.send(f"🔎 Auto-prune removed Verified from <@{did}> (MC `{mcid}` no longer found).")
+                    await asyncio.get_running_loop().run_in_executor(None, _record_exit)
+                except Exception as e:
+                    log.error(f"Failed to record exit for MC {mcid}: {e}")
+                
+                if not member or not role or role not in member.roles:
+                    already_gone += 1
+                    details.append(f"MC {mcid} ({username}) - Already without role")
+                    continue
+                
+                # Remove role (unless dry run)
+                if not dry_run:
+                    try:
+                        await member.remove_roles(role, reason="MemberSync auto-prune: not in alliance anymore")
+                        removed += 1
+                        details.append(f"✅ Removed role from {member.mention} (MC {mcid} - {username})")
+                        
+                        # Update exit record
+                        def _update_exit():
+                            con = sqlite3.connect(self.links_db)
+                            try:
+                                con.execute("""
+                                    UPDATE member_left_alliance 
+                                    SET role_removed=1 
+                                    WHERE mc_user_id=? AND discord_id=?
+                                """, (mcid, did))
+                                con.commit()
+                            finally:
+                                con.close()
+                        
+                        await asyncio.get_running_loop().run_in_executor(None, _update_exit)
+                        
+                        # Log to channel
+                        if isinstance(ch, discord.TextChannel):
+                            embed = discord.Embed(
+                                title="🔎 Auto-Prune: Member Left Alliance",
+                                color=discord.Color.red(),
+                                timestamp=datetime.utcnow()
+                            )
+                            embed.add_field(name="Discord", value=f"{member.mention} (`{did}`)", inline=False)
+                            embed.add_field(name="MC Name", value=username, inline=True)
+                            embed.add_field(name="MC ID", value=f"[{mcid}]({_mc_profile_url(mcid)})", inline=True)
+                            embed.add_field(name="Last Rank", value=rank or "Unknown", inline=True)
+                            embed.add_field(name="Last Credits", value=f"{credits:,}" if credits else "Unknown", inline=True)
+                            embed.add_field(name="Action", value="Verified role removed", inline=False)
+                            await ch.send(embed=embed)
+                        
+                    except Exception as e:
+                        errors += 1
+                        details.append(f"❌ Failed to remove role from {member.mention}: {e}")
+                        log.error(f"Failed to remove role from {member.name}: {e}")
+                else:
+                    # Dry run
+                    details.append(f"🔍 Would remove role from {member.mention} (MC {mcid} - {username})")
 
-        if removed:
-            log.info("Auto-prune removed %s roles", removed)
+        if not manual and removed > 0:
+            log.info(f"Auto-prune removed {removed} roles from members who left alliance")
+        
+        return {
+            'checked': checked,
+            'left_alliance': left_alliance,
+            'removed': removed,
+            'already_gone': already_gone,
+            'errors': errors,
+            'details': details
+        }
 
 
 async def setup(bot: Red):
