@@ -1,6 +1,9 @@
 """
 Utility functions for MemberManager
 Fuzzy search, formatting, and helper functions
+
+COMPLETE VERSION - No sanctions-specific changes needed
+All sanction utilities are in SanctionManager
 """
 
 import re
@@ -39,7 +42,8 @@ async def fuzzy_search_member(
     guild: discord.Guild,
     membersync,
     alliance_scraper,
-    threshold: float = 0.6
+    threshold: float = 0.6,
+    limit: int = 1
 ) -> Optional[Dict[str, Any]]:
     """
     Fuzzy search for a member across Discord and MC databases.
@@ -50,13 +54,14 @@ async def fuzzy_search_member(
         membersync: MemberSync cog instance
         alliance_scraper: AllianceScraper cog instance
         threshold: Minimum match score (0.0-1.0)
+        limit: Max results to return (default 1 for single best match)
     
     Returns:
         Dict with discord_id and/or mc_user_id, or None
+        If limit > 1, returns list of dicts
     """
     target_clean = target.lower().strip()
-    best_match = None
-    best_score = threshold
+    results = []
     
     # Search Discord members
     for member in guild.members:
@@ -65,15 +70,25 @@ async def fuzzy_search_member(
         
         # Check username
         score = fuzzy_match_score(target_clean, str(member))
-        if score > best_score:
-            best_score = score
-            best_match = {"discord_id": member.id, "mc_user_id": None, "source": "discord"}
+        if score >= threshold:
+            results.append({
+                "score": score,
+                "discord_id": member.id,
+                "mc_user_id": None,
+                "name": str(member),
+                "source": "discord"
+            })
         
         # Check display name
         score = fuzzy_match_score(target_clean, member.display_name)
-        if score > best_score:
-            best_score = score
-            best_match = {"discord_id": member.id, "mc_user_id": None, "source": "discord"}
+        if score >= threshold:
+            results.append({
+                "score": score,
+                "discord_id": member.id,
+                "mc_user_id": None,
+                "name": member.display_name,
+                "source": "discord"
+            })
     
     # Search MC members via AllianceScraper
     if alliance_scraper:
@@ -89,9 +104,7 @@ async def fuzzy_search_member(
                 
                 # Check MC username
                 score = fuzzy_match_score(target_clean, mc_name)
-                if score > best_score:
-                    best_score = score
-                    
+                if score >= threshold:
                     # Try to find linked Discord account
                     discord_id = None
                     if membersync:
@@ -99,16 +112,27 @@ async def fuzzy_search_member(
                         if link:
                             discord_id = link.get("discord_id")
                     
-                    best_match = {
+                    results.append({
+                        "score": score,
                         "discord_id": discord_id,
                         "mc_user_id": mc_id,
+                        "name": mc_name,
                         "source": "missionchief"
-                    }
+                    })
         except Exception:
             # Silently fail - AllianceScraper might not be available
             pass
     
-    return best_match
+    if not results:
+        return None if limit == 1 else []
+    
+    # Sort by score (highest first)
+    results.sort(key=lambda x: x["score"], reverse=True)
+    
+    if limit == 1:
+        return results[0]
+    else:
+        return results[:limit]
 
 
 def format_contribution_trend(
@@ -124,6 +148,9 @@ def format_contribution_trend(
         - "5.0% ➡️"
         - "12.3% ⬆️ (+2.5%)"
     """
+    if current is None:
+        return "*No data*"
+    
     current_str = f"{current:.1f}%"
     
     if previous is None or previous == 0:
