@@ -24,7 +24,6 @@ except Exception:  # pragma: no cover
             self.headers = headers
 
         def raise_for_status(self):
-            # urllib throws on HTTP errors already via HTTPError, so nothing to do.
             return
 
         @property
@@ -37,13 +36,18 @@ except Exception:  # pragma: no cover
             req = _ul.Request(url, headers=headers or {})
             with _ul.urlopen(req, timeout=timeout) as r:
                 data = r.read()
-                # Normalize headers to a plain dict with lower-cased keys
                 hdrs = {k.lower(): v for k, v in r.headers.items()}
                 return _Resp(data, hdrs)
 
 from jsonschema import validate, ValidationError
 
-from config import DB_PATH, DATA_DIR, SRC_FILES, TS_TO_JSON, NODE_BIN, SCHEMA_DIR
+# ---- robust dual-mode import for cogs vs. standalone runs ----
+try:
+    # running as package (inside Red cog)
+    from .config import DB_PATH, DATA_DIR, SRC_FILES, TS_TO_JSON, NODE_BIN, SCHEMA_DIR
+except Exception:
+    # fallback when executed directly: `python assetmanager/etl.py`
+    from config import DB_PATH, DATA_DIR, SRC_FILES, TS_TO_JSON, NODE_BIN, SCHEMA_DIR  # type: ignore
 
 # --------------- Utilities ---------------
 
@@ -59,7 +63,6 @@ def ensure_db():
         con.commit()
 
 def _which_node() -> str:
-    # Respect NODE_BIN from config, but verify it exists
     node = shutil.which(str(NODE_BIN)) if NODE_BIN else None
     if not node:
         raise RuntimeError(
@@ -75,8 +78,6 @@ def fetch_raw(url: str, out_path: Path, *, retries: int = 3, backoff: float = 1.
             r = requests.get(url, timeout=30, headers={"User-Agent": UA, "Accept": "text/plain"})
             r.raise_for_status()
             out_path.write_text(r.text, encoding="utf-8")
-            # GitHub raw geeft zelden commit mee; pak wat we kunnen krijgen.
-            # We proberen eerst iets unieks, anders 'dev'.
             headers = {k.lower(): v for k, v in (getattr(r, "headers", {}) or {}).items()}
             commit = (
                 headers.get("x-github-request-id")
@@ -94,7 +95,6 @@ def fetch_raw(url: str, out_path: Path, *, retries: int = 3, backoff: float = 1.
 
 def ts_to_json(ts_path: Path, json_path: Path) -> None:
     node = _which_node()
-    # Node script print JSON naar stdout
     res = subprocess.run([node, str(TS_TO_JSON), str(ts_path)], capture_output=True, text=True)
     if res.returncode != 0:
         snippet = (res.stderr or res.stdout or "").strip()
@@ -233,12 +233,10 @@ def transform_vehicles(src: Dict[str, Any]) -> Tuple[
             "specials": specials,
         }
 
-        # Possible buildings
         pbs = v.get("possible_buildings") or v.get("possibleBuildings") or v.get("building_ids")
         if isinstance(pbs, list):
             vp_buildings[vid] = set(int(x) for x in pbs if isinstance(x, (int, str)) and str(x).isdigit())
 
-        # Required schoolings
         reqs = v.get("required_schoolings") or v.get("schoolings") or []
         arr = []
         if isinstance(reqs, list):
@@ -256,12 +254,10 @@ def transform_vehicles(src: Dict[str, Any]) -> Tuple[
         if arr:
             v_schoolings[vid] = arr
 
-        # Equipment compatibility
         ec = v.get("equipment_compat") or v.get("equipment") or []
         if isinstance(ec, list):
             v_equipment[vid] = set(int(x) for x in ec if isinstance(x, (int, str)) and str(x).isdigit())
 
-        # Roles (multi-role behavior)
         roles = v.get("roles") or v.get("acts_as") or v.get("role")
         role_set = set()
         if isinstance(roles, list):
@@ -340,7 +336,6 @@ def upsert_vehicles(con: sqlite3.Connection, rows: Dict[int, Dict[str, Any]]):
 def replace_relations(con: sqlite3.Connection,
                       vp_buildings, v_schoolings, v_equipment,
                       role_index, v_roles):
-    # vehicle_possible_buildings
     con.execute("DELETE FROM vehicle_possible_buildings")
     for vid, bids in vp_buildings.items():
         for b in bids:
@@ -349,7 +344,6 @@ def replace_relations(con: sqlite3.Connection,
                 VALUES (?, ?)
             """, (vid, b))
 
-    # vehicle_required_schoolings
     con.execute("DELETE FROM vehicle_required_schoolings")
     for vid, arr in v_schoolings.items():
         for it in arr:
@@ -358,7 +352,6 @@ def replace_relations(con: sqlite3.Connection,
                 VALUES (?, ?, ?)
             """, (vid, it["schooling_id"], it.get("count", 1)))
 
-    # vehicle_equipment_compat
     con.execute("DELETE FROM vehicle_equipment_compat")
     for vid, eids in v_equipment.items():
         for eid in eids:
@@ -367,7 +360,6 @@ def replace_relations(con: sqlite3.Connection,
                 VALUES (?, ?, 1)
             """, (vid, eid))
 
-    # roles
     role_id_map = {}
     for role_name in role_index.keys():
         con.execute("INSERT INTO vehicle_roles (role) VALUES (?) ON CONFLICT(role) DO NOTHING", (role_name,))
@@ -387,20 +379,16 @@ def replace_relations(con: sqlite3.Connection,
 
 def rebuild_fts(con: sqlite3.Connection):
     con.execute("DELETE FROM search_index")
-    # vehicles
     for row in con.execute("SELECT id, name, specials FROM vehicles"):
         body = row[2] or ""
         con.execute("INSERT INTO search_index (type, ref_id, name, body) VALUES ('vehicle', ?, ?, ?)",
                     (str(row[0]), row[1], body))
-    # equipment
     for row in con.execute("SELECT id, name, description FROM equipment"):
         con.execute("INSERT INTO search_index (type, ref_id, name, body) VALUES ('equipment', ?, ?, ?)",
                     (str(row[0]), row[1], row[2] or ""))
-    # schoolings
     for row in con.execute("SELECT id, name, department FROM schoolings"):
         con.execute("INSERT INTO search_index (type, ref_id, name, body) VALUES ('schooling', ?, ?, ?)",
                     (str(row[0]), row[1], row[2] or ""))
-    # buildings
     for row in con.execute("SELECT id, name, category FROM buildings"):
         con.execute("INSERT INTO search_index (type, ref_id, name, body) VALUES ('building', ?, ?, ?)",
                     (str(row[0]), row[1], row[2] or ""))
@@ -414,7 +402,7 @@ def run_etl():
     try:
         results = {}
         for key, url in SRC_FILES.items():
-            ts_path = tmpdir / f"{key}.ts"
+            ts_path = tmpdir / f"{key}.ts"}
             commit_sha = fetch_raw(url, ts_path)
             json_path = tmpdir / f"{key}.json"
             ts_to_json(ts_path, json_path)
@@ -429,14 +417,12 @@ def run_etl():
         with sqlite3.connect(DB_PATH) as con:
             con.execute("PRAGMA foreign_keys=ON")
             cur = con.cursor()
-            # Upserts
             upsert_buildings(con, buildings)
             upsert_schoolings(con, schoolings)
             upsert_equipment(con, equipment)
             upsert_vehicles(con, vehicles)
             replace_relations(con, vp_buildings, v_schoolings, v_equipment, role_index, v_roles)
 
-            # Record commits (best effort)
             fetched_at = utcnow_iso()
             for key in ("buildings", "equipment", "schoolings", "vehicles"):
                 cur.execute("""
