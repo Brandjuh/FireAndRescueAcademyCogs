@@ -198,7 +198,7 @@ class MembersScraper(commands.Cog):
                 pass
     
     async def _get_session(self, ctx=None):
-        """Get authenticated session - GEEN WIJZIGINGEN AAN HEADERS!"""
+        """Get authenticated session - EXACT ZOALS ALLIANCE_SCRAPER"""
         cookie_manager = self.bot.get_cog("CookieManager")
         if not cookie_manager:
             await self._debug_log("❌ CookieManager not loaded", ctx)
@@ -208,6 +208,13 @@ class MembersScraper(commands.Cog):
             session = await cookie_manager.get_session()
             if not session:
                 return None
+            
+            # EXACT zoals alliance_scraper: voeg User-Agent header toe
+            headers = {
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+            }
+            session.headers.update(headers)
+            
             await self._debug_log("✅ Session obtained", ctx)
             return session
         except Exception as e:
