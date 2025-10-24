@@ -24,6 +24,7 @@ except Exception:  # pragma: no cover
             self.headers = headers
 
         def raise_for_status(self):
+            # urllib raises HTTPError on non-2xx by itself
             return
 
         @property
@@ -95,6 +96,7 @@ def fetch_raw(url: str, out_path: Path, *, retries: int = 3, backoff: float = 1.
 
 def ts_to_json(ts_path: Path, json_path: Path) -> None:
     node = _which_node()
+    # Node script print JSON naar stdout
     res = subprocess.run([node, str(TS_TO_JSON), str(ts_path)], capture_output=True, text=True)
     if res.returncode != 0:
         snippet = (res.stderr or res.stdout or "").strip()
@@ -187,11 +189,11 @@ def transform_equipment(src: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
 
 def transform_vehicles(src: Dict[str, Any]) -> Tuple[
     Dict[int, Dict[str, Any]],
-    Dict[int, set],
-    Dict[int, list],
-    Dict[int, set],
-    Dict[str, int],
-    Dict[int, set]
+    Dict[int, set],                # vehicle -> building ids
+    Dict[int, list],               # vehicle -> [{"schooling_id": int, "count": int}]
+    Dict[int, set],                # vehicle -> equipment ids (compatible)
+    Dict[str, int],                # role name -> role id temp index (0 placeholder)
+    Dict[int, set]                 # vehicle -> role names
 ]:
     vehicles = {}
     vp_buildings = {}
@@ -233,10 +235,12 @@ def transform_vehicles(src: Dict[str, Any]) -> Tuple[
             "specials": specials,
         }
 
+        # Possible buildings
         pbs = v.get("possible_buildings") or v.get("possibleBuildings") or v.get("building_ids")
         if isinstance(pbs, list):
             vp_buildings[vid] = set(int(x) for x in pbs if isinstance(x, (int, str)) and str(x).isdigit())
 
+        # Required schoolings (array of {schooling_id, count})
         reqs = v.get("required_schoolings") or v.get("schoolings") or []
         arr = []
         if isinstance(reqs, list):
@@ -254,15 +258,18 @@ def transform_vehicles(src: Dict[str, Any]) -> Tuple[
         if arr:
             v_schoolings[vid] = arr
 
+        # Equipment compatibility
         ec = v.get("equipment_compat") or v.get("equipment") or []
         if isinstance(ec, list):
             v_equipment[vid] = set(int(x) for x in ec if isinstance(x, (int, str)) and str(x).isdigit())
 
+        # Roles (multi-role behavior)
         roles = v.get("roles") or v.get("acts_as") or v.get("role")
         role_set = set()
         if isinstance(roles, list):
             role_set = set(str(r).strip() for r in roles if r)
         elif isinstance(roles, str):
+            # maybe "Heavy Rescue + Engine"
             parts = re.split(r"[+,/]|and", roles, flags=re.I)
             role_set = set(p.strip() for p in parts if p.strip())
         if role_set:
@@ -336,6 +343,7 @@ def upsert_vehicles(con: sqlite3.Connection, rows: Dict[int, Dict[str, Any]]):
 def replace_relations(con: sqlite3.Connection,
                       vp_buildings, v_schoolings, v_equipment,
                       role_index, v_roles):
+    # vehicle_possible_buildings
     con.execute("DELETE FROM vehicle_possible_buildings")
     for vid, bids in vp_buildings.items():
         for b in bids:
@@ -344,6 +352,7 @@ def replace_relations(con: sqlite3.Connection,
                 VALUES (?, ?)
             """, (vid, b))
 
+    # vehicle_required_schoolings
     con.execute("DELETE FROM vehicle_required_schoolings")
     for vid, arr in v_schoolings.items():
         for it in arr:
@@ -352,6 +361,7 @@ def replace_relations(con: sqlite3.Connection,
                 VALUES (?, ?, ?)
             """, (vid, it["schooling_id"], it.get("count", 1)))
 
+    # vehicle_equipment_compat
     con.execute("DELETE FROM vehicle_equipment_compat")
     for vid, eids in v_equipment.items():
         for eid in eids:
@@ -360,6 +370,7 @@ def replace_relations(con: sqlite3.Connection,
                 VALUES (?, ?, 1)
             """, (vid, eid))
 
+    # roles
     role_id_map = {}
     for role_name in role_index.keys():
         con.execute("INSERT INTO vehicle_roles (role) VALUES (?) ON CONFLICT(role) DO NOTHING", (role_name,))
@@ -379,16 +390,20 @@ def replace_relations(con: sqlite3.Connection,
 
 def rebuild_fts(con: sqlite3.Connection):
     con.execute("DELETE FROM search_index")
+    # vehicles
     for row in con.execute("SELECT id, name, specials FROM vehicles"):
         body = row[2] or ""
         con.execute("INSERT INTO search_index (type, ref_id, name, body) VALUES ('vehicle', ?, ?, ?)",
                     (str(row[0]), row[1], body))
+    # equipment
     for row in con.execute("SELECT id, name, description FROM equipment"):
         con.execute("INSERT INTO search_index (type, ref_id, name, body) VALUES ('equipment', ?, ?, ?)",
                     (str(row[0]), row[1], row[2] or ""))
+    # schoolings
     for row in con.execute("SELECT id, name, department FROM schoolings"):
         con.execute("INSERT INTO search_index (type, ref_id, name, body) VALUES ('schooling', ?, ?, ?)",
                     (str(row[0]), row[1], row[2] or ""))
+    # buildings
     for row in con.execute("SELECT id, name, category FROM buildings"):
         con.execute("INSERT INTO search_index (type, ref_id, name, body) VALUES ('building', ?, ?, ?)",
                     (str(row[0]), row[1], row[2] or ""))
@@ -402,7 +417,7 @@ def run_etl():
     try:
         results = {}
         for key, url in SRC_FILES.items():
-            ts_path = tmpdir / f"{key}.ts"}
+            ts_path = tmpdir / f"{key}.ts"
             commit_sha = fetch_raw(url, ts_path)
             json_path = tmpdir / f"{key}.json"
             ts_to_json(ts_path, json_path)
@@ -412,28 +427,38 @@ def run_etl():
         buildings = transform_buildings(results["buildings"][0])
         schoolings = transform_schoolings(results["schoolings"][0])
         equipment = transform_equipment(results["equipment"][0])
-        vehicles, vp_buildings, v_schoolings, v_equipment, role_index, v_roles = transform_vehicles(results["vehicles"][0])
+        vehicles, vp_buildings, v_schoolings, v_equipment, role_index, v_roles = transform_vehicles(
+            results["vehicles"][0]
+        )
 
         with sqlite3.connect(DB_PATH) as con:
             con.execute("PRAGMA foreign_keys=ON")
             cur = con.cursor()
+            # Upserts
             upsert_buildings(con, buildings)
             upsert_schoolings(con, schoolings)
             upsert_equipment(con, equipment)
             upsert_vehicles(con, vehicles)
             replace_relations(con, vp_buildings, v_schoolings, v_equipment, role_index, v_roles)
 
+            # Record commits (best effort)
             fetched_at = utcnow_iso()
             for key in ("buildings", "equipment", "schoolings", "vehicles"):
-                cur.execute("""
+                cur.execute(
+                    """
                     INSERT INTO source_commits (repo, path, commit_sha, fetched_at)
                     VALUES (?, ?, ?, ?)
-                """, ("LSSM-V.4", f"en_US/{key}.ts", results[key][1], fetched_at))
+                    """,
+                    ("LSSM-V.4", f"en_US/{key}.ts", results[key][1], fetched_at),
+                )
 
             rebuild_fts(con)
             con.commit()
 
-        print(f"[OK] ETL finished. {len(vehicles)} vehicles, {len(equipment)} equipment, {len(schoolings)} schoolings, {len(buildings)} buildings.")
+        print(
+            f"[OK] ETL finished. {len(vehicles)} vehicles, {len(equipment)} equipment, "
+            f"{len(schoolings)} schoolings, {len(buildings)} buildings."
+        )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
