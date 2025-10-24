@@ -5,7 +5,14 @@ from typing import Iterable, List, Tuple
 
 from rapidfuzz import fuzz, process
 
-from config import DB_PATH, FUZZY_MIN_SCORE
+# ---- robust dual-mode import for cogs vs. standalone runs ----
+try:
+    # running as package (inside Red cog)
+    from .config import DB_PATH, FUZZY_MIN_SCORE
+except Exception:
+    # fallback when executed directly: `python assetmanager/search.py`
+    from config import DB_PATH, FUZZY_MIN_SCORE  # type: ignore
+
 
 def _fetch_all(con: sqlite3.Connection, q: str, args: Iterable):
     cur = con.execute(q, args)
@@ -13,42 +20,59 @@ def _fetch_all(con: sqlite3.Connection, q: str, args: Iterable):
     for row in cur.fetchall():
         yield dict(zip(cols, row))
 
+
 def fts_search(q: str, type_filter: str | None = None, limit: int = 25):
     with sqlite3.connect(DB_PATH) as con:
         con.row_factory = sqlite3.Row
         if type_filter:
-            rows = list(_fetch_all(con, """
+            rows = list(_fetch_all(
+                con,
+                """
                 SELECT type, ref_id, name, body
                 FROM search_index
                 WHERE search_index MATCH ?
                   AND type = ?
                 LIMIT ?
-            """, (q, type_filter, limit)))
+                """,
+                (q, type_filter, limit),
+            ))
         else:
-            rows = list(_fetch_all(con, """
+            rows = list(_fetch_all(
+                con,
+                """
                 SELECT type, ref_id, name, body
                 FROM search_index
                 WHERE search_index MATCH ?
                 LIMIT ?
-            """, (q, limit)))
+                """,
+                (q, limit),
+            ))
     return rows
 
+
 def fuzzy_search(query: str, type_filter: str | None = None, limit: int = 20):
-    # Pull candidate pool from FTS first (broad), then rank with fuzzy.
-    # If FTS yields nothing, fall back to scanning names.
+    # Haal eerst een pool op (met of zonder type-filter), rank daarna met fuzzy.
     with sqlite3.connect(DB_PATH) as con:
         con.row_factory = sqlite3.Row
         if type_filter:
-            pool = list(_fetch_all(con, """
+            pool = list(_fetch_all(
+                con,
+                """
                 SELECT type, ref_id, name, body
                 FROM search_index
                 WHERE type = ?
-            """, (type_filter,)))
+                """,
+                (type_filter,),
+            ))
         else:
-            pool = list(_fetch_all(con, """
+            pool = list(_fetch_all(
+                con,
+                """
                 SELECT type, ref_id, name, body
                 FROM search_index
-            """, ()))
+                """,
+                (),
+            ))
 
     choices = {f'{r["type"]}:{r["ref_id"]}': r["name"] for r in pool}
     if not choices:
@@ -67,39 +91,57 @@ def fuzzy_search(query: str, type_filter: str | None = None, limit: int = 20):
             break
     return out
 
+
 def get_vehicle(con: sqlite3.Connection, vid: int):
     v = _fetch_all(con, "SELECT * FROM vehicles WHERE id=?", (vid,))
     v = next(v, None)
     if not v:
         return None
 
-    buildings = list(_fetch_all(con, """
-        SELECT b.id, b.name FROM vehicle_possible_buildings pb
+    buildings = list(_fetch_all(
+        con,
+        """
+        SELECT b.id, b.name
+        FROM vehicle_possible_buildings pb
         JOIN buildings b ON b.id = pb.building_id
         WHERE pb.vehicle_id=? ORDER BY b.id
-    """, (vid,)))
+        """,
+        (vid,),
+    ))
 
-    schoolings = list(_fetch_all(con, """
+    schoolings = list(_fetch_all(
+        con,
+        """
         SELECT s.id, s.name, vrs.required_count
         FROM vehicle_required_schoolings vrs
         JOIN schoolings s ON s.id = vrs.schooling_id
         WHERE vrs.vehicle_id=? ORDER BY s.id
-    """, (vid,)))
+        """,
+        (vid,),
+    ))
 
-    equipment = list(_fetch_all(con, """
+    equipment = list(_fetch_all(
+        con,
+        """
         SELECT e.id, e.name
         FROM vehicle_equipment_compat vec
         JOIN equipment e ON e.id = vec.equipment_id
         WHERE vec.vehicle_id=? AND vec.compatible=1 ORDER BY e.id
-    """, (vid,)))
+        """,
+        (vid,),
+    ))
 
-    roles = list(_fetch_all(con, """
+    roles = list(_fetch_all(
+        con,
+        """
         SELECT r.role
         FROM vehicle_role_map vrm
         JOIN vehicle_roles r ON r.id = vrm.role_id
         WHERE vrm.vehicle_id=?
         ORDER BY r.role
-    """, (vid,)))
+        """,
+        (vid,),
+    ))
 
     v["possible_buildings"] = buildings
     v["required_schoolings"] = schoolings
