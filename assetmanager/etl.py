@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -274,6 +275,26 @@ def _node_bin() -> str | None:
     except Exception:
         return None
 
+def _node_env_with_global_node_path() -> dict:
+    """
+    Try to ensure Node can resolve global packages by setting NODE_PATH to `npm root -g` if available.
+    Falls back to existing environment unchanged.
+    """
+    env = os.environ.copy()
+    if env.get("NODE_PATH"):
+        return env
+    # Try to discover npm root -g
+    try:
+        res = subprocess.run(["npm", "root", "-g"], capture_output=True, text=True)
+        if res.returncode == 0:
+            g = res.stdout.strip()
+            if g:
+                # Some systems need the directory itself, not .../node_modules
+                env["NODE_PATH"] = g
+    except Exception:
+        pass
+    return env
+
 def ts_to_json(ts_path: Path, json_path: Path) -> None:
     """
     If the exported object is a pure literal, convert with Python.
@@ -296,9 +317,10 @@ def ts_to_json(ts_path: Path, json_path: Path) -> None:
         if not helper.exists():
             raise RuntimeError(
                 "ts_to_json.mjs helper not found next to etl.py. Create it and ensure it uses ts-node. "
-                "Example helper expects global 'ts-node' and 'typescript' packages."
+                "Example helper expects 'ts-node' and 'typescript' to be resolvable."
             )
-        res = subprocess.run([node, str(helper), str(ts_path)], capture_output=True, text=True)
+        res = subprocess.run([node, str(helper), str(ts_path)],
+                             capture_output=True, text=True, env=_node_env_with_global_node_path())
         if res.returncode != 0:
             snippet = (res.stderr or res.stdout or "").strip()
             if len(snippet) > 800:
@@ -317,7 +339,16 @@ def ts_to_json(ts_path: Path, json_path: Path) -> None:
 
 def load_and_validate(json_path: Path, schema_name: str) -> Dict[str, Any]:
     obj = json.loads(json_path.read_text(encoding="utf-8"))
-    schema = json.loads((SCHEMA_DIR / f"{schema_name}.json").read_text(encoding="utf-8"))
+    schema_file = (SCHEMA_DIR / f"{schema_name}.json")
+    try:
+        schema = json.loads(schema_file.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        print(f"[warn] Schema missing: {schema_file} — skipping validation.")
+        return obj
+    except Exception as e:
+        print(f"[warn] Failed to read schema {schema_file}: {e} — skipping validation.")
+        return obj
+
     try:
         validate(obj, schema)
     except ValidationError as e:
@@ -611,11 +642,11 @@ def rebuild_fts(con: sqlite3.Connection):
         )
     # schoolings
     for row in con.execute("SELECT id, name, department FROM schoolings"):
-    # buildings
         con.execute(
             "INSERT INTO search_index (type, ref_id, name, body) VALUES ('schooling', ?, ?, ?)",
             (str(row[0]), row[1], row[2] or ""),
         )
+    # buildings
     for row in con.execute("SELECT id, name, category FROM buildings"):
         con.execute(
             "INSERT INTO search_index (type, ref_id, name, body) VALUES ('building', ?, ?, ?)",
