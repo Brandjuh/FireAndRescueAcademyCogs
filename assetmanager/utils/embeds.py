@@ -245,90 +245,74 @@ def create_comparison_embed(vehicles: List[Dict[str, Any]]) -> discord.Embed:
     if len(vehicles) > 3:
         vehicles = vehicles[:3]
     
-    # Names
+    # Header with vehicle names
     names = " **vs** ".join([v['name'] for v in vehicles])
-    embed.description = f"**Comparing:** {names}\n\n"
+    embed.description = f"**Comparing:** {names}\n_ _"
     
-    # Create comparison table
-    comparison_lines = []
+    # Create individual columns for each vehicle
+    for i, vehicle in enumerate(vehicles):
+        column_lines = []
+        
+        # Name as header
+        column_lines.append(f"**{vehicle['name']}**")
+        column_lines.append("─────────")
+        
+        # Price
+        column_lines.append(f"💰 {format_price(vehicle.get('price'))}")
+        
+        # Personnel
+        min_p = vehicle.get('min_personnel', 'N/A')
+        max_p = vehicle.get('max_personnel', 'N/A')
+        column_lines.append(f"👥 {min_p}-{max_p}")
+        
+        # Water tank
+        tank = vehicle.get('water_tank')
+        column_lines.append(f"💧 {format_number(tank) + ' gal' if tank else 'None'}")
+        
+        # Foam tank
+        foam = vehicle.get('foam_tank')
+        column_lines.append(f"🧴 {format_number(foam) + ' gal' if foam else 'None'}")
+        
+        # Pump
+        pump = vehicle.get('pump_capacity')
+        column_lines.append(f"⚡ {format_number(pump) + ' GPM' if pump else 'None'}")
+        
+        # Add as inline field
+        embed.add_field(
+            name=f"Vehicle {i+1}",
+            value="\n".join(column_lines),
+            inline=True
+        )
     
-    # Price comparison
-    prices = [format_price(v.get('price')) for v in vehicles]
-    comparison_lines.append(f"💰 **Price**")
-    comparison_lines.append(" | ".join(prices))
-    comparison_lines.append("")
+    # Add separator if needed
+    if len(vehicles) == 2:
+        embed.add_field(name="_ _", value="_ _", inline=True)
     
-    # Personnel comparison
-    personnel = []
-    for v in vehicles:
-        min_p = v.get('min_personnel', 'N/A')
-        max_p = v.get('max_personnel', 'N/A')
-        personnel.append(f"{min_p}-{max_p}")
-    
-    comparison_lines.append(f"👥 **Personnel (Min-Max)**")
-    comparison_lines.append(" | ".join(personnel))
-    comparison_lines.append("")
-    
-    # Water tank comparison
-    water_tanks = []
-    for v in vehicles:
-        tank = v.get('water_tank')
-        water_tanks.append(format_number(tank) + " gal" if tank else "None")
-    
-    comparison_lines.append(f"💧 **Water Tank**")
-    comparison_lines.append(" | ".join(water_tanks))
-    comparison_lines.append("")
-    
-    # Foam tank comparison
-    foam_tanks = []
-    for v in vehicles:
-        foam = v.get('foam_tank')
-        foam_tanks.append(format_number(foam) + " gal" if foam else "None")
-    
-    comparison_lines.append(f"🧴 **Foam Tank**")
-    comparison_lines.append(" | ".join(foam_tanks))
-    comparison_lines.append("")
-    
-    # Pump capacity comparison
-    pump_caps = []
-    for v in vehicles:
-        pump = v.get('pump_capacity')
-        pump_caps.append(format_number(pump) + " GPM" if pump else "None")
-    
-    comparison_lines.append(f"⚡ **Pump Capacity**")
-    comparison_lines.append(" | ".join(pump_caps))
-    
-    embed.add_field(
-        name="📊 Comparison",
-        value="\n".join(comparison_lines),
-        inline=False
-    )
-    
-    # Add best value indicators
+    # Add best value indicators at the bottom
     best_value = []
     
     # Find cheapest
     prices_numeric = [v.get('price', float('inf')) for v in vehicles]
     if any(p < float('inf') for p in prices_numeric):
         cheapest_idx = prices_numeric.index(min(p for p in prices_numeric if p < float('inf')))
-        best_value.append(f"💰 **Cheapest:** {vehicles[cheapest_idx]['name']}")
+        best_value.append(f"💰 Cheapest: **{vehicles[cheapest_idx]['name']}**")
     
     # Find largest water tank
     water_numeric = [v.get('water_tank', 0) or 0 for v in vehicles]
     if any(w > 0 for w in water_numeric):
         largest_water_idx = water_numeric.index(max(water_numeric))
-        best_value.append(f"💧 **Largest Tank:** {vehicles[largest_water_idx]['name']}")
+        best_value.append(f"💧 Largest Tank: **{vehicles[largest_water_idx]['name']}**")
     
     # Find highest pump capacity
     pump_numeric = [v.get('pump_capacity', 0) or 0 for v in vehicles]
     if any(p > 0 for p in pump_numeric):
         highest_pump_idx = pump_numeric.index(max(pump_numeric))
-        best_value.append(f"⚡ **Highest Pump:** {vehicles[highest_pump_idx]['name']}")
+        best_value.append(f"⚡ Highest Pump: **{vehicles[highest_pump_idx]['name']}**")
     
     if best_value:
         embed.add_field(
             name="🏆 Best In Category",
-            value="\n".join(best_value),
+            value=" • ".join(best_value),
             inline=False
         )
     
