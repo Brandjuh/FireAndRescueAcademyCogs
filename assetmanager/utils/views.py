@@ -3,25 +3,103 @@ from typing import List, Dict, Any, Optional
 
 
 class CompareView(discord.ui.View):
-    """Interactive view for comparing vehicles."""
+    """Interactive view for comparing vehicles with category filtering."""
     
-    def __init__(self, vehicles: List[Dict[str, Any]], timeout: float = 180):
+    def __init__(self, vehicles: List[Dict[str, Any]], timeout: float = 300):
         super().__init__(timeout=timeout)
         self.vehicles = vehicles
-        self.selected_vehicles = []
+        self.selected_categories = [None, None, None]
+        self.selected_vehicles = [None, None, None]
         
-        # Create select menus
-        self.add_item(VehicleSelect(vehicles, placeholder="Select first vehicle", row=0))
-        self.add_item(VehicleSelect(vehicles, placeholder="Select second vehicle", row=1))
-        self.add_item(VehicleSelect(vehicles, placeholder="Select third vehicle (optional)", row=2))
+        # Categorize vehicles
+        self.categories = self.categorize_vehicles(vehicles)
         
-        # Add compare button
-        self.compare_button = CompareButton(row=3)
-        self.add_item(self.compare_button)
+        self.update_view()
+    
+    def categorize_vehicles(self, vehicles: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+        """Categorize vehicles by type based on name patterns."""
+        categories = {
+            "🚒 Fire & Rescue": [],
+            "🚑 EMS & Medical": [],
+            "👮 Police & Law": [],
+            "🚧 Utility & Support": [],
+            "🌊 Water & Marine": [],
+            "✈️ Airport & Aviation": [],
+            "🚛 Heavy & Specialized": [],
+            "📦 Other": []
+        }
         
-        # Add clear button
-        self.clear_button = ClearButton(row=3)
-        self.add_item(self.clear_button)
+        for vehicle in vehicles:
+            name = vehicle['name'].lower()
+            categorized = False
+            
+            # Fire & Rescue
+            if any(word in name for word in ['fire', 'engine', 'ladder', 'truck', 'hazmat', 'rescue', 'pumper', 'tanker', 'quint']):
+                categories["🚒 Fire & Rescue"].append(vehicle)
+                categorized = True
+            
+            # EMS & Medical
+            elif any(word in name for word in ['ambulance', 'ems', 'medical', 'paramedic', 'supervisor', 'fly-car', 'mass casualty']):
+                categories["🚑 EMS & Medical"].append(vehicle)
+                categorized = True
+            
+            # Police & Law
+            elif any(word in name for word in ['police', 'sheriff', 'k-9', 'k9', 'swat', 'patrol', 'motorcycle', 'supervisor', 'detective', 'warden']):
+                categories["👮 Police & Law"].append(vehicle)
+                categorized = True
+            
+            # Water & Marine
+            elif any(word in name for word in ['boat', 'rescue boat', 'large rescue', 'water', 'swift water', 'lifeguard']):
+                categories["🌊 Water & Marine"].append(vehicle)
+                categorized = True
+            
+            # Airport & Aviation
+            elif any(word in name for word in ['airport', 'arff', 'crash tender', 'aircraft']):
+                categories["✈️ Airport & Aviation"].append(vehicle)
+                categorized = True
+            
+            # Heavy & Specialized
+            elif any(word in name for word in ['heavy', 'dozer', 'tow', 'wrecker', 'rotator', 'crane', 'mobile command']):
+                categories["🚛 Heavy & Specialized"].append(vehicle)
+                categorized = True
+            
+            # Utility & Support
+            elif any(word in name for word in ['utility', 'pickup', 'battalion', 'chief', 'command', 'crew carrier', 'transport']):
+                categories["🚧 Utility & Support"].append(vehicle)
+                categorized = True
+            
+            # Other
+            if not categorized:
+                categories["📦 Other"].append(vehicle)
+        
+        # Remove empty categories and sort vehicles within categories
+        return {k: sorted(v, key=lambda x: x['name']) for k, v in categories.items() if v}
+    
+    def update_view(self):
+        """Update view with current selections."""
+        self.clear_items()
+        
+        # Row 0: First vehicle
+        self.add_item(CategorySelect(0, self.categories, self.selected_categories[0], row=0))
+        if self.selected_categories[0]:
+            vehicles = self.categories.get(self.selected_categories[0], [])
+            self.add_item(VehicleSelect(0, vehicles, self.selected_vehicles[0], row=0))
+        
+        # Row 1: Second vehicle
+        self.add_item(CategorySelect(1, self.categories, self.selected_categories[1], row=1))
+        if self.selected_categories[1]:
+            vehicles = self.categories.get(self.selected_categories[1], [])
+            self.add_item(VehicleSelect(1, vehicles, self.selected_vehicles[1], row=1))
+        
+        # Row 2: Third vehicle (optional)
+        self.add_item(CategorySelect(2, self.categories, self.selected_categories[2], row=2, optional=True))
+        if self.selected_categories[2] and self.selected_categories[2] != "none":
+            vehicles = self.categories.get(self.selected_categories[2], [])
+            self.add_item(VehicleSelect(2, vehicles, self.selected_vehicles[2], row=2))
+        
+        # Row 3: Action buttons
+        self.add_item(CompareButton(row=3))
+        self.add_item(ClearButton(row=3))
     
     async def on_timeout(self):
         """Disable all items when view times out."""
@@ -29,60 +107,107 @@ class CompareView(discord.ui.View):
             item.disabled = True
 
 
-class VehicleSelect(discord.ui.Select):
-    """Select menu for choosing a vehicle."""
+class CategorySelect(discord.ui.Select):
+    """Select menu for choosing a vehicle category."""
     
-    def __init__(self, vehicles: List[Dict[str, Any]], placeholder: str, row: int):
-        # Discord select menus can have max 25 options
-        # Sort vehicles by name
-        sorted_vehicles = sorted(vehicles, key=lambda v: v['name'])
-        
+    def __init__(self, selector_index: int, categories: Dict[str, List], current_selection: Optional[str], row: int, optional: bool = False):
         options = []
         
-        # Add "None" option for optional third vehicle (at the top)
-        if "optional" in placeholder.lower():
+        # Add skip option for third selector
+        if optional:
             options.append(discord.SelectOption(
-                label="Skip (compare only 2 vehicles)",
+                label="Skip third vehicle",
                 value="none",
-                description="Don't select a third vehicle",
+                description="Compare only 2 vehicles",
                 emoji="❌"
             ))
         
-        # Add vehicle options (up to 24 if we have "none", or 25 if we don't)
-        max_vehicles = 24 if options else 25
-        for vehicle in sorted_vehicles[:max_vehicles]:
-            price_desc = f"${vehicle.get('price', 0):,}" if vehicle.get('price') else "Price unknown"
-            options.append(
-                discord.SelectOption(
-                    label=vehicle['name'][:100],  # Discord limit
-                    value=str(vehicle['game_id']),
-                    description=price_desc[:100]  # Discord limit
-                )
-            )
+        # Add category options
+        for category_name, vehicles in categories.items():
+            emoji = category_name.split()[0]  # Get emoji from category name
+            label = category_name.split(maxsplit=1)[1] if len(category_name.split()) > 1 else category_name
+            
+            is_default = current_selection == category_name
+            options.append(discord.SelectOption(
+                label=label[:100],
+                value=category_name,
+                description=f"{len(vehicles)} vehicles",
+                emoji=emoji,
+                default=is_default
+            ))
+        
+        placeholder = f"{'Optional: ' if optional else ''}Step 1: Choose category"
+        if current_selection and current_selection != "none":
+            placeholder = f"Category: {current_selection.split(maxsplit=1)[1][:50]}"
+        elif current_selection == "none":
+            placeholder = "Skipped"
         
         super().__init__(
             placeholder=placeholder,
             options=options,
-            row=row
+            row=row,
+            custom_id=f"category_{selector_index}"
         )
+        self.selector_index = selector_index
+    
+    async def callback(self, interaction: discord.Interaction):
+        """Handle category selection."""
+        view: CompareView = self.view
+        
+        # Update selected category
+        view.selected_categories[self.selector_index] = self.values[0]
+        view.selected_vehicles[self.selector_index] = None  # Reset vehicle selection
+        
+        # Update view
+        view.update_view()
+        await interaction.response.edit_message(view=view)
+
+
+class VehicleSelect(discord.ui.Select):
+    """Select menu for choosing a specific vehicle."""
+    
+    def __init__(self, selector_index: int, vehicles: List[Dict[str, Any]], current_selection: Optional[Dict], row: int):
+        options = []
+        
+        for vehicle in vehicles[:25]:  # Max 25 options
+            price = vehicle.get('price', 0)
+            price_desc = f"${price:,}" if price else "Free"
+            
+            is_default = current_selection and current_selection['game_id'] == vehicle['game_id']
+            
+            options.append(discord.SelectOption(
+                label=vehicle['name'][:100],
+                value=str(vehicle['game_id']),
+                description=price_desc[:100],
+                default=is_default
+            ))
+        
+        placeholder = "Step 2: Choose vehicle"
+        if current_selection:
+            placeholder = f"Selected: {current_selection['name'][:50]}"
+        
+        super().__init__(
+            placeholder=placeholder,
+            options=options,
+            row=row,
+            custom_id=f"vehicle_{selector_index}"
+        )
+        self.selector_index = selector_index
+        self.vehicles = vehicles
     
     async def callback(self, interaction: discord.Interaction):
         """Handle vehicle selection."""
         view: CompareView = self.view
         
-        # Store selection
-        selected_id = self.values[0]
+        # Find selected vehicle
+        selected_id = int(self.values[0])
+        for vehicle in self.vehicles:
+            if vehicle['game_id'] == selected_id:
+                view.selected_vehicles[self.selector_index] = vehicle
+                break
         
-        # Update placeholder to show selection
-        if selected_id == "none":
-            self.placeholder = "Third vehicle: None"
-        else:
-            # Find vehicle name
-            for vehicle in view.vehicles:
-                if str(vehicle['game_id']) == selected_id:
-                    self.placeholder = f"Selected: {vehicle['name'][:80]}"
-                    break
-        
+        # Update view
+        view.update_view()
         await interaction.response.edit_message(view=view)
 
 
@@ -102,32 +227,20 @@ class CompareButton(discord.ui.Button):
         view: CompareView = self.view
         
         # Get all selected vehicles
-        selected_ids = []
-        for item in view.children:
-            if isinstance(item, VehicleSelect) and item.values:
-                if item.values[0] != "none":
-                    selected_ids.append(item.values[0])
+        selected = [v for v in view.selected_vehicles if v is not None]
         
-        if len(selected_ids) < 2:
+        if len(selected) < 2:
             await interaction.response.send_message(
                 "❌ Please select at least 2 vehicles to compare.",
                 ephemeral=True
             )
             return
         
-        # Get vehicle objects
-        selected_vehicles = []
-        for vid in selected_ids:
-            for vehicle in view.vehicles:
-                if str(vehicle['game_id']) == vid:
-                    selected_vehicles.append(vehicle)
-                    break
-        
         # Import here to avoid circular import
         from .embeds import create_comparison_embed
         
         # Create comparison embed
-        embed = create_comparison_embed(selected_vehicles)
+        embed = create_comparison_embed(selected)
         
         # Send comparison
         await interaction.response.send_message(embed=embed)
@@ -144,7 +257,7 @@ class ClearButton(discord.ui.Button):
     
     def __init__(self, row: int):
         super().__init__(
-            label="Clear",
+            label="Clear All",
             style=discord.ButtonStyle.secondary,
             emoji="🔄",
             row=row
@@ -154,14 +267,10 @@ class ClearButton(discord.ui.Button):
         """Clear all selections."""
         view: CompareView = self.view
         
-        # Reset all select menus
-        for i, item in enumerate(view.children):
-            if isinstance(item, VehicleSelect):
-                if i == 0:
-                    item.placeholder = "Select first vehicle"
-                elif i == 1:
-                    item.placeholder = "Select second vehicle"
-                elif i == 2:
-                    item.placeholder = "Select third vehicle (optional)"
+        # Reset all selections
+        view.selected_categories = [None, None, None]
+        view.selected_vehicles = [None, None, None]
         
+        # Update view
+        view.update_view()
         await interaction.response.edit_message(view=view)
