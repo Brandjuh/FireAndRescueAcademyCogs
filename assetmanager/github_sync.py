@@ -78,51 +78,60 @@ class GitHubSync:
             obj_str = re.sub(r'\.\.\.\s*Array\s*\(\s*\d+\s*\)\s*\.fill\s*\([^)]+\)', '[]', obj_str)
             obj_str = re.sub(r'\.\.\.\s*new\s+Array\s*\(\s*\d+\s*\)\s*\.fill\s*\([^)]+\)', '[]', obj_str)
             
-            # CRITICAL: Remove JavaScript functions and code
-            # Strategy: Remove any line that contains JavaScript operators or keywords
+            # CRITICAL: Remove properties ending with "Function" and their entire values
+            # Use a more sophisticated approach that tracks nesting
+            def remove_function_properties(text):
+                lines = text.split('\n')
+                result = []
+                skip_mode = False
+                nesting_level = 0
+                
+                for i, line in enumerate(lines):
+                    # Check if this line defines a property ending with "Function"
+                    if re.search(r'"\w*[Ff]unction"\s*:', line):
+                        skip_mode = True
+                        nesting_level = 0
+                        continue
+                    
+                    if skip_mode:
+                        # Count nesting depth
+                        nesting_level += line.count('(') + line.count('{') + line.count('[')
+                        nesting_level -= line.count(')') + line.count('}') + line.count(']')
+                        
+                        # If we're back to level 0 or negative and hit a comma, we're done
+                        if nesting_level <= 0 and ',' in line:
+                            skip_mode = False
+                            continue
+                        
+                        # Still inside the function value
+                        continue
+                    
+                    result.append(line)
+                
+                return '\n'.join(result)
+            
+            obj_str = remove_function_properties(obj_str)
+            
+            # Also remove any remaining lines with JavaScript operators (but keep data)
             lines = obj_str.split('\n')
-            filtered_lines = []
-            
+            cleaned = []
             for line in lines:
-                stripped = line.strip()
-                
-                # Skip empty lines
-                if not stripped:
-                    filtered_lines.append(line)
+                # Keep lines that look like data (have colons for properties)
+                if ':' in line:
+                    cleaned.append(line)
+                # Keep structural lines
+                elif line.strip() in ['{', '}', '[', ']', '},', '],', ',']:
+                    cleaned.append(line)
+                # Keep empty lines
+                elif not line.strip():
+                    cleaned.append(line)
+                # Skip lines that are clearly JavaScript code
+                elif any(op in line for op in ['=>', '??', 'typeof', 'Math.', 'Object.']):
                     continue
-                
-                # Skip lines with JavaScript operators/keywords
-                js_patterns = [
-                    '=>',           # Arrow functions
-                    '??',           # Nullish coalescing
-                    'typeof',       # Type checking
-                    'Math.',        # Math operations
-                    'Object.',      # Object operations
-                    'buildingsByType',  # Variable references
-                    'boughtExtensions', # Variable references
-                    '.length',      # Property access
-                    '.floor',       # Method calls
-                    '.keys',        # Method calls
-                ]
-                
-                # Check if line contains any JavaScript patterns
-                has_js = any(pattern in line for pattern in js_patterns)
-                
-                # Also skip standalone closing parens/braces with commas
-                if stripped in [')', '),', '},', '],']:
-                    continue
-                
-                # Skip lines that are just operations (no colon means not a property)
-                if has_js and ':' not in line:
-                    continue
-                
-                # Skip property definitions that end with Function
-                if re.search(r'"\w*Function"\s*:', line):
-                    continue
-                
-                filtered_lines.append(line)
+                else:
+                    cleaned.append(line)
             
-            obj_str = '\n'.join(filtered_lines)
+            obj_str = '\n'.join(cleaned)
             
             # Handle apostrophes BEFORE converting quotes
             obj_str = re.sub(r"([a-zA-Z])'([a-zA-Z])", r'\1__APOS__\2', obj_str)
