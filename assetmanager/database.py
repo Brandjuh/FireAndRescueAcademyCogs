@@ -66,6 +66,10 @@ class AssetDatabase:
                 game_id INTEGER UNIQUE NOT NULL,
                 name TEXT NOT NULL,
                 size INTEGER,
+                credits INTEGER,
+                coins INTEGER,
+                min_staff INTEGER,
+                max_staff INTEGER,
                 last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -78,6 +82,8 @@ class AssetDatabase:
                 name TEXT NOT NULL,
                 duration TEXT,
                 cost INTEGER,
+                building_type TEXT,
+                key TEXT,
                 last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -272,12 +278,16 @@ class AssetDatabase:
         
         cursor.execute("""
             INSERT OR REPLACE INTO equipment 
-            (game_id, name, size, last_updated)
-            VALUES (?, ?, ?, ?)
+            (game_id, name, size, credits, coins, min_staff, max_staff, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             equipment_data.get('game_id'),
             equipment_data.get('name'),
             equipment_data.get('size'),
+            equipment_data.get('credits'),
+            equipment_data.get('coins'),
+            equipment_data.get('min_staff'),
+            equipment_data.get('max_staff'),
             datetime.utcnow()
         ))
         
@@ -298,13 +308,15 @@ class AssetDatabase:
         
         cursor.execute("""
             INSERT OR REPLACE INTO educations 
-            (game_id, name, duration, cost, last_updated)
-            VALUES (?, ?, ?, ?, ?)
+            (game_id, name, duration, cost, building_type, key, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
             education_data.get('game_id'),
             education_data.get('name'),
             education_data.get('duration'),
             education_data.get('cost'),
+            education_data.get('building_type'),
+            education_data.get('key'),
             datetime.utcnow()
         ))
         
