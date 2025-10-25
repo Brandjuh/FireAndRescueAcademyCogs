@@ -59,49 +59,52 @@ class GitHubSync:
             content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
             content = re.sub(r'import\s+.*?;', '', content, flags=re.DOTALL)
             
-            # Find the export default block
-            match = re.search(r'export\s+default\s+(\{.+\})', content, re.DOTALL)
-            if not match:
-                log.error("Could not find export default pattern")
-                return None
-            
-            obj_str = match.group(1)
+            # SPECIAL CASE: Equipment uses registerEquipment wrapper
+            equipment_match = re.search(r'registerEquipment\s*\(\s*(\{.+\})\s*\)', content, re.DOTALL)
+            if equipment_match:
+                obj_str = equipment_match.group(1)
+            else:
+                # Find the export default block
+                match = re.search(r'export\s+default\s+(\{.+\})', content, re.DOTALL)
+                if not match:
+                    log.error("Could not find export default pattern")
+                    return None
+                obj_str = match.group(1)
             
             # Remove numeric separators
             obj_str = re.sub(r'(\d)_(\d)', r'\1\2', obj_str)
             
-            # CRITICAL: Handle apostrophes BEFORE converting quotes
-            # Replace ' inside words with a placeholder
+            # CRITICAL: Remove JavaScript spread syntax ...Array(X).fill(Y)
+            # Replace with a placeholder array to keep valid JSON structure
+            obj_str = re.sub(r'\.\.\.\s*Array\s*\(\s*\d+\s*\)\s*\.fill\s*\([^)]+\)', '[]', obj_str)
+            obj_str = re.sub(r'\.\.\.\s*new\s+Array\s*\(\s*\d+\s*\)\s*\.fill\s*\([^)]+\)', '[]', obj_str)
+            
+            # Handle apostrophes BEFORE converting quotes
             obj_str = re.sub(r"([a-zA-Z])'([a-zA-Z])", r'\1__APOS__\2', obj_str)
             
             # Convert single quotes to double quotes
             obj_str = obj_str.replace("'", '"')
             
-            # Restore apostrophes inside strings (after we've converted quotes)
+            # Restore apostrophes
             obj_str = obj_str.replace('__APOS__', "'")
             
-            # Fix multi-line strings by joining lines that are part of a string value
-            # Pattern: "key": "value that continues
-            #                 on next line"
+            # Fix multi-line strings
             lines = obj_str.split('\n')
             result_lines = []
             in_string = False
             current_line = ""
             
             for line in lines:
-                # Count unescaped quotes in this line
                 quote_count = line.count('"') - line.count('\\"')
                 
                 if in_string:
-                    # We're continuing a multi-line string
                     current_line += " " + line.strip()
-                    if quote_count % 2 == 1:  # Odd number means string ends
+                    if quote_count % 2 == 1:
                         in_string = False
                         result_lines.append(current_line)
                         current_line = ""
                 else:
-                    # Check if this line starts a string that doesn't end
-                    if quote_count % 2 == 1:  # Odd number means string starts but doesn't end
+                    if quote_count % 2 == 1:
                         in_string = True
                         current_line = line
                     else:
@@ -109,7 +112,7 @@ class GitHubSync:
             
             obj_str = '\n'.join(result_lines)
             
-            # Quote numeric keys at start of lines
+            # Quote numeric keys
             obj_str = re.sub(r'([\n\r]\s*)(\d+)(\s*):', r'\1"\2"\3:', obj_str)
             
             # Quote alphabetic keys
@@ -117,24 +120,9 @@ class GitHubSync:
             result_lines = []
             
             for line in lines:
-                # Match at start of line
-                new_line = re.sub(
-                    r'^(\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*):',
-                    r'\1"\2"\3:',
-                    line
-                )
-                # After comma
-                new_line = re.sub(
-                    r'(,\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*):',
-                    r'\1"\2"\3:',
-                    new_line
-                )
-                # After opening brace
-                new_line = re.sub(
-                    r'(\{\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*):',
-                    r'\1"\2"\3:',
-                    new_line
-                )
+                new_line = re.sub(r'^(\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*):', r'\1"\2"\3:', line)
+                new_line = re.sub(r'(,\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*):', r'\1"\2"\3:', new_line)
+                new_line = re.sub(r'(\{\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*):', r'\1"\2"\3:', new_line)
                 result_lines.append(new_line)
             
             obj_str = '\n'.join(result_lines)
@@ -145,12 +133,13 @@ class GitHubSync:
             # Parse to JSON
             parsed = json.loads(obj_str)
             
-            # Convert string keys to int keys
+            # Convert numeric string keys to int keys (for vehicles/buildings)
             result = {}
             for key, value in parsed.items():
                 try:
                     result[int(key)] = value
                 except ValueError:
+                    # Keep string keys as-is (for equipment/educations)
                     result[key] = value
             
             return result
@@ -197,8 +186,11 @@ class GitHubSync:
         
         parsed = self.parse_typescript_export(content)
         if parsed:
-            log.info(f"Parsed {len(parsed)} equipment items")
-        return parsed
+            # Equipment comes with string keys, flatten to numbered dict
+            flattened = self.flatten_equipment(parsed)
+            log.info(f"Parsed {len(flattened)} equipment items")
+            return flattened
+        return None
     
     async def fetch_educations(self) -> Optional[Dict[int, Dict[str, Any]]]:
         """Fetch and parse educations data."""
@@ -208,8 +200,12 @@ class GitHubSync:
         
         parsed = self.parse_typescript_export(content)
         if parsed:
-            log.info(f"Parsed {len(parsed)} educations")
-        return parsed
+            # Educations come in as { 'Fire Station': [...], 'Police Station': [...] }
+            # Flatten to numbered dict
+            flattened = self.flatten_educations(parsed)
+            log.info(f"Parsed {len(flattened)} educations")
+            return flattened
+        return None
     
     async def fetch_all(self) -> Dict[str, Optional[Dict[int, Dict[str, Any]]]]:
         """Fetch all data sources."""
@@ -259,20 +255,67 @@ class GitHubSync:
     
     def normalize_equipment_data(self, game_id: int, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize equipment data from GitHub format to database format."""
+        # Equipment uses string IDs, so game_id is actually the index we assign
         return {
             'game_id': game_id,
-            'name': raw_data.get('caption', f'Equipment {game_id}'),
+            'name': raw_data.get('caption', raw_data.get('id', f'Equipment {game_id}')),
             'size': raw_data.get('size')
         }
     
+    def flatten_equipment(self, equipment_data: Dict[str, Dict]) -> Dict[int, Dict[str, Any]]:
+        """
+        Flatten equipment from string-keyed dict to numbered dict.
+        Input: { 'breathing_protection': {...}, 'flood_equipment': {...} }
+        Output: { 0: {...}, 1: {...} }
+        """
+        flattened = {}
+        for index, (equip_id, equip_data) in enumerate(equipment_data.items()):
+            if isinstance(equip_data, dict):
+                # Preserve the original ID
+                equip_data['equipment_id'] = equip_id
+                flattened[index] = equip_data
+        
+        return flattened
+    
     def normalize_education_data(self, game_id: int, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize education data from GitHub format to database format."""
-        return {
-            'game_id': game_id,
-            'name': raw_data.get('caption', f'Education {game_id}'),
-            'duration': raw_data.get('duration'),
-            'cost': raw_data.get('cost')
-        }
+        # Handle both dict and list formats
+        if isinstance(raw_data, list):
+            # It's an array item
+            return {
+                'game_id': game_id,
+                'name': raw_data[0].get('caption', f'Education {game_id}') if raw_data else f'Education {game_id}',
+                'duration': raw_data[0].get('duration') if raw_data else None,
+                'cost': raw_data[0].get('cost') if raw_data else None
+            }
+        else:
+            # It's a dict
+            return {
+                'game_id': game_id,
+                'name': raw_data.get('caption', f'Education {game_id}'),
+                'duration': raw_data.get('duration'),
+                'cost': raw_data.get('cost')
+            }
+    
+    def flatten_educations(self, educations_data: Dict[str, List]) -> Dict[int, Dict[str, Any]]:
+        """
+        Flatten educations from building-based structure to numbered dict.
+        Input: { 'Fire Station': [{...}, {...}], 'Police Station': [{...}] }
+        Output: { 0: {...}, 1: {...}, 2: {...} }
+        """
+        flattened = {}
+        index = 0
+        
+        for building_type, education_list in educations_data.items():
+            if isinstance(education_list, list):
+                for education in education_list:
+                    if isinstance(education, dict):
+                        # Add building type to education data
+                        education['building_type'] = building_type
+                        flattened[index] = education
+                        index += 1
+        
+        return flattened
     
     def detect_changes(self, old_data: List[Dict], new_data: Dict[int, Dict]) -> Dict[str, List]:
         """Detect changes between old and new data."""
