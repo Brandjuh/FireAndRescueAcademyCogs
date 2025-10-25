@@ -4,9 +4,10 @@ import asyncio
 from typing import Any, Dict, List, Optional
 
 import discord
-from redbot.core import commands, checks
+from redbot.core import commands, checks, Config
 from redbot.core.utils.chat_formatting import box
 
+# --- local imports -----------------------------------------------------------
 try:
     from .search import (
         fuzzy_search,
@@ -15,6 +16,7 @@ try:
         get_schooling,
         get_building,
     )
+    from . import etl
 except Exception:  # pragma: no cover
     from search import (  # type: ignore
         fuzzy_search,
@@ -23,6 +25,9 @@ except Exception:  # pragma: no cover
         get_schooling,
         get_building,
     )
+    import etl  # type: ignore
+
+# ---------- tiny helpers -----------------------------------------------------
 
 def _clip(text: Optional[str], limit: int) -> str:
     if not text:
@@ -41,7 +46,6 @@ def _crew_text(v: Dict[str, Any]) -> str:
 MONEY_EMOJI = "💰"
 COIN_EMOJI = "🪙"
 
-# Fallback agency colors if vehicle has no color in DB
 AGENCY_COLORS = {
     "Fire": discord.Color.red(),
     "Police": discord.Color.blue(),
@@ -52,24 +56,62 @@ AGENCY_COLORS = {
     "Other": discord.Color.blurple(),
 }
 
-# very light heuristic; identical to earlier version
 def infer_agency(name: str, roles: List[str], building_names: List[str], building_categories: List[str]) -> str:
     t = (name or "").lower()
-    if any(k in t for k in ("engine", "ladder", "foam", "tanker", "hazmat", "fire")):
+    if any(k in t for k in ("engine", "ladder", "foam", "tanker", "hazmat", "fire", "quint", "aerial")):
         return "Fire"
     if any(k in t for k in ("ambulance", "ems", "paramedic", "hems", "medical")):
         return "EMS"
-    if any(k in t for k in ("police", "sheriff", "k9", "riot", "swat", "interceptor")):
+    if any(k in t for k in ("police", "sheriff", "k9", "riot", "swat", "interceptor", "patrol")):
         return "Police"
     if "rescue" in t:
         return "Rescue"
     return "Other"
 
+# ---------- Cog with scheduler ----------------------------------------------
+
 class AssetManager(commands.Cog):
-    """Asset database."""
+    """Asset database with on-demand and scheduled ETL."""
+
+    # persistent config: global, not per-guild
+    _CONF_ID = 0xA55E7  # just a number, calm down
 
     def __init__(self, bot):
         self.bot = bot
+        self.config = Config.get_conf(self, identifier=self._CONF_ID, force_registration=True)
+        self.config.register_global(refresh_minutes=0)  # 0 = off
+        self._task: Optional[asyncio.Task] = None
+        # start background scheduler
+        self._task = self.bot.loop.create_task(self._scheduler())
+
+    def cog_unload(self):
+        # stop scheduler cleanly
+        t = self._task
+        self._task = None
+        if t and not t.done():
+            t.cancel()
+
+    async def _scheduler(self):
+        # periodic ETL based on refresh_minutes
+        try:
+            while True:
+                mins = await self.config.refresh_minutes()
+                if not mins or mins <= 0:
+                    # sleep a bit, check again later
+                    await asyncio.sleep(1800)
+                    continue
+                # wait
+                await asyncio.sleep(float(mins) * 60.0)
+                # run ETL in thread to avoid blocking
+                try:
+                    await asyncio.to_thread(etl.run_etl)
+                except Exception as e:
+                    # no spam in chat; just log to console
+                    print(f"[assetmanager] Periodic ETL failed: {e}")
+        except asyncio.CancelledError:
+            pass
+
+    # -------------------- Commands --------------------
 
     @commands.group(name="assets", invoke_without_command=True)
     async def assets_group(self, ctx: commands.Context):
@@ -81,6 +123,8 @@ class AssetManager(commands.Cog):
             f"{p}assets equipment <id>      · Equipment details",
             f"{p}assets schooling <id>      · Schooling details",
             f"{p}assets building <id>       · Building details",
+            f"{p}assets reload              · Run ETL now (owner only)",
+            f"{p}assets interval <min|off>  · Schedule periodic ETL (owner only)",
             f"{p}assets status              · Quick ETL/index sanity check",
         ]
         await ctx.send(box("\n".join(lines), "ini"))
@@ -125,7 +169,7 @@ class AssetManager(commands.Cog):
 
         name = v.get("name") or f"Vehicle {vehicle_id}"
 
-        # color from data if present, else agency color
+        # color from DB (hex) or fallback per agency
         hex_color = str(v.get("color") or "").lstrip("#")
         color = None
         try:
@@ -134,7 +178,6 @@ class AssetManager(commands.Cog):
         except Exception:
             color = None
 
-        # agency as fallback color chooser
         roles = list(v.get("roles") or [])
         buildings = list(v.get("possible_buildings") or [])
         b_names = [b.get("name", "") for b in buildings if isinstance(b, dict)]
@@ -160,7 +203,7 @@ class AssetManager(commands.Cog):
         # Agency
         em.add_field(name="Agency", value=agency, inline=True)
 
-        # Capabilities: water/foam/pump + equipment capacity
+        # Capabilities from ETL (water/foam/pump/pump_type/equipment_capacity)
         caps: List[str] = []
         if v.get("water_tank"):
             caps.append(f"Water {v['water_tank']}")
@@ -181,13 +224,13 @@ class AssetManager(commands.Cog):
         if v.get("specials"):
             em.add_field(name="Specials", value=_clip(str(v["specials"]), 1024), inline=False)
 
-        # Buildings / schoolings / equipment compat if present
         if buildings:
             em.add_field(
                 name="Possible buildings",
                 value=_clip(", ".join(sorted(set(b_names))) or "—", 1024),
                 inline=False,
             )
+
         schoolings = list(v.get("required_schoolings") or [])
         if schoolings:
             em.add_field(
@@ -195,6 +238,7 @@ class AssetManager(commands.Cog):
                 value=_clip(", ".join(f"{s.get('name','?')} ×{s.get('required_count',1)}" for s in schoolings), 1024),
                 inline=False,
             )
+
         equipment = list(v.get("equipment_compat") or [])
         if equipment:
             em.add_field(
@@ -247,7 +291,7 @@ class AssetManager(commands.Cog):
             await ctx.send(f"Building {building_id} not found.")
             return
         em = discord.Embed(
-            title=_clip(b.get("name","Building"), 256),
+            title=_clip(b.get('name','Building'), 256),
             color=discord.Color.dark_purple(),
         )
         em.set_footer(text=f"#{building_id}")
@@ -257,12 +301,57 @@ class AssetManager(commands.Cog):
             em.add_field(name="Notes", value=_clip(str(b["notes"]), 1024), inline=False)
         await ctx.send(embed=em)
 
+    # ---------------- owner tools: ETL now & schedule interval ----------------
+
+    @assets_group.command(name="reload")
+    @checks.is_owner()
+    async def assets_reload(self, ctx: commands.Context):
+        """Run ETL now and rebuild the index."""
+        await ctx.send("Kicking ETL... try not to sneeze on the database.")
+        try:
+            await asyncio.to_thread(etl.run_etl)
+        except Exception as e:
+            await ctx.send(box(f"ETL failed: {e}", "ini"))
+            return
+        await ctx.send("ETL done. Index rebuilt. You may proceed with your clicking.")
+
+    @assets_group.command(name="interval")
+    @checks.is_owner()
+    async def assets_interval(self, ctx: commands.Context, setting: str):
+        """
+        Set periodic ETL interval.
+        Examples:
+          assets interval 720   -> run every 720 minutes (12h)
+          assets interval off   -> disable scheduler
+        """
+        s = setting.strip().lower()
+        if s in ("off", "0", "disable", "disabled", "none"):
+            await self.config.refresh_minutes.set(0)
+            await ctx.send("Periodic ETL disabled.")
+            return
+        try:
+            minutes = int(s)
+        except Exception:
+            await ctx.send("Give me a number of minutes or 'off'.")
+            return
+        if minutes < 5:
+            await ctx.send("Be reasonable. Minimum is 5 minutes.")
+            return
+        await self.config.refresh_minutes.set(minutes)
+        await ctx.send(f"Periodic ETL set to every {minutes} minutes.")
+
     @assets_group.command(name="status")
     @checks.is_owner()
     async def assets_status(self, ctx: commands.Context):
         try:
             probe = await asyncio.to_thread(fuzzy_search, "engine", None, 5)
             ok = bool(probe)
-            await ctx.send(box(f"Search probe: {'OK' if ok else 'EMPTY'}", "ini"))
+            mins = await self.config.refresh_minutes()
+            lines = [
+                f"Search probe: {'OK' if ok else 'EMPTY'}",
+                f"Scheduler: {'OFF' if not mins else f'every {mins} minutes'}",
+                "Try: assets reload   to force ETL now.",
+            ]
+            await ctx.send(box("\n".join(lines), "ini"))
         except Exception as e:
             await ctx.send(box(f"Status failed: {e}", "ini"))
