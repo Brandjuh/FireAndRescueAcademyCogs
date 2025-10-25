@@ -510,65 +510,63 @@ class AssetManager(commands.Cog):
         msg = await ctx.send("🔍 Testing GitHub connection...")
         
         try:
-            # Test 1: Fetch vehicles
-            await msg.edit(content="🔍 Step 1/5: Fetching vehicles...")
+            # Test 1: Raw fetch
+            await msg.edit(content="🔍 Step 1/5: Testing raw GitHub fetch...")
+            url = "https://raw.githubusercontent.com/LSS-Manager/LSSM-V.4/dev/src/i18n/en_US/vehicles.ts"
+            
+            raw_content = await self.github_sync.fetch_file(url)
+            
+            if raw_content:
+                await ctx.send(f"✅ Raw fetch succeeded! Content length: {len(raw_content)} characters")
+                # Show first 500 chars
+                await ctx.send(f"First 500 characters:\n```typescript\n{raw_content[:500]}\n```")
+            else:
+                await ctx.send("❌ Raw fetch failed - could not download file from GitHub")
+                await ctx.send(f"URL attempted: {url}")
+                return
+            
+            # Test 2: Parse the content
+            await msg.edit(content="🔍 Step 2/5: Testing TypeScript parsing...")
+            parsed = self.github_sync.parse_typescript_export(raw_content)
+            
+            if parsed:
+                await ctx.send(f"✅ Parse succeeded! Found {len(parsed)} vehicles")
+                # Show first vehicle
+                first_key = list(parsed.keys())[0]
+                first_vehicle = parsed[first_key]
+                sample = json.dumps(first_vehicle, indent=2)[:1000]
+                await ctx.send(f"First vehicle (ID {first_key}):\n```json\n{sample}\n```")
+            else:
+                await ctx.send("❌ Parse failed - could not parse TypeScript to JSON")
+                await ctx.send("Showing last 500 chars of content:")
+                await ctx.send(f"```typescript\n{raw_content[-500:]}\n```")
+                return
+            
+            # Test 3: Fetch vehicles using the method
+            await msg.edit(content="🔍 Step 3/5: Testing fetch_vehicles method...")
             vehicles = await self.github_sync.fetch_vehicles()
             
             if vehicles:
-                await ctx.send(f"✅ Vehicles: Fetched {len(vehicles)} items")
-                # Show first vehicle as sample
-                first_key = list(vehicles.keys())[0]
-                first_vehicle = vehicles[first_key]
-                sample = json.dumps(first_vehicle, indent=2)[:1500]
-                await ctx.send(f"Sample vehicle data:\n```json\n{sample}\n```")
+                await ctx.send(f"✅ fetch_vehicles succeeded! Got {len(vehicles)} vehicles")
             else:
-                await ctx.send("❌ Vehicles: Failed to fetch or parse")
-                await ctx.send("Check console logs for more details.")
+                await ctx.send("❌ fetch_vehicles failed")
                 return
             
-            # Test 2: Fetch buildings
-            await msg.edit(content="🔍 Step 2/5: Fetching buildings...")
-            buildings = await self.github_sync.fetch_buildings()
+            # Test 4: Normalize vehicle data
+            await msg.edit(content="🔍 Step 4/5: Testing data normalization...")
+            test_vehicle = self.github_sync.normalize_vehicle_data(
+                list(vehicles.keys())[0], 
+                list(vehicles.values())[0]
+            )
+            await ctx.send(f"✅ Normalization succeeded")
+            await ctx.send(f"Normalized data:\n```json\n{json.dumps(test_vehicle, indent=2)[:1000]}\n```")
             
-            if buildings:
-                await ctx.send(f"✅ Buildings: Fetched {len(buildings)} items")
-            else:
-                await ctx.send("❌ Buildings: Failed to fetch or parse")
-                return
-            
-            # Test 3: Fetch equipment
-            await msg.edit(content="🔍 Step 3/5: Fetching equipment...")
-            equipment = await self.github_sync.fetch_equipment()
-            
-            if equipment:
-                await ctx.send(f"✅ Equipment: Fetched {len(equipment)} items")
-            else:
-                await ctx.send("❌ Equipment: Failed to fetch or parse")
-                return
-            
-            # Test 4: Fetch educations
-            await msg.edit(content="🔍 Step 4/5: Fetching educations...")
-            educations = await self.github_sync.fetch_educations()
-            
-            if educations:
-                await ctx.send(f"✅ Educations: Fetched {len(educations)} items")
-            else:
-                await ctx.send("❌ Educations: Failed to fetch or parse")
-                return
-            
-            # Test 5: Try to insert one vehicle
+            # Test 5: Try to insert
             await msg.edit(content="🔍 Step 5/5: Testing database insert...")
-            if vehicles:
-                test_vehicle = self.github_sync.normalize_vehicle_data(
-                    list(vehicles.keys())[0], 
-                    list(vehicles.values())[0]
-                )
-                await ctx.send(f"Normalized vehicle data:\n```json\n{json.dumps(test_vehicle, indent=2)[:1500]}\n```")
-                
-                vehicle_id = self.db.insert_vehicle(test_vehicle)
-                await ctx.send(f"✅ Database: Inserted test vehicle with ID {vehicle_id}")
+            vehicle_id = self.db.insert_vehicle(test_vehicle)
+            await ctx.send(f"✅ Database insert succeeded! Vehicle ID: {vehicle_id}")
             
-            await msg.edit(content="✅ All debug tests passed!")
+            await msg.edit(content="✅ All debug tests passed! Sync should work now.")
             
         except Exception as e:
             await ctx.send(f"❌ Error during debug:\n```\n{str(e)}\n```")
