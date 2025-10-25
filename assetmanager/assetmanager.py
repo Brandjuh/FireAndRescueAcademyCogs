@@ -888,6 +888,53 @@ class AssetManager(commands.Cog):
             for i in range(0, len(tb), 1900):
                 await ctx.send(f"```python\n{tb[i:i+1900]}\n```")
     
+    @commands.command(name="assettrainingdebug")
+    @checks.is_owner()
+    async def training_debug(self, ctx: commands.Context, *, vehicle_name: str = "HazMat Ambulance"):
+        """Debug training key extraction for a vehicle."""
+        await ctx.send(f"Debugging training keys for: **{vehicle_name}**")
+        
+        try:
+            # Fetch vehicles data
+            vehicles_data = await self.github_sync.fetch_vehicles()
+            
+            if not vehicles_data:
+                await ctx.send("❌ Failed to fetch vehicles")
+                return
+            
+            # Find the vehicle
+            target_vehicle = None
+            for game_id, raw_data in vehicles_data.items():
+                if raw_data.get('caption', '').lower() == vehicle_name.lower():
+                    target_vehicle = (game_id, raw_data)
+                    break
+            
+            if not target_vehicle:
+                await ctx.send(f"❌ Vehicle '{vehicle_name}' not found")
+                return
+            
+            game_id, raw_data = target_vehicle
+            
+            # Show raw staff data
+            staff = raw_data.get('staff', {})
+            await ctx.send(f"**Raw staff data:**\n```json\n{json.dumps(staff, indent=2)[:1800]}\n```")
+            
+            # Show normalized data
+            normalized = self.github_sync.normalize_vehicle_data(game_id, raw_data)
+            await ctx.send(f"**Training keys found:** `{normalized.get('training_keys', [])}`")
+            
+            # Show all educations with keys
+            all_educations = self.db.get_all_educations()
+            education_keys = [f"{e['name']}: {e.get('key')}" for e in all_educations if e.get('key')]
+            
+            await ctx.send(f"**Available education keys ({len(education_keys)}):**\n```\n" + "\n".join(education_keys[:20]) + "\n```")
+            
+        except Exception as e:
+            await ctx.send(f"❌ Error: {str(e)}")
+            import traceback
+            tb = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+            await ctx.send(f"```python\n{tb[:1800]}\n```")
+    
     @commands.group(name="assetset")
     @checks.admin_or_permissions(manage_guild=True)
     async def asset_settings(self, ctx: commands.Context):
