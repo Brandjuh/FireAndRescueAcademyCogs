@@ -309,11 +309,23 @@ class GitHubSync:
     
     def normalize_equipment_data(self, game_id: int, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize equipment data from GitHub format to database format."""
-        # Equipment uses string IDs, so game_id is actually the index we assign
+        # Handle staff field (can be nested object with min/max)
+        staff = raw_data.get('staff', {})
+        if isinstance(staff, dict):
+            min_staff = staff.get('min')
+            max_staff = staff.get('max')
+        else:
+            min_staff = None
+            max_staff = None
+        
         return {
             'game_id': game_id,
             'name': raw_data.get('caption', raw_data.get('id', f'Equipment {game_id}')),
-            'size': raw_data.get('size')
+            'size': raw_data.get('size'),
+            'credits': raw_data.get('credits'),
+            'coins': raw_data.get('coins'),
+            'min_staff': min_staff,
+            'max_staff': max_staff
         }
     
     def flatten_equipment(self, equipment_data: Dict[str, Dict]) -> Dict[int, Dict[str, Any]]:
@@ -333,23 +345,14 @@ class GitHubSync:
     
     def normalize_education_data(self, game_id: int, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize education data from GitHub format to database format."""
-        # Handle both dict and list formats
-        if isinstance(raw_data, list):
-            # It's an array item
-            return {
-                'game_id': game_id,
-                'name': raw_data[0].get('caption', f'Education {game_id}') if raw_data else f'Education {game_id}',
-                'duration': raw_data[0].get('duration') if raw_data else None,
-                'cost': raw_data[0].get('cost') if raw_data else None
-            }
-        else:
-            # It's a dict
-            return {
-                'game_id': game_id,
-                'name': raw_data.get('caption', f'Education {game_id}'),
-                'duration': raw_data.get('duration'),
-                'cost': raw_data.get('cost')
-            }
+        return {
+            'game_id': game_id,
+            'name': raw_data.get('caption', f'Education {game_id}'),
+            'duration': raw_data.get('duration'),
+            'cost': raw_data.get('cost'),
+            'building_type': raw_data.get('building_type'),
+            'key': raw_data.get('key')
+        }
     
     def flatten_educations(self, educations_data: Dict[str, List]) -> Dict[int, Dict[str, Any]]:
         """
