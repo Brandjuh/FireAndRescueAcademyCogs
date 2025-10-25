@@ -4,6 +4,7 @@ from redbot.core.bot import Red
 from redbot.core.data_manager import cog_data_path
 import logging
 import asyncio
+import json
 from datetime import datetime, timedelta
 from typing import Optional, List
 from difflib import get_close_matches
@@ -399,6 +400,23 @@ class AssetManager(commands.Cog):
         msg = await ctx.send("🔄 Starting manual sync... This may take a moment.")
         
         try:
+            # Test GitHub connection first
+            await msg.edit(content="🔄 Testing GitHub connection...")
+            test_content = await self.github_sync.fetch_file(
+                "https://raw.githubusercontent.com/LSS-Manager/LSSM-V.4/dev/src/i18n/en_US/vehicles.ts"
+            )
+            
+            if not test_content:
+                await msg.edit(
+                    content=None,
+                    embed=create_error_embed(
+                        "❌ Failed to connect to GitHub.\n"
+                        "Please check your internet connection and try again."
+                    )
+                )
+                return
+            
+            await msg.edit(content="🔄 Syncing data from GitHub...")
             results = await self.perform_full_sync(auto=False)
             
             # Create summary embed
@@ -408,6 +426,7 @@ class AssetManager(commands.Cog):
                 timestamp=datetime.utcnow()
             )
             
+            errors = []
             for source, data in results.items():
                 if data['success']:
                     changes = data.get('changes', {})
@@ -426,15 +445,39 @@ class AssetManager(commands.Cog):
                         value="❌ Failed",
                         inline=True
                     )
+                    errors.append(f"{source}: Check logs for details")
+            
+            if errors:
+                embed.add_field(
+                    name="⚠️ Errors",
+                    value="\n".join(errors),
+                    inline=False
+                )
+                embed.color = 0xFFA500  # Orange for partial failure
             
             await msg.edit(content=None, embed=embed)
             
+            # Send detailed error info
+            if errors:
+                last_sync = self.db.get_last_sync()
+                await ctx.send(
+                    f"⚠️ Some sources failed. Check console logs for details.\n"
+                    f"Try `[p]assetdebug` for more information."
+                )
+            
         except Exception as e:
             log.error(f"Manual sync error: {e}", exc_info=True)
+            import traceback
+            tb = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+            
             await msg.edit(
                 content=None,
                 embed=create_error_embed(f"Sync failed: {str(e)}")
             )
+            
+            # Send full traceback in separate message
+            for i in range(0, len(tb), 1900):
+                await ctx.send(f"```python\n{tb[i:i+1900]}\n```")
     
     @commands.group(name="assetset")
     @checks.admin_or_permissions(manage_guild=True)
@@ -459,6 +502,81 @@ class AssetManager(commands.Cog):
         await ctx.send(embed=create_success_embed(
             f"Automatic syncing {status}"
         ))
+    
+    @commands.command(name="assetdebug")
+    @checks.is_owner()
+    async def debug_sync(self, ctx: commands.Context):
+        """Debug sync issues - shows detailed error info."""
+        msg = await ctx.send("🔍 Testing GitHub connection...")
+        
+        try:
+            # Test 1: Fetch vehicles
+            await msg.edit(content="🔍 Step 1/5: Fetching vehicles...")
+            vehicles = await self.github_sync.fetch_vehicles()
+            
+            if vehicles:
+                await ctx.send(f"✅ Vehicles: Fetched {len(vehicles)} items")
+                # Show first vehicle as sample
+                first_key = list(vehicles.keys())[0]
+                first_vehicle = vehicles[first_key]
+                sample = json.dumps(first_vehicle, indent=2)[:1500]
+                await ctx.send(f"Sample vehicle data:\n```json\n{sample}\n```")
+            else:
+                await ctx.send("❌ Vehicles: Failed to fetch or parse")
+                await ctx.send("Check console logs for more details.")
+                return
+            
+            # Test 2: Fetch buildings
+            await msg.edit(content="🔍 Step 2/5: Fetching buildings...")
+            buildings = await self.github_sync.fetch_buildings()
+            
+            if buildings:
+                await ctx.send(f"✅ Buildings: Fetched {len(buildings)} items")
+            else:
+                await ctx.send("❌ Buildings: Failed to fetch or parse")
+                return
+            
+            # Test 3: Fetch equipment
+            await msg.edit(content="🔍 Step 3/5: Fetching equipment...")
+            equipment = await self.github_sync.fetch_equipment()
+            
+            if equipment:
+                await ctx.send(f"✅ Equipment: Fetched {len(equipment)} items")
+            else:
+                await ctx.send("❌ Equipment: Failed to fetch or parse")
+                return
+            
+            # Test 4: Fetch educations
+            await msg.edit(content="🔍 Step 4/5: Fetching educations...")
+            educations = await self.github_sync.fetch_educations()
+            
+            if educations:
+                await ctx.send(f"✅ Educations: Fetched {len(educations)} items")
+            else:
+                await ctx.send("❌ Educations: Failed to fetch or parse")
+                return
+            
+            # Test 5: Try to insert one vehicle
+            await msg.edit(content="🔍 Step 5/5: Testing database insert...")
+            if vehicles:
+                test_vehicle = self.github_sync.normalize_vehicle_data(
+                    list(vehicles.keys())[0], 
+                    list(vehicles.values())[0]
+                )
+                await ctx.send(f"Normalized vehicle data:\n```json\n{json.dumps(test_vehicle, indent=2)[:1500]}\n```")
+                
+                vehicle_id = self.db.insert_vehicle(test_vehicle)
+                await ctx.send(f"✅ Database: Inserted test vehicle with ID {vehicle_id}")
+            
+            await msg.edit(content="✅ All debug tests passed!")
+            
+        except Exception as e:
+            await ctx.send(f"❌ Error during debug:\n```\n{str(e)}\n```")
+            import traceback
+            tb = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+            # Split long traceback
+            for i in range(0, len(tb), 1900):
+                await ctx.send(f"```python\n{tb[i:i+1900]}\n```")
 
 
 async def setup(bot: Red):
