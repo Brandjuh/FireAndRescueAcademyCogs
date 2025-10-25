@@ -230,7 +230,8 @@ def transform_vehicles(src: Dict[str, Any]) -> Tuple[
         except Exception:
             continue
 
-        name = v.get("name") or f"Vehicle {vid}"
+        # Use caption as fallback for name to avoid "Vehicle 11"
+        name = v.get("name") or v.get("caption") or f"Vehicle {vid}"
         min_p = norm_int(v.get("min_personnel") or v.get("minPersonnel") or v.get("min_crew"))
         max_p = norm_int(v.get("max_personnel") or v.get("maxPersonnel") or v.get("max_crew"))
         price_credits = norm_int(v.get("price_credits") or v.get("credits") or v.get("price"))
@@ -257,10 +258,12 @@ def transform_vehicles(src: Dict[str, Any]) -> Tuple[
             "specials": specials,
         }
 
+        # Possible buildings
         pbs = v.get("possible_buildings") or v.get("possibleBuildings") or v.get("building_ids")
         if isinstance(pbs, list):
             vp_buildings[vid] = set(int(x) for x in pbs if isinstance(x, (int, str)) and str(x).isdigit())
 
+        # Required schoolings (array of {schooling_id, count})
         reqs = v.get("required_schoolings") or v.get("schoolings") or []
         arr = []
         if isinstance(reqs, list):
@@ -278,10 +281,12 @@ def transform_vehicles(src: Dict[str, Any]) -> Tuple[
         if arr:
             v_schoolings[vid] = arr
 
+        # Equipment compatibility
         ec = v.get("equipment_compat") or v.get("equipment") or []
         if isinstance(ec, list):
             v_equipment[vid] = set(int(x) for x in ec if isinstance(x, (int, str)) and str(x).isdigit())
 
+        # Roles (multi-role behavior)
         roles = v.get("roles") or v.get("acts_as") or v.get("role")
         role_set = set()
         if isinstance(roles, list):
@@ -360,6 +365,7 @@ def upsert_vehicles(con: sqlite3.Connection, rows: Dict[int, Dict[str, Any]]):
 def replace_relations(con: sqlite3.Connection,
                       vp_buildings, v_schoolings, v_equipment,
                       role_index, v_roles):
+    # vehicle_possible_buildings
     con.execute("DELETE FROM vehicle_possible_buildings")
     for vid, bids in vp_buildings.items():
         for b in bids:
@@ -368,6 +374,7 @@ def replace_relations(con: sqlite3.Connection,
                 VALUES (?, ?)
             """, (vid, b))
 
+    # vehicle_required_schoolings
     con.execute("DELETE FROM vehicle_required_schoolings")
     for vid, arr in v_schoolings.items():
         for it in arr:
@@ -376,6 +383,7 @@ def replace_relations(con: sqlite3.Connection,
                 VALUES (?, ?, ?)
             """, (vid, it["schooling_id"], it.get("count", 1)))
 
+    # vehicle_equipment_compat
     con.execute("DELETE FROM vehicle_equipment_compat")
     for vid, eids in v_equipment.items():
         for eid in eids:
@@ -384,6 +392,7 @@ def replace_relations(con: sqlite3.Connection,
                 VALUES (?, ?, 1)
             """, (vid, eid))
 
+    # roles
     role_id_map = {}
     for role_name in role_index.keys():
         con.execute("INSERT INTO vehicle_roles (role) VALUES (?) ON CONFLICT(role) DO NOTHING", (role_name,))
