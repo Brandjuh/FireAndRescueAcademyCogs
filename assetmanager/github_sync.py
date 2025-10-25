@@ -280,6 +280,38 @@ class GitHubSync:
             min_personnel = raw_data.get('minPersonnel')
             max_personnel = raw_data.get('maxPersonnel')
         
+        # ===== FIXED: Extract training keys from deeply nested structure =====
+        training_keys = []
+        if isinstance(staff, dict) and 'training' in staff:
+            training_data = staff['training']
+            
+            # Log for debugging
+            log.debug(f"Vehicle {game_id} ({raw_data.get('caption', 'Unknown')}) has training data: {type(training_data)}")
+            
+            if isinstance(training_data, dict):
+                # Iterate through building types (Fire Station, Rescue, Police, etc.)
+                for building_type, trainings in training_data.items():
+                    log.debug(f"  Building type: {building_type}, trainings: {type(trainings)}")
+                    
+                    if isinstance(trainings, dict):
+                        # NOW go one level deeper - trainings is like {gw_gefahrgut: {all: true}}
+                        for training_key, training_details in trainings.items():
+                            # training_key is what we want (e.g., "gw_gefahrgut")
+                            training_keys.append(training_key)
+                            
+                            # Log for debugging
+                            log.info(
+                                f"Vehicle {game_id} ({raw_data.get('caption', 'Unknown')}) "
+                                f"requires training: {training_key} (from {building_type})"
+                            )
+        
+        # Also log if no training keys were found but we expected some
+        if not training_keys and isinstance(staff, dict) and 'training' in staff:
+            log.warning(
+                f"Vehicle {game_id} ({raw_data.get('caption', 'Unknown')}) "
+                f"has training field but no keys extracted. Structure: {staff.get('training')}"
+            )
+        
         return {
             'game_id': game_id,
             'name': raw_data.get('caption', f'Vehicle {game_id}'),
@@ -296,7 +328,8 @@ class GitHubSync:
                 'icon': raw_data.get('icon'),
                 'equipmentCapacity': raw_data.get('equipmentCapacity'),
                 'possibleBuildings': raw_data.get('possibleBuildings', [])
-            }
+            },
+            'education_keys': training_keys  # ← NOW THIS WILL HAVE VALUES!
         }
     
     def normalize_building_data(self, game_id: int, raw_data: Dict[str, Any]) -> Dict[str, Any]:
