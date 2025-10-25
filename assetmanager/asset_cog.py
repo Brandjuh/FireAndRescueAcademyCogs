@@ -39,6 +39,14 @@ def _clip(text: Optional[str], limit: int) -> str:
         return text
     return text[: max(0, limit - 1)] + "…"
 
+def _crew_text(v: Dict[str, Any]) -> str:
+    mn = v.get("min_personnel") or 0
+    mx = v.get("max_personnel") or 0
+    if mn == 0 and mx == 0:
+        return "—"
+    return f"{mn}–{mx}"
+
+# Agency inference (zelfde als eerder)
 AGENCY_ORDER = ("Fire", "Police", "EMS", "Rescue", "Tow", "FBI", "Other")
 
 _KEYWORDS = {
@@ -109,6 +117,21 @@ def infer_agency(name: str, roles: List[str], building_names: List[str], buildin
         return "Rescue"
 
     return "Other"
+
+# “kleur per agency” zolang we geen echte kleurvelden uit de data hebben
+AGENCY_COLORS = {
+    "Fire": discord.Color.red(),
+    "Police": discord.Color.blue(),
+    "EMS": discord.Color.green(),
+    "Rescue": discord.Color.dark_orange(),
+    "Tow": discord.Color.dark_gold(),
+    "FBI": discord.Color.dark_teal(),
+    "Other": discord.Color.blurple(),
+}
+
+MONEY_EMOJI = "💰"
+COIN_EMOJI = "🪙"
+
 
 # ---------- Cog ----------
 
@@ -207,28 +230,29 @@ class AssetManager(commands.Cog):
                     b_cats.append(str(cat))
 
         agency = infer_agency(name, roles, b_names, b_cats)
-
-        def crew_text() -> str:
-            mn = v.get("min_personnel") or 0
-            mx = v.get("max_personnel") or 0
-            if mn == 0 and mx == 0:
-                return "—"
-            return f"{mn}–{mx}"
+        color = AGENCY_COLORS.get(agency, discord.Color.blurple())
 
         em = discord.Embed(
-            title=_clip(f"{name} · #{vehicle_id}", 256),
-            color=discord.Color.dark_teal(),
+            title=_clip(name, 256),
+            color=color,
         )
-        em.add_field(name="Agency", value=agency, inline=True)
-        em.add_field(name="Crew", value=crew_text(), inline=True)
+        em.set_footer(text=f"#{vehicle_id}")
 
+        # Crew
+        em.add_field(name="Crew", value=_crew_text(v), inline=True)
+
+        # Price with emojis
         price_parts: List[str] = []
         if v.get("price_credits") is not None:
-            price_parts.append(f"{v['price_credits']} credits")
+            price_parts.append(f"{MONEY_EMOJI} {v['price_credits']}")
         if v.get("price_coins") is not None:
-            price_parts.append(f"{v['price_coins']} coins")
+            price_parts.append(f"{COIN_EMOJI} {v['price_coins']}")
         em.add_field(name="Price", value=", ".join(price_parts) or "—", inline=True)
 
+        # Agency field
+        em.add_field(name="Agency", value=agency, inline=True)
+
+        # Capabilities
         caps: List[str] = []
         if v.get("water_tank"):
             caps.append(f"Water {v['water_tank']}")
@@ -236,28 +260,33 @@ class AssetManager(commands.Cog):
             caps.append(f"Foam {v['foam_tank']}")
         if v.get("pump_gpm"):
             caps.append(f"Pump {v['pump_gpm']} GPM")
-        em.add_field(name="Capabilities", value=", ".join(caps) or "—", inline=True)
+        em.add_field(name="Capabilities", value=", ".join(caps) or "—", inline=False)
 
         if v.get("rank_required"):
             em.add_field(name="Rank required", value=str(v["rank_required"]), inline=True)
         if v.get("speed"):
             em.add_field(name="Speed", value=str(v["speed"]), inline=True)
+
         if v.get("specials"):
             em.add_field(name="Specials", value=_clip(str(v["specials"]), 1024), inline=False)
+
         if roles:
             em.add_field(name="Roles", value=_clip(", ".join(sorted(roles)), 1024), inline=False)
+
         if buildings:
             em.add_field(
                 name="Possible buildings",
                 value=_clip(", ".join(sorted(set(b_names))) or "—", 1024),
                 inline=False,
             )
+
         if schoolings:
             em.add_field(
                 name="Required schoolings",
                 value=_clip(", ".join(f"{s.get('name','?')} ×{s.get('required_count',1)}" for s in schoolings), 1024),
                 inline=False,
             )
+
         if equipment:
             em.add_field(
                 name="Equipment compat",
@@ -274,11 +303,15 @@ class AssetManager(commands.Cog):
         if not eq:
             await ctx.send(f"Equipment {equipment_id} not found.")
             return
+        # Geen kleur in DB? Kies nette vaste kleur.
         em = discord.Embed(
-            title=_clip(f"{eq.get('name','Equipment')} · #{equipment_id}", 256),
+            title=_clip(eq.get("name","Equipment"), 256),
             color=discord.Color.dark_gold(),
-            description=_clip(eq.get("description") or "", 2048),
         )
+        em.set_footer(text=f"#{equipment_id}")
+        desc = _clip(eq.get("description") or "", 2048)
+        if desc:
+            em.description = desc
         if eq.get("size"):
             em.add_field(name="Size", value=str(eq["size"]), inline=True)
         if eq.get("notes"):
@@ -293,9 +326,10 @@ class AssetManager(commands.Cog):
             await ctx.send(f"Schooling {schooling_id} not found.")
             return
         em = discord.Embed(
-            title=_clip(f"{sc.get('name','Schooling')} · #{schooling_id}", 256),
+            title=_clip(sc.get("name","Schooling"), 256),
             color=discord.Color.dark_green(),
         )
+        em.set_footer(text=f"#{schooling_id}")
         if sc.get("department"):
             em.add_field(name="Department", value=str(sc["department"]), inline=True)
         if sc.get("duration_days") is not None:
@@ -309,10 +343,12 @@ class AssetManager(commands.Cog):
         if not b:
             await ctx.send(f"Building {building_id} not found.")
             return
+        # We hebben (voor nu) geen 'color' kolom in de DB. Vaste kleur tot we dat opslaan.
         em = discord.Embed(
-            title=_clip(f"{b.get('name','Building')} · #{building_id}", 256),
+            title=_clip(b.get("name","Building"), 256),
             color=discord.Color.dark_purple(),
         )
+        em.set_footer(text=f"#{building_id}")
         if b.get("category"):
             em.add_field(name="Category", value=str(b["category"]), inline=True)
         if b.get("notes"):
