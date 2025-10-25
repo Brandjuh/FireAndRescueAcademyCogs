@@ -70,31 +70,66 @@ class GitHubSync:
             # Remove numeric separators
             obj_str = re.sub(r'(\d)_(\d)', r'\1\2', obj_str)
             
+            # CRITICAL: Handle apostrophes BEFORE converting quotes
+            # Replace ' inside words with a placeholder
+            obj_str = re.sub(r"([a-zA-Z])'([a-zA-Z])", r'\1__APOS__\2', obj_str)
+            
             # Convert single quotes to double quotes
             obj_str = obj_str.replace("'", '"')
+            
+            # Restore apostrophes inside strings (after we've converted quotes)
+            obj_str = obj_str.replace('__APOS__', "'")
+            
+            # Fix multi-line strings by joining lines that are part of a string value
+            # Pattern: "key": "value that continues
+            #                 on next line"
+            lines = obj_str.split('\n')
+            result_lines = []
+            in_string = False
+            current_line = ""
+            
+            for line in lines:
+                # Count unescaped quotes in this line
+                quote_count = line.count('"') - line.count('\\"')
+                
+                if in_string:
+                    # We're continuing a multi-line string
+                    current_line += " " + line.strip()
+                    if quote_count % 2 == 1:  # Odd number means string ends
+                        in_string = False
+                        result_lines.append(current_line)
+                        current_line = ""
+                else:
+                    # Check if this line starts a string that doesn't end
+                    if quote_count % 2 == 1:  # Odd number means string starts but doesn't end
+                        in_string = True
+                        current_line = line
+                    else:
+                        result_lines.append(line)
+            
+            obj_str = '\n'.join(result_lines)
             
             # Quote numeric keys at start of lines
             obj_str = re.sub(r'([\n\r]\s*)(\d+)(\s*):', r'\1"\2"\3:', obj_str)
             
-            # Quote alphabetic keys more carefully
+            # Quote alphabetic keys
             lines = obj_str.split('\n')
             result_lines = []
             
             for line in lines:
-                # Match pattern: whitespace + word + whitespace + colon
-                # Only at the start of properties (after { or ,)
+                # Match at start of line
                 new_line = re.sub(
                     r'^(\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*):',
                     r'\1"\2"\3:',
                     line
                 )
-                # Also match after comma on same line
+                # After comma
                 new_line = re.sub(
                     r'(,\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*):',
                     r'\1"\2"\3:',
                     new_line
                 )
-                # Match after opening brace
+                # After opening brace
                 new_line = re.sub(
                     r'(\{\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*):',
                     r'\1"\2"\3:',
