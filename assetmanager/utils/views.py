@@ -34,25 +34,31 @@ class VehicleSelect(discord.ui.Select):
     
     def __init__(self, vehicles: List[Dict[str, Any]], placeholder: str, row: int):
         # Discord select menus can have max 25 options
-        # Sort vehicles by name and take first 25
-        sorted_vehicles = sorted(vehicles, key=lambda v: v['name'])[:25]
+        # Sort vehicles by name
+        sorted_vehicles = sorted(vehicles, key=lambda v: v['name'])
         
-        options = [
-            discord.SelectOption(
-                label=vehicle['name'][:100],  # Discord limit
-                value=str(vehicle['game_id']),
-                description=f"${vehicle.get('price', 0):,}" if vehicle.get('price') else "Price unknown"
-            )
-            for vehicle in sorted_vehicles
-        ]
+        options = []
         
-        # Add "None" option for optional third vehicle
+        # Add "None" option for optional third vehicle (at the top)
         if "optional" in placeholder.lower():
-            options.insert(0, discord.SelectOption(
-                label="None (compare 2 vehicles only)",
+            options.append(discord.SelectOption(
+                label="Skip (compare only 2 vehicles)",
                 value="none",
-                description="Skip third vehicle"
+                description="Don't select a third vehicle",
+                emoji="❌"
             ))
+        
+        # Add vehicle options (up to 24 if we have "none", or 25 if we don't)
+        max_vehicles = 24 if options else 25
+        for vehicle in sorted_vehicles[:max_vehicles]:
+            price_desc = f"${vehicle.get('price', 0):,}" if vehicle.get('price') else "Price unknown"
+            options.append(
+                discord.SelectOption(
+                    label=vehicle['name'][:100],  # Discord limit
+                    value=str(vehicle['game_id']),
+                    description=price_desc[:100]  # Discord limit
+                )
+            )
         
         super().__init__(
             placeholder=placeholder,
