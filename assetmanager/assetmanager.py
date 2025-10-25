@@ -418,7 +418,7 @@ class AssetManager(commands.Cog):
             if errors:
                 await ctx.send(
                     f"⚠️ Some sources failed. Check console logs for details.\n"
-                    f"Try `[p]assetdebug` for more information."
+                    f"Try `[p]assetdebug` or `[p]assetrawdebug <source>` for more information."
                 )
             
         except Exception as e:
@@ -493,6 +493,38 @@ class AssetManager(commands.Cog):
             tb = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
             for i in range(0, len(tb), 1900):
                 await ctx.send(f"```python\n{tb[i:i+1900]}\n```")
+    
+    @commands.command(name="assetrawdebug")
+    @checks.is_owner()
+    async def raw_debug(self, ctx: commands.Context, source: str):
+        """Show raw data from GitHub sources. Use: buildings, equipment, or educations"""
+        
+        urls = {
+            "buildings": "https://raw.githubusercontent.com/LSS-Manager/LSSM-V.4/dev/src/i18n/en_US/buildings.ts",
+            "equipment": "https://raw.githubusercontent.com/LSS-Manager/LSSM-V.4/dev/src/i18n/en_US/equipment.ts",
+            "educations": "https://raw.githubusercontent.com/LSS-Manager/LSSM-V.4/dev/src/i18n/en_US/schoolings.ts"
+        }
+        
+        if source not in urls:
+            await ctx.send(f"Invalid source. Use: {', '.join(urls.keys())}")
+            return
+        
+        await ctx.send(f"Fetching {source}...")
+        
+        content = await self.github_sync.fetch_file(urls[source])
+        if not content:
+            await ctx.send("Failed to fetch")
+            return
+        
+        # Show first 1500 chars
+        await ctx.send(f"First 1500 characters:\n```typescript\n{content[:1500]}\n```")
+        
+        # Show structure around "export default"
+        match = re.search(r'export\s+default\s+.{0,200}', content, re.DOTALL)
+        if match:
+            await ctx.send(f"Export default section:\n```typescript\n{match.group(0)}\n```")
+        else:
+            await ctx.send("No 'export default' found")
 
 
 async def setup(bot: Red):
