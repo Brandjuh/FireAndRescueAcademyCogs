@@ -78,31 +78,41 @@ class GitHubSync:
             obj_str = re.sub(r'\.\.\.\s*Array\s*\(\s*\d+\s*\)\s*\.fill\s*\([^)]+\)', '[]', obj_str)
             obj_str = re.sub(r'\.\.\.\s*new\s+Array\s*\(\s*\d+\s*\)\s*\.fill\s*\([^)]+\)', '[]', obj_str)
             
-            # CRITICAL: Remove JavaScript arrow functions by removing lines containing =>
-            # and any following lines until we hit a comma or closing brace at the same level
+            # CRITICAL: Remove any properties ending in "Function" (these contain arrow functions)
+            # Remove the entire property including its value
             lines = obj_str.split('\n')
             filtered_lines = []
-            skip_until_end = False
+            skip_function = False
+            paren_depth = 0
             brace_depth = 0
             
             for line in lines:
-                # Check if this line starts an arrow function
-                if '=>' in line and not skip_until_end:
-                    skip_until_end = True
+                # Check if line contains a property ending in "Function":
+                if re.search(r'\w+Function["\']?\s*:', line) and not skip_function:
+                    skip_function = True
+                    paren_depth = 0
                     brace_depth = 0
                     continue
                 
-                if skip_until_end:
-                    # Track braces/parentheses to know when function ends
-                    brace_depth += line.count('(') - line.count(')')
+                if skip_function:
+                    # Track depth
+                    paren_depth += line.count('(') - line.count(')')
                     brace_depth += line.count('{') - line.count('}')
                     
-                    # Function ends when we close all braces and hit a comma or closing brace
-                    if brace_depth <= 0 and (',' in line or '}' in line):
-                        skip_until_end = False
-                        # Keep this line if it has other content besides the comma
-                        if line.strip() not in [',', '},']:
-                            filtered_lines.append(line)
+                    # Check if we reached the end (comma at depth 0)
+                    if paren_depth <= 0 and brace_depth <= 0:
+                        # Look for comma or closing brace/bracket
+                        if re.search(r'[,\}\]]', line):
+                            skip_function = False
+                            # Only skip this line if it's just the comma/brace
+                            if line.strip() not in [',', '},', '],', '}', ']']:
+                                filtered_lines.append(line)
+                            continue
+                    continue
+                
+                # Also remove lines that look like JavaScript code (not data)
+                # Lines with => or ?? or complex expressions
+                if '=>' in line or '??' in line:
                     continue
                 
                 filtered_lines.append(line)
