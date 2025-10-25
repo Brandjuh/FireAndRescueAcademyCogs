@@ -43,24 +43,30 @@ from jsonschema import validate, ValidationError
 
 # ---- robust dual-mode import for cogs vs. standalone runs ----
 try:
-    # running as package (inside Red cog)
     from .config import DB_PATH, SRC_FILES, SCHEMA_DIR, NODE_BIN
 except Exception:
-    # fallback when executed directly: `python assetmanager/etl.py`
     from config import DB_PATH, SRC_FILES, SCHEMA_DIR, NODE_BIN  # type: ignore
-
-# --------------- Utilities ---------------
 
 UA = "FARA-AssetManager/1.0 (+https://missionchief.local)"
 
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+def _exec_sql(con: sqlite3.Connection, stmt: str):
+    try:
+        con.execute(stmt)
+    except sqlite3.OperationalError:
+        pass  # column/table probably exists already
+
 def ensure_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     schema_path = Path(__file__).with_name("db_schema.sql")
     with sqlite3.connect(DB_PATH) as con:
         con.executescript(schema_path.read_text(encoding="utf-8"))
+        # lightweight migrations for new fields we add below
+        _exec_sql(con, "ALTER TABLE vehicles ADD COLUMN color TEXT")
+        _exec_sql(con, "ALTER TABLE vehicles ADD COLUMN equipment_capacity INTEGER")
+        _exec_sql(con, "ALTER TABLE vehicles ADD COLUMN pump_type TEXT")
         con.commit()
 
 def fetch_raw(url: str, out_path: Path, *, retries: int = 3, backoff: float = 1.5) -> str:
@@ -71,12 +77,7 @@ def fetch_raw(url: str, out_path: Path, *, retries: int = 3, backoff: float = 1.
             r.raise_for_status()
             out_path.write_text(r.text, encoding="utf-8")
             headers = {k.lower(): v for k, v in (getattr(r, "headers", {}) or {}).items()}
-            commit = (
-                headers.get("x-github-request-id")
-                or headers.get("etag")
-                or headers.get("x-cache")
-                or "dev"
-            )
+            commit = headers.get("etag") or headers.get("x-github-request-id") or "dev"
             return str(commit)
         except Exception as e:
             last_err = e
@@ -85,8 +86,6 @@ def fetch_raw(url: str, out_path: Path, *, retries: int = 3, backoff: float = 1.
             time.sleep(backoff ** attempt)
     raise RuntimeError(f"Download failed for {url}: {last_err}")
 
-# ---------- TS -> JSON conversion (Node-only, deterministic) ----------
-
 def _node_bin() -> str | None:
     try:
         return shutil.which(str(NODE_BIN)) if NODE_BIN else shutil.which("node")
@@ -94,10 +93,6 @@ def _node_bin() -> str | None:
         return None
 
 def _node_env_with_global_node_path() -> dict:
-    """
-    Ensure Node can resolve global packages by setting NODE_PATH to `npm root -g` if available.
-    Falls back to existing environment unchanged.
-    """
     env = os.environ.copy()
     if env.get("NODE_PATH"):
         return env
@@ -112,23 +107,12 @@ def _node_env_with_global_node_path() -> dict:
     return env
 
 def ts_to_json(ts_path: Path, json_path: Path) -> None:
-    """
-    Deterministic, boring, reliable:
-    Always convert TS -> JSON via the Node helper (ts_to_json.mjs).
-    No literal fast-path, no heuristics.
-    """
     node = _node_bin()
     helper = Path(__file__).with_name("ts_to_json.mjs")
     if not node:
-        raise RuntimeError(
-            "Node.js is required for TS conversion but was not found. "
-            "Install Node 18+ and ensure `node` is in PATH, or set NODE_BIN in config.py."
-        )
+        raise RuntimeError("Node.js is required for TS conversion and was not found.")
     if not helper.exists():
-        raise RuntimeError(
-            "Missing ts_to_json.mjs next to etl.py. Create the helper and make it executable. "
-            "It must be able to resolve 'ts-node' and 'typescript'."
-        )
+        raise RuntimeError("Missing ts_to_json.mjs next to etl.py.")
     res = subprocess.run([node, str(helper), str(ts_path)],
                          capture_output=True, text=True, env=_node_env_with_global_node_path())
     if res.returncode != 0:
@@ -143,19 +127,14 @@ def load_and_validate(json_path: Path, schema_name: str) -> Dict[str, Any]:
     schema_file = (SCHEMA_DIR / f"{schema_name}.json")
     try:
         schema = json.loads(schema_file.read_text(encoding="utf-8"))
+        validate(obj, schema)
     except FileNotFoundError:
         print(f"[warn] Schema missing: {schema_file} — skipping validation.")
-        return obj
-    except Exception as e:
-        print(f"[warn] Failed to read schema {schema_file}: {e} — skipping validation.")
-        return obj
-    try:
-        validate(obj, schema)
     except ValidationError as e:
         raise RuntimeError(f"Validation failed for {schema_name}: {e.message}")
     return obj
 
-# --------------- Mapping / Transform ---------------
+# ---------- transform helpers ----------
 
 def norm_int(x: Any) -> int | None:
     try:
@@ -211,11 +190,11 @@ def transform_equipment(src: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
 
 def transform_vehicles(src: Dict[str, Any]) -> Tuple[
     Dict[int, Dict[str, Any]],
-    Dict[int, set],                # vehicle -> building ids
-    Dict[int, list],               # vehicle -> [{"schooling_id": int, "count": int}]
-    Dict[int, set],                # vehicle -> equipment ids (compatible)
-    Dict[str, int],                # role name -> role id temp index (0 placeholder)
-    Dict[int, set]                 # vehicle -> role names
+    Dict[int, set],
+    Dict[int, list],
+    Dict[int, set],
+    Dict[str, int],
+    Dict[int, set]
 ]:
     vehicles = {}
     vp_buildings = {}
@@ -230,22 +209,44 @@ def transform_vehicles(src: Dict[str, Any]) -> Tuple[
         except Exception:
             continue
 
-        # Use caption as fallback for name to avoid "Vehicle 11"
+        # Names: prefer 'name', then 'caption'
         name = v.get("name") or v.get("caption") or f"Vehicle {vid}"
-        min_p = norm_int(v.get("min_personnel") or v.get("minPersonnel") or v.get("min_crew"))
-        max_p = norm_int(v.get("max_personnel") or v.get("maxPersonnel") or v.get("max_crew"))
+        # Color from data if present (hex)
+        color = v.get("color")
+
+        # Staff can be nested: { min, max }
+        min_p = norm_int(
+            v.get("min_personnel") or v.get("minPersonnel") or v.get("min_crew")
+            or (v.get("staff") or {}).get("min")
+        )
+        max_p = norm_int(
+            v.get("max_personnel") or v.get("maxPersonnel") or v.get("max_crew")
+            or (v.get("staff") or {}).get("max")
+        )
+
+        # Prices
         price_credits = norm_int(v.get("price_credits") or v.get("credits") or v.get("price"))
         price_coins = norm_int(v.get("price_coins") or v.get("coins"))
+
+        # Various attributes
         rank_required = v.get("rank_required") or v.get("rank")
         water_tank = norm_int(v.get("water_tank") or v.get("waterTank"))
         foam_tank = norm_int(v.get("foam_tank") or v.get("foamTank"))
-        pump_gpm = norm_int(v.get("pump_gpm") or v.get("gpm") or v.get("pump"))
+
+        # Pump capacity/type (LSSM: pumpCapacity, pumpType)
+        pump_gpm = norm_int(v.get("pump_gpm") or v.get("pumpCapacity") or v.get("gpm") or v.get("pump"))
+        pump_type = v.get("pump_type") or v.get("pumpType")
+
+        # Equipment capacity
+        equipment_capacity = norm_int(v.get("equipmentCapacity"))
+
         speed = norm_int(v.get("speed"))
         specials = collect_text(v.get("specials"), v.get("acts_as"), v.get("notes"))
 
         vehicles[vid] = {
             "id": vid,
             "name": name,
+            "color": color,
             "min_personnel": min_p or 0,
             "max_personnel": max_p or 0,
             "price_credits": price_credits,
@@ -254,6 +255,8 @@ def transform_vehicles(src: Dict[str, Any]) -> Tuple[
             "water_tank": water_tank,
             "foam_tank": foam_tank,
             "pump_gpm": pump_gpm,
+            "pump_type": pump_type,
+            "equipment_capacity": equipment_capacity,
             "speed": speed,
             "specials": specials,
         }
@@ -281,7 +284,7 @@ def transform_vehicles(src: Dict[str, Any]) -> Tuple[
         if arr:
             v_schoolings[vid] = arr
 
-        # Equipment compatibility
+        # Equipment compatibility (only if source provides explicit list; many locales don't)
         ec = v.get("equipment_compat") or v.get("equipment") or []
         if isinstance(ec, list):
             v_equipment[vid] = set(int(x) for x in ec if isinstance(x, (int, str)) and str(x).isdigit())
@@ -301,7 +304,7 @@ def transform_vehicles(src: Dict[str, Any]) -> Tuple[
     role_index = {name: 0 for name in sorted(role_names)}
     return vehicles, vp_buildings, v_schoolings, v_equipment, role_index, v_roles
 
-# --------------- Upserts ---------------
+# ---------- upserts ----------
 
 def upsert_buildings(con: sqlite3.Connection, rows: Dict[int, Dict[str, Any]]):
     for r in rows.values():
@@ -341,11 +344,12 @@ def upsert_vehicles(con: sqlite3.Connection, rows: Dict[int, Dict[str, Any]]):
     for r in rows.values():
         con.execute("""
             INSERT INTO vehicles (
-              id, name, min_personnel, max_personnel, price_credits, price_coins,
-              rank_required, water_tank, foam_tank, pump_gpm, speed, specials
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              id, name, color, min_personnel, max_personnel, price_credits, price_coins,
+              rank_required, water_tank, foam_tank, pump_gpm, pump_type, equipment_capacity, speed, specials
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               name=excluded.name,
+              color=excluded.color,
               min_personnel=excluded.min_personnel,
               max_personnel=excluded.max_personnel,
               price_credits=excluded.price_credits,
@@ -354,18 +358,21 @@ def upsert_vehicles(con: sqlite3.Connection, rows: Dict[int, Dict[str, Any]]):
               water_tank=excluded.water_tank,
               foam_tank=excluded.foam_tank,
               pump_gpm=excluded.pump_gpm,
+              pump_type=excluded.pump_type,
+              equipment_capacity=excluded.equipment_capacity,
               speed=excluded.speed,
               specials=excluded.specials
         """, (
-            r["id"], r["name"], r["min_personnel"], r["max_personnel"],
+            r["id"], r["name"], r.get("color"),
+            r["min_personnel"], r["max_personnel"],
             r["price_credits"], r["price_coins"], r["rank_required"],
-            r["water_tank"], r["foam_tank"], r["pump_gpm"], r["speed"], r["specials"]
+            r["water_tank"], r["foam_tank"], r["pump_gpm"], r.get("pump_type"),
+            r.get("equipment_capacity"), r["speed"], r["specials"]
         ))
 
 def replace_relations(con: sqlite3.Connection,
                       vp_buildings, v_schoolings, v_equipment,
                       role_index, v_roles):
-    # vehicle_possible_buildings
     con.execute("DELETE FROM vehicle_possible_buildings")
     for vid, bids in vp_buildings.items():
         for b in bids:
@@ -374,7 +381,6 @@ def replace_relations(con: sqlite3.Connection,
                 VALUES (?, ?)
             """, (vid, b))
 
-    # vehicle_required_schoolings
     con.execute("DELETE FROM vehicle_required_schoolings")
     for vid, arr in v_schoolings.items():
         for it in arr:
@@ -383,7 +389,6 @@ def replace_relations(con: sqlite3.Connection,
                 VALUES (?, ?, ?)
             """, (vid, it["schooling_id"], it.get("count", 1)))
 
-    # vehicle_equipment_compat
     con.execute("DELETE FROM vehicle_equipment_compat")
     for vid, eids in v_equipment.items():
         for eid in eids:
@@ -392,7 +397,6 @@ def replace_relations(con: sqlite3.Connection,
                 VALUES (?, ?, 1)
             """, (vid, eid))
 
-    # roles
     role_id_map = {}
     for role_name in role_index.keys():
         con.execute("INSERT INTO vehicle_roles (role) VALUES (?) ON CONFLICT(role) DO NOTHING", (role_name,))
@@ -412,38 +416,31 @@ def replace_relations(con: sqlite3.Connection,
 
 def rebuild_fts(con: sqlite3.Connection):
     con.execute("DELETE FROM search_index")
-    # vehicles
     for row in con.execute("SELECT id, name, specials FROM vehicles"):
         body = row[2] or ""
         con.execute(
             "INSERT INTO search_index (type, ref_id, name, body) VALUES ('vehicle', ?, ?, ?)",
             (str(row[0]), row[1], body),
         )
-    # equipment
     for row in con.execute("SELECT id, name, description FROM equipment"):
         con.execute(
             "INSERT INTO search_index (type, ref_id, name, body) VALUES ('equipment', ?, ?, ?)",
             (str(row[0]), row[1], row[2] or ""),
         )
-    # schoolings
     for row in con.execute("SELECT id, name, department FROM schoolings"):
         con.execute(
             "INSERT INTO search_index (type, ref_id, name, body) VALUES ('schooling', ?, ?, ?)",
             (str(row[0]), row[1], row[2] or ""),
         )
-    # buildings
     for row in con.execute("SELECT id, name, category FROM buildings"):
         con.execute(
             "INSERT INTO search_index (type, ref_id, name, body) VALUES ('building', ?, ?, ?)",
             (str(row[0]), row[1], row[2] or ""),
         )
 
-# --------------- Main ETL ---------------
-
 def run_etl():
     ensure_db()
     tmpdir = Path(tempfile.mkdtemp(prefix="am_ts_"))
-
     try:
         results = {}
         for key, url in SRC_FILES.items():
@@ -464,31 +461,24 @@ def run_etl():
         with sqlite3.connect(DB_PATH) as con:
             con.execute("PRAGMA foreign_keys=ON")
             cur = con.cursor()
-            # Upserts
+
             upsert_buildings(con, buildings)
             upsert_schoolings(con, schoolings)
             upsert_equipment(con, equipment)
             upsert_vehicles(con, vehicles)
             replace_relations(con, vp_buildings, v_schoolings, v_equipment, role_index, v_roles)
 
-            # Record commits (best effort)
             fetched_at = utcnow_iso()
             for key in ("buildings", "equipment", "schoolings", "vehicles"):
                 cur.execute(
-                    """
-                    INSERT INTO source_commits (repo, path, commit_sha, fetched_at)
-                    VALUES (?, ?, ?, ?)
-                    """,
+                    "INSERT INTO source_commits (repo, path, commit_sha, fetched_at) VALUES (?, ?, ?, ?)",
                     ("LSSM-V.4", f"en_US/{key}.ts", results[key][1], fetched_at),
                 )
 
             rebuild_fts(con)
             con.commit()
 
-        print(
-            f"[OK] ETL finished. {len(vehicles)} vehicles, {len(equipment)} equipment, "
-            f"{len(schoolings)} schoolings, {len(buildings)} buildings."
-        )
+        print(f"[OK] ETL finished. {len(vehicles)} vehicles, {len(equipment)} equipment, {len(schoolings)} schoolings, {len(buildings)} buildings.")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
