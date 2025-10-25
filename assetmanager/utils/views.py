@@ -90,42 +90,47 @@ class CompareView(discord.ui.View):
         """Update view with current selections."""
         self.clear_items()
         
-        # Row 0: First vehicle - category and vehicle select
-        cat_select_0 = CategorySelect(0, self.categories, self.selected_categories[0], row=0, optional=False)
-        self.add_item(cat_select_0)
+        current_row = 0
         
+        # Vehicle 1: Category
+        self.add_item(CategorySelect(0, self.categories, self.selected_categories[0], current_row, optional=False))
+        current_row += 1
+        
+        # Vehicle 1: Vehicle select (if category chosen)
         if self.selected_categories[0] and self.selected_categories[0] != "none":
             vehicles = self.categories.get(self.selected_categories[0], [])
             if vehicles:
-                veh_select_0 = VehicleSelect(0, vehicles, self.selected_vehicles[0], row=0)
-                self.add_item(veh_select_0)
+                self.add_item(VehicleSelect(0, vehicles, self.selected_vehicles[0], current_row))
+                current_row += 1
         
-        # Row 1: Second vehicle - category and vehicle select
-        cat_select_1 = CategorySelect(1, self.categories, self.selected_categories[1], row=1, optional=False)
-        self.add_item(cat_select_1)
+        # Vehicle 2: Category
+        if current_row < 5:  # Discord max 5 rows
+            self.add_item(CategorySelect(1, self.categories, self.selected_categories[1], current_row, optional=False))
+            current_row += 1
         
-        if self.selected_categories[1] and self.selected_categories[1] != "none":
+        # Vehicle 2: Vehicle select (if category chosen)
+        if current_row < 5 and self.selected_categories[1] and self.selected_categories[1] != "none":
             vehicles = self.categories.get(self.selected_categories[1], [])
             if vehicles:
-                veh_select_1 = VehicleSelect(1, vehicles, self.selected_vehicles[1], row=1)
-                self.add_item(veh_select_1)
+                self.add_item(VehicleSelect(1, vehicles, self.selected_vehicles[1], current_row))
+                current_row += 1
         
-        # Row 2: Third vehicle (optional) - category and vehicle select
-        cat_select_2 = CategorySelect(2, self.categories, self.selected_categories[2], row=2, optional=True)
-        self.add_item(cat_select_2)
+        # Vehicle 3: Category (optional)
+        if current_row < 5:
+            self.add_item(CategorySelect(2, self.categories, self.selected_categories[2], current_row, optional=True))
+            current_row += 1
         
-        if self.selected_categories[2] and self.selected_categories[2] != "none":
+        # Vehicle 3: Vehicle select (if category chosen)
+        if current_row < 5 and self.selected_categories[2] and self.selected_categories[2] != "none":
             vehicles = self.categories.get(self.selected_categories[2], [])
             if vehicles:
-                veh_select_2 = VehicleSelect(2, vehicles, self.selected_vehicles[2], row=2)
-                self.add_item(veh_select_2)
+                self.add_item(VehicleSelect(2, vehicles, self.selected_vehicles[2], current_row))
+                current_row += 1
         
-        # Row 4: Action buttons (skip row 3 to avoid conflicts)
-        compare_btn = CompareButton(row=4)
-        self.add_item(compare_btn)
-        
-        clear_btn = ClearButton(row=4)
-        self.add_item(clear_btn)
+        # Action buttons on last available row
+        if current_row < 5:
+            self.add_item(CompareButton(current_row))
+            self.add_item(ClearButton(current_row))
     
     async def on_timeout(self):
         """Disable all items when view times out."""
