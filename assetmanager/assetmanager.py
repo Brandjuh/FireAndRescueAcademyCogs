@@ -21,7 +21,9 @@ from .utils.embeds import (
     create_sync_changelog_embed,
     create_error_embed,
     create_success_embed,
-    create_list_embed
+    create_list_embed,
+    format_price,
+    format_number
 )
 
 log = logging.getLogger("red.assetmanager")
@@ -329,6 +331,171 @@ class AssetManager(commands.Cog):
             educations = self.db.get_vehicle_educations(vehicle['id'])
             
             embed = create_vehicle_embed(vehicle, buildings, educations)
+            await ctx.send(embed=embed)
+    
+    # ========== COMPARE COMMAND ==========
+    
+    @commands.command(name="compare")
+    async def compare_vehicles(self, ctx: commands.Context, *vehicle_names: str):
+        """
+        Compare 2-3 vehicles side by side.
+        
+        Example: [p]compare "Type 1 fire engine" "Type 2 fire engine"
+        """
+        if len(vehicle_names) < 2:
+            await ctx.send(embed=create_error_embed(
+                "Please provide at least 2 vehicles to compare.\n"
+                "Example: `[p]compare \"Type 1 fire engine\" \"Type 2 fire engine\"`"
+            ))
+            return
+        
+        if len(vehicle_names) > 3:
+            await ctx.send(embed=create_error_embed(
+                "You can only compare up to 3 vehicles at once."
+            ))
+            return
+        
+        async with ctx.typing():
+            vehicles = []
+            
+            # Find each vehicle
+            for vehicle_name in vehicle_names:
+                vehicle = self.db.get_vehicle_by_name(vehicle_name)
+                
+                if not vehicle:
+                    # Try fuzzy search
+                    all_vehicles = self.db.get_all_vehicles()
+                    vehicle_names_list = [v['name'] for v in all_vehicles]
+                    matches = get_close_matches(vehicle_name, vehicle_names_list, n=1, cutoff=0.6)
+                    
+                    if matches:
+                        vehicle = self.db.get_vehicle_by_name(matches[0])
+                    else:
+                        await ctx.send(embed=create_error_embed(
+                            f"Vehicle '{vehicle_name}' not found."
+                        ))
+                        return
+                
+                vehicles.append(vehicle)
+            
+            # Create comparison embed
+            embed = create_comparison_embed(vehicles)
+            await ctx.send(embed=embed)
+    
+    # ========== REQUIREMENTS CHECKER ==========
+    
+    @commands.command(name="check")
+    async def check_requirements(self, ctx: commands.Context, *, vehicle_name: str):
+        """
+        Check requirements for a vehicle.
+        Shows required buildings, training, personnel, and cost.
+        
+        Example: [p]check Type 1 fire engine
+        """
+        async with ctx.typing():
+            vehicle = self.db.get_vehicle_by_name(vehicle_name)
+            
+            if not vehicle:
+                # Try fuzzy search
+                all_vehicles = self.db.get_all_vehicles()
+                vehicle_names = [v['name'] for v in all_vehicles]
+                matches = get_close_matches(vehicle_name, vehicle_names, n=1, cutoff=0.6)
+                
+                if not matches:
+                    await ctx.send(embed=create_error_embed(
+                        f"Vehicle '{vehicle_name}' not found."
+                    ))
+                    return
+                
+                vehicle = self.db.get_vehicle_by_name(matches[0])
+            
+            # Get related data
+            buildings = self.db.get_vehicle_buildings(vehicle['id'])
+            educations = self.db.get_vehicle_educations(vehicle['id'])
+            
+            # Create requirements embed
+            embed = discord.Embed(
+                title=f"✅ Requirements Check: {vehicle['name']}",
+                color=0x3498DB,
+                timestamp=datetime.utcnow()
+            )
+            
+            # Cost
+            if vehicle.get('price'):
+                embed.add_field(
+                    name="💰 Cost",
+                    value=f"**{format_price(vehicle['price'])}**",
+                    inline=True
+                )
+            
+            # Personnel
+            min_p = vehicle.get('min_personnel')
+            max_p = vehicle.get('max_personnel')
+            if min_p is not None or max_p is not None:
+                personnel_text = f"**Min:** {min_p or 0}\n**Max:** {max_p or 0}"
+                if min_p and min_p > 0:
+                    personnel_text += f"\n\n⚠️ Requires at least **{min_p} personnel**"
+                
+                embed.add_field(
+                    name="👥 Personnel Needed",
+                    value=personnel_text,
+                    inline=True
+                )
+            
+            # Required Buildings
+            if buildings:
+                building_list = [f"• {b['name']}" for b in buildings[:5]]
+                if len(buildings) > 5:
+                    building_list.append(f"• ... and {len(buildings) - 5} more")
+                
+                embed.add_field(
+                    name=f"🏢 Possible Buildings ({len(buildings)})",
+                    value="\n".join(building_list),
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="🏢 Possible Buildings",
+                    value="ℹ️ No specific building restrictions",
+                    inline=False
+                )
+            
+            # Required Training
+            if educations:
+                edu_list = [f"• {e['name']}" for e in educations[:5]]
+                if len(educations) > 5:
+                    edu_list.append(f"• ... and {len(educations) - 5} more")
+                
+                embed.add_field(
+                    name=f"🎓 Required Training ({len(educations)})",
+                    value="\n".join(edu_list),
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="🎓 Required Training",
+                    value="✅ No special training required",
+                    inline=False
+                )
+            
+            # Water capabilities summary
+            water_summary = []
+            if vehicle.get('water_tank'):
+                water_summary.append(f"💧 {format_number(vehicle['water_tank'])} gal tank")
+            if vehicle.get('foam_tank'):
+                water_summary.append(f"🧴 {format_number(vehicle['foam_tank'])} gal foam")
+            if vehicle.get('pump_capacity'):
+                water_summary.append(f"⚡ {format_number(vehicle['pump_capacity'])} GPM pump")
+            
+            if water_summary:
+                embed.add_field(
+                    name="💦 Water Capabilities",
+                    value="\n".join(water_summary),
+                    inline=False
+                )
+            
+            embed.set_footer(text="Use [p]vehicle info for more details")
+            
             await ctx.send(embed=embed)
     
     @vehicle.command(name="list", aliases=["l", "all"])
