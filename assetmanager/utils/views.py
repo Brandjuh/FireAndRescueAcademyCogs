@@ -90,27 +90,42 @@ class CompareView(discord.ui.View):
         """Update view with current selections."""
         self.clear_items()
         
-        # Row 0: First vehicle
-        self.add_item(CategorySelect(0, self.categories, self.selected_categories[0], row=0))
-        if self.selected_categories[0]:
+        # Row 0: First vehicle - category and vehicle select
+        cat_select_0 = CategorySelect(0, self.categories, self.selected_categories[0], row=0, optional=False)
+        self.add_item(cat_select_0)
+        
+        if self.selected_categories[0] and self.selected_categories[0] != "none":
             vehicles = self.categories.get(self.selected_categories[0], [])
-            self.add_item(VehicleSelect(0, vehicles, self.selected_vehicles[0], row=0))
+            if vehicles:
+                veh_select_0 = VehicleSelect(0, vehicles, self.selected_vehicles[0], row=0)
+                self.add_item(veh_select_0)
         
-        # Row 1: Second vehicle
-        self.add_item(CategorySelect(1, self.categories, self.selected_categories[1], row=1))
-        if self.selected_categories[1]:
+        # Row 1: Second vehicle - category and vehicle select
+        cat_select_1 = CategorySelect(1, self.categories, self.selected_categories[1], row=1, optional=False)
+        self.add_item(cat_select_1)
+        
+        if self.selected_categories[1] and self.selected_categories[1] != "none":
             vehicles = self.categories.get(self.selected_categories[1], [])
-            self.add_item(VehicleSelect(1, vehicles, self.selected_vehicles[1], row=1))
+            if vehicles:
+                veh_select_1 = VehicleSelect(1, vehicles, self.selected_vehicles[1], row=1)
+                self.add_item(veh_select_1)
         
-        # Row 2: Third vehicle (optional)
-        self.add_item(CategorySelect(2, self.categories, self.selected_categories[2], row=2, optional=True))
+        # Row 2: Third vehicle (optional) - category and vehicle select
+        cat_select_2 = CategorySelect(2, self.categories, self.selected_categories[2], row=2, optional=True)
+        self.add_item(cat_select_2)
+        
         if self.selected_categories[2] and self.selected_categories[2] != "none":
             vehicles = self.categories.get(self.selected_categories[2], [])
-            self.add_item(VehicleSelect(2, vehicles, self.selected_vehicles[2], row=2))
+            if vehicles:
+                veh_select_2 = VehicleSelect(2, vehicles, self.selected_vehicles[2], row=2)
+                self.add_item(veh_select_2)
         
-        # Row 3: Action buttons
-        self.add_item(CompareButton(row=3))
-        self.add_item(ClearButton(row=3))
+        # Row 4: Action buttons (skip row 3 to avoid conflicts)
+        compare_btn = CompareButton(row=4)
+        self.add_item(compare_btn)
+        
+        clear_btn = ClearButton(row=4)
+        self.add_item(clear_btn)
     
     async def on_timeout(self):
         """Disable all items when view times out."""
@@ -157,7 +172,7 @@ class CategorySelect(discord.ui.Select):
             placeholder=placeholder,
             options=options,
             row=row,
-            custom_id=f"category_{selector_index}"
+            custom_id=f"cat_{selector_index}_{optional}"
         )
         self.selector_index = selector_index
     
@@ -208,25 +223,31 @@ class VehicleSelect(discord.ui.Select):
             placeholder=placeholder,
             options=options,
             row=row,
-            custom_id=f"vehicle_{selector_index}"
+            custom_id=f"veh_{selector_index}"
         )
         self.selector_index = selector_index
         self.vehicles = vehicles
     
     async def callback(self, interaction: discord.Interaction):
         """Handle vehicle selection."""
-        view: CompareView = self.view
-        
-        # Find selected vehicle
-        selected_id = int(self.values[0])
-        for vehicle in self.vehicles:
-            if vehicle['game_id'] == selected_id:
-                view.selected_vehicles[self.selector_index] = vehicle
-                break
-        
-        # Update view
-        view.update_view()
-        await interaction.response.edit_message(view=view)
+        try:
+            view: CompareView = self.view
+            
+            # Find selected vehicle
+            selected_id = int(self.values[0])
+            for vehicle in self.vehicles:
+                if vehicle['game_id'] == selected_id:
+                    view.selected_vehicles[self.selector_index] = vehicle
+                    break
+            
+            # Update view
+            view.update_view()
+            await interaction.response.edit_message(view=view)
+        except Exception as e:
+            if interaction.response.is_done():
+                await interaction.followup.send(f"Error: {str(e)}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"Error: {str(e)}", ephemeral=True)
 
 
 class CompareButton(discord.ui.Button):
@@ -237,7 +258,8 @@ class CompareButton(discord.ui.Button):
             label="Compare Vehicles",
             style=discord.ButtonStyle.primary,
             emoji="🔍",
-            row=row
+            row=row,
+            custom_id="compare_btn"
         )
     
     async def callback(self, interaction: discord.Interaction):
@@ -278,7 +300,8 @@ class ClearButton(discord.ui.Button):
             label="Clear All",
             style=discord.ButtonStyle.secondary,
             emoji="🔄",
-            row=row
+            row=row,
+            custom_id="clear_btn"
         )
     
     async def callback(self, interaction: discord.Interaction):
