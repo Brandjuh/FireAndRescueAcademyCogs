@@ -143,10 +143,42 @@ def create_equipment_embed(equipment: Dict[str, Any]) -> discord.Embed:
         timestamp=datetime.utcnow()
     )
     
+    # Price
+    if equipment.get('credits'):
+        embed.add_field(
+            name="💰 Price",
+            value=format_price(equipment['credits']),
+            inline=True
+        )
+    
+    if equipment.get('coins'):
+        embed.add_field(
+            name="🪙 Coins",
+            value=str(equipment['coins']),
+            inline=True
+        )
+    
+    # Size
     if equipment.get('size'):
         embed.add_field(
             name="📏 Size",
             value=str(equipment['size']),
+            inline=True
+        )
+    
+    # Staff requirements
+    min_staff = equipment.get('min_staff')
+    max_staff = equipment.get('max_staff')
+    
+    if min_staff is not None or max_staff is not None:
+        if max_staff:
+            staff_text = f"Min: {min_staff or 0} | Max: {max_staff}"
+        else:
+            staff_text = f"Min: {min_staff or 0}"
+        
+        embed.add_field(
+            name="👥 Staff Required",
+            value=staff_text,
             inline=True
         )
     
@@ -164,6 +196,15 @@ def create_education_embed(education: Dict[str, Any]) -> discord.Embed:
         timestamp=datetime.utcnow()
     )
     
+    # Building type
+    if education.get('building_type'):
+        embed.add_field(
+            name="🏢 Training Location",
+            value=education['building_type'],
+            inline=True
+        )
+    
+    # Duration
     if education.get('duration'):
         embed.add_field(
             name="⏱️ Duration",
@@ -171,11 +212,20 @@ def create_education_embed(education: Dict[str, Any]) -> discord.Embed:
             inline=True
         )
     
+    # Cost
     if education.get('cost'):
         embed.add_field(
             name="💰 Cost",
             value=format_price(education['cost']),
             inline=True
+        )
+    
+    # Key (internal identifier)
+    if education.get('key'):
+        embed.add_field(
+            name="🔑 Key",
+            value=f"`{education['key']}`",
+            inline=False
         )
     
     embed.set_footer(text=f"Training ID: {education['game_id']}")
