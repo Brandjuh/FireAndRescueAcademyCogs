@@ -115,24 +115,42 @@ class AssetManager(commands.Cog):
             log.info("Fetching data from GitHub...")
             all_data = await self.github_sync.fetch_all()
             
+            # Sync vehicles
             if all_data['vehicles']:
                 results['vehicles'] = await self.sync_vehicles(all_data['vehicles'])
+            else:
+                log.warning("No vehicles data received")
             
+            # Sync buildings (OPTIONAL - may fail due to complex JavaScript)
             if all_data['buildings']:
-                results['buildings'] = await self.sync_buildings(all_data['buildings'])
+                try:
+                    results['buildings'] = await self.sync_buildings(all_data['buildings'])
+                except Exception as e:
+                    log.warning(f"Buildings sync failed (non-critical): {e}")
+                    results['buildings'] = {'success': False, 'changes': {}, 'error': 'Parsing failed - contains JavaScript functions'}
+            else:
+                log.warning("No buildings data received (this is expected if parsing failed)")
             
+            # Sync equipment
             if all_data['equipment']:
                 results['equipment'] = await self.sync_equipment(all_data['equipment'])
+            else:
+                log.warning("No equipment data received")
             
+            # Sync educations
             if all_data['educations']:
                 results['educations'] = await self.sync_educations(all_data['educations'])
+            else:
+                log.warning("No educations data received")
             
             await self.config.last_sync.set(datetime.utcnow().isoformat())
             
             if auto:
                 await self.post_changelog(results)
             
-            log.info("Full sync completed successfully")
+            # Count successes
+            success_count = sum(1 for r in results.values() if r['success'])
+            log.info(f"Full sync completed: {success_count}/4 sources successful")
             
         except Exception as e:
             log.error(f"Error during full sync: {e}", exc_info=True)
