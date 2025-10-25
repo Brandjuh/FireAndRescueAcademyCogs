@@ -24,14 +24,6 @@ except Exception:  # pragma: no cover
         get_building,
     )
 
-# ---------- Helpers ----------
-
-def _fmt_score(s: float) -> str:
-    try:
-        return f"{float(s):.0f}"
-    except Exception:
-        return "0"
-
 def _clip(text: Optional[str], limit: int) -> str:
     if not text:
         return ""
@@ -46,79 +38,10 @@ def _crew_text(v: Dict[str, Any]) -> str:
         return "—"
     return f"{mn}–{mx}"
 
-# Agency inference (zelfde als eerder)
-AGENCY_ORDER = ("Fire", "Police", "EMS", "Rescue", "Tow", "FBI", "Other")
+MONEY_EMOJI = "💰"
+COIN_EMOJI = "🪙"
 
-_KEYWORDS = {
-    "Fire": ("fire", "engine", "ladder", "quint", "tanker", "foam", "brush", "wildland", "hazmat", "aerial", "platform", "pumper"),
-    "Police": ("police", "sheriff", "patrol", "k9", "k-9", "swat", "riot", "traffic", "highway", "interceptor", "law", "cop"),
-    "EMS": ("ambulance", "ems", "paramedic", "hems", "medical", "icu"),
-    "Rescue": ("rescue", "usar", "technical"),
-    "Tow": ("tow", "wrecker", "flatbed", "recovery"),
-    "FBI": ("fbi", "federal", "bureau"),
-}
-
-_BUILDING_HINTS = {
-    "Fire": ("fire", "aerial", "rescue", "wildland", "hazmat"),
-    "Police": ("police", "sheriff", "law"),
-    "EMS": ("ambulance", "clinic", "medical", "hospital", "ems"),
-    "Tow": ("tow", "recovery"),
-    "FBI": ("fbi", "federal"),
-}
-
-_ROLE_HINTS = {
-    "Fire": ("engine", "ladder", "hazmat", "foam", "tanker", "quint", "brush"),
-    "Police": ("patrol", "k9", "riot", "swat", "traffic"),
-    "EMS": ("ambulance", "paramedic", "medic"),
-    "Rescue": ("rescue", "usar"),
-    "Tow": ("tow",),
-    "FBI": ("fbi",),
-}
-
-def infer_agency(name: str, roles: List[str], building_names: List[str], building_categories: List[str]) -> str:
-    n_low = (name or "").lower()
-
-    hits: List[str] = []
-    for agency, kws in _KEYWORDS.items():
-        if any(k in n_low for k in kws):
-            hits.append(agency)
-    if hits:
-        for a in AGENCY_ORDER:
-            if a in hits:
-                return a
-
-    rl = " ".join(roles).lower() if roles else ""
-    if rl:
-        hits = []
-        for agency, rk in _ROLE_HINTS.items():
-            if any(k in rl for k in rk):
-                hits.append(agency)
-        if hits:
-            for a in AGENCY_ORDER:
-                if a in hits:
-                    return a
-
-    b_text = " ".join(building_names + building_categories).lower()
-    if b_text:
-        hits = []
-        for agency, bk in _BUILDING_HINTS.items():
-            if any(k in b_text for k in bk):
-                hits.append(agency)
-        if hits:
-            for a in AGENCY_ORDER:
-                if a in hits:
-                    return a
-
-    if "pol" in n_low:
-        return "Police"
-    if "amb" in n_low or "med" in n_low:
-        return "EMS"
-    if "rescue" in n_low:
-        return "Rescue"
-
-    return "Other"
-
-# “kleur per agency” zolang we geen echte kleurvelden uit de data hebben
+# Fallback agency colors if vehicle has no color in DB
 AGENCY_COLORS = {
     "Fire": discord.Color.red(),
     "Police": discord.Color.blue(),
@@ -129,11 +52,18 @@ AGENCY_COLORS = {
     "Other": discord.Color.blurple(),
 }
 
-MONEY_EMOJI = "💰"
-COIN_EMOJI = "🪙"
-
-
-# ---------- Cog ----------
+# very light heuristic; identical to earlier version
+def infer_agency(name: str, roles: List[str], building_names: List[str], building_categories: List[str]) -> str:
+    t = (name or "").lower()
+    if any(k in t for k in ("engine", "ladder", "foam", "tanker", "hazmat", "fire")):
+        return "Fire"
+    if any(k in t for k in ("ambulance", "ems", "paramedic", "hems", "medical")):
+        return "EMS"
+    if any(k in t for k in ("police", "sheriff", "k9", "riot", "swat", "interceptor")):
+        return "Police"
+    if "rescue" in t:
+        return "Rescue"
+    return "Other"
 
 class AssetManager(commands.Cog):
     """Asset database."""
@@ -162,80 +92,58 @@ class AssetManager(commands.Cog):
         if not q:
             await ctx.send("Usage: `assets search <query>`.")
             return
-
         try:
             items = await asyncio.to_thread(fuzzy_search, q, None, 20)
         except Exception as e:
             await ctx.send(box(f"Search failed: {e}", "ini"))
             return
-
         if not items:
             await ctx.send("No results.")
             return
 
         title = _clip(f"Assets search: {q}", 256)
         embed = discord.Embed(title=title, color=discord.Color.blurple())
-
-        total_chars = len(title)
-        max_fields = 10
-        for it in items[:max_fields]:
+        for it in items[:10]:
             typ = str(it.get("type", "item"))
             rid = str(it.get("id", "?"))
             name = it.get("name") or f"{typ.capitalize()} {rid}"
-            score = _fmt_score(float(it.get("score", 0)))
             snippet = it.get("snippet") or "\u200b"
-
-            fname = _clip(f"{name} · {typ} #{rid} · {score}", 256)
-            fval = _clip(snippet, 1024)
-
-            if total_chars + len(fname) + len(fval) + 10 > 5900:
-                break
-
-            embed.add_field(name=fname, value=fval, inline=False)
-            total_chars += len(fname) + len(fval) + 10
-
-        if len(items) > max_fields:
-            embed.set_footer(text=f"{len(items)} results, showing first {embed.fields.__len__()}.")
-
+            embed.add_field(
+                name=_clip(f"{name} · {typ} #{rid} · {int(float(it.get('score', 0)))}", 256),
+                value=_clip(snippet, 1024),
+                inline=False,
+            )
         await ctx.send(embed=embed)
 
     @assets_group.command(name="vehicle")
     async def assets_vehicle(self, ctx: commands.Context, vehicle_id: int):
         """Show detailed info about a vehicle by ID."""
-        def _get() -> Optional[Dict[str, Any]]:
-            return get_vehicle(vehicle_id)
-
-        try:
-            v = await asyncio.to_thread(_get)
-        except Exception as e:
-            await ctx.send(box(f"Lookup failed: {e}", "ini"))
-            return
-
+        v = await asyncio.to_thread(lambda: get_vehicle(vehicle_id))
         if not v:
             await ctx.send(f"Vehicle {vehicle_id} not found.")
             return
 
         name = v.get("name") or f"Vehicle {vehicle_id}"
+
+        # color from data if present, else agency color
+        hex_color = str(v.get("color") or "").lstrip("#")
+        color = None
+        try:
+            if len(hex_color) == 6:
+                color = discord.Color(int(hex_color, 16))
+        except Exception:
+            color = None
+
+        # agency as fallback color chooser
         roles = list(v.get("roles") or [])
         buildings = list(v.get("possible_buildings") or [])
-        schoolings = list(v.get("required_schoolings") or [])
-        equipment = list(v.get("equipment_compat") or [])
-
         b_names = [b.get("name", "") for b in buildings if isinstance(b, dict)]
-        b_cats: List[str] = []
-        for b in buildings:
-            if isinstance(b, dict):
-                cat = b.get("category")
-                if cat:
-                    b_cats.append(str(cat))
-
+        b_cats: List[str] = [str(b.get("category")) for b in buildings if isinstance(b, dict) and b.get("category")]
         agency = infer_agency(name, roles, b_names, b_cats)
-        color = AGENCY_COLORS.get(agency, discord.Color.blurple())
+        if color is None:
+            color = AGENCY_COLORS.get(agency, discord.Color.blurple())
 
-        em = discord.Embed(
-            title=_clip(name, 256),
-            color=color,
-        )
+        em = discord.Embed(title=_clip(name, 256), color=color)
         em.set_footer(text=f"#{vehicle_id}")
 
         # Crew
@@ -249,10 +157,10 @@ class AssetManager(commands.Cog):
             price_parts.append(f"{COIN_EMOJI} {v['price_coins']}")
         em.add_field(name="Price", value=", ".join(price_parts) or "—", inline=True)
 
-        # Agency field
+        # Agency
         em.add_field(name="Agency", value=agency, inline=True)
 
-        # Capabilities
+        # Capabilities: water/foam/pump + equipment capacity
         caps: List[str] = []
         if v.get("water_tank"):
             caps.append(f"Water {v['water_tank']}")
@@ -260,33 +168,34 @@ class AssetManager(commands.Cog):
             caps.append(f"Foam {v['foam_tank']}")
         if v.get("pump_gpm"):
             caps.append(f"Pump {v['pump_gpm']} GPM")
+        if v.get("pump_type"):
+            caps.append(f"Pump type {v['pump_type']}")
+        if v.get("equipment_capacity") is not None:
+            caps.append(f"Equipment {v['equipment_capacity']}")
         em.add_field(name="Capabilities", value=", ".join(caps) or "—", inline=False)
 
         if v.get("rank_required"):
             em.add_field(name="Rank required", value=str(v["rank_required"]), inline=True)
         if v.get("speed"):
             em.add_field(name="Speed", value=str(v["speed"]), inline=True)
-
         if v.get("specials"):
             em.add_field(name="Specials", value=_clip(str(v["specials"]), 1024), inline=False)
 
-        if roles:
-            em.add_field(name="Roles", value=_clip(", ".join(sorted(roles)), 1024), inline=False)
-
+        # Buildings / schoolings / equipment compat if present
         if buildings:
             em.add_field(
                 name="Possible buildings",
                 value=_clip(", ".join(sorted(set(b_names))) or "—", 1024),
                 inline=False,
             )
-
+        schoolings = list(v.get("required_schoolings") or [])
         if schoolings:
             em.add_field(
                 name="Required schoolings",
                 value=_clip(", ".join(f"{s.get('name','?')} ×{s.get('required_count',1)}" for s in schoolings), 1024),
                 inline=False,
             )
-
+        equipment = list(v.get("equipment_compat") or [])
         if equipment:
             em.add_field(
                 name="Equipment compat",
@@ -298,20 +207,16 @@ class AssetManager(commands.Cog):
 
     @assets_group.command(name="equipment")
     async def assets_equipment(self, ctx: commands.Context, equipment_id: int):
-        """Show equipment details by ID."""
         eq = await asyncio.to_thread(lambda: get_equipment(equipment_id))
         if not eq:
             await ctx.send(f"Equipment {equipment_id} not found.")
             return
-        # Geen kleur in DB? Kies nette vaste kleur.
         em = discord.Embed(
             title=_clip(eq.get("name","Equipment"), 256),
             color=discord.Color.dark_gold(),
+            description=_clip(eq.get("description") or "", 2048),
         )
         em.set_footer(text=f"#{equipment_id}")
-        desc = _clip(eq.get("description") or "", 2048)
-        if desc:
-            em.description = desc
         if eq.get("size"):
             em.add_field(name="Size", value=str(eq["size"]), inline=True)
         if eq.get("notes"):
@@ -320,7 +225,6 @@ class AssetManager(commands.Cog):
 
     @assets_group.command(name="schooling")
     async def assets_schooling(self, ctx: commands.Context, schooling_id: int):
-        """Show schooling details by ID."""
         sc = await asyncio.to_thread(lambda: get_schooling(schooling_id))
         if not sc:
             await ctx.send(f"Schooling {schooling_id} not found.")
@@ -338,12 +242,10 @@ class AssetManager(commands.Cog):
 
     @assets_group.command(name="building")
     async def assets_building(self, ctx: commands.Context, building_id: int):
-        """Show building details by ID."""
         b = await asyncio.to_thread(lambda: get_building(building_id))
         if not b:
             await ctx.send(f"Building {building_id} not found.")
             return
-        # We hebben (voor nu) geen 'color' kolom in de DB. Vaste kleur tot we dat opslaan.
         em = discord.Embed(
             title=_clip(b.get("name","Building"), 256),
             color=discord.Color.dark_purple(),
@@ -358,15 +260,9 @@ class AssetManager(commands.Cog):
     @assets_group.command(name="status")
     @checks.is_owner()
     async def assets_status(self, ctx: commands.Context):
-        """Quick status to verify DB/FTS."""
         try:
             probe = await asyncio.to_thread(fuzzy_search, "engine", None, 5)
             ok = bool(probe)
-            lines = [
-                f"Search probe: {'OK' if ok else 'EMPTY'}",
-                "Try: assets search engine",
-                "Try: assets vehicle 1",
-            ]
-            await ctx.send(box("\n".join(lines), "ini"))
+            await ctx.send(box(f"Search probe: {'OK' if ok else 'EMPTY'}", "ini"))
         except Exception as e:
             await ctx.send(box(f"Status failed: {e}", "ini"))
