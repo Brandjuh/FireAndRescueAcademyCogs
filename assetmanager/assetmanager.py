@@ -372,6 +372,206 @@ class AssetManager(commands.Cog):
             
             await ctx.send(embed=embed)
     
+    # ========== BUILDING COMMANDS ==========
+    
+    @commands.group(name="building", aliases=["b"])
+    async def building(self, ctx: commands.Context):
+        """Building information commands."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+    
+    @building.command(name="info")
+    async def building_info(self, ctx: commands.Context, *, building_name: str):
+        """Show detailed information about a building."""
+        async with ctx.typing():
+            building = self.db.get_building_by_name(building_name)
+            
+            if not building:
+                all_buildings = self.db.get_all_buildings()
+                building_names = [b['name'] for b in all_buildings]
+                matches = get_close_matches(building_name, building_names, n=5, cutoff=0.6)
+                
+                if not matches:
+                    await ctx.send(embed=create_error_embed(
+                        f"Building '{building_name}' not found.\n"
+                        "Use `[p]building list` to see all available buildings."
+                    ))
+                    return
+                
+                if len(matches) == 1:
+                    building = self.db.get_building_by_name(matches[0])
+                else:
+                    match_list = "\n".join([f"{i+1}. {name}" for i, name in enumerate(matches)])
+                    await ctx.send(
+                        f"Multiple buildings found matching '{building_name}':\n```\n{match_list}\n```\n"
+                        f"Please be more specific."
+                    )
+                    return
+            
+            embed = create_building_embed(building)
+            await ctx.send(embed=embed)
+    
+    @building.command(name="list", aliases=["l", "all"])
+    async def building_list(self, ctx: commands.Context):
+        """List all available buildings."""
+        async with ctx.typing():
+            buildings = self.db.get_all_buildings()
+            
+            if not buildings:
+                await ctx.send(embed=create_error_embed(
+                    "No buildings found in database. "
+                    "Buildings sync is currently unavailable due to complex data format."
+                ))
+                return
+            
+            display_buildings = buildings[:20]
+            embed = create_list_embed(display_buildings, "building", 1, 1)
+            embed.set_footer(text=f"Showing {min(20, len(buildings))} of {len(buildings)} buildings.")
+            
+            await ctx.send(embed=embed)
+    
+    # ========== EQUIPMENT COMMANDS ==========
+    
+    @commands.group(name="equipment", aliases=["eq"])
+    async def equipment(self, ctx: commands.Context):
+        """Equipment information commands."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+    
+    @equipment.command(name="info")
+    async def equipment_info(self, ctx: commands.Context, *, equipment_name: str):
+        """Show detailed information about equipment."""
+        async with ctx.typing():
+            # Search for equipment
+            all_equipment = self.db.get_all_equipment()
+            
+            # Try exact match first
+            equipment = None
+            for eq in all_equipment:
+                if eq['name'].lower() == equipment_name.lower():
+                    equipment = eq
+                    break
+            
+            if not equipment:
+                # Try fuzzy search
+                equipment_names = [e['name'] for e in all_equipment]
+                matches = get_close_matches(equipment_name, equipment_names, n=5, cutoff=0.6)
+                
+                if not matches:
+                    await ctx.send(embed=create_error_embed(
+                        f"Equipment '{equipment_name}' not found.\n"
+                        "Use `[p]equipment list` to see all available equipment."
+                    ))
+                    return
+                
+                if len(matches) == 1:
+                    for eq in all_equipment:
+                        if eq['name'] == matches[0]:
+                            equipment = eq
+                            break
+                else:
+                    match_list = "\n".join([f"{i+1}. {name}" for i, name in enumerate(matches)])
+                    await ctx.send(
+                        f"Multiple equipment found matching '{equipment_name}':\n```\n{match_list}\n```\n"
+                        f"Please be more specific."
+                    )
+                    return
+            
+            embed = create_equipment_embed(equipment)
+            await ctx.send(embed=embed)
+    
+    @equipment.command(name="list", aliases=["l", "all"])
+    async def equipment_list(self, ctx: commands.Context):
+        """List all available equipment."""
+        async with ctx.typing():
+            equipment = self.db.get_all_equipment()
+            
+            if not equipment:
+                await ctx.send(embed=create_error_embed(
+                    "No equipment found in database. "
+                    "Use `[p]assetsync` to sync data from GitHub."
+                ))
+                return
+            
+            embed = create_list_embed(equipment, "equipment", 1, 1)
+            embed.set_footer(text=f"Total equipment: {len(equipment)}")
+            
+            await ctx.send(embed=embed)
+    
+    # ========== EDUCATION/TRAINING COMMANDS ==========
+    
+    @commands.group(name="training", aliases=["edu", "education"])
+    async def training(self, ctx: commands.Context):
+        """Training/Education information commands."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+    
+    @training.command(name="info")
+    async def training_info(self, ctx: commands.Context, *, training_name: str):
+        """Show detailed information about a training."""
+        async with ctx.typing():
+            # Search for training
+            all_trainings = self.db.get_all_educations()
+            
+            # Try exact match first
+            training = None
+            for t in all_trainings:
+                if t['name'].lower() == training_name.lower():
+                    training = t
+                    break
+            
+            if not training:
+                # Try fuzzy search
+                training_names = [t['name'] for t in all_trainings]
+                matches = get_close_matches(training_name, training_names, n=5, cutoff=0.6)
+                
+                if not matches:
+                    await ctx.send(embed=create_error_embed(
+                        f"Training '{training_name}' not found.\n"
+                        "Use `[p]training list` to see all available trainings."
+                    ))
+                    return
+                
+                if len(matches) == 1:
+                    for t in all_trainings:
+                        if t['name'] == matches[0]:
+                            training = t
+                            break
+                else:
+                    match_list = "\n".join([f"{i+1}. {name}" for i, name in enumerate(matches)])
+                    await ctx.send(
+                        f"Multiple trainings found matching '{training_name}':\n```\n{match_list}\n```\n"
+                        f"Please be more specific."
+                    )
+                    return
+            
+            embed = create_education_embed(training)
+            await ctx.send(embed=embed)
+    
+    @training.command(name="list", aliases=["l", "all"])
+    async def training_list(self, ctx: commands.Context):
+        """List all available trainings."""
+        async with ctx.typing():
+            trainings = self.db.get_all_educations()
+            
+            if not trainings:
+                await ctx.send(embed=create_error_embed(
+                    "No trainings found in database. "
+                    "Use `[p]assetsync` to sync data from GitHub."
+                ))
+                return
+            
+            # Show up to 30 trainings
+            display_trainings = trainings[:30]
+            embed = create_list_embed(display_trainings, "education", 1, 1)
+            
+            if len(trainings) > 30:
+                embed.set_footer(text=f"Showing 30 of {len(trainings)} trainings.")
+            else:
+                embed.set_footer(text=f"Total trainings: {len(trainings)}")
+            
+            await ctx.send(embed=embed)
+    
     @commands.command(name="assetsync")
     @checks.is_owner()
     async def manual_sync(self, ctx: commands.Context):
