@@ -118,7 +118,13 @@ class AssetManager(commands.Cog):
             log.info("Fetching data from GitHub...")
             all_data = await self.github_sync.fetch_all()
             
-            # Sync vehicles
+            # ===== CRITICAL FIX: Sync educations FIRST so they exist when linking vehicles =====
+            if all_data['educations']:
+                results['educations'] = await self.sync_educations(all_data['educations'])
+            else:
+                log.warning("No educations data received")
+            
+            # Now sync vehicles (can link to educations that now exist)
             if all_data['vehicles']:
                 results['vehicles'] = await self.sync_vehicles(all_data['vehicles'])
             else:
@@ -140,12 +146,6 @@ class AssetManager(commands.Cog):
             else:
                 log.warning("No equipment data received")
             
-            # Sync educations
-            if all_data['educations']:
-                results['educations'] = await self.sync_educations(all_data['educations'])
-            else:
-                log.warning("No educations data received")
-            
             await self.config.last_sync.set(datetime.utcnow().isoformat())
             
             if auto:
@@ -164,13 +164,18 @@ class AssetManager(commands.Cog):
         return results
     
     async def sync_vehicles(self, vehicles_data: dict) -> dict:
-        """Sync vehicles to database."""
+        """Sync vehicles to database with FIXED education linking."""
         try:
             old_vehicles = self.db.get_all_vehicles()
             changes = self.github_sync.detect_changes(old_vehicles, vehicles_data)
             
-            # Get all educations to match with training keys
+            # ===== CRITICAL: Get educations AFTER they've been synced =====
             all_educations = self.db.get_all_educations()
+            
+            if not all_educations:
+                log.warning("No educations found in database - training links cannot be created!")
+            else:
+                log.debug(f"Found {len(all_educations)} educations for linking")
             
             training_links_made = 0
             
@@ -187,24 +192,25 @@ class AssetManager(commands.Cog):
                     if building:
                         self.db.link_vehicle_building(vehicle_id, building['id'])
                 
-                # Link educations/trainings using training keys
-                training_keys = normalized.get('training_keys', [])
+                # ===== FIXED: Link educations/trainings using training keys =====
+                training_keys = normalized.get('education_keys', [])  # Changed from 'training_keys' to match github_sync output
+                
                 if training_keys:
                     log.debug(f"Vehicle {normalized['name']} has training keys: {training_keys}")
-                
-                for training_key in training_keys:
-                    # Find education with matching key
-                    matched = False
-                    for education in all_educations:
-                        if education.get('key') == training_key:
-                            self.db.link_vehicle_education(vehicle_id, education['id'])
-                            training_links_made += 1
-                            matched = True
-                            log.debug(f"Linked {normalized['name']} -> {education['name']}")
-                            break
                     
-                    if not matched:
-                        log.warning(f"No education found for training key: {training_key} (vehicle: {normalized['name']})")
+                    for training_key in training_keys:
+                        # Find education with matching key
+                        matched = False
+                        for education in all_educations:
+                            if education.get('key') == training_key:
+                                self.db.link_vehicle_education(vehicle_id, education['id'])
+                                training_links_made += 1
+                                matched = True
+                                log.info(f"✅ Linked {normalized['name']} -> {education['name']} (key: {training_key})")
+                                break
+                        
+                        if not matched:
+                            log.warning(f"⚠️ Training key '{training_key}' not found in educations for {normalized['name']}")
             
             self.db.log_sync('vehicles', changes, True)
             log.info(f"Synced vehicles: {len(vehicles_data)} total, {training_links_made} training links created")
@@ -388,13 +394,20 @@ class AssetManager(commands.Cog):
                 title="🔍 Interactive Vehicle Comparison",
                 description=(
                     "**How to use:**\n"
-                    "1️⃣ Choose a category, then select a vehicle\n"
-                    "2️⃣ Choose a category, then select a vehicle\n"
-                    "3️⃣ (Optional) Choose a category and vehicle, or skip\n"
+                    "1️⃣ Choose a category for Vehicle 1\n"
+                    "2️⃣ Choose a category for Vehicle 2\n"
+                    "3️⃣ (Optional) Choose a category for Vehicle 3, or skip\n"
                     "4️⃣ Click **Compare Vehicles** to see the results!\n\n"
-                    "💡 *Tip: Use Clear All to start over*"
+                    "💡 *Tip: Use Clear All to start over*\n"
+                    "💡 *After choosing a category, a popup will let you select the vehicle*"
                 ),
                 color=0x3498DB
+            )
+            
+            embed.add_field(
+                name="📊 Current Selection",
+                value=view.get_status_text(),
+                inline=False
             )
             
             embed.set_footer(text=f"This menu is for {ctx.author.display_name} only • Expires in 5 minutes")
@@ -921,13 +934,20 @@ class AssetManager(commands.Cog):
             
             # Show normalized data
             normalized = self.github_sync.normalize_vehicle_data(game_id, raw_data)
-            await ctx.send(f"**Training keys found:** `{normalized.get('training_keys', [])}`")
+            await ctx.send(f"**Training keys found:** `{normalized.get('education_keys', [])}`")
             
             # Show all educations with keys
             all_educations = self.db.get_all_educations()
             education_keys = [f"{e['name']}: {e.get('key')}" for e in all_educations if e.get('key')]
             
             await ctx.send(f"**Available education keys ({len(education_keys)}):**\n```\n" + "\n".join(education_keys[:20]) + "\n```")
+            
+            # Check if keys match
+            vehicle_keys = normalized.get('education_keys', [])
+            for vkey in vehicle_keys:
+                matched = any(e.get('key') == vkey for e in all_educations)
+                status = "✅" if matched else "❌"
+                await ctx.send(f"{status} Key `{vkey}` {'found' if matched else 'NOT FOUND'} in database")
             
         except Exception as e:
             await ctx.send(f"❌ Error: {str(e)}")
