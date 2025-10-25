@@ -25,6 +25,7 @@ from .utils.embeds import (
     format_price,
     format_number
 )
+from .utils.views import CompareView
 
 log = logging.getLogger("red.assetmanager")
 
@@ -335,17 +336,60 @@ class AssetManager(commands.Cog):
     
     # ========== COMPARE COMMAND ==========
     
+    @commands.command(name="comparemenu", aliases=["cm"])
+    async def compare_menu(self, ctx: commands.Context):
+        """
+        Interactive vehicle comparison menu.
+        Select vehicles from dropdown menus and compare them!
+        
+        Example: [p]comparemenu
+        """
+        async with ctx.typing():
+            # Get all vehicles
+            vehicles = self.db.get_all_vehicles()
+            
+            if not vehicles:
+                await ctx.send(embed=create_error_embed(
+                    "No vehicles found in database. "
+                    "Use `[p]assetsync` to sync data from GitHub."
+                ))
+                return
+            
+            # Create interactive view
+            view = CompareView(vehicles, timeout=180)
+            
+            # Create initial embed
+            embed = discord.Embed(
+                title="🔍 Interactive Vehicle Comparison",
+                description=(
+                    "**Select vehicles to compare:**\n"
+                    "1️⃣ Choose your first vehicle\n"
+                    "2️⃣ Choose your second vehicle\n"
+                    "3️⃣ Optionally choose a third vehicle\n"
+                    "4️⃣ Click **Compare Vehicles** to see the results!\n\n"
+                    "💡 *Tip: You can use the Clear button to start over*"
+                ),
+                color=0x3498DB
+            )
+            
+            embed.set_footer(text="This menu will expire in 3 minutes")
+            
+            await ctx.send(embed=embed, view=view)
+    
     @commands.command(name="compare")
     async def compare_vehicles(self, ctx: commands.Context, *vehicle_names: str):
         """
-        Compare 2-3 vehicles side by side.
+        Compare 2-3 vehicles side by side (manual entry).
         
         Example: [p]compare "Type 1 fire engine" "Type 2 fire engine"
+        
+        💡 Tip: Use [p]comparemenu for an easier interactive menu!
         """
         if len(vehicle_names) < 2:
             await ctx.send(embed=create_error_embed(
                 "Please provide at least 2 vehicles to compare.\n"
-                "Example: `[p]compare \"Type 1 fire engine\" \"Type 2 fire engine\"`"
+                "**Example:** `[p]compare \"Type 1 fire engine\" \"Type 2 fire engine\"`\n\n"
+                "💡 **Easier option:** Use `[p]comparemenu` for an interactive menu!"
             ))
             return
         
