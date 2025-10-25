@@ -5,6 +5,7 @@ from redbot.core.data_manager import cog_data_path
 import logging
 import asyncio
 import json
+import re
 from datetime import datetime, timedelta
 from typing import Optional, List
 from difflib import get_close_matches
@@ -518,61 +519,102 @@ class AssetManager(commands.Cog):
             
             if raw_content:
                 await ctx.send(f"✅ Raw fetch succeeded! Content length: {len(raw_content)} characters")
-                # Show first 500 chars
                 await ctx.send(f"First 500 characters:\n```typescript\n{raw_content[:500]}\n```")
             else:
-                await ctx.send("❌ Raw fetch failed - could not download file from GitHub")
-                await ctx.send(f"URL attempted: {url}")
+                await ctx.send("❌ Raw fetch failed")
                 return
             
-            # Test 2: Parse the content
+            # Test 2: Manual parse with error details
             await msg.edit(content="🔍 Step 2/5: Testing TypeScript parsing...")
-            parsed = self.github_sync.parse_typescript_export(raw_content)
             
-            if parsed:
-                await ctx.send(f"✅ Parse succeeded! Found {len(parsed)} vehicles")
-                # Show first vehicle
-                first_key = list(parsed.keys())[0]
-                first_vehicle = parsed[first_key]
-                sample = json.dumps(first_vehicle, indent=2)[:1000]
-                await ctx.send(f"First vehicle (ID {first_key}):\n```json\n{sample}\n```")
-            else:
-                await ctx.send("❌ Parse failed - could not parse TypeScript to JSON")
-                await ctx.send("Showing last 500 chars of content:")
-                await ctx.send(f"```typescript\n{raw_content[-500:]}\n```")
+            # Try parsing with detailed error reporting
+            import traceback
+            try:
+                parsed = self.github_sync.parse_typescript_export(raw_content)
+                if parsed:
+                    await ctx.send(f"✅ Parse succeeded! Found {len(parsed)} vehicles")
+                    first_key = list(parsed.keys())[0]
+                    first_vehicle = parsed[first_key]
+                    sample = json.dumps(first_vehicle, indent=2)[:1000]
+                    await ctx.send(f"First vehicle (ID {first_key}):\n```json\n{sample}\n```")
+                else:
+                    await ctx.send("❌ Parse returned None - check Red logs for details")
+                    
+                    # Show what the parser tried to do
+                    await ctx.send("Attempting manual parse to see the error...")
+                    
+                    # Do manual steps
+                    content = raw_content
+                    content = re.sub(r'//.*', '', content)
+                    content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
+                    content = re.sub(r'import\s+.*?;', '', content, flags=re.DOTALL)
+                    
+                    pattern = r'export\s+default\s+(\{[\s\S]+?\})\s*(?:satisfies|as\s+const)?[^;]*;?\s*
+
+
+async def setup(bot: Red):
+    """Add cog to bot."""
+    cog = AssetManager(bot)
+    await bot.add_cog(cog)
+    await cog.cog_load()
+
+                    match = re.search(pattern, content)
+                    
+                    if not match:
+                        await ctx.send("❌ Could not find export pattern")
+                        return
+                    
+                    obj_str = match.group(1)
+                    await ctx.send(f"Extracted object length: {len(obj_str)} chars")
+                    
+                    # Apply transformations
+                    obj_str = re.sub(r'(\d)_(\d)', r'\1\2', obj_str)
+                    obj_str = obj_str.replace("'", '"')
+                    obj_str = re.sub(r'(\s+)(\d+)(\s*):', r'\1"\2"\3:', obj_str)
+                    obj_str = re.sub(r'([,\{]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*):', r'\1"\2"\3:', obj_str)
+                    obj_str = re.sub(r',(\s*[\}\]])', r'\1', obj_str)
+                    
+                    await ctx.send(f"After transformations, first 800 chars:\n```json\n{obj_str[:800]}\n```")
+                    
+                    # Try to parse and catch specific error
+                    try:
+                        test_parse = json.loads(obj_str)
+                        await ctx.send("✅ Manual parse succeeded!")
+                    except json.JSONDecodeError as je:
+                        await ctx.send(f"❌ JSON Error at position {je.pos}: {je.msg}")
+                        if je.pos:
+                            start = max(0, je.pos - 150)
+                            end = min(len(obj_str), je.pos + 150)
+                            error_context = obj_str[start:end]
+                            await ctx.send(f"Error context:\n```\n{error_context}\n```")
+                    
+                    return
+                    
+            except Exception as parse_error:
+                tb = ''.join(traceback.format_exception(type(parse_error), parse_error, parse_error.__traceback__))
+                await ctx.send(f"❌ Parse exception:\n```python\n{tb[:1800]}\n```")
                 return
             
-            # Test 3: Fetch vehicles using the method
-            await msg.edit(content="🔍 Step 3/5: Testing fetch_vehicles method...")
-            vehicles = await self.github_sync.fetch_vehicles()
-            
-            if vehicles:
-                await ctx.send(f"✅ fetch_vehicles succeeded! Got {len(vehicles)} vehicles")
-            else:
-                await ctx.send("❌ fetch_vehicles failed")
-                return
-            
-            # Test 4: Normalize vehicle data
-            await msg.edit(content="🔍 Step 4/5: Testing data normalization...")
+            # Test 3: Normalize
+            await msg.edit(content="🔍 Step 3/5: Testing data normalization...")
             test_vehicle = self.github_sync.normalize_vehicle_data(
-                list(vehicles.keys())[0], 
-                list(vehicles.values())[0]
+                list(parsed.keys())[0], 
+                list(parsed.values())[0]
             )
             await ctx.send(f"✅ Normalization succeeded")
-            await ctx.send(f"Normalized data:\n```json\n{json.dumps(test_vehicle, indent=2)[:1000]}\n```")
+            await ctx.send(f"Normalized:\n```json\n{json.dumps(test_vehicle, indent=2)[:1000]}\n```")
             
-            # Test 5: Try to insert
-            await msg.edit(content="🔍 Step 5/5: Testing database insert...")
+            # Test 4: Database insert
+            await msg.edit(content="🔍 Step 4/5: Testing database insert...")
             vehicle_id = self.db.insert_vehicle(test_vehicle)
             await ctx.send(f"✅ Database insert succeeded! Vehicle ID: {vehicle_id}")
             
-            await msg.edit(content="✅ All debug tests passed! Sync should work now.")
+            await msg.edit(content="✅ All tests passed!")
             
         except Exception as e:
-            await ctx.send(f"❌ Error during debug:\n```\n{str(e)}\n```")
+            await ctx.send(f"❌ Error:\n```\n{str(e)}\n```")
             import traceback
             tb = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
-            # Split long traceback
             for i in range(0, len(tb), 1900):
                 await ctx.send(f"```python\n{tb[i:i+1900]}\n```")
 
