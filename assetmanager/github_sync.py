@@ -78,41 +78,46 @@ class GitHubSync:
             obj_str = re.sub(r'\.\.\.\s*Array\s*\(\s*\d+\s*\)\s*\.fill\s*\([^)]+\)', '[]', obj_str)
             obj_str = re.sub(r'\.\.\.\s*new\s+Array\s*\(\s*\d+\s*\)\s*\.fill\s*\([^)]+\)', '[]', obj_str)
             
-            # CRITICAL: Remove any properties ending in "Function" (these contain arrow functions)
-            # Remove the entire property including its value
+            # CRITICAL: Remove JavaScript functions and code
+            # Strategy: Remove any line that contains JavaScript operators or keywords
             lines = obj_str.split('\n')
             filtered_lines = []
-            skip_function = False
-            paren_depth = 0
-            brace_depth = 0
             
             for line in lines:
-                # Check if line contains a property ending in "Function":
-                if re.search(r'\w+Function["\']?\s*:', line) and not skip_function:
-                    skip_function = True
-                    paren_depth = 0
-                    brace_depth = 0
+                stripped = line.strip()
+                
+                # Skip empty lines
+                if not stripped:
+                    filtered_lines.append(line)
                     continue
                 
-                if skip_function:
-                    # Track depth
-                    paren_depth += line.count('(') - line.count(')')
-                    brace_depth += line.count('{') - line.count('}')
-                    
-                    # Check if we reached the end (comma at depth 0)
-                    if paren_depth <= 0 and brace_depth <= 0:
-                        # Look for comma or closing brace/bracket
-                        if re.search(r'[,\}\]]', line):
-                            skip_function = False
-                            # Only skip this line if it's just the comma/brace
-                            if line.strip() not in [',', '},', '],', '}', ']']:
-                                filtered_lines.append(line)
-                            continue
+                # Skip lines with JavaScript operators/keywords
+                js_patterns = [
+                    '=>',           # Arrow functions
+                    '??',           # Nullish coalescing
+                    'typeof',       # Type checking
+                    'Math.',        # Math operations
+                    'Object.',      # Object operations
+                    'buildingsByType',  # Variable references
+                    'boughtExtensions', # Variable references
+                    '.length',      # Property access
+                    '.floor',       # Method calls
+                    '.keys',        # Method calls
+                ]
+                
+                # Check if line contains any JavaScript patterns
+                has_js = any(pattern in line for pattern in js_patterns)
+                
+                # Also skip standalone closing parens/braces with commas
+                if stripped in [')', '),', '},', '],']:
                     continue
                 
-                # Also remove lines that look like JavaScript code (not data)
-                # Lines with => or ?? or complex expressions
-                if '=>' in line or '??' in line:
+                # Skip lines that are just operations (no colon means not a property)
+                if has_js and ':' not in line:
+                    continue
+                
+                # Skip property definitions that end with Function
+                if re.search(r'"\w*Function"\s*:', line):
                     continue
                 
                 filtered_lines.append(line)
