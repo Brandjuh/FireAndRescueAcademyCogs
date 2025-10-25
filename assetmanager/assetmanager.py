@@ -40,21 +40,18 @@ class AssetManager(commands.Cog):
             "changelog_channel_id": None,
             "auto_sync_enabled": True,
             "last_sync": None,
-            "sync_hour": 0  # UTC hour for daily sync
+            "sync_hour": 0
         }
         
         self.config.register_global(**default_global)
         
-        # Initialize database
         self.db_path = cog_data_path(self) / "assets.db"
         self.db = AssetDatabase(self.db_path)
         self.db.connect()
         self.db.initialize_tables()
         
-        # Initialize GitHub sync
         self.github_sync = GitHubSync()
         
-        # Background task
         self.sync_task = None
         
         log.info("AssetManager initialized")
@@ -73,21 +70,17 @@ class AssetManager(commands.Cog):
         self.sync_task = self.bot.loop.create_task(self.daily_sync_loop())
         log.info("Daily sync task started")
     
-    # ========== BACKGROUND SYNC ==========
-    
     async def daily_sync_loop(self):
         """Background task for daily syncing."""
         await self.bot.wait_until_red_ready()
         
         while True:
             try:
-                # Check if auto sync is enabled
                 auto_sync = await self.config.auto_sync_enabled()
                 if not auto_sync:
-                    await asyncio.sleep(3600)  # Check every hour
+                    await asyncio.sleep(3600)
                     continue
                 
-                # Calculate time until next sync
                 now = datetime.utcnow()
                 sync_hour = await self.config.sync_hour()
                 next_sync = now.replace(hour=sync_hour, minute=0, second=0, microsecond=0)
@@ -100,7 +93,6 @@ class AssetManager(commands.Cog):
                 
                 await asyncio.sleep(wait_seconds)
                 
-                # Perform sync
                 log.info("Starting automated sync")
                 await self.perform_full_sync(auto=True)
                 
@@ -108,7 +100,7 @@ class AssetManager(commands.Cog):
                 break
             except Exception as e:
                 log.error(f"Error in daily sync loop: {e}", exc_info=True)
-                await asyncio.sleep(3600)  # Wait an hour before retrying
+                await asyncio.sleep(3600)
     
     async def perform_full_sync(self, auto: bool = False) -> dict:
         """Perform full sync of all data sources."""
@@ -120,30 +112,23 @@ class AssetManager(commands.Cog):
         }
         
         try:
-            # Fetch all data
             log.info("Fetching data from GitHub...")
             all_data = await self.github_sync.fetch_all()
             
-            # Sync vehicles
             if all_data['vehicles']:
                 results['vehicles'] = await self.sync_vehicles(all_data['vehicles'])
             
-            # Sync buildings
             if all_data['buildings']:
                 results['buildings'] = await self.sync_buildings(all_data['buildings'])
             
-            # Sync equipment
             if all_data['equipment']:
                 results['equipment'] = await self.sync_equipment(all_data['equipment'])
             
-            # Sync educations
             if all_data['educations']:
                 results['educations'] = await self.sync_educations(all_data['educations'])
             
-            # Update last sync time
             await self.config.last_sync.set(datetime.utcnow().isoformat())
             
-            # Post changelog if auto sync and channel is set
             if auto:
                 await self.post_changelog(results)
             
@@ -152,7 +137,6 @@ class AssetManager(commands.Cog):
         except Exception as e:
             log.error(f"Error during full sync: {e}", exc_info=True)
             
-            # Notify bot owner on error
             if auto:
                 await self.notify_owner_error(str(e))
         
@@ -164,15 +148,12 @@ class AssetManager(commands.Cog):
             old_vehicles = self.db.get_all_vehicles()
             changes = self.github_sync.detect_changes(old_vehicles, vehicles_data)
             
-            # Process each vehicle
             for game_id, raw_data in vehicles_data.items():
                 normalized = self.github_sync.normalize_vehicle_data(game_id, raw_data)
                 vehicle_id = self.db.insert_vehicle(normalized)
                 
-                # Clear old relations
                 self.db.clear_all_relations(vehicle_id)
                 
-                # Link buildings
                 possible_buildings = raw_data.get('possibleBuildings', [])
                 for building_game_id in possible_buildings:
                     building = self.db.get_building_by_name(str(building_game_id))
@@ -260,7 +241,6 @@ class AssetManager(commands.Cog):
             log.warning(f"Changelog channel {channel_id} not found")
             return
         
-        # Only post if there are actual changes
         has_changes = False
         for source, data in results.items():
             if data.get('success') and any(data.get('changes', {}).values()):
@@ -270,7 +250,6 @@ class AssetManager(commands.Cog):
         if not has_changes:
             return
         
-        # Post embed for each source with changes
         for source, data in results.items():
             if data.get('success') and any(data.get('changes', {}).values()):
                 embed = create_sync_changelog_embed(data['changes'], source)
@@ -294,8 +273,6 @@ class AssetManager(commands.Cog):
         except Exception as e:
             log.error(f"Failed to notify owner: {e}")
     
-    # ========== VEHICLE COMMANDS ==========
-    
     @commands.group(name="vehicle", aliases=["v"])
     async def vehicle(self, ctx: commands.Context):
         """Vehicle information commands."""
@@ -304,16 +281,10 @@ class AssetManager(commands.Cog):
     
     @vehicle.command(name="info")
     async def vehicle_info(self, ctx: commands.Context, *, vehicle_name: str):
-        """
-        Show detailed information about a vehicle.
-        
-        Example: [p]vehicle info Type 1 Engine
-        """
+        """Show detailed information about a vehicle."""
         async with ctx.typing():
-            # Try exact match first
             vehicle = self.db.get_vehicle_by_name(vehicle_name)
             
-            # If no exact match, try fuzzy search
             if not vehicle:
                 all_vehicles = self.db.get_all_vehicles()
                 vehicle_names = [v['name'] for v in all_vehicles]
@@ -329,7 +300,6 @@ class AssetManager(commands.Cog):
                 if len(matches) == 1:
                     vehicle = self.db.get_vehicle_by_name(matches[0])
                 else:
-                    # Multiple matches - let user choose
                     match_list = "\n".join([f"{i+1}. {name}" for i, name in enumerate(matches)])
                     await ctx.send(
                         f"Multiple vehicles found matching '{vehicle_name}':\n```\n{match_list}\n```\n"
@@ -337,11 +307,9 @@ class AssetManager(commands.Cog):
                     )
                     return
             
-            # Get related data
             buildings = self.db.get_vehicle_buildings(vehicle['id'])
             educations = self.db.get_vehicle_educations(vehicle['id'])
             
-            # Create and send embed
             embed = create_vehicle_embed(vehicle, buildings, educations)
             await ctx.send(embed=embed)
     
@@ -358,7 +326,6 @@ class AssetManager(commands.Cog):
                 ))
                 return
             
-            # For now, show first 20
             display_vehicles = vehicles[:20]
             embed = create_list_embed(display_vehicles, "vehicle", 1, 1)
             embed.set_footer(text=f"Showing 20 of {len(vehicles)} vehicles. Use [p]vehicle search for specific vehicles.")
@@ -367,11 +334,7 @@ class AssetManager(commands.Cog):
     
     @vehicle.command(name="search", aliases=["s", "find"])
     async def vehicle_search(self, ctx: commands.Context, *, query: str):
-        """
-        Search for vehicles by name.
-        
-        Example: [p]vehicle search engine
-        """
+        """Search for vehicles by name."""
         async with ctx.typing():
             results = self.db.search_vehicles(query)
             
@@ -381,7 +344,6 @@ class AssetManager(commands.Cog):
                 ))
                 return
             
-            # Show up to 15 results
             display_results = results[:15]
             embed = create_list_embed(display_results, "vehicle", 1, 1)
             
@@ -392,20 +354,16 @@ class AssetManager(commands.Cog):
             
             await ctx.send(embed=embed)
     
-    # ========== ADMIN COMMANDS ==========
-    
     @commands.command(name="assetsync")
     @checks.is_owner()
     async def manual_sync(self, ctx: commands.Context):
-        """Manually sync asset data from GitHub. (Bot owner only)"""
-        msg = await ctx.send("🔄 Starting manual sync... This may take a moment.")
+        """Manually sync asset data from GitHub."""
+        msg = await ctx.send("🔄 Starting manual sync...")
         
         try:
-            # Test GitHub connection first
             await msg.edit(content="🔄 Testing GitHub connection...")
-            test_content = await self.github_sync.fetch_file(
-                "https://raw.githubusercontent.com/LSS-Manager/LSSM-V.4/dev/src/i18n/en_US/vehicles.ts"
-            )
+            test_url = "https://raw.githubusercontent.com/LSS-Manager/LSSM-V.4/dev/src/i18n/en_US/vehicles.ts"
+            test_content = await self.github_sync.fetch_file(test_url)
             
             if not test_content:
                 await msg.edit(
@@ -420,7 +378,6 @@ class AssetManager(commands.Cog):
             await msg.edit(content="🔄 Syncing data from GitHub...")
             results = await self.perform_full_sync(auto=False)
             
-            # Create summary embed
             embed = discord.Embed(
                 title="✅ Sync Completed",
                 color=0x00FF00,
@@ -454,13 +411,11 @@ class AssetManager(commands.Cog):
                     value="\n".join(errors),
                     inline=False
                 )
-                embed.color = 0xFFA500  # Orange for partial failure
+                embed.color = 0xFFA500
             
             await msg.edit(content=None, embed=embed)
             
-            # Send detailed error info
             if errors:
-                last_sync = self.db.get_last_sync()
                 await ctx.send(
                     f"⚠️ Some sources failed. Check console logs for details.\n"
                     f"Try `[p]assetdebug` for more information."
@@ -476,7 +431,6 @@ class AssetManager(commands.Cog):
                 embed=create_error_embed(f"Sync failed: {str(e)}")
             )
             
-            # Send full traceback in separate message
             for i in range(0, len(tb), 1900):
                 await ctx.send(f"```python\n{tb[i:i+1900]}\n```")
     
@@ -507,112 +461,34 @@ class AssetManager(commands.Cog):
     @commands.command(name="assetdebug")
     @checks.is_owner()
     async def debug_sync(self, ctx: commands.Context):
-        """Debug sync issues - shows detailed error info."""
-        msg = await ctx.send("🔍 Testing GitHub connection...")
+        """Debug sync issues."""
+        msg = await ctx.send("🔍 Testing...")
         
         try:
-            # Test 1: Raw fetch
-            await msg.edit(content="🔍 Step 1/5: Testing raw GitHub fetch...")
-            url = "https://raw.githubusercontent.com/LSS-Manager/LSSM-V.4/dev/src/i18n/en_US/vehicles.ts"
+            await msg.edit(content="🔍 Step 1: Fetching from GitHub...")
+            vehicles = await self.github_sync.fetch_vehicles()
             
-            raw_content = await self.github_sync.fetch_file(url)
-            
-            if raw_content:
-                await ctx.send(f"✅ Raw fetch succeeded! Content length: {len(raw_content)} characters")
-                await ctx.send(f"First 500 characters:\n```typescript\n{raw_content[:500]}\n```")
+            if vehicles:
+                await ctx.send(f"✅ Fetched {len(vehicles)} vehicles")
+                first_key = list(vehicles.keys())[0]
+                first_vehicle = vehicles[first_key]
+                sample = json.dumps(first_vehicle, indent=2)[:1000]
+                await ctx.send(f"Sample:\n```json\n{sample}\n```")
+                
+                await msg.edit(content="🔍 Step 2: Normalizing...")
+                test_vehicle = self.github_sync.normalize_vehicle_data(first_key, first_vehicle)
+                await ctx.send(f"✅ Normalized")
+                
+                await msg.edit(content="🔍 Step 3: Inserting to DB...")
+                vehicle_id = self.db.insert_vehicle(test_vehicle)
+                await ctx.send(f"✅ Inserted with ID {vehicle_id}")
+                
+                await msg.edit(content="✅ All tests passed!")
             else:
-                await ctx.send("❌ Raw fetch failed")
-                return
-            
-            # Test 2: Manual parse with error details
-            await msg.edit(content="🔍 Step 2/5: Testing TypeScript parsing...")
-            
-            # Try parsing with detailed error reporting
-            import traceback
-            try:
-                parsed = self.github_sync.parse_typescript_export(raw_content)
-                if parsed:
-                    await ctx.send(f"✅ Parse succeeded! Found {len(parsed)} vehicles")
-                    first_key = list(parsed.keys())[0]
-                    first_vehicle = parsed[first_key]
-                    sample = json.dumps(first_vehicle, indent=2)[:1000]
-                    await ctx.send(f"First vehicle (ID {first_key}):\n```json\n{sample}\n```")
-                else:
-                    await ctx.send("❌ Parse returned None - check Red logs for details")
-                    
-                    # Show what the parser tried to do
-                    await ctx.send("Attempting manual parse to see the error...")
-                    
-                    # Do manual steps
-                    content = raw_content
-                    content = re.sub(r'//.*', '', content)
-                    content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
-                    content = re.sub(r'import\s+.*?;', '', content, flags=re.DOTALL)
-                    
-                    pattern = r'export\s+default\s+(\{[\s\S]+?\})\s*(?:satisfies|as\s+const)?[^;]*;?\s*
-
-
-async def setup(bot: Red):
-    """Add cog to bot."""
-    cog = AssetManager(bot)
-    await bot.add_cog(cog)
-    await cog.cog_load()
-
-                    match = re.search(pattern, content)
-                    
-                    if not match:
-                        await ctx.send("❌ Could not find export pattern")
-                        return
-                    
-                    obj_str = match.group(1)
-                    await ctx.send(f"Extracted object length: {len(obj_str)} chars")
-                    
-                    # Apply transformations
-                    obj_str = re.sub(r'(\d)_(\d)', r'\1\2', obj_str)
-                    obj_str = obj_str.replace("'", '"')
-                    obj_str = re.sub(r'(\s+)(\d+)(\s*):', r'\1"\2"\3:', obj_str)
-                    obj_str = re.sub(r'([,\{]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*):', r'\1"\2"\3:', obj_str)
-                    obj_str = re.sub(r',(\s*[\}\]])', r'\1', obj_str)
-                    
-                    await ctx.send(f"After transformations, first 800 chars:\n```json\n{obj_str[:800]}\n```")
-                    
-                    # Try to parse and catch specific error
-                    try:
-                        test_parse = json.loads(obj_str)
-                        await ctx.send("✅ Manual parse succeeded!")
-                    except json.JSONDecodeError as je:
-                        await ctx.send(f"❌ JSON Error at position {je.pos}: {je.msg}")
-                        if je.pos:
-                            start = max(0, je.pos - 150)
-                            end = min(len(obj_str), je.pos + 150)
-                            error_context = obj_str[start:end]
-                            await ctx.send(f"Error context:\n```\n{error_context}\n```")
-                    
-                    return
-                    
-            except Exception as parse_error:
-                tb = ''.join(traceback.format_exception(type(parse_error), parse_error, parse_error.__traceback__))
-                await ctx.send(f"❌ Parse exception:\n```python\n{tb[:1800]}\n```")
-                return
-            
-            # Test 3: Normalize
-            await msg.edit(content="🔍 Step 3/5: Testing data normalization...")
-            test_vehicle = self.github_sync.normalize_vehicle_data(
-                list(parsed.keys())[0], 
-                list(parsed.values())[0]
-            )
-            await ctx.send(f"✅ Normalization succeeded")
-            await ctx.send(f"Normalized:\n```json\n{json.dumps(test_vehicle, indent=2)[:1000]}\n```")
-            
-            # Test 4: Database insert
-            await msg.edit(content="🔍 Step 4/5: Testing database insert...")
-            vehicle_id = self.db.insert_vehicle(test_vehicle)
-            await ctx.send(f"✅ Database insert succeeded! Vehicle ID: {vehicle_id}")
-            
-            await msg.edit(content="✅ All tests passed!")
-            
+                await ctx.send("❌ Failed to fetch vehicles")
+                
         except Exception as e:
-            await ctx.send(f"❌ Error:\n```\n{str(e)}\n```")
+            await ctx.send(f"❌ Error: {str(e)}")
             import traceback
             tb = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
             for i in range(0, len(tb), 1900):
