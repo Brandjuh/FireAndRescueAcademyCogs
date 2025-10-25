@@ -172,6 +172,8 @@ class AssetManager(commands.Cog):
             # Get all educations to match with training keys
             all_educations = self.db.get_all_educations()
             
+            training_links_made = 0
+            
             for game_id, raw_data in vehicles_data.items():
                 normalized = self.github_sync.normalize_vehicle_data(game_id, raw_data)
                 vehicle_id = self.db.insert_vehicle(normalized)
@@ -187,15 +189,25 @@ class AssetManager(commands.Cog):
                 
                 # Link educations/trainings using training keys
                 training_keys = normalized.get('training_keys', [])
+                if training_keys:
+                    log.debug(f"Vehicle {normalized['name']} has training keys: {training_keys}")
+                
                 for training_key in training_keys:
                     # Find education with matching key
+                    matched = False
                     for education in all_educations:
                         if education.get('key') == training_key:
                             self.db.link_vehicle_education(vehicle_id, education['id'])
+                            training_links_made += 1
+                            matched = True
+                            log.debug(f"Linked {normalized['name']} -> {education['name']}")
                             break
+                    
+                    if not matched:
+                        log.warning(f"No education found for training key: {training_key} (vehicle: {normalized['name']})")
             
             self.db.log_sync('vehicles', changes, True)
-            log.info(f"Synced vehicles: {len(vehicles_data)} total")
+            log.info(f"Synced vehicles: {len(vehicles_data)} total, {training_links_made} training links created")
             
             return {'success': True, 'changes': changes}
             
