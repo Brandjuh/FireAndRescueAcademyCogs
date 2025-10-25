@@ -74,10 +74,40 @@ class GitHubSync:
             # Remove numeric separators
             obj_str = re.sub(r'(\d)_(\d)', r'\1\2', obj_str)
             
-            # CRITICAL: Remove JavaScript spread syntax ...Array(X).fill(Y)
-            # Replace with a placeholder array to keep valid JSON structure
+            # CRITICAL: Remove JavaScript spread syntax
             obj_str = re.sub(r'\.\.\.\s*Array\s*\(\s*\d+\s*\)\s*\.fill\s*\([^)]+\)', '[]', obj_str)
             obj_str = re.sub(r'\.\.\.\s*new\s+Array\s*\(\s*\d+\s*\)\s*\.fill\s*\([^)]+\)', '[]', obj_str)
+            
+            # CRITICAL: Remove JavaScript arrow functions by removing lines containing =>
+            # and any following lines until we hit a comma or closing brace at the same level
+            lines = obj_str.split('\n')
+            filtered_lines = []
+            skip_until_end = False
+            brace_depth = 0
+            
+            for line in lines:
+                # Check if this line starts an arrow function
+                if '=>' in line and not skip_until_end:
+                    skip_until_end = True
+                    brace_depth = 0
+                    continue
+                
+                if skip_until_end:
+                    # Track braces/parentheses to know when function ends
+                    brace_depth += line.count('(') - line.count(')')
+                    brace_depth += line.count('{') - line.count('}')
+                    
+                    # Function ends when we close all braces and hit a comma or closing brace
+                    if brace_depth <= 0 and (',' in line or '}' in line):
+                        skip_until_end = False
+                        # Keep this line if it has other content besides the comma
+                        if line.strip() not in [',', '},']:
+                            filtered_lines.append(line)
+                    continue
+                
+                filtered_lines.append(line)
+            
+            obj_str = '\n'.join(filtered_lines)
             
             # Handle apostrophes BEFORE converting quotes
             obj_str = re.sub(r"([a-zA-Z])'([a-zA-Z])", r'\1__APOS__\2', obj_str)
