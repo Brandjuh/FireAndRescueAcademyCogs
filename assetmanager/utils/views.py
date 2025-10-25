@@ -5,9 +5,10 @@ from typing import List, Dict, Any, Optional
 class CompareView(discord.ui.View):
     """Interactive view for comparing vehicles with category filtering."""
     
-    def __init__(self, vehicles: List[Dict[str, Any]], timeout: float = 300):
+    def __init__(self, vehicles: List[Dict[str, Any]], user_id: int, timeout: float = 300):
         super().__init__(timeout=timeout)
         self.vehicles = vehicles
+        self.user_id = user_id  # Store who opened the menu
         self.selected_categories = [None, None, None]
         self.selected_vehicles = [None, None, None]
         
@@ -15,6 +16,16 @@ class CompareView(discord.ui.View):
         self.categories = self.categorize_vehicles(vehicles)
         
         self.update_view()
+    
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Check if the user is allowed to interact."""
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "❌ Only the person who opened this menu can use it!",
+                ephemeral=True
+            )
+            return False
+        return True
     
     def categorize_vehicles(self, vehicles: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
         """Categorize vehicles by type based on name patterns."""
@@ -152,15 +163,22 @@ class CategorySelect(discord.ui.Select):
     
     async def callback(self, interaction: discord.Interaction):
         """Handle category selection."""
-        view: CompareView = self.view
-        
-        # Update selected category
-        view.selected_categories[self.selector_index] = self.values[0]
-        view.selected_vehicles[self.selector_index] = None  # Reset vehicle selection
-        
-        # Update view
-        view.update_view()
-        await interaction.response.edit_message(view=view)
+        try:
+            view: CompareView = self.view
+            
+            # Update selected category
+            view.selected_categories[self.selector_index] = self.values[0]
+            view.selected_vehicles[self.selector_index] = None  # Reset vehicle selection
+            
+            # Update view
+            view.update_view()
+            await interaction.response.edit_message(view=view)
+        except Exception as e:
+            # If already responded, use followup
+            if interaction.response.is_done():
+                await interaction.followup.send(f"Error: {str(e)}", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"Error: {str(e)}", ephemeral=True)
 
 
 class VehicleSelect(discord.ui.Select):
