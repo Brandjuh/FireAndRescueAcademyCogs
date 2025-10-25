@@ -169,17 +169,30 @@ class AssetManager(commands.Cog):
             old_vehicles = self.db.get_all_vehicles()
             changes = self.github_sync.detect_changes(old_vehicles, vehicles_data)
             
+            # Get all educations to match with training keys
+            all_educations = self.db.get_all_educations()
+            
             for game_id, raw_data in vehicles_data.items():
                 normalized = self.github_sync.normalize_vehicle_data(game_id, raw_data)
                 vehicle_id = self.db.insert_vehicle(normalized)
                 
                 self.db.clear_all_relations(vehicle_id)
                 
+                # Link buildings
                 possible_buildings = raw_data.get('possibleBuildings', [])
                 for building_game_id in possible_buildings:
                     building = self.db.get_building_by_name(str(building_game_id))
                     if building:
                         self.db.link_vehicle_building(vehicle_id, building['id'])
+                
+                # Link educations/trainings using training keys
+                training_keys = normalized.get('training_keys', [])
+                for training_key in training_keys:
+                    # Find education with matching key
+                    for education in all_educations:
+                        if education.get('key') == training_key:
+                            self.db.link_vehicle_education(vehicle_id, education['id'])
+                            break
             
             self.db.log_sync('vehicles', changes, True)
             log.info(f"Synced vehicles: {len(vehicles_data)} total")
@@ -355,24 +368,24 @@ class AssetManager(commands.Cog):
                 ))
                 return
             
-            # Create interactive view
-            view = CompareView(vehicles, timeout=180)
+            # Create interactive view with user restriction
+            view = CompareView(vehicles, ctx.author.id, timeout=300)
             
             # Create initial embed
             embed = discord.Embed(
                 title="🔍 Interactive Vehicle Comparison",
                 description=(
-                    "**Select vehicles to compare:**\n"
-                    "1️⃣ Choose your first vehicle\n"
-                    "2️⃣ Choose your second vehicle\n"
-                    "3️⃣ Optionally choose a third vehicle\n"
+                    "**How to use:**\n"
+                    "1️⃣ Choose a category, then select a vehicle\n"
+                    "2️⃣ Choose a category, then select a vehicle\n"
+                    "3️⃣ (Optional) Choose a category and vehicle, or skip\n"
                     "4️⃣ Click **Compare Vehicles** to see the results!\n\n"
-                    "💡 *Tip: You can use the Clear button to start over*"
+                    "💡 *Tip: Use Clear All to start over*"
                 ),
                 color=0x3498DB
             )
             
-            embed.set_footer(text="This menu will expire in 3 minutes")
+            embed.set_footer(text=f"This menu is for {ctx.author.display_name} only • Expires in 5 minutes")
             
             await ctx.send(embed=embed, view=view)
     
