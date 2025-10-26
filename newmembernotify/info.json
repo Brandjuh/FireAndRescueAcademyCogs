@@ -1,0 +1,15 @@
+{
+    "author": ["FARA"],
+    "description": "Automatically notify admins of new MissionChief alliance member applications with Discord embeds and Accept/Deny buttons. Includes auto-accept functionality.",
+    "install_msg": "Thanks for installing NewMemberNotify! Use `!newmember status` to get started and `!newmember setchannel` to configure notification channel.",
+    "name": "NewMemberNotify",
+    "short": "Notify admins of new alliance applications",
+    "tags": ["missionchief", "alliance", "notifications", "automation"],
+    "type": "COG",
+    "end_user_data_statement": "This cog does not store any user data.",
+    "min_bot_version": "3.4.0",
+    "required_cogs": {
+        "CookieManager": "Required for MissionChief authentication"
+    },
+    "requirements": ["beautifulsoup4", "lxml", "aiohttp"]
+}
