@@ -21,7 +21,7 @@ DEFAULTS = {
     "auto_accept_log_channel_id": 550375997258596356,
     "admin_role_id": None,
     "auto_accept_enabled": False,
-    "check_interval_minutes": 1,
+    "check_interval_minutes": 15,
     "bewerbungen_url": "https://www.missionchief.com/verband/bewerbungen",
 }
 
@@ -272,8 +272,12 @@ class NewMemberNotify(commands.Cog):
             log.error(f"Error processing application {app_id} ({action}): {e}")
             return False, str(e)
     
-    async def _check_for_new_applications(self):
-        """Check for new applications and handle them."""
+    async def _check_for_new_applications(self, skip_first_run_check: bool = False):
+        """Check for new applications and handle them.
+        
+        Args:
+            skip_first_run_check: If True, process applications even on first run (for manual checks)
+        """
         applications = await self._fetch_applications()
         
         if not applications:
@@ -282,6 +286,9 @@ class NewMemberNotify(commands.Cog):
         
         # Get current config
         auto_accept = await self.config.auto_accept_enabled()
+        
+        # Check if this is first run and we should skip processing
+        should_skip_processing = self._first_run and not skip_first_run_check
         
         for app in applications:
             app_id = app["id"]
@@ -293,8 +300,8 @@ class NewMemberNotify(commands.Cog):
             # Mark as seen
             self._seen_applications.add(app_id)
             
-            # Skip processing on first run to avoid spam
-            if self._first_run:
+            # Skip processing on first run to avoid spam (unless explicitly told not to)
+            if should_skip_processing:
                 log.debug(f"First run: skipping notification for {app['username']} ({app_id})")
                 continue
             
@@ -486,11 +493,12 @@ class NewMemberNotify(commands.Cog):
     
     @newmember.command(name="checknow")
     async def checknow(self, ctx: commands.Context):
-        """Manually trigger a check for new applications."""
+        """Manually trigger a check for new applications (processes immediately, ignores first-run protection)."""
         await ctx.send("🔍 Checking for new applications...")
         
         try:
-            await self._check_for_new_applications()
+            # Manual checks should always process, even on first run
+            await self._check_for_new_applications(skip_first_run_check=True)
             await ctx.send("✅ Check complete!")
         except Exception as e:
             await ctx.send(f"❌ Error during check: {e}")
@@ -498,11 +506,46 @@ class NewMemberNotify(commands.Cog):
     
     @newmember.command(name="reset")
     async def reset(self, ctx: commands.Context):
-        """Reset the list of seen applications (will re-notify on next check)."""
+        """Reset the list of seen applications (will re-process on next check)."""
         count = len(self._seen_applications)
         self._seen_applications.clear()
-        self._first_run = True
-        await ctx.send(f"✅ Reset complete. Cleared {count} seen applications. First run mode enabled.")
+        await ctx.send(f"✅ Reset complete. Cleared {count} seen applications. Next check will process all pending applications.")
+    
+    @newmember.command(name="debug")
+    async def debug(self, ctx: commands.Context):
+        """Show debug information."""
+        lines = [
+            f"**First Run Mode:** {self._first_run}",
+            f"**Seen Applications:** {len(self._seen_applications)}",
+            f"**Seen IDs:** {', '.join(self._seen_applications) if self._seen_applications else 'None'}",
+        ]
+        await ctx.send("\n".join(lines))
+    
+    @newmember.command(name="forceaccept")
+    async def forceaccept(self, ctx: commands.Context, application_id: str):
+        """Force accept a specific application by ID (bypasses seen check)."""
+        await ctx.send(f"🔄 Attempting to accept application {application_id}...")
+        
+        success, message = await self._process_application(application_id, action="accept")
+        
+        if success:
+            await ctx.send(f"✅ Successfully accepted application {application_id}!")
+            self._seen_applications.add(application_id)
+        else:
+            await ctx.send(f"❌ Failed to accept: {message}")
+    
+    @newmember.command(name="forcedeny")
+    async def forcedeny(self, ctx: commands.Context, application_id: str):
+        """Force deny a specific application by ID (bypasses seen check)."""
+        await ctx.send(f"🔄 Attempting to deny application {application_id}...")
+        
+        success, message = await self._process_application(application_id, action="deny")
+        
+        if success:
+            await ctx.send(f"✅ Successfully denied application {application_id}!")
+            self._seen_applications.add(application_id)
+        else:
+            await ctx.send(f"❌ Failed to deny: {message}")
     
     @newmember.command(name="list")
     async def list_applications(self, ctx: commands.Context):
