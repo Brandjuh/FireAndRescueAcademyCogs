@@ -21,7 +21,7 @@ DEFAULTS = {
     "auto_accept_log_channel_id": 550375997258596356,
     "admin_role_id": None,
     "auto_accept_enabled": False,
-    "check_interval_minutes": 15,
+    "check_interval_minutes": 1,
     "bewerbungen_url": "https://www.missionchief.com/verband/bewerbungen",
 }
 
