@@ -1,6 +1,6 @@
 """
-Report Scheduler
-Handles time-based report generation with timezone support
+Report Scheduler - LAST DAY OF MONTH SUPPORT
+Handles time-based report generation with timezone support and smart month-end scheduling
 """
 
 import asyncio
@@ -8,6 +8,7 @@ import logging
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional, Dict
+import calendar
 
 import discord
 
@@ -15,7 +16,7 @@ log = logging.getLogger("red.FARA.AllianceReports.Scheduler")
 
 
 class ReportScheduler:
-    """Manages scheduled report generation."""
+    """Manages scheduled report generation with smart last-day-of-month handling."""
     
     def __init__(self, bot, config_manager):
         """Initialize scheduler."""
@@ -25,6 +26,38 @@ class ReportScheduler:
         self._daily_task: Optional[asyncio.Task] = None
         self._monthly_task: Optional[asyncio.Task] = None
         self._running = False
+    
+    def _get_last_day_of_month(self, year: int, month: int) -> int:
+        """
+        Get the last day of a specific month (handles leap years).
+        
+        Args:
+            year: Year (e.g., 2025)
+            month: Month (1-12)
+        
+        Returns:
+            Last day of month (28, 29, 30, or 31)
+        """
+        return calendar.monthrange(year, month)[1]
+    
+    def _calculate_monthly_target_day(self, config_day: int, now: datetime) -> int:
+        """
+        Calculate the actual target day for monthly reports.
+        
+        Args:
+            config_day: Configured day (0/-1 = last day, 1-31 = specific day)
+            now: Current datetime
+        
+        Returns:
+            Actual day to use for this month
+        """
+        # Special value: 0 or -1 means "last day of month"
+        if config_day <= 0:
+            return self._get_last_day_of_month(now.year, now.month)
+        
+        # Regular day: ensure it exists in this month
+        last_day = self._get_last_day_of_month(now.year, now.month)
+        return min(config_day, last_day)
     
     async def start(self):
         """Start the scheduler."""
@@ -84,13 +117,16 @@ class ReportScheduler:
             if daily_target <= now:
                 daily_target += timedelta(days=1)
             
-            # Monthly
-            monthly_day = await self.config_manager.config.monthly_day()
+            # Monthly (with last-day-of-month support)
+            config_day = await self.config_manager.config.monthly_day()
             monthly_time_str = await self.config_manager.config.monthly_time()
             monthly_hour, monthly_minute = map(int, monthly_time_str.split(":"))
             
+            # Calculate actual day for this month
+            target_day = self._calculate_monthly_target_day(config_day, now)
+            
             monthly_target = now.replace(
-                day=monthly_day,
+                day=target_day,
                 hour=monthly_hour,
                 minute=monthly_minute,
                 second=0,
@@ -101,9 +137,18 @@ class ReportScheduler:
             if monthly_target <= now:
                 # Move to next month
                 if now.month == 12:
-                    monthly_target = monthly_target.replace(year=now.year + 1, month=1)
+                    next_month_date = datetime(now.year + 1, 1, 1, tzinfo=tz)
                 else:
-                    monthly_target = monthly_target.replace(month=now.month + 1)
+                    next_month_date = datetime(now.year, now.month + 1, 1, tzinfo=tz)
+                
+                # Calculate target day for next month
+                next_target_day = self._calculate_monthly_target_day(config_day, next_month_date)
+                
+                monthly_target = next_month_date.replace(
+                    day=next_target_day,
+                    hour=monthly_hour,
+                    minute=monthly_minute
+                )
             
             return {
                 "daily": daily_target,
@@ -166,7 +211,7 @@ class ReportScheduler:
         log.info("Daily report loop stopped")
     
     async def _monthly_loop(self):
-        """Monthly report generation loop."""
+        """Monthly report generation loop with last-day-of-month support."""
         await self.bot.wait_until_ready()
         
         log.info("Monthly report loop started")
@@ -179,44 +224,63 @@ class ReportScheduler:
                 now = datetime.now(tz)
                 
                 # Get target day and time
-                target_day = await self.config_manager.config.monthly_day()
+                config_day = await self.config_manager.config.monthly_day()
                 time_str = await self.config_manager.config.monthly_time()
                 target_hour, target_minute = map(int, time_str.split(":"))
                 
+                # Calculate actual target day for THIS month
+                target_day = self._calculate_monthly_target_day(config_day, now)
+                
+                log.info(f"Monthly config: day={config_day}, actual_day={target_day} for {now.strftime('%B %Y')}")
+                
                 # Calculate next run
-                target = now.replace(
-                    day=target_day,
-                    hour=target_hour,
-                    minute=target_minute,
-                    second=0,
-                    microsecond=0
-                )
+                try:
+                    target = now.replace(
+                        day=target_day,
+                        hour=target_hour,
+                        minute=target_minute,
+                        second=0,
+                        microsecond=0
+                    )
+                except ValueError as e:
+                    # Day doesn't exist in this month
+                    log.warning(f"Day {target_day} doesn't exist in {now.strftime('%B %Y')}: {e}")
+                    target = now.replace(day=1, hour=target_hour, minute=target_minute, second=0, microsecond=0)
+                    # Move to next month
+                    if now.month == 12:
+                        target = target.replace(year=now.year + 1, month=1)
+                    else:
+                        target = target.replace(month=now.month + 1)
+                    
+                    # Recalculate target day for next month
+                    next_target_day = self._calculate_monthly_target_day(config_day, target)
+                    target = target.replace(day=next_target_day)
                 
                 # If target is in the past, schedule for next month
                 if target <= now:
                     # Move to next month
                     if now.month == 12:
-                        target = target.replace(year=now.year + 1, month=1)
+                        next_month_date = datetime(now.year + 1, 1, 1, tzinfo=tz)
                     else:
-                        try:
-                            target = target.replace(month=now.month + 1)
-                        except ValueError:
-                            # Day doesn't exist in next month (e.g., 31st)
-                            # Set to last day of next month
-                            if now.month == 12:
-                                target = target.replace(year=now.year + 1, month=1, day=1)
-                            else:
-                                target = target.replace(month=now.month + 1, day=1)
-                            # Move to last day of that month
-                            next_month = target.month + 1 if target.month < 12 else 1
-                            next_year = target.year if target.month < 12 else target.year + 1
-                            target = datetime(next_year, next_month, 1, tzinfo=tz) - timedelta(days=1)
-                            target = target.replace(hour=target_hour, minute=target_minute)
+                        next_month_date = datetime(now.year, now.month + 1, 1, tzinfo=tz)
+                    
+                    # Calculate target day for next month
+                    next_target_day = self._calculate_monthly_target_day(config_day, next_month_date)
+                    
+                    target = next_month_date.replace(
+                        day=next_target_day,
+                        hour=target_hour,
+                        minute=target_minute
+                    )
                 
                 # Calculate sleep time
                 sleep_seconds = (target - now).total_seconds()
                 
-                log.info(f"Next monthly report: {target.strftime('%Y-%m-%d %H:%M:%S %Z')} (in {sleep_seconds:.0f}s)")
+                # Special message for last-day-of-month
+                if config_day <= 0:
+                    log.info(f"Next monthly report (LAST DAY): {target.strftime('%Y-%m-%d %H:%M:%S %Z')} (in {sleep_seconds:.0f}s)")
+                else:
+                    log.info(f"Next monthly report: {target.strftime('%Y-%m-%d %H:%M:%S %Z')} (in {sleep_seconds:.0f}s)")
                 
                 # Sleep until target time
                 await asyncio.sleep(sleep_seconds)
@@ -339,15 +403,75 @@ class ReportScheduler:
             
             test_mode = await self.config_manager.config.test_mode()
             
-            # Monthly Member Report (placeholder)
+            # Monthly Member Report
             if member_channel_id and await self.config_manager.config.monthly_member_enabled():
-                log.info("Monthly member report - Phase 4 (not implemented yet)")
-                # TODO: Implement in Phase 4
+                try:
+                    from .templates.monthly_member import MonthlyMemberReport
+                    
+                    report_gen = MonthlyMemberReport(self.bot, self.config_manager)
+                    
+                    if test_mode:
+                        embeds = await report_gen.generate()
+                        if embeds:
+                            log.info(f"Monthly member report generated ({len(embeds)} embeds, test mode - not posted)")
+                        else:
+                            log.error("Failed to generate monthly member report")
+                    else:
+                        channel = self.bot.get_channel(int(member_channel_id))
+                        if channel:
+                            success = await report_gen.post(channel)
+                            if success:
+                                log.info("Monthly member report posted successfully")
+                            else:
+                                log.error("Failed to post monthly member report")
+                                await self._send_error_notification(
+                                    error_channel_id,
+                                    "Failed to post monthly member report"
+                                )
+                        else:
+                            log.error(f"Monthly member channel not found: {member_channel_id}")
+                
+                except Exception as e:
+                    log.exception(f"Error generating monthly member report: {e}")
+                    await self._send_error_notification(
+                        error_channel_id,
+                        f"Error in monthly member report: {e}"
+                    )
             
-            # Monthly Admin Report (placeholder)
+            # Monthly Admin Report
             if admin_channel_id and await self.config_manager.config.monthly_admin_enabled():
-                log.info("Monthly admin report - Phase 5 (not implemented yet)")
-                # TODO: Implement in Phase 5
+                try:
+                    from .templates.monthly_admin import MonthlyAdminReport
+                    
+                    report_gen = MonthlyAdminReport(self.bot, self.config_manager)
+                    
+                    if test_mode:
+                        embeds = await report_gen.generate()
+                        if embeds:
+                            log.info(f"Monthly admin report generated ({len(embeds)} embeds, test mode - not posted)")
+                        else:
+                            log.error("Failed to generate monthly admin report")
+                    else:
+                        channel = self.bot.get_channel(int(admin_channel_id))
+                        if channel:
+                            success = await report_gen.post(channel)
+                            if success:
+                                log.info("Monthly admin report posted successfully")
+                            else:
+                                log.error("Failed to post monthly admin report")
+                                await self._send_error_notification(
+                                    error_channel_id,
+                                    "Failed to post monthly admin report"
+                                )
+                        else:
+                            log.error(f"Monthly admin channel not found: {admin_channel_id}")
+                
+                except Exception as e:
+                    log.exception(f"Error generating monthly admin report: {e}")
+                    await self._send_error_notification(
+                        error_channel_id,
+                        f"Error in monthly admin report: {e}"
+                    )
             
             log.info("Monthly reports execution completed")
         
