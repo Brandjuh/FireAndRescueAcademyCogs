@@ -2,6 +2,7 @@
 Alliance Leaderboard System for Missionchief USA
 Displays daily and monthly top 10 rankings for earned credits and treasury contributions.
 Uses NEW scraper_databases structure (members_v2.db, income_v2.db)
+Posts at 05:55 Amsterdam time (23:55 New York time - 5 minutes before daily reset)
 """
 
 import asyncio
@@ -36,10 +37,10 @@ class Leaderboard(commands.Cog):
         self.config = Config.get_conf(self, identifier=1234567890123, force_registration=True)
         
         default_guild = {
-            "daily_earned_channel": None,
-            "daily_contrib_channel": None,
-            "monthly_earned_channel": None,
-            "monthly_contrib_channel": None,
+            "daily_earned_channel": 544461383358480385,
+            "daily_contrib_channel": 544461383358480385,
+            "monthly_earned_channel": 544461383358480385,
+            "monthly_contrib_channel": 544461383358480385,
         }
         self.config.register_guild(**default_guild)
         
@@ -476,20 +477,20 @@ class Leaderboard(commands.Cog):
             return False
     
     async def _daily_leaderboard_loop(self):
-        """Daily leaderboard posting at 06:00 Amsterdam time."""
+        """Daily leaderboard posting at 05:55 Amsterdam time."""
         await self.bot.wait_until_ready()
         
         while not self.bot.is_closed():
             try:
                 now = datetime.now(self.tz)
                 
-                # Calculate next 06:00
-                target = now.replace(hour=6, minute=0, second=0, microsecond=0)
+                # Calculate next 05:55
+                target = now.replace(hour=5, minute=55, second=0, microsecond=0)
                 if now >= target:
                     target += timedelta(days=1)
                 
                 wait_seconds = (target - now).total_seconds()
-                logger.info(f"Next daily leaderboard in {wait_seconds/3600:.1f} hours")
+                logger.info(f"Next daily leaderboard in {wait_seconds/3600:.1f} hours at {target.strftime('%Y-%m-%d %H:%M %Z')}")
                 
                 await asyncio.sleep(wait_seconds)
                 
@@ -524,14 +525,14 @@ class Leaderboard(commands.Cog):
                 await asyncio.sleep(3600)  # Wait 1 hour on error
     
     async def _monthly_leaderboard_loop(self):
-        """Monthly leaderboard posting on last day of month at 06:00 Amsterdam time."""
+        """Monthly leaderboard posting on last day of month at 05:55 Amsterdam time."""
         await self.bot.wait_until_ready()
         
         while not self.bot.is_closed():
             try:
                 now = datetime.now(self.tz)
                 
-                # Calculate next last day of month at 06:00
+                # Calculate next last day of month at 05:55
                 # Move to next month, then subtract 1 day
                 if now.month == 12:
                     next_month = now.replace(year=now.year + 1, month=1, day=1)
@@ -539,7 +540,7 @@ class Leaderboard(commands.Cog):
                     next_month = now.replace(month=now.month + 1, day=1)
                 
                 last_day = next_month - timedelta(days=1)
-                target = last_day.replace(hour=6, minute=0, second=0, microsecond=0)
+                target = last_day.replace(hour=5, minute=55, second=0, microsecond=0)
                 
                 # If we're past this month's target, calculate for next month
                 if now >= target:
@@ -549,10 +550,10 @@ class Leaderboard(commands.Cog):
                         next_month = target.replace(month=target.month + 1, day=1)
                     
                     last_day = next_month - timedelta(days=1)
-                    target = last_day.replace(hour=6, minute=0, second=0, microsecond=0)
+                    target = last_day.replace(hour=5, minute=55, second=0, microsecond=0)
                 
                 wait_seconds = (target - now).total_seconds()
-                logger.info(f"Next monthly leaderboard on {target.date()} ({wait_seconds/86400:.1f} days)")
+                logger.info(f"Next monthly leaderboard on {target.strftime('%Y-%m-%d %H:%M %Z')} ({wait_seconds/86400:.1f} days)")
                 
                 await asyncio.sleep(wait_seconds)
                 
@@ -664,7 +665,7 @@ class Leaderboard(commands.Cog):
         now = datetime.now(self.tz)
         embed.add_field(
             name="⏰ Schedule",
-            value=f"**Daily:** 06:00 Amsterdam time\n**Monthly:** Last day of month at 06:00\n**Current time:** {now.strftime('%Y-%m-%d %H:%M:%S %Z')}",
+            value=f"**Daily:** 05:55 Amsterdam time (23:55 NY)\n**Monthly:** Last day of month at 05:55\n**Current time:** {now.strftime('%Y-%m-%d %H:%M:%S %Z')}",
             inline=False
         )
         
