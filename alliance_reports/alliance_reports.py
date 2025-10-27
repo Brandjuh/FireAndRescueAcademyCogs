@@ -1,5 +1,5 @@
 """
-AllianceReports - Main Cog
+AllianceReports - Main Cog (V2 + Last Day of Month Support)
 Comprehensive reporting system for Fire & Rescue Academy alliance data.
 """
 
@@ -27,7 +27,8 @@ class AllianceReports(commands.Cog):
     Comprehensive reporting system for alliance data.
     
     Generates daily and monthly reports from:
-    - AllianceScraper (members, logs, treasury)
+    - V2 Scraper Databases (members_v2, logs_v2, income_v2, buildings_v2)
+    - AllianceScraper (treasury only)
     - MemberSync (verifications)
     - BuildingManager (building requests)
     - SanctionsManager (discipline)
@@ -128,13 +129,13 @@ class AllianceReports(commands.Cog):
             scheduler_status = f"\n⏰ NEXT SCHEDULED RUNS\n"
             
             if next_runs.get("daily"):
-                daily_str = next_runs["daily"].strftime("%Y-%m-%d %H:%M:%S UTC")
+                daily_str = next_runs["daily"].strftime("%Y-%m-%d %H:%M:%S %Z")
                 scheduler_status += f"  Daily: {daily_str}\n"
             else:
                 scheduler_status += f"  Daily: Not scheduled\n"
             
             if next_runs.get("monthly"):
-                monthly_str = next_runs["monthly"].strftime("%Y-%m-%d %H:%M:%S UTC")
+                monthly_str = next_runs["monthly"].strftime("%Y-%m-%d %H:%M:%S %Z")
                 scheduler_status += f"  Monthly: {monthly_str}\n"
             else:
                 scheduler_status += f"  Monthly: Not scheduled\n"
@@ -240,14 +241,25 @@ class AllianceReports(commands.Cog):
     async def time_monthly(self, ctx: commands.Context, day: int, time_str: str):
         """Set monthly report generation day and time.
         
-        Example: [p]reportset time monthly 1 06:00
+        Special values:
+        - Day 0 or -1: Last day of month (recommended for month-end reports)
+        - Day 1-28: Safe for all months
+        - Day 29-31: May skip shorter months
+        
+        Examples:
+        [p]reportset time monthly 0 06:00    (last day of every month)
+        [p]reportset time monthly 1 06:00    (first day of every month)
+        [p]reportset time monthly 15 06:00   (15th of every month)
         """
         if not await self._is_authorized(ctx):
             await ctx.send("❌ You don't have permission to use this command.")
             return
         
-        if not 1 <= day <= 31:
-            await ctx.send("❌ Day must be between 1 and 31")
+        # NEW: Use the validation method from config_manager
+        if not self.config_manager.validate_monthly_day(day):
+            await ctx.send("❌ Day must be between -1 (or 0 for last day) and 31\n"
+                          "💡 Use `0` or `-1` for last day of month (handles leap years!)\n"
+                          "💡 Use `1-31` for specific day")
             return
         
         if not await self.config_manager.validate_time_format(time_str):
@@ -257,7 +269,14 @@ class AllianceReports(commands.Cog):
         await self.config.monthly_day.set(day)
         await self.config.monthly_time.set(time_str)
         tz = await self.config.timezone()
-        await ctx.send(f"✅ Monthly reports will generate on day {day} at {time_str} {tz}")
+        
+        # User-friendly message
+        if day <= 0:
+            await ctx.send(f"✅ Monthly reports will generate on the **last day of each month** at {time_str} {tz}\n"
+                          f"📅 This handles leap years and varying month lengths automatically!")
+        else:
+            await ctx.send(f"✅ Monthly reports will generate on day **{day}** at {time_str} {tz}\n"
+                          f"⚠️ Note: Day {day} doesn't exist in all months (Feb has 28/29, some months have 30)")
         
         # Restart scheduler
         await self.scheduler.stop()
@@ -353,7 +372,7 @@ class AllianceReports(commands.Cog):
     @reportset.command(name="version")
     async def reportset_version(self, ctx: commands.Context):
         """Show cog version."""
-        await ctx.send(f"**AllianceReports** version `{__version__}` - Phase 5 Complete (All Reports Ready!)")
+        await ctx.send(f"**AllianceReports** version `{__version__}` - V2 Database Support + Smart Last-Day Scheduling")
     
     # ==================== REPORT COMMANDS ====================
     
@@ -363,16 +382,6 @@ class AllianceReports(commands.Cog):
         if ctx.invoked_subcommand is None:
             await ctx.send_help(ctx.command)
     
-    @report_group.command(name="test")
-    async def report_test(self, ctx: commands.Context):
-        """Generate all reports in test mode (no posting)."""
-        if not await self._is_authorized(ctx):
-            await ctx.send("❌ You don't have permission to use this command.")
-            return
-        
-        await ctx.send("🔄 Test mode - reports will be generated but not posted...")
-        await ctx.send("✅ Use [p]report dailymember or [p]report dailyadmin to test specific reports")
-    
     @report_group.command(name="dailymember")
     async def report_daily_member(self, ctx: commands.Context):
         """Generate daily member report now."""
@@ -380,37 +389,30 @@ class AllianceReports(commands.Cog):
             await ctx.send("❌ You don't have permission to use this command.")
             return
         
-        await ctx.send("🔄 Generating daily member report...")
+        await ctx.send("📄 Generating daily member report...")
         
         try:
             from .templates.daily_member import DailyMemberReport
             
-            # Create report generator
             report_gen = DailyMemberReport(self.bot, self.config_manager)
-            
-            # Generate embed
             embed = await report_gen.generate()
             
             if not embed:
                 await ctx.send("❌ Failed to generate report")
                 return
             
-            # Check if channel is configured
             channel_id = await self.config.daily_member_channel()
             if not channel_id:
-                # Post in current channel as test
                 await ctx.send("ℹ️ No channel configured, posting here:")
                 await ctx.send(embed=embed)
                 await ctx.send("✅ Set channel with `[p]reportset channel dailymember #channel`")
                 return
             
-            # Get configured channel
             channel = self.bot.get_channel(int(channel_id))
             if not channel:
                 await ctx.send(f"❌ Configured channel not found (ID: {channel_id})")
                 return
             
-            # Post to configured channel
             success = await report_gen.post(channel)
             
             if success:
@@ -429,37 +431,30 @@ class AllianceReports(commands.Cog):
             await ctx.send("❌ You don't have permission to use this command.")
             return
         
-        await ctx.send("🔄 Generating daily admin report...")
+        await ctx.send("📄 Generating daily admin report...")
         
         try:
             from .templates.daily_admin import DailyAdminReport
             
-            # Create report generator
             report_gen = DailyAdminReport(self.bot, self.config_manager)
-            
-            # Generate embed
             embed = await report_gen.generate()
             
             if not embed:
                 await ctx.send("❌ Failed to generate report")
                 return
             
-            # Check if channel is configured
             channel_id = await self.config.daily_admin_channel()
             if not channel_id:
-                # Post in current channel as test
                 await ctx.send("ℹ️ No channel configured, posting here:")
                 await ctx.send(embed=embed)
                 await ctx.send("✅ Set channel with `[p]reportset channel dailyadmin #channel`")
                 return
             
-            # Get configured channel
             channel = self.bot.get_channel(int(channel_id))
             if not channel:
                 await ctx.send(f"❌ Configured channel not found (ID: {channel_id})")
                 return
             
-            # Post to configured channel
             success = await report_gen.post(channel)
             
             if success:
@@ -478,38 +473,31 @@ class AllianceReports(commands.Cog):
             await ctx.send("❌ You don't have permission to use this command.")
             return
         
-        await ctx.send("🔄 Generating monthly member report...")
+        await ctx.send("📄 Generating monthly member report...")
         
         try:
             from .templates.monthly_member import MonthlyMemberReport
             
-            # Create report generator
             report_gen = MonthlyMemberReport(self.bot, self.config_manager)
-            
-            # Generate embeds
             embeds = await report_gen.generate()
             
             if not embeds:
                 await ctx.send("❌ Failed to generate report")
                 return
             
-            # Check if channel is configured
             channel_id = await self.config.monthly_member_channel()
             if not channel_id:
-                # Post in current channel as test
                 await ctx.send("ℹ️ No channel configured, posting here:")
                 for embed in embeds:
                     await ctx.send(embed=embed)
                 await ctx.send("✅ Set channel with `[p]reportset channel monthlymember #channel`")
                 return
             
-            # Get configured channel
             channel = self.bot.get_channel(int(channel_id))
             if not channel:
                 await ctx.send(f"❌ Configured channel not found (ID: {channel_id})")
                 return
             
-            # Post to configured channel
             success = await report_gen.post(channel)
             
             if success:
@@ -528,169 +516,59 @@ class AllianceReports(commands.Cog):
             await ctx.send("❌ You don't have permission to use this command.")
             return
         
-        await ctx.send("🔍 Testing data aggregation step by step...")
+        await ctx.send("🔍 Testing V2 database connections...")
         
         try:
             from .data_aggregator import DataAggregator
-            from datetime import datetime, timedelta
-            from zoneinfo import ZoneInfo
             
             aggregator = DataAggregator(self.config_manager)
             
-            # Test timezone calculation
-            await ctx.send("⏰ Testing game day calculation...")
-            utc_now = datetime.now(ZoneInfo("UTC"))
-            await ctx.send(f"UTC Now: {utc_now.isoformat()}")
+            # Test V2 database connections
+            await ctx.send("\n🔌 Testing V2 databases...")
             
-            # Calculate game day
-            if utc_now.hour >= 4:
-                game_day_end = utc_now.replace(hour=4, minute=0, second=0, microsecond=0)
+            conn_members = aggregator._get_db_connection("members_v2")
+            if conn_members:
+                await ctx.send("✅ Members V2 DB connected")
+                conn_members.close()
             else:
-                game_day_end = (utc_now - timedelta(days=1)).replace(hour=4, minute=0, second=0, microsecond=0)
+                await ctx.send("❌ Members V2 DB connection failed!")
             
-            game_day_start = game_day_end - timedelta(days=1)
+            conn_logs = aggregator._get_db_connection("logs_v2")
+            if conn_logs:
+                await ctx.send("✅ Logs V2 DB connected")
+                conn_logs.close()
+            else:
+                await ctx.send("❌ Logs V2 DB connection failed!")
             
-            await ctx.send(f"Game Day Start: {game_day_start.isoformat()}")
-            await ctx.send(f"Game Day End: {game_day_end.isoformat()}")
+            conn_income = aggregator._get_db_connection("income_v2")
+            if conn_income:
+                await ctx.send("✅ Income V2 DB connected")
+                conn_income.close()
+            else:
+                await ctx.send("❌ Income V2 DB connection failed!")
             
-            # Test database connections
-            await ctx.send("\n🔌 Testing database connections...")
+            conn_buildings = aggregator._get_db_connection("buildings_v2")
+            if conn_buildings:
+                await ctx.send("✅ Buildings V2 DB connected")
+                conn_buildings.close()
+            else:
+                await ctx.send("❌ Buildings V2 DB connection failed!")
+            
+            # Test legacy databases
+            await ctx.send("\n🔌 Testing legacy databases...")
             
             conn_alliance = aggregator._get_db_connection("alliance")
             if conn_alliance:
-                await ctx.send("✅ Alliance DB connected")
+                await ctx.send("✅ Alliance DB (treasury) connected")
                 conn_alliance.close()
             else:
-                await ctx.send("❌ Alliance DB connection failed!")
-                return
+                await ctx.send("⚠️ Alliance DB connection failed")
             
-            conn_ms = aggregator._get_db_connection("membersync")
-            if conn_ms:
-                await ctx.send("✅ MemberSync DB connected")
-                conn_ms.close()
-            else:
-                await ctx.send("⚠️ MemberSync DB connection failed")
-            
-            conn_bm = aggregator._get_db_connection("building")
-            if conn_bm:
-                await ctx.send("✅ Building DB connected")
-                conn_bm.close()
-            else:
-                await ctx.send("⚠️ Building DB connection failed")
-            
-            conn_s = aggregator._get_db_connection("sanctions")
-            if conn_s:
-                await ctx.send("✅ Sanctions DB connected")
-                conn_s.close()
-            else:
-                await ctx.send("⚠️ Sanctions DB connection failed")
-            
-            # Test individual data methods
-            await ctx.send("\n📊 Testing individual data methods...")
-            
-            try:
-                await ctx.send("Testing membership...")
-                membership = await aggregator._get_membership_data_daily(game_day_start, game_day_end)
-                await ctx.send(f"✅ Membership: {len(membership)} fields")
-            except Exception as e:
-                await ctx.send(f"❌ Membership failed: {str(e)}")
-            
-            try:
-                await ctx.send("Testing training...")
-                training = await aggregator._get_training_data_daily(game_day_start, game_day_end)
-                await ctx.send(f"✅ Training: {len(training)} fields")
-            except Exception as e:
-                await ctx.send(f"❌ Training failed: {str(e)}")
-            
-            try:
-                await ctx.send("Testing buildings...")
-                buildings = await aggregator._get_buildings_data_daily(game_day_start, game_day_end)
-                await ctx.send(f"✅ Buildings: {len(buildings)} fields")
-            except Exception as e:
-                await ctx.send(f"❌ Buildings failed: {str(e)}")
-            
-            try:
-                await ctx.send("Testing treasury...")
-                treasury = await aggregator._get_treasury_data_daily(game_day_start, game_day_end)
-                await ctx.send(f"✅ Treasury: {len(treasury)} fields")
-            except Exception as e:
-                await ctx.send(f"❌ Treasury failed: {str(e)}")
-            
-            # Now test full daily data
-            await ctx.send("\n🔄 Testing full get_daily_data()...")
-            data = await aggregator.get_daily_data()
-            
-            if not data:
-                await ctx.send("❌ Full data aggregation returned empty dict!")
-                return
-            
-            # Show summary
-            summary = "**✅ Data Retrieved:**\n"
-            for key, value in data.items():
-                if isinstance(value, dict):
-                    summary += f"• {key}: {len(value)} fields\n"
-                else:
-                    summary += f"• {key}: {value}\n"
-            
-            await ctx.send(summary)
+            await ctx.send("\n✅ Database connection test complete!")
             
         except Exception as e:
             log.exception(f"Error in debug: {e}")
             await ctx.send(f"❌ Error: {str(e)}")
-            import traceback
-            tb = traceback.format_exc()
-            # Send in chunks if too long
-            for chunk in [tb[i:i+1900] for i in range(0, len(tb), 1900)]:
-                await ctx.send(f"```\n{chunk}\n```")
-    async def report_monthly_admin(self, ctx: commands.Context):
-        """Generate monthly admin report now."""
-        if not await self._is_authorized(ctx):
-            await ctx.send("❌ You don't have permission to use this command.")
-            return
-        
-        await ctx.send("🔄 Generating MEGA monthly admin report...")
-        
-        try:
-            from .templates.monthly_admin import MonthlyAdminReport
-            
-            # Create report generator
-            report_gen = MonthlyAdminReport(self.bot, self.config_manager)
-            
-            # Generate embeds
-            embeds = await report_gen.generate()
-            
-            if not embeds:
-                await ctx.send("❌ Failed to generate report")
-                return
-            
-            await ctx.send(f"✅ Generated {len(embeds)} embeds")
-            
-            # Check if channel is configured
-            channel_id = await self.config.monthly_admin_channel()
-            if not channel_id:
-                # Post in current channel as test
-                await ctx.send("ℹ️ No channel configured, posting here:")
-                await ctx.send(embeds=embeds)
-                await ctx.send("✅ Set channel with `[p]reportset channel monthlyadmin #channel`")
-                return
-            
-            # Get configured channel
-            channel = self.bot.get_channel(int(channel_id))
-            if not channel:
-                await ctx.send(f"❌ Configured channel not found (ID: {channel_id})")
-                return
-            
-            # Post to configured channel
-            success = await report_gen.post(channel)
-            
-            if success:
-                await ctx.send(f"✅ Monthly admin report posted to {channel.mention}")
-            else:
-                await ctx.send("❌ Failed to post report (check logs)")
-        
-        except Exception as e:
-            log.exception(f"Error generating monthly admin report: {e}")
-            await ctx.send(f"❌ Error: {e}")
 
 
 async def setup(bot: Red):
