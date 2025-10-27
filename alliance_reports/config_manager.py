@@ -1,6 +1,7 @@
 """
-Configuration Manager for AllianceReports
+Configuration Manager for AllianceReports - V2 DATABASE SUPPORT
 Handles all configuration, validation, and database path detection.
+Updated for V2 scraper databases structure.
 """
 
 import logging
@@ -117,11 +118,15 @@ class ConfigManager:
         "predictions_enabled": True,
         "prediction_confidence": "medium",
         
-        # Database Paths (auto-detected)
-        "alliance_db_path": None,
-        "membersync_db_path": None,
-        "building_db_path": None,
-        "sanctions_db_path": None,
+        # Database Paths (auto-detected) - V2 STRUCTURE
+        "members_v2_db_path": None,      # NEW: members_v2.db
+        "logs_v2_db_path": None,         # NEW: logs_v2.db
+        "income_v2_db_path": None,       # NEW: income_v2.db
+        "buildings_v2_db_path": None,    # NEW: buildings_v2.db
+        "alliance_db_path": None,        # KEEP: alliance.db (treasury only)
+        "membersync_db_path": None,      # KEEP: membersync.db
+        "building_manager_db_path": None,# KEEP: building_manager.db
+        "sanctions_db_path": None,       # KEEP: sanctions.db
         
         # Advanced
         "test_mode": False,
@@ -145,7 +150,7 @@ class ConfigManager:
         return ConfigManager.DEFAULTS.copy()
     
     async def detect_database_paths(self, instance_name: Optional[str] = None) -> Dict[str, Optional[Path]]:
-        """Auto-detect database paths for all required cogs."""
+        """Auto-detect database paths for all required databases (V2 + legacy)."""
         if self._db_cache:
             return self._db_cache
         
@@ -156,6 +161,7 @@ class ConfigManager:
                 log.warning(f"Red-DiscordBot data directory not found: {base_path}")
                 return {}
             
+            # Determine instance path
             if instance_name:
                 instance_path = base_path / instance_name
             else:
@@ -175,10 +181,20 @@ class ConfigManager:
             
             cogs_path = instance_path / "cogs"
             
+            # V2 SCRAPER DATABASES (in scraper_databases/)
+            scraper_db_path = cogs_path / "scraper_databases"
+            
             db_locations = {
+                # V2 Databases
+                "members_v2_db_path": scraper_db_path / "members_v2.db",
+                "logs_v2_db_path": scraper_db_path / "logs_v2.db",
+                "income_v2_db_path": scraper_db_path / "income_v2.db",
+                "buildings_v2_db_path": scraper_db_path / "buildings_v2.db",
+                
+                # Legacy Databases
                 "alliance_db_path": cogs_path / "AllianceScraper" / "alliance.db",
                 "membersync_db_path": cogs_path / "MemberSync" / "membersync.db",
-                "building_db_path": cogs_path / "BuildingManager" / "building_manager.db",
+                "building_manager_db_path": cogs_path / "BuildingManager" / "building_manager.db",
                 "sanctions_db_path": cogs_path / "SanctionsManager" / "sanctions.db",
             }
             
@@ -256,11 +272,15 @@ class ConfigManager:
         lines.append(f"  Monthly Admin: {'✅ Enabled' if settings.get('monthly_admin_enabled') else '❌ Disabled'}")
         lines.append("")
         
-        lines.append("💾 DATABASES")
+        lines.append("💾 DATABASES (V2)")
         db_paths = {
-            "Alliance": settings.get('alliance_db_path'),
+            "Members V2": settings.get('members_v2_db_path'),
+            "Logs V2": settings.get('logs_v2_db_path'),
+            "Income V2": settings.get('income_v2_db_path'),
+            "Buildings V2": settings.get('buildings_v2_db_path'),
+            "Alliance (Treasury)": settings.get('alliance_db_path'),
             "MemberSync": settings.get('membersync_db_path'),
-            "Building": settings.get('building_db_path'),
+            "BuildingManager": settings.get('building_manager_db_path'),
             "Sanctions": settings.get('sanctions_db_path'),
         }
         for name, path in db_paths.items():
