@@ -27,7 +27,7 @@ class ConfigManager:
         
         # Timing (Amsterdam timezone)
         "daily_time": "06:00",
-        "monthly_day": 1,
+        "monthly_day": 0,  # 0 = last day of month (handles all month lengths)
         "monthly_time": "06:00",
         "timezone": "Europe/Amsterdam",
         
@@ -238,6 +238,20 @@ class ConfigManager:
             return 0 <= hour <= 23 and 0 <= minute <= 59
         except (ValueError, AttributeError):
             return False
+    
+    def validate_monthly_day(self, day: int) -> bool:
+        """
+        Validate monthly report day.
+        
+        Special values:
+        - 0 or -1: Last day of month (handles leap years & varying month lengths)
+        - 1-28: Valid for all months
+        - 29-31: Valid but may skip months without that day
+        
+        Returns:
+            True if valid day value
+        """
+        return -1 <= day <= 31
     
     async def get_all_settings(self) -> Dict[str, Any]:
         """Get all current settings."""
