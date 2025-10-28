@@ -649,20 +649,17 @@ class FAQResultView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
     
     async def report_outdated_callback(self, interaction: discord.Interaction):
-        """Handle outdated report."""
-        report = OutdatedReport(
-            source=self.main_result.source,
-            title=self.main_result.title,
-            reporter_id=interaction.user.id,
-            channel_id=interaction.channel_id,
-            query=self.query,
-            timestamp=int(time.time()),
-            url=self.main_result.url,
-            faq_id=self.main_result.faq_id
-        )
+        """Handle outdated report - show confirmation first."""
+        view = ConfirmOutdatedView(self.cog, self.main_result, self.query, interaction.user.id, interaction.channel_id, interaction.guild)
         
-        await self.cog._log_outdated_report(report, interaction.guild)
-        await interaction.response.send_message("✅ Thank you! Outdated content has been reported.", ephemeral=True)
+        embed = discord.Embed(
+            title="⚠️ Report Outdated Content",
+            description=f"Are you sure you want to report this content as outdated?\n\n**Title:** {self.main_result.title}\n**Source:** {self.main_result.source.value.title()}",
+            color=discord.Color.orange()
+        )
+        embed.set_footer(text="This will notify the moderators")
+        
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 class SuggestionView(discord.ui.View):
@@ -943,6 +940,46 @@ class PostSelectView(discord.ui.View):
             self.stop()
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to post in that channel.", ephemeral=True)
+    
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user_id
+
+
+class ConfirmOutdatedView(discord.ui.View):
+    """View for confirming outdated content report."""
+    
+    def __init__(self, cog: FAQManager, result: SearchResult, query: str, user_id: int, channel_id: int, guild: discord.Guild):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.result = result
+        self.query = query
+        self.user_id = user_id
+        self.channel_id = channel_id
+        self.guild = guild
+    
+    @discord.ui.button(label="Confirm Report", style=discord.ButtonStyle.danger, emoji="⚠️")
+    async def confirm_report(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Confirm and submit the outdated report."""
+        report = OutdatedReport(
+            source=self.result.source,
+            title=self.result.title,
+            reporter_id=self.user_id,
+            channel_id=self.channel_id,
+            query=self.query,
+            timestamp=int(time.time()),
+            url=self.result.url,
+            faq_id=self.result.faq_id
+        )
+        
+        await self.cog._log_outdated_report(report, self.guild)
+        await interaction.response.send_message("✅ Thank you! Outdated content has been reported to moderators.", ephemeral=True)
+        self.stop()
+    
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Cancel the report."""
+        await interaction.response.send_message("❌ Report cancelled.", ephemeral=True)
+        self.stop()
     
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user_id
