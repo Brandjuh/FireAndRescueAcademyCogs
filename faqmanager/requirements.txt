@@ -1,0 +1,19 @@
+# FAQManager Cog Dependencies
+# For Red-DiscordBot (discord.py 2.x)
+
+# Web scraping and HTTP
+aiohttp>=3.9.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+
+# Fuzzy search and text matching
+rapidfuzz>=3.5.0
+
+# Database
+aiosqlite>=0.19.0
+
+# Date/time utilities (optional but recommended)
+python-dateutil>=2.8.2
+
+# HTML sanitization
+bleach>=6.1.0
