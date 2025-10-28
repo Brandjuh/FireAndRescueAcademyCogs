@@ -2,7 +2,9 @@
 Alliance Leaderboard System for Missionchief USA
 Displays daily and monthly top 10 rankings for earned credits and treasury contributions.
 Uses NEW scraper_databases structure (members_v2.db, income_v2.db)
-Posts at 05:55 Amsterdam time (23:55 New York time - 5 minutes before daily reset)
+Posts at 06:00 Amsterdam time (00:00 New York - after daily reset)
+Daily: Shows full previous day (00:01-23:59 NY time)
+Monthly: Shows full previous month (1st 00:01 - last day 23:59 NY time)
 """
 
 import asyncio
@@ -49,8 +51,9 @@ class Leaderboard(commands.Cog):
         self.members_db_path = base_path / "members_v2.db"
         self.income_db_path = base_path / "income_v2.db"
         
-        # Timezone for Amsterdam
-        self.tz = pytz.timezone('Europe/Amsterdam')
+        # Timezones
+        self.tz_amsterdam = pytz.timezone('Europe/Amsterdam')
+        self.tz_ny = pytz.timezone('America/New_York')
         
         # Start scheduled tasks
         self.daily_task = self.bot.loop.create_task(self._daily_leaderboard_loop())
@@ -115,10 +118,87 @@ class Leaderboard(commands.Cog):
         
         return valid_entries
     
+    def _get_period_boundaries(self, period: str, current_time: datetime) -> Tuple[datetime, datetime, datetime, datetime]:
+        """
+        Get period boundaries in NY timezone for current and previous periods.
+        Returns: (current_start, current_end, previous_start, previous_end) in UTC
+        
+        For daily: full previous day (00:00:00 - 23:59:59 NY time)
+        For monthly: full previous month (1st 00:00:00 - last day 23:59:59 NY time)
+        """
+        # Convert current time to NY timezone
+        ny_time = current_time.astimezone(self.tz_ny)
+        
+        if period == "daily":
+            # Yesterday in NY timezone
+            yesterday = ny_time.date() - timedelta(days=1)
+            current_start = self.tz_ny.localize(datetime.combine(yesterday, datetime.min.time()))
+            current_end = self.tz_ny.localize(datetime.combine(yesterday, datetime.max.time()))
+            
+            # Day before yesterday
+            day_before = yesterday - timedelta(days=1)
+            previous_start = self.tz_ny.localize(datetime.combine(day_before, datetime.min.time()))
+            previous_end = self.tz_ny.localize(datetime.combine(day_before, datetime.max.time()))
+            
+        else:  # monthly
+            # Previous month in NY timezone
+            # Get first day of current month, then subtract 1 day to get last day of previous month
+            first_of_current = ny_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            last_of_previous = first_of_current - timedelta(days=1)
+            first_of_previous = last_of_previous.replace(day=1)
+            
+            current_start = self.tz_ny.localize(datetime.combine(first_of_previous.date(), datetime.min.time()))
+            current_end = self.tz_ny.localize(datetime.combine(last_of_previous.date(), datetime.max.time()))
+            
+            # Month before that
+            first_of_prev_month = first_of_previous - timedelta(days=1)
+            first_of_prev_month = first_of_prev_month.replace(day=1)
+            last_of_prev_month = first_of_previous - timedelta(days=1)
+            
+            previous_start = self.tz_ny.localize(datetime.combine(first_of_prev_month.date(), datetime.min.time()))
+            previous_end = self.tz_ny.localize(datetime.combine(last_of_prev_month.date(), datetime.max.time()))
+        
+        # Convert all to UTC for database queries
+        return (
+            current_start.astimezone(pytz.UTC),
+            current_end.astimezone(pytz.UTC),
+            previous_start.astimezone(pytz.UTC),
+            previous_end.astimezone(pytz.UTC)
+        )
+    
+    async def _find_closest_scrape(self, db, target_time: datetime, before: bool = True) -> Optional[str]:
+        """
+        Find the scrape timestamp closest to target_time.
+        If before=True, find closest scrape before or at target_time.
+        If before=False, find closest scrape after or at target_time.
+        """
+        target_iso = target_time.isoformat()
+        
+        if before:
+            query = """
+                SELECT timestamp 
+                FROM members 
+                WHERE timestamp <= ?
+                ORDER BY timestamp DESC 
+                LIMIT 1
+            """
+        else:
+            query = """
+                SELECT timestamp 
+                FROM members 
+                WHERE timestamp >= ?
+                ORDER BY timestamp ASC 
+                LIMIT 1
+            """
+        
+        async with db.execute(query, (target_iso,)) as cursor:
+            result = await cursor.fetchone()
+            return result[0] if result else None
+    
     async def _get_earned_credits_rankings(self, period: str) -> Optional[Dict]:
         """
         Get earned credits rankings from members_v2.db.
-        Calculates DELTA between current and previous timestamps.
+        Calculates DELTA between start and end of the specified period.
         Returns dict with 'current' and 'previous' lists of {username, credits, rank}
         """
         if not self.members_db_path.exists():
@@ -127,86 +207,51 @@ class Leaderboard(commands.Cog):
         
         try:
             async with aiosqlite.connect(self.members_db_path) as db:
-                # Determine lookback period
-                lookback_hours = 24 if period == "daily" else 30 * 24  # 30 days for monthly
+                # Get period boundaries
+                now = datetime.now(self.tz_amsterdam)
+                current_start, current_end, previous_start, previous_end = self._get_period_boundaries(period, now)
                 
-                # Get the two most recent timestamps
-                query = """
-                    SELECT DISTINCT timestamp
-                    FROM members
-                    ORDER BY timestamp DESC
-                    LIMIT 2
-                """
+                logger.info(f"Earned credits {period} - Current period: {current_start} to {current_end}")
+                logger.info(f"Earned credits {period} - Previous period: {previous_start} to {previous_end}")
                 
-                async with db.execute(query) as cursor:
-                    timestamps = await cursor.fetchall()
+                # Find scrapes at start and end of current period
+                start_scrape = await self._find_closest_scrape(db, current_start, before=False)  # First scrape after period start
+                end_scrape = await self._find_closest_scrape(db, current_end, before=True)  # Last scrape before period end
                 
-                if len(timestamps) < 2:
-                    logger.warning("Not enough timestamps for earned credits comparison")
+                if not start_scrape or not end_scrape:
+                    logger.warning(f"Could not find scrapes for current {period} period")
                     return None
                 
-                current_ts = timestamps[0][0]
+                logger.info(f"Using start scrape: {start_scrape}, end scrape: {end_scrape}")
                 
-                # Calculate lookback timestamp
-                current_dt = datetime.fromisoformat(current_ts)
-                lookback_dt = current_dt - timedelta(hours=lookback_hours)
-                
-                logger.info(f"Earned credits {period} - Current: {current_ts}, Lookback: {lookback_dt.isoformat()}")
-                
-                # Get current credits for all members
+                # Get credits at start of period
                 query = """
                     SELECT member_id, username, earned_credits
                     FROM members
                     WHERE timestamp = ?
-                    AND earned_credits > 0
                 """
                 
-                async with db.execute(query, (current_ts,)) as cursor:
-                    current_data = await cursor.fetchall()
+                async with db.execute(query, (start_scrape,)) as cursor:
+                    start_data = await cursor.fetchall()
                 
-                if not current_data:
-                    logger.warning("No current data found")
-                    return None
+                # Get credits at end of period
+                async with db.execute(query, (end_scrape,)) as cursor:
+                    end_data = await cursor.fetchall()
                 
-                # Get credits from lookback period (find closest timestamp)
-                query = """
-                    SELECT DISTINCT timestamp
-                    FROM members
-                    WHERE timestamp <= ?
-                    ORDER BY timestamp DESC
-                    LIMIT 1
-                """
-                
-                async with db.execute(query, (lookback_dt.isoformat(),)) as cursor:
-                    lookback_result = await cursor.fetchone()
-                
-                if not lookback_result:
-                    logger.warning("No lookback timestamp found")
-                    return None
-                
-                lookback_ts = lookback_result[0]
-                logger.info(f"Using lookback timestamp: {lookback_ts}")
-                
-                # Get lookback credits
-                query = """
-                    SELECT member_id, earned_credits
-                    FROM members
-                    WHERE timestamp = ?
-                """
-                
-                async with db.execute(query, (lookback_ts,)) as cursor:
-                    lookback_data = await cursor.fetchall()
-                
-                # Build lookback map
-                lookback_map = {member_id: credits for member_id, credits in lookback_data}
+                # Build start credits map
+                start_map = {member_id: (username, credits) for member_id, username, credits in start_data}
                 
                 # Calculate deltas
                 delta_list = []
-                for member_id, username, current_credits in current_data:
-                    lookback_credits = lookback_map.get(member_id, current_credits)
-                    delta = current_credits - lookback_credits
+                for member_id, username, end_credits in end_data:
+                    if member_id in start_map:
+                        start_credits = start_map[member_id][1]
+                        delta = end_credits - start_credits
+                    else:
+                        # New member during period
+                        delta = end_credits
                     
-                    if delta > 0:  # Only include members with positive growth
+                    if delta > 0:
                         delta_list.append({
                             "username": username,
                             "credits": delta,
@@ -228,40 +273,29 @@ class Leaderboard(commands.Cog):
                 for i, entry in enumerate(current_rankings, 1):
                     entry["rank"] = i
                 
-                # For previous period, do the same calculation but with older timestamps
-                # Get timestamp for previous period
-                previous_lookback_dt = lookback_dt - timedelta(hours=lookback_hours)
-                
-                query = """
-                    SELECT DISTINCT timestamp
-                    FROM members
-                    WHERE timestamp <= ?
-                    ORDER BY timestamp DESC
-                    LIMIT 1
-                """
-                
-                async with db.execute(query, (previous_lookback_dt.isoformat(),)) as cursor:
-                    prev_lookback_result = await cursor.fetchone()
+                # Do the same for previous period
+                prev_start_scrape = await self._find_closest_scrape(db, previous_start, before=False)
+                prev_end_scrape = await self._find_closest_scrape(db, previous_end, before=True)
                 
                 previous_rankings = []
-                if prev_lookback_result:
-                    prev_lookback_ts = prev_lookback_result[0]
+                if prev_start_scrape and prev_end_scrape:
+                    logger.info(f"Previous period: start scrape {prev_start_scrape}, end scrape {prev_end_scrape}")
                     
-                    # Get previous period data
-                    async with db.execute("SELECT member_id, username, earned_credits FROM members WHERE timestamp = ?", 
-                                        (lookback_ts,)) as cursor:
-                        prev_current_data = await cursor.fetchall()
+                    async with db.execute(query, (prev_start_scrape,)) as cursor:
+                        prev_start_data = await cursor.fetchall()
                     
-                    async with db.execute("SELECT member_id, earned_credits FROM members WHERE timestamp = ?",
-                                        (prev_lookback_ts,)) as cursor:
-                        prev_lookback_data = await cursor.fetchall()
+                    async with db.execute(query, (prev_end_scrape,)) as cursor:
+                        prev_end_data = await cursor.fetchall()
                     
-                    prev_lookback_map = {member_id: credits for member_id, credits in prev_lookback_data}
+                    prev_start_map = {member_id: (username, credits) for member_id, username, credits in prev_start_data}
                     
                     prev_delta_list = []
-                    for member_id, username, credits in prev_current_data:
-                        prev_lookback_credits = prev_lookback_map.get(member_id, credits)
-                        delta = credits - prev_lookback_credits
+                    for member_id, username, end_credits in prev_end_data:
+                        if member_id in prev_start_map:
+                            start_credits = prev_start_map[member_id][1]
+                            delta = end_credits - start_credits
+                        else:
+                            delta = end_credits
                         
                         if delta > 0:
                             prev_delta_list.append({
@@ -289,8 +323,7 @@ class Leaderboard(commands.Cog):
     async def _get_treasury_rankings(self, period: str) -> Optional[Dict]:
         """
         Get treasury contribution rankings from income_v2.db.
-        NOTE: IncomeScraper stores member contributions as 'income' type (not 'expense')!
-        We filter out period='paginated' which contains actual expenses (African Prison, etc.)
+        Uses the most recent scrape from the specified period.
         Returns dict with 'current' and 'previous' lists of {username, credits, rank}
         """
         if not self.income_db_path.exists():
@@ -300,7 +333,6 @@ class Leaderboard(commands.Cog):
         try:
             async with aiosqlite.connect(self.income_db_path) as db:
                 # Get the two most recent timestamps for this period
-                # NOTE: Using entry_type='income' (not 'expense')!
                 query = """
                     SELECT DISTINCT timestamp
                     FROM income
@@ -419,12 +451,12 @@ class Leaderboard(commands.Cog):
         embed = discord.Embed(
             title=f"🏆 {title}",
             color=discord.Color.gold(),
-            timestamp=datetime.now(self.tz)
+            timestamp=datetime.now(self.tz_amsterdam)
         )
         
         if not rankings_data or not rankings_data.get("current"):
             embed.description = "No data available for this period."
-            embed.set_footer(text="Rankings based on last 24 hours • Using new scraper_databases")
+            embed.set_footer(text="Rankings based on full day/month in NY timezone • Using new scraper_databases")
             return embed
         
         current = rankings_data["current"]
@@ -450,7 +482,7 @@ class Leaderboard(commands.Cog):
         
         embed.description = "\n".join(lines)
         
-        period_text = "last 24 hours" if "Daily" in title else "last 30 days"
+        period_text = "full previous day (NY time)" if "Daily" in title else "full previous month (NY time)"
         embed.set_footer(text=f"Rankings based on {period_text} • Using new scraper_databases")
         
         return embed
@@ -477,15 +509,15 @@ class Leaderboard(commands.Cog):
             return False
     
     async def _daily_leaderboard_loop(self):
-        """Daily leaderboard posting at 05:55 Amsterdam time."""
+        """Daily leaderboard posting at 06:00 Amsterdam time (00:00 NY time)."""
         await self.bot.wait_until_ready()
         
         while not self.bot.is_closed():
             try:
-                now = datetime.now(self.tz)
+                now = datetime.now(self.tz_amsterdam)
                 
-                # Calculate next 05:55
-                target = now.replace(hour=5, minute=55, second=0, microsecond=0)
+                # Calculate next 06:00
+                target = now.replace(hour=6, minute=0, second=0, microsecond=0)
                 if now >= target:
                     target += timedelta(days=1)
                 
@@ -525,32 +557,23 @@ class Leaderboard(commands.Cog):
                 await asyncio.sleep(3600)  # Wait 1 hour on error
     
     async def _monthly_leaderboard_loop(self):
-        """Monthly leaderboard posting on last day of month at 05:55 Amsterdam time."""
+        """Monthly leaderboard posting on 1st day of month at 06:00 Amsterdam time."""
         await self.bot.wait_until_ready()
         
         while not self.bot.is_closed():
             try:
-                now = datetime.now(self.tz)
+                now = datetime.now(self.tz_amsterdam)
                 
-                # Calculate next last day of month at 05:55
-                # Move to next month, then subtract 1 day
-                if now.month == 12:
-                    next_month = now.replace(year=now.year + 1, month=1, day=1)
+                # Calculate next 1st of month at 06:00
+                if now.day == 1 and now.hour < 6:
+                    # We're on the 1st but before 06:00
+                    target = now.replace(hour=6, minute=0, second=0, microsecond=0)
                 else:
-                    next_month = now.replace(month=now.month + 1, day=1)
-                
-                last_day = next_month - timedelta(days=1)
-                target = last_day.replace(hour=5, minute=55, second=0, microsecond=0)
-                
-                # If we're past this month's target, calculate for next month
-                if now >= target:
-                    if target.month == 12:
-                        next_month = target.replace(year=target.year + 1, month=1, day=1)
+                    # Move to next month
+                    if now.month == 12:
+                        target = now.replace(year=now.year + 1, month=1, day=1, hour=6, minute=0, second=0, microsecond=0)
                     else:
-                        next_month = target.replace(month=target.month + 1, day=1)
-                    
-                    last_day = next_month - timedelta(days=1)
-                    target = last_day.replace(hour=5, minute=55, second=0, microsecond=0)
+                        target = now.replace(month=now.month + 1, day=1, hour=6, minute=0, second=0, microsecond=0)
                 
                 wait_seconds = (target - now).total_seconds()
                 logger.info(f"Next monthly leaderboard on {target.strftime('%Y-%m-%d %H:%M %Z')} ({wait_seconds/86400:.1f} days)")
@@ -662,10 +685,13 @@ class Leaderboard(commands.Cog):
         )
         
         # Schedule info
-        now = datetime.now(self.tz)
+        now_adam = datetime.now(self.tz_amsterdam)
+        now_ny = datetime.now(self.tz_ny)
         embed.add_field(
             name="⏰ Schedule",
-            value=f"**Daily:** 05:55 Amsterdam time (23:55 NY)\n**Monthly:** Last day of month at 05:55\n**Current time:** {now.strftime('%Y-%m-%d %H:%M:%S %Z')}",
+            value=f"**Daily:** 06:00 Amsterdam (00:00 NY) - shows full previous day\n"
+                  f"**Monthly:** 1st of month at 06:00 - shows full previous month\n"
+                  f"**Current time:** {now_adam.strftime('%Y-%m-%d %H:%M %Z')} / {now_ny.strftime('%H:%M %Z')}",
             inline=False
         )
         
@@ -734,7 +760,7 @@ class Leaderboard(commands.Cog):
                     query = """
                         SELECT DISTINCT timestamp, period 
                         FROM income 
-                        WHERE entry_type = 'expense' AND period IN ('daily', 'monthly')
+                        WHERE entry_type = 'income' AND period IN ('daily', 'monthly')
                         ORDER BY timestamp DESC 
                         LIMIT 10
                     """
@@ -743,7 +769,7 @@ class Leaderboard(commands.Cog):
                     
                     ts_text = "\n".join([f"• {ts[0]} ({ts[1]})" for ts in timestamps])
                     embed.add_field(
-                        name="income_v2.db (last 10 scrapes, expense/daily)",
+                        name="income_v2.db (last 10 scrapes, income/daily+monthly)",
                         value=ts_text or "No data",
                         inline=False
                     )
@@ -751,6 +777,43 @@ class Leaderboard(commands.Cog):
                 embed.add_field(name="income_v2.db", value=f"Error: {str(e)}", inline=False)
         else:
             embed.add_field(name="income_v2.db", value="❌ Not found", inline=False)
+        
+        await ctx.send(embed=embed)
+    
+    @topplayers.command(name="debugperiod")
+    @checks.is_owner()
+    async def debug_period(self, ctx, period: str = "daily"):
+        """Debug: Show what period boundaries would be calculated right now."""
+        if period not in ["daily", "monthly"]:
+            await ctx.send("❌ Period must be 'daily' or 'monthly'")
+            return
+        
+        now = datetime.now(self.tz_amsterdam)
+        current_start, current_end, previous_start, previous_end = self._get_period_boundaries(period, now)
+        
+        embed = discord.Embed(
+            title=f"🔍 Period Boundaries Debug ({period})",
+            color=discord.Color.blue()
+        )
+        
+        embed.add_field(
+            name="Current Period",
+            value=f"**Start:** {current_start.isoformat()}\n**End:** {current_end.isoformat()}",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="Previous Period",
+            value=f"**Start:** {previous_start.isoformat()}\n**End:** {previous_end.isoformat()}",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="Current Time",
+            value=f"**Amsterdam:** {now.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
+                  f"**New York:** {now.astimezone(self.tz_ny).strftime('%Y-%m-%d %H:%M:%S %Z')}",
+            inline=False
+        )
         
         await ctx.send(embed=embed)
     
@@ -819,22 +882,22 @@ class Leaderboard(commands.Cog):
                         by_type = await cursor.fetchall()
                     
                     # Income records specifically
-                    async with db.execute("SELECT COUNT(*) FROM income WHERE entry_type = 'expense' AND period IN ('daily', 'monthly')") as cursor:
+                    async with db.execute("SELECT COUNT(*) FROM income WHERE entry_type = 'income' AND period IN ('daily', 'monthly')") as cursor:
                         contrib_count = (await cursor.fetchone())[0]
                     
                     # Latest scrape
-                    async with db.execute("SELECT MAX(timestamp) FROM income WHERE entry_type = 'expense' AND period = 'daily'") as cursor:
+                    async with db.execute("SELECT MAX(timestamp) FROM income WHERE entry_type = 'income' AND period = 'daily'") as cursor:
                         latest = (await cursor.fetchone())[0]
                     
                     # By period
-                    async with db.execute("SELECT period, COUNT(*) FROM income WHERE entry_type = 'expense' GROUP BY period") as cursor:
+                    async with db.execute("SELECT period, COUNT(*) FROM income WHERE entry_type = 'income' GROUP BY period") as cursor:
                         by_period = await cursor.fetchall()
                     
-                    # Sample data (show ALL types if no income)
+                    # Sample data
                     async with db.execute("""
                         SELECT username, amount, period, entry_type
                         FROM income 
-                        WHERE entry_type = 'expense' AND period = 'daily'
+                        WHERE entry_type = 'income' AND period = 'daily'
                         ORDER BY timestamp DESC, amount DESC
                         LIMIT 5
                     """) as cursor:
@@ -844,7 +907,7 @@ class Leaderboard(commands.Cog):
                     period_text = "\n".join([f"• {p}: {c:,}" for p, c in by_period])
                     
                     if sample:
-                        sample_text = "\n".join([f"• {name}: {amt:,} ({per}, type={typ})" for name, amt, per, typ in sample])
+                        sample_text = "\n".join([f"• {name}: {amt:,} ({per})" for name, amt, per, typ in sample])
                     else:
                         sample_text = "No data"
                     
@@ -864,122 +927,3 @@ class Leaderboard(commands.Cog):
             embed.add_field(name="income_v2.db", value="❌ Not found", inline=False)
         
         await ctx.send(embed=embed)
-    
-    @topplayers.command(name="checklatest")
-    @checks.is_owner()
-    async def check_latest(self, ctx, period: str = "daily", username: str = None):
-        """
-        Check what's in the latest scrape for a specific period, optionally search for specific username.
-        NOTE: Only shows contribution data (period='daily' or 'monthly'), NOT expenses (period='paginated')
-        """
-        if not self.income_db_path.exists():
-            await ctx.send("❌ income_v2.db not found!")
-            return
-        
-        if period not in ["daily", "monthly"]:
-            await ctx.send("❌ Period must be 'daily' or 'monthly'")
-            return
-        
-        try:
-            async with aiosqlite.connect(self.income_db_path) as db:
-                # First, let's see ALL distinct periods and entry_types
-                debug_query = "SELECT DISTINCT entry_type, period, COUNT(*) FROM income GROUP BY entry_type, period"
-                async with db.execute(debug_query) as cursor:
-                    all_data = await cursor.fetchall()
-                    await ctx.send(f"🔍 DEBUG - Data in database:\n" + "\n".join([f"  • {etype} / {per}: {cnt} records" for etype, per, cnt in all_data]))
-                
-                # Get latest timestamp for this period (contributions only, not paginated expenses)
-                query = """
-                    SELECT MAX(timestamp) as latest_ts
-                    FROM income
-                    WHERE entry_type = 'income' AND period = ?
-                """
-                async with db.execute(query, (period,)) as cursor:
-                    result = await cursor.fetchone()
-                    if not result or not result[0]:
-                        await ctx.send(f"❌ No data found for period: {period}\nTry checking if entry_type='income' and period='{period}' exists in debug info above.")
-                        return
-                    
-                    latest_ts = result[0]
-                
-                # If searching for specific username
-                if username:
-                    query = """
-                        SELECT username, amount
-                        FROM income
-                        WHERE entry_type = 'income' 
-                        AND period = ?
-                        AND timestamp = ?
-                        AND username LIKE ?
-                        ORDER BY amount DESC
-                    """
-                    async with db.execute(query, (period, latest_ts, f"%{username}%")) as cursor:
-                        results = await cursor.fetchall()
-                        
-                        if not results:
-                            await ctx.send(f"❌ Username '{username}' not found in latest {period} scrape (timestamp: {latest_ts})")
-                            return
-                        
-                        embed = discord.Embed(
-                            title=f"🔍 Search Results for '{username}'",
-                            description=f"Period: {period}\nTimestamp: {latest_ts}",
-                            color=discord.Color.blue()
-                        )
-                        
-                        for i, (uname, amount) in enumerate(results, 1):
-                            embed.add_field(
-                                name=f"{i}. {uname}",
-                                value=f"{amount:,} credits",
-                                inline=False
-                            )
-                        
-                        await ctx.send(embed=embed)
-                        return
-                
-                # Get ALL contributors (not just top 15) to verify complete data
-                query = """
-                    SELECT username, amount
-                    FROM income
-                    WHERE entry_type = 'income' 
-                    AND period = ?
-                    AND timestamp = ?
-                    ORDER BY amount DESC
-                """
-                
-                async with db.execute(query, (period, latest_ts)) as cursor:
-                    results = await cursor.fetchall()
-                
-                if not results:
-                    await ctx.send(f"❌ No contributors found for {period}")
-                    return
-                
-                embed = discord.Embed(
-                    title=f"📊 Latest {period.upper()} scrape (RAW DATA)",
-                    description=f"Timestamp: {latest_ts}\nTotal contributors: {len(results)}",
-                    color=discord.Color.green()
-                )
-                
-                # Show top 20
-                contributors_text = "\n".join([
-                    f"{i}. **{username}** - {amount:,} credits"
-                    for i, (username, amount) in enumerate(results[:20], 1)
-                ])
-                
-                embed.add_field(
-                    name="Top 20 Contributors (unfiltered)",
-                    value=contributors_text,
-                    inline=False
-                )
-                
-                if len(results) > 20:
-                    embed.add_field(
-                        name="Note",
-                        value=f"... and {len(results) - 20} more contributors",
-                        inline=False
-                    )
-                
-                await ctx.send(embed=embed)
-                
-        except Exception as e:
-            logger.error(f"Error checking latest scrape: {e}", exc_info=True)
-            await ctx.send(f"❌ Error: {str(e)}")
