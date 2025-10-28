@@ -166,14 +166,19 @@ class Leaderboard(commands.Cog):
             previous_end.astimezone(pytz.UTC)
         )
     
-    async def _get_scrapes_in_period(self, db, start_time: datetime, end_time: datetime) -> List[str]:
+    async def _get_best_scrapes_in_period(self, db, start_time: datetime, end_time: datetime) -> Tuple[Optional[str], Optional[str]]:
         """
-        Get all scrape timestamps within the specified period.
-        Returns list of timestamps sorted chronologically.
+        Get the best first and last scrapes within a period.
+        Returns (first_scrape, last_scrape) timestamps.
+        
+        "Best" means:
+        - First scrape: earliest scrape with at least 10 members with earned_credits > 0
+        - Last scrape: latest scrape with at least 10 members with earned_credits > 0
         """
         start_iso = start_time.isoformat()
         end_iso = end_time.isoformat()
         
+        # Get all timestamps in period
         query = """
             SELECT DISTINCT timestamp 
             FROM members 
@@ -182,8 +187,39 @@ class Leaderboard(commands.Cog):
         """
         
         async with db.execute(query, (start_iso, end_iso)) as cursor:
-            results = await cursor.fetchall()
-            return [row[0] for row in results]
+            all_timestamps = [row[0] for row in await cursor.fetchall()]
+        
+        if not all_timestamps:
+            return None, None
+        
+        # Function to check if a scrape has good data
+        async def has_good_data(timestamp: str) -> bool:
+            count_query = """
+                SELECT COUNT(*) 
+                FROM members 
+                WHERE timestamp = ? AND earned_credits > 0
+            """
+            async with db.execute(count_query, (timestamp,)) as cursor:
+                count = (await cursor.fetchone())[0]
+            return count >= 10
+        
+        # Find first good scrape
+        first_scrape = None
+        for ts in all_timestamps:
+            if await has_good_data(ts):
+                first_scrape = ts
+                logger.info(f"Found first good scrape: {ts}")
+                break
+        
+        # Find last good scrape (search backwards)
+        last_scrape = None
+        for ts in reversed(all_timestamps):
+            if await has_good_data(ts):
+                last_scrape = ts
+                logger.info(f"Found last good scrape: {ts}")
+                break
+        
+        return first_scrape, last_scrape
     
     async def _get_earned_credits_rankings(self, period: str) -> Optional[Dict]:
         """
@@ -204,18 +240,14 @@ class Leaderboard(commands.Cog):
                 logger.info(f"Earned credits {period} - Current period: {current_start} to {current_end}")
                 logger.info(f"Earned credits {period} - Previous period: {previous_start} to {previous_end}")
                 
-                # Find ALL scrapes within current period
-                current_scrapes = await self._get_scrapes_in_period(db, current_start, current_end)
+                # Find best scrapes within current period
+                start_scrape, end_scrape = await self._get_best_scrapes_in_period(db, current_start, current_end)
                 
-                if len(current_scrapes) < 2:
-                    logger.warning(f"Not enough scrapes in current {period} period (found {len(current_scrapes)})")
+                if not start_scrape or not end_scrape:
+                    logger.warning(f"Could not find good scrapes for current {period} period")
                     return None
                 
-                # Use FIRST and LAST scrape of the period
-                start_scrape = current_scrapes[0]
-                end_scrape = current_scrapes[-1]
-                
-                logger.info(f"Using {len(current_scrapes)} scrapes: first={start_scrape}, last={end_scrape}")
+                logger.info(f"Using start scrape: {start_scrape}, end scrape: {end_scrape}")
                 
                 # Get credits at start of period
                 query = """
@@ -279,14 +311,11 @@ class Leaderboard(commands.Cog):
                     entry["rank"] = i
                 
                 # Do the same for previous period
-                previous_scrapes = await self._get_scrapes_in_period(db, previous_start, previous_end)
+                prev_start_scrape, prev_end_scrape = await self._get_best_scrapes_in_period(db, previous_start, previous_end)
                 
                 previous_rankings = []
-                if len(previous_scrapes) >= 2:
-                    prev_start_scrape = previous_scrapes[0]
-                    prev_end_scrape = previous_scrapes[-1]
-                    
-                    logger.info(f"Previous period: {len(previous_scrapes)} scrapes, first={prev_start_scrape}, last={prev_end_scrape}")
+                if prev_start_scrape and prev_end_scrape:
+                    logger.info(f"Previous period: start scrape {prev_start_scrape}, end scrape {prev_end_scrape}")
                     
                     async with db.execute(query, (prev_start_scrape,)) as cursor:
                         prev_start_data = await cursor.fetchall()
@@ -791,7 +820,7 @@ class Leaderboard(commands.Cog):
     @topplayers.command(name="debugdata")
     @checks.is_owner()
     async def debug_data(self, ctx, period: str = "daily"):
-        """Debug: Show actual data from first and last scrape of period."""
+        """Debug: Show actual data from first and last GOOD scrape of period."""
         if period not in ["daily", "monthly"]:
             await ctx.send("❌ Period must be 'daily' or 'monthly'")
             return
@@ -805,14 +834,11 @@ class Leaderboard(commands.Cog):
             current_start, current_end, _, _ = self._get_period_boundaries(period, now)
             
             async with aiosqlite.connect(self.members_db_path) as db:
-                current_scrapes = await self._get_scrapes_in_period(db, current_start, current_end)
+                start_scrape, end_scrape = await self._get_best_scrapes_in_period(db, current_start, current_end)
                 
-                if len(current_scrapes) < 2:
-                    await ctx.send(f"❌ Not enough scrapes (found {len(current_scrapes)})")
+                if not start_scrape or not end_scrape:
+                    await ctx.send(f"❌ Could not find good scrapes in period")
                     return
-                
-                start_scrape = current_scrapes[0]
-                end_scrape = current_scrapes[-1]
                 
                 # Get some sample data from both scrapes
                 query = """
@@ -830,7 +856,7 @@ class Leaderboard(commands.Cog):
                     end_top = await cursor.fetchall()
                 
                 # Count total members
-                count_query = "SELECT COUNT(*) FROM members WHERE timestamp = ?"
+                count_query = "SELECT COUNT(*) FROM members WHERE timestamp = ? AND earned_credits > 0"
                 
                 async with db.execute(count_query, (start_scrape,)) as cursor:
                     start_count = (await cursor.fetchone())[0]
@@ -839,28 +865,28 @@ class Leaderboard(commands.Cog):
                     end_count = (await cursor.fetchone())[0]
             
             embed = discord.Embed(
-                title=f"🔍 Data Debug ({period})",
+                title=f"🔍 Data Debug ({period}) - Good Scrapes Only",
                 color=discord.Color.blue()
             )
             
             # Start scrape info
-            start_text = f"**Timestamp:** {start_scrape}\n**Total members:** {start_count}\n\n**Top 5:**\n"
+            start_text = f"**Timestamp:** {start_scrape}\n**Members with credits > 0:** {start_count}\n\n**Top 5:**\n"
             for member_id, username, credits in start_top:
                 start_text += f"• {username}: {credits:,} credits\n"
             
             embed.add_field(
-                name="First Scrape",
+                name="First Good Scrape",
                 value=start_text,
                 inline=False
             )
             
             # End scrape info
-            end_text = f"**Timestamp:** {end_scrape}\n**Total members:** {end_count}\n\n**Top 5:**\n"
+            end_text = f"**Timestamp:** {end_scrape}\n**Members with credits > 0:** {end_count}\n\n**Top 5:**\n"
             for member_id, username, credits in end_top:
                 end_text += f"• {username}: {credits:,} credits\n"
             
             embed.add_field(
-                name="Last Scrape",
+                name="Last Good Scrape",
                 value=end_text,
                 inline=False
             )
@@ -868,10 +894,11 @@ class Leaderboard(commands.Cog):
             # Calculate some deltas for the top 5
             if start_top and end_top:
                 delta_text = "**Sample deltas (if same member in both):**\n"
-                start_map = {member_id: credits for member_id, _, credits in start_top}
+                start_map = {member_id: (username, credits) for member_id, username, credits in start_top}
                 for member_id, username, end_credits in end_top:
                     if member_id in start_map:
-                        delta = end_credits - start_map[member_id]
+                        start_username, start_credits = start_map[member_id]
+                        delta = end_credits - start_credits
                         delta_text += f"• {username}: {delta:,} credits gained\n"
                 
                 embed.add_field(
