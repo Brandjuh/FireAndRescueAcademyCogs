@@ -166,39 +166,29 @@ class Leaderboard(commands.Cog):
             previous_end.astimezone(pytz.UTC)
         )
     
-    async def _find_closest_scrape(self, db, target_time: datetime, before: bool = True) -> Optional[str]:
+    async def _get_scrapes_in_period(self, db, start_time: datetime, end_time: datetime) -> List[str]:
         """
-        Find the scrape timestamp closest to target_time.
-        If before=True, find closest scrape before or at target_time.
-        If before=False, find closest scrape after or at target_time.
+        Get all scrape timestamps within the specified period.
+        Returns list of timestamps sorted chronologically.
         """
-        target_iso = target_time.isoformat()
+        start_iso = start_time.isoformat()
+        end_iso = end_time.isoformat()
         
-        if before:
-            query = """
-                SELECT timestamp 
-                FROM members 
-                WHERE timestamp <= ?
-                ORDER BY timestamp DESC 
-                LIMIT 1
-            """
-        else:
-            query = """
-                SELECT timestamp 
-                FROM members 
-                WHERE timestamp >= ?
-                ORDER BY timestamp ASC 
-                LIMIT 1
-            """
+        query = """
+            SELECT DISTINCT timestamp 
+            FROM members 
+            WHERE timestamp >= ? AND timestamp <= ?
+            ORDER BY timestamp ASC
+        """
         
-        async with db.execute(query, (target_iso,)) as cursor:
-            result = await cursor.fetchone()
-            return result[0] if result else None
+        async with db.execute(query, (start_iso, end_iso)) as cursor:
+            results = await cursor.fetchall()
+            return [row[0] for row in results]
     
     async def _get_earned_credits_rankings(self, period: str) -> Optional[Dict]:
         """
         Get earned credits rankings from members_v2.db.
-        Calculates DELTA between start and end of the specified period.
+        Finds ALL scrapes within the period and compares FIRST vs LAST scrape.
         Returns dict with 'current' and 'previous' lists of {username, credits, rank}
         """
         if not self.members_db_path.exists():
@@ -214,15 +204,18 @@ class Leaderboard(commands.Cog):
                 logger.info(f"Earned credits {period} - Current period: {current_start} to {current_end}")
                 logger.info(f"Earned credits {period} - Previous period: {previous_start} to {previous_end}")
                 
-                # Find scrapes at start and end of current period
-                start_scrape = await self._find_closest_scrape(db, current_start, before=False)  # First scrape after period start
-                end_scrape = await self._find_closest_scrape(db, current_end, before=True)  # Last scrape before period end
+                # Find ALL scrapes within current period
+                current_scrapes = await self._get_scrapes_in_period(db, current_start, current_end)
                 
-                if not start_scrape or not end_scrape:
-                    logger.warning(f"Could not find scrapes for current {period} period")
+                if len(current_scrapes) < 2:
+                    logger.warning(f"Not enough scrapes in current {period} period (found {len(current_scrapes)})")
                     return None
                 
-                logger.info(f"Using start scrape: {start_scrape}, end scrape: {end_scrape}")
+                # Use FIRST and LAST scrape of the period
+                start_scrape = current_scrapes[0]
+                end_scrape = current_scrapes[-1]
+                
+                logger.info(f"Using {len(current_scrapes)} scrapes: first={start_scrape}, last={end_scrape}")
                 
                 # Get credits at start of period
                 query = """
@@ -237,6 +230,10 @@ class Leaderboard(commands.Cog):
                 # Get credits at end of period
                 async with db.execute(query, (end_scrape,)) as cursor:
                     end_data = await cursor.fetchall()
+                
+                if not start_data or not end_data:
+                    logger.warning("No data found in start or end scrapes")
+                    return None
                 
                 # Build start credits map
                 start_map = {member_id: (username, credits) for member_id, username, credits in start_data}
@@ -262,8 +259,12 @@ class Leaderboard(commands.Cog):
                     logger.warning("No members with positive credit growth")
                     return None
                 
+                logger.info(f"Found {len(delta_list)} members with positive growth")
+                
                 # Filter invalid entries
                 delta_filtered = self._filter_invalid_entries(delta_list)
+                
+                logger.info(f"After filtering: {len(delta_filtered)} members")
                 
                 # Sort by delta and get top 10
                 delta_filtered.sort(key=lambda x: x["credits"], reverse=True)
@@ -274,12 +275,14 @@ class Leaderboard(commands.Cog):
                     entry["rank"] = i
                 
                 # Do the same for previous period
-                prev_start_scrape = await self._find_closest_scrape(db, previous_start, before=False)
-                prev_end_scrape = await self._find_closest_scrape(db, previous_end, before=True)
+                previous_scrapes = await self._get_scrapes_in_period(db, previous_start, previous_end)
                 
                 previous_rankings = []
-                if prev_start_scrape and prev_end_scrape:
-                    logger.info(f"Previous period: start scrape {prev_start_scrape}, end scrape {prev_end_scrape}")
+                if len(previous_scrapes) >= 2:
+                    prev_start_scrape = previous_scrapes[0]
+                    prev_end_scrape = previous_scrapes[-1]
+                    
+                    logger.info(f"Previous period: {len(previous_scrapes)} scrapes, first={prev_start_scrape}, last={prev_end_scrape}")
                     
                     async with db.execute(query, (prev_start_scrape,)) as cursor:
                         prev_start_data = await cursor.fetchall()
@@ -287,29 +290,30 @@ class Leaderboard(commands.Cog):
                     async with db.execute(query, (prev_end_scrape,)) as cursor:
                         prev_end_data = await cursor.fetchall()
                     
-                    prev_start_map = {member_id: (username, credits) for member_id, username, credits in prev_start_data}
-                    
-                    prev_delta_list = []
-                    for member_id, username, end_credits in prev_end_data:
-                        if member_id in prev_start_map:
-                            start_credits = prev_start_map[member_id][1]
-                            delta = end_credits - start_credits
-                        else:
-                            delta = end_credits
+                    if prev_start_data and prev_end_data:
+                        prev_start_map = {member_id: (username, credits) for member_id, username, credits in prev_start_data}
                         
-                        if delta > 0:
-                            prev_delta_list.append({
-                                "username": username,
-                                "credits": delta,
-                                "user_id": str(member_id)
-                            })
-                    
-                    prev_delta_filtered = self._filter_invalid_entries(prev_delta_list)
-                    prev_delta_filtered.sort(key=lambda x: x["credits"], reverse=True)
-                    previous_rankings = prev_delta_filtered[:20]
-                    
-                    for i, entry in enumerate(previous_rankings, 1):
-                        entry["rank"] = i
+                        prev_delta_list = []
+                        for member_id, username, end_credits in prev_end_data:
+                            if member_id in prev_start_map:
+                                start_credits = prev_start_map[member_id][1]
+                                delta = end_credits - start_credits
+                            else:
+                                delta = end_credits
+                            
+                            if delta > 0:
+                                prev_delta_list.append({
+                                    "username": username,
+                                    "credits": delta,
+                                    "user_id": str(member_id)
+                                })
+                        
+                        prev_delta_filtered = self._filter_invalid_entries(prev_delta_list)
+                        prev_delta_filtered.sort(key=lambda x: x["credits"], reverse=True)
+                        previous_rankings = prev_delta_filtered[:20]
+                        
+                        for i, entry in enumerate(previous_rankings, 1):
+                            entry["rank"] = i
                 
                 return {
                     "current": current_rankings,
@@ -780,42 +784,69 @@ class Leaderboard(commands.Cog):
         
         await ctx.send(embed=embed)
     
-    @topplayers.command(name="debugperiod")
+    @topplayers.command(name="debugscrapes")
     @checks.is_owner()
-    async def debug_period(self, ctx, period: str = "daily"):
-        """Debug: Show what period boundaries would be calculated right now."""
+    async def debug_scrapes(self, ctx, period: str = "daily"):
+        """Debug: Show which scrapes would be used for a period calculation."""
         if period not in ["daily", "monthly"]:
             await ctx.send("❌ Period must be 'daily' or 'monthly'")
             return
         
-        now = datetime.now(self.tz_amsterdam)
-        current_start, current_end, previous_start, previous_end = self._get_period_boundaries(period, now)
+        if not self.members_db_path.exists():
+            await ctx.send("❌ members_v2.db not found!")
+            return
         
-        embed = discord.Embed(
-            title=f"🔍 Period Boundaries Debug ({period})",
-            color=discord.Color.blue()
-        )
-        
-        embed.add_field(
-            name="Current Period",
-            value=f"**Start:** {current_start.isoformat()}\n**End:** {current_end.isoformat()}",
-            inline=False
-        )
-        
-        embed.add_field(
-            name="Previous Period",
-            value=f"**Start:** {previous_start.isoformat()}\n**End:** {previous_end.isoformat()}",
-            inline=False
-        )
-        
-        embed.add_field(
-            name="Current Time",
-            value=f"**Amsterdam:** {now.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
-                  f"**New York:** {now.astimezone(self.tz_ny).strftime('%Y-%m-%d %H:%M:%S %Z')}",
-            inline=False
-        )
-        
-        await ctx.send(embed=embed)
+        try:
+            now = datetime.now(self.tz_amsterdam)
+            current_start, current_end, previous_start, previous_end = self._get_period_boundaries(period, now)
+            
+            async with aiosqlite.connect(self.members_db_path) as db:
+                current_scrapes = await self._get_scrapes_in_period(db, current_start, current_end)
+                previous_scrapes = await self._get_scrapes_in_period(db, previous_start, previous_end)
+            
+            embed = discord.Embed(
+                title=f"🔍 Scrapes Debug ({period})",
+                color=discord.Color.blue()
+            )
+            
+            # Current period
+            if current_scrapes:
+                scrape_text = f"**Total scrapes:** {len(current_scrapes)}\n"
+                scrape_text += f"**First:** {current_scrapes[0]}\n"
+                scrape_text += f"**Last:** {current_scrapes[-1]}\n"
+                if len(current_scrapes) > 2:
+                    scrape_text += f"\n**All scrapes:**\n"
+                    scrape_text += "\n".join([f"• {s}" for s in current_scrapes[:10]])
+                    if len(current_scrapes) > 10:
+                        scrape_text += f"\n... and {len(current_scrapes) - 10} more"
+            else:
+                scrape_text = "❌ No scrapes found!"
+            
+            embed.add_field(
+                name=f"Current Period ({current_start.strftime('%Y-%m-%d')} to {current_end.strftime('%Y-%m-%d')})",
+                value=scrape_text,
+                inline=False
+            )
+            
+            # Previous period
+            if previous_scrapes:
+                prev_text = f"**Total scrapes:** {len(previous_scrapes)}\n"
+                prev_text += f"**First:** {previous_scrapes[0]}\n"
+                prev_text += f"**Last:** {previous_scrapes[-1]}"
+            else:
+                prev_text = "❌ No scrapes found!"
+            
+            embed.add_field(
+                name=f"Previous Period ({previous_start.strftime('%Y-%m-%d')} to {previous_end.strftime('%Y-%m-%d')})",
+                value=prev_text,
+                inline=False
+            )
+            
+            await ctx.send(embed=embed)
+            
+        except Exception as e:
+            await ctx.send(f"❌ Error: {str(e)}")
+            logger.error(f"Debug scrapes error: {e}", exc_info=True)
     
     @topplayers.command(name="debug")
     @checks.is_owner()
