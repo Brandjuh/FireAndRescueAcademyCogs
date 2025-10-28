@@ -171,53 +171,38 @@ class Leaderboard(commands.Cog):
         Get the best first and last scrapes within a period.
         Returns (first_scrape, last_scrape) timestamps.
         
-        "Best" means:
-        - First scrape: earliest scrape with at least 10 members with earned_credits > 0
-        - Last scrape: latest scrape with at least 10 members with earned_credits > 0
+        "Best" means scrapes with the most members (indicating complete scrapes).
+        We want scrapes with at least 15 members to ensure we have full alliance data.
         """
         start_iso = start_time.isoformat()
         end_iso = end_time.isoformat()
         
-        # Get all timestamps in period
+        # Get all timestamps with member counts
         query = """
-            SELECT DISTINCT timestamp 
+            SELECT timestamp, COUNT(*) as member_count
             FROM members 
             WHERE timestamp >= ? AND timestamp <= ?
+            GROUP BY timestamp
+            HAVING COUNT(*) >= 15
             ORDER BY timestamp ASC
         """
         
         async with db.execute(query, (start_iso, end_iso)) as cursor:
-            all_timestamps = [row[0] for row in await cursor.fetchall()]
+            results = await cursor.fetchall()
         
-        if not all_timestamps:
+        if not results:
+            logger.warning("No scrapes found with >= 15 members in period")
             return None, None
         
-        # Function to check if a scrape has good data
-        async def has_good_data(timestamp: str) -> bool:
-            count_query = """
-                SELECT COUNT(*) 
-                FROM members 
-                WHERE timestamp = ? AND earned_credits > 0
-            """
-            async with db.execute(count_query, (timestamp,)) as cursor:
-                count = (await cursor.fetchone())[0]
-            return count >= 10
+        # Get first and last scrapes
+        first_scrape = results[0][0]
+        last_scrape = results[-1][0]
         
-        # Find first good scrape
-        first_scrape = None
-        for ts in all_timestamps:
-            if await has_good_data(ts):
-                first_scrape = ts
-                logger.info(f"Found first good scrape: {ts}")
-                break
+        first_count = results[0][1]
+        last_count = results[-1][1]
         
-        # Find last good scrape (search backwards)
-        last_scrape = None
-        for ts in reversed(all_timestamps):
-            if await has_good_data(ts):
-                last_scrape = ts
-                logger.info(f"Found last good scrape: {ts}")
-                break
+        logger.info(f"Found first scrape: {first_scrape} ({first_count} members)")
+        logger.info(f"Found last scrape: {last_scrape} ({last_count} members)")
         
         return first_scrape, last_scrape
     
