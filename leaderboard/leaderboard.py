@@ -802,101 +802,73 @@ class Leaderboard(commands.Cog):
         
         await ctx.send(embed=embed)
     
-    @topplayers.command(name="debugdata")
+    @topplayers.command(name="debugday")
     @checks.is_owner()
-    async def debug_data(self, ctx, period: str = "daily"):
-        """Debug: Show actual data from first and last GOOD scrape of period."""
-        if period not in ["daily", "monthly"]:
-            await ctx.send("❌ Period must be 'daily' or 'monthly'")
-            return
-        
+    async def debug_day(self, ctx, date: str = None):
+        """
+        Debug: Show ALL scrapes for a specific day with member counts and top earner.
+        Format: YYYY-MM-DD (e.g., 2025-10-27)
+        If no date provided, uses yesterday.
+        """
         if not self.members_db_path.exists():
             await ctx.send("❌ members_v2.db not found!")
             return
         
         try:
-            now = datetime.now(self.tz_amsterdam)
-            current_start, current_end, _, _ = self._get_period_boundaries(period, now)
+            if date:
+                target_date = datetime.strptime(date, "%Y-%m-%d").date()
+            else:
+                # Yesterday
+                target_date = (datetime.now(self.tz_ny) - timedelta(days=1)).date()
             
             async with aiosqlite.connect(self.members_db_path) as db:
-                start_scrape, end_scrape = await self._get_best_scrapes_in_period(db, current_start, current_end)
-                
-                if not start_scrape or not end_scrape:
-                    await ctx.send(f"❌ Could not find good scrapes in period")
-                    return
-                
-                # Get some sample data from both scrapes
+                # Get all timestamps for this date with stats
                 query = """
-                    SELECT member_id, username, earned_credits
-                    FROM members
-                    WHERE timestamp = ?
-                    ORDER BY earned_credits DESC
-                    LIMIT 5
+                    SELECT 
+                        timestamp,
+                        COUNT(*) as member_count,
+                        MAX(earned_credits) as max_credits,
+                        (SELECT username FROM members m2 
+                         WHERE m2.timestamp = m1.timestamp 
+                         ORDER BY earned_credits DESC LIMIT 1) as top_earner
+                    FROM members m1
+                    WHERE DATE(timestamp) = ?
+                    GROUP BY timestamp
+                    ORDER BY timestamp ASC
                 """
                 
-                async with db.execute(query, (start_scrape,)) as cursor:
-                    start_top = await cursor.fetchall()
-                
-                async with db.execute(query, (end_scrape,)) as cursor:
-                    end_top = await cursor.fetchall()
-                
-                # Count total members
-                count_query = "SELECT COUNT(*) FROM members WHERE timestamp = ? AND earned_credits > 0"
-                
-                async with db.execute(count_query, (start_scrape,)) as cursor:
-                    start_count = (await cursor.fetchone())[0]
-                
-                async with db.execute(count_query, (end_scrape,)) as cursor:
-                    end_count = (await cursor.fetchone())[0]
+                async with db.execute(query, (str(target_date),)) as cursor:
+                    results = await cursor.fetchall()
             
-            embed = discord.Embed(
-                title=f"🔍 Data Debug ({period}) - Good Scrapes Only",
-                color=discord.Color.blue()
-            )
+            if not results:
+                await ctx.send(f"❌ No scrapes found for date: {target_date}")
+                return
             
-            # Start scrape info
-            start_text = f"**Timestamp:** {start_scrape}\n**Members with credits > 0:** {start_count}\n\n**Top 5:**\n"
-            for member_id, username, credits in start_top:
-                start_text += f"• {username}: {credits:,} credits\n"
+            # Create paginated response
+            chunks = [results[i:i+10] for i in range(0, len(results), 10)]
             
-            embed.add_field(
-                name="First Good Scrape",
-                value=start_text,
-                inline=False
-            )
-            
-            # End scrape info
-            end_text = f"**Timestamp:** {end_scrape}\n**Members with credits > 0:** {end_count}\n\n**Top 5:**\n"
-            for member_id, username, credits in end_top:
-                end_text += f"• {username}: {credits:,} credits\n"
-            
-            embed.add_field(
-                name="Last Good Scrape",
-                value=end_text,
-                inline=False
-            )
-            
-            # Calculate some deltas for the top 5
-            if start_top and end_top:
-                delta_text = "**Sample deltas (if same member in both):**\n"
-                start_map = {member_id: (username, credits) for member_id, username, credits in start_top}
-                for member_id, username, end_credits in end_top:
-                    if member_id in start_map:
-                        start_username, start_credits = start_map[member_id]
-                        delta = end_credits - start_credits
-                        delta_text += f"• {username}: {delta:,} credits gained\n"
-                
-                embed.add_field(
-                    name="Example Deltas",
-                    value=delta_text,
-                    inline=False
+            for chunk_idx, chunk in enumerate(chunks[:3]):  # Max 3 messages (30 scrapes)
+                embed = discord.Embed(
+                    title=f"🔍 All Scrapes for {target_date} (Part {chunk_idx + 1}/{min(len(chunks), 3)})",
+                    color=discord.Color.blue()
                 )
+                
+                scrape_text = ""
+                for idx, (timestamp, count, max_cred, top_earner) in enumerate(chunk, chunk_idx * 10 + 1):
+                    time_only = timestamp.split('T')[1][:8] if 'T' in timestamp else timestamp
+                    scrape_text += f"**{idx}.** {time_only} - {count} members - Top: {top_earner} ({max_cred:,})\n"
+                
+                embed.description = scrape_text
+                embed.set_footer(text=f"Total scrapes found: {len(results)}")
+                
+                await ctx.send(embed=embed)
             
-            await ctx.send(embed=embed)
-            
+            if len(chunks) > 3:
+                await ctx.send(f"... and {len(results) - 30} more scrapes (showing first 30 only)")
+                
         except Exception as e:
             await ctx.send(f"❌ Error: {str(e)}")
-            logger.error(f"Debug data error: {e}", exc_info=True)
+            logger.error(f"Debug day error: {e}", exc_info=True)
     
     @topplayers.command(name="debug")
     @checks.is_owner()
