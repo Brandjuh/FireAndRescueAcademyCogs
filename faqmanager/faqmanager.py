@@ -333,21 +333,38 @@ class FAQManager(red_commands.Cog):
     
     @faq_admin.command(name="list")
     async def faq_list(self, ctx: red_commands.Context):
-        """List all custom FAQs."""
+        """List all custom FAQs with their IDs."""
         if not self._faq_cache:
             await ctx.send("📝 No custom FAQs found.", ephemeral=True)
             return
         
-        lines = []
-        for faq in self._faq_cache[:50]:  # Limit to 50
-            lines.append(f"**[{faq.id}]** {faq.question} ({faq.category or 'No category'})")
-        
         embed = discord.Embed(
             title="📚 Custom FAQs",
-            description="\n".join(lines[:25]),  # Discord embed limits
+            description=f"Total: {len(self._faq_cache)} FAQ(s)",
             color=discord.Color.green()
         )
-        embed.set_footer(text=f"Total: {len(self._faq_cache)} FAQs")
+        
+        # Group FAQs by category
+        categorized = {}
+        for faq in self._faq_cache[:50]:  # Limit to 50
+            category = faq.category or "Uncategorized"
+            if category not in categorized:
+                categorized[category] = []
+            categorized[category].append(faq)
+        
+        # Add fields per category
+        for category, faqs in sorted(categorized.items()):
+            lines = []
+            for faq in faqs[:10]:  # Max 10 per category to avoid embed limits
+                lines.append(f"`ID {faq.id:03d}` • {faq.question[:60]}")
+            
+            embed.add_field(
+                name=f"📂 {category}",
+                value="\n".join(lines),
+                inline=False
+            )
+        
+        embed.set_footer(text="Use /faqadmin edit <id> to modify an entry")
         
         await ctx.send(embed=embed, ephemeral=True)
     
@@ -518,7 +535,17 @@ class FAQManager(red_commands.Cog):
         if result.last_updated:
             embed.add_field(name="🕒 Last Updated", value=result.last_updated, inline=True)
         
-        embed.set_footer(text=f"Source: {source_text} • Score: {result.score:.0f}")
+        # Add FAQ ID for custom items (very important for editing)
+        if result.source == Source.CUSTOM and result.faq_id:
+            embed.add_field(name="🔢 FAQ ID", value=f"`{result.faq_id}`", inline=True)
+        
+        # Build footer text
+        footer_parts = [f"Source: {source_text}"]
+        if result.source == Source.CUSTOM and result.faq_id:
+            footer_parts.append(f"ID: {result.faq_id}")
+        footer_parts.append(f"Score: {result.score:.0f}")
+        
+        embed.set_footer(text=" • ".join(footer_parts))
         
         return embed
     
