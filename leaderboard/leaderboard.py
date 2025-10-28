@@ -227,9 +227,13 @@ class Leaderboard(commands.Cog):
                 async with db.execute(query, (start_scrape,)) as cursor:
                     start_data = await cursor.fetchall()
                 
+                logger.info(f"Start scrape has {len(start_data)} members")
+                
                 # Get credits at end of period
                 async with db.execute(query, (end_scrape,)) as cursor:
                     end_data = await cursor.fetchall()
+                
+                logger.info(f"End scrape has {len(end_data)} members")
                 
                 if not start_data or not end_data:
                     logger.warning("No data found in start or end scrapes")
@@ -784,10 +788,10 @@ class Leaderboard(commands.Cog):
         
         await ctx.send(embed=embed)
     
-    @topplayers.command(name="debugscrapes")
+    @topplayers.command(name="debugdata")
     @checks.is_owner()
-    async def debug_scrapes(self, ctx, period: str = "daily"):
-        """Debug: Show which scrapes would be used for a period calculation."""
+    async def debug_data(self, ctx, period: str = "daily"):
+        """Debug: Show actual data from first and last scrape of period."""
         if period not in ["daily", "monthly"]:
             await ctx.send("❌ Period must be 'daily' or 'monthly'")
             return
@@ -798,55 +802,89 @@ class Leaderboard(commands.Cog):
         
         try:
             now = datetime.now(self.tz_amsterdam)
-            current_start, current_end, previous_start, previous_end = self._get_period_boundaries(period, now)
+            current_start, current_end, _, _ = self._get_period_boundaries(period, now)
             
             async with aiosqlite.connect(self.members_db_path) as db:
                 current_scrapes = await self._get_scrapes_in_period(db, current_start, current_end)
-                previous_scrapes = await self._get_scrapes_in_period(db, previous_start, previous_end)
+                
+                if len(current_scrapes) < 2:
+                    await ctx.send(f"❌ Not enough scrapes (found {len(current_scrapes)})")
+                    return
+                
+                start_scrape = current_scrapes[0]
+                end_scrape = current_scrapes[-1]
+                
+                # Get some sample data from both scrapes
+                query = """
+                    SELECT member_id, username, earned_credits
+                    FROM members
+                    WHERE timestamp = ?
+                    ORDER BY earned_credits DESC
+                    LIMIT 5
+                """
+                
+                async with db.execute(query, (start_scrape,)) as cursor:
+                    start_top = await cursor.fetchall()
+                
+                async with db.execute(query, (end_scrape,)) as cursor:
+                    end_top = await cursor.fetchall()
+                
+                # Count total members
+                count_query = "SELECT COUNT(*) FROM members WHERE timestamp = ?"
+                
+                async with db.execute(count_query, (start_scrape,)) as cursor:
+                    start_count = (await cursor.fetchone())[0]
+                
+                async with db.execute(count_query, (end_scrape,)) as cursor:
+                    end_count = (await cursor.fetchone())[0]
             
             embed = discord.Embed(
-                title=f"🔍 Scrapes Debug ({period})",
+                title=f"🔍 Data Debug ({period})",
                 color=discord.Color.blue()
             )
             
-            # Current period
-            if current_scrapes:
-                scrape_text = f"**Total scrapes:** {len(current_scrapes)}\n"
-                scrape_text += f"**First:** {current_scrapes[0]}\n"
-                scrape_text += f"**Last:** {current_scrapes[-1]}\n"
-                if len(current_scrapes) > 2:
-                    scrape_text += f"\n**All scrapes:**\n"
-                    scrape_text += "\n".join([f"• {s}" for s in current_scrapes[:10]])
-                    if len(current_scrapes) > 10:
-                        scrape_text += f"\n... and {len(current_scrapes) - 10} more"
-            else:
-                scrape_text = "❌ No scrapes found!"
+            # Start scrape info
+            start_text = f"**Timestamp:** {start_scrape}\n**Total members:** {start_count}\n\n**Top 5:**\n"
+            for member_id, username, credits in start_top:
+                start_text += f"• {username}: {credits:,} credits\n"
             
             embed.add_field(
-                name=f"Current Period ({current_start.strftime('%Y-%m-%d')} to {current_end.strftime('%Y-%m-%d')})",
-                value=scrape_text,
+                name="First Scrape",
+                value=start_text,
                 inline=False
             )
             
-            # Previous period
-            if previous_scrapes:
-                prev_text = f"**Total scrapes:** {len(previous_scrapes)}\n"
-                prev_text += f"**First:** {previous_scrapes[0]}\n"
-                prev_text += f"**Last:** {previous_scrapes[-1]}"
-            else:
-                prev_text = "❌ No scrapes found!"
+            # End scrape info
+            end_text = f"**Timestamp:** {end_scrape}\n**Total members:** {end_count}\n\n**Top 5:**\n"
+            for member_id, username, credits in end_top:
+                end_text += f"• {username}: {credits:,} credits\n"
             
             embed.add_field(
-                name=f"Previous Period ({previous_start.strftime('%Y-%m-%d')} to {previous_end.strftime('%Y-%m-%d')})",
-                value=prev_text,
+                name="Last Scrape",
+                value=end_text,
                 inline=False
             )
+            
+            # Calculate some deltas for the top 5
+            if start_top and end_top:
+                delta_text = "**Sample deltas (if same member in both):**\n"
+                start_map = {member_id: credits for member_id, _, credits in start_top}
+                for member_id, username, end_credits in end_top:
+                    if member_id in start_map:
+                        delta = end_credits - start_map[member_id]
+                        delta_text += f"• {username}: {delta:,} credits gained\n"
+                
+                embed.add_field(
+                    name="Example Deltas",
+                    value=delta_text,
+                    inline=False
+                )
             
             await ctx.send(embed=embed)
             
         except Exception as e:
             await ctx.send(f"❌ Error: {str(e)}")
-            logger.error(f"Debug scrapes error: {e}", exc_info=True)
+            logger.error(f"Debug data error: {e}", exc_info=True)
     
     @topplayers.command(name="debug")
     @checks.is_owner()
