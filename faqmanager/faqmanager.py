@@ -75,17 +75,17 @@ class FAQManager(red_commands.Cog):
         self._cache_loaded = True
         log.info(f"Loaded {len(self._faq_cache)} FAQs into cache")
     
-    async def _is_editor(self, interaction: discord.Interaction) -> bool:
+    async def _is_editor(self, guild: discord.Guild, member: discord.Member) -> bool:
         """Check if user has editor permissions."""
         # Server admins always have access
-        if interaction.user.guild_permissions.administrator:
+        if member.guild_permissions.administrator:
             return True
-        if interaction.user.guild_permissions.manage_guild:
+        if member.guild_permissions.manage_guild:
             return True
         
         # Check configured editor roles
-        editor_role_ids = await self.config.guild(interaction.guild).editor_roles()
-        user_role_ids = [role.id for role in interaction.user.roles]
+        editor_role_ids = await self.config.guild(guild).editor_roles()
+        user_role_ids = [role.id for role in member.roles]
         
         return any(role_id in user_role_ids for role_id in editor_role_ids)
     
@@ -237,8 +237,13 @@ class FAQManager(red_commands.Cog):
     async def faq_add(self, ctx: red_commands.Context):
         """Add a new custom FAQ entry."""
         # Check permissions
-        if not await self._is_editor(ctx.interaction if ctx.interaction else ctx):
+        if not await self._is_editor(ctx.guild, ctx.author):
             await ctx.send("❌ You don't have permission to add FAQs.", ephemeral=True)
+            return
+        
+        # Modals only work with slash commands
+        if not ctx.interaction:
+            await ctx.send("❌ This command only works as a slash command. Use `/faqadmin add` instead.")
             return
         
         modal = AddFAQModal(self, ctx.author.id)
@@ -248,7 +253,7 @@ class FAQManager(red_commands.Cog):
     @app_commands.describe(faq_id="ID of the FAQ to edit")
     async def faq_edit(self, ctx: red_commands.Context, faq_id: int):
         """Edit an existing custom FAQ entry."""
-        if not await self._is_editor(ctx.interaction if ctx.interaction else ctx):
+        if not await self._is_editor(ctx.guild, ctx.author):
             await ctx.send("❌ You don't have permission to edit FAQs.", ephemeral=True)
             return
         
@@ -258,6 +263,11 @@ class FAQManager(red_commands.Cog):
             await ctx.send(f"❌ FAQ with ID `{faq_id}` not found.", ephemeral=True)
             return
         
+        # Modals only work with slash commands
+        if not ctx.interaction:
+            await ctx.send("❌ This command only works as a slash command. Use `/faqadmin edit` instead.")
+            return
+        
         modal = EditFAQModal(self, faq, ctx.author.id)
         await ctx.interaction.response.send_modal(modal)
     
@@ -265,7 +275,7 @@ class FAQManager(red_commands.Cog):
     @app_commands.describe(faq_id="ID of the FAQ to remove")
     async def faq_remove(self, ctx: red_commands.Context, faq_id: int):
         """Remove a custom FAQ entry (requires confirmation)."""
-        if not await self._is_editor(ctx.interaction if ctx.interaction else ctx):
+        if not await self._is_editor(ctx.guild, ctx.author):
             await ctx.send("❌ You don't have permission to remove FAQs.", ephemeral=True)
             return
         
@@ -287,7 +297,7 @@ class FAQManager(red_commands.Cog):
     @app_commands.describe(query="Search for FAQ to post publicly")
     async def faq_post(self, ctx: red_commands.Context, *, query: str):
         """Search and post a FAQ publicly in the current channel."""
-        if not await self._is_editor(ctx.interaction if ctx.interaction else ctx):
+        if not await self._is_editor(ctx.guild, ctx.author):
             await ctx.send("❌ You don't have permission to post FAQs.", ephemeral=True)
             return
         
