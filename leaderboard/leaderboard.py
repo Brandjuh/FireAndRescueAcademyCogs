@@ -209,7 +209,8 @@ class Leaderboard(commands.Cog):
     async def _get_earned_credits_rankings(self, period: str) -> Optional[Dict]:
         """
         Get earned credits rankings from members_v2.db.
-        Finds ALL scrapes within the period and compares FIRST vs LAST scrape.
+        For each member, finds MIN and MAX earned_credits within the period.
+        Delta = MAX - MIN for that member on that day.
         Returns dict with 'current' and 'previous' lists of {username, credits, rank}
         """
         if not self.members_db_path.exists():
@@ -223,64 +224,42 @@ class Leaderboard(commands.Cog):
                 current_start, current_end, previous_start, previous_end = self._get_period_boundaries(period, now)
                 
                 logger.info(f"Earned credits {period} - Current period: {current_start} to {current_end}")
-                logger.info(f"Earned credits {period} - Previous period: {previous_start} to {previous_end}")
                 
-                # Find best scrapes within current period
-                start_scrape, end_scrape = await self._get_best_scrapes_in_period(db, current_start, current_end)
-                
-                if not start_scrape or not end_scrape:
-                    logger.warning(f"Could not find good scrapes for current {period} period")
-                    return None
-                
-                logger.info(f"Using start scrape: {start_scrape}, end scrape: {end_scrape}")
-                
-                # Get credits at start of period
+                # For each member, get MIN and MAX earned_credits in the period
                 query = """
-                    SELECT member_id, username, earned_credits
+                    SELECT 
+                        member_id,
+                        username,
+                        MIN(earned_credits) as min_credits,
+                        MAX(earned_credits) as max_credits,
+                        (MAX(earned_credits) - MIN(earned_credits)) as delta
                     FROM members
-                    WHERE timestamp = ?
+                    WHERE timestamp >= ? AND timestamp <= ?
+                    GROUP BY member_id
+                    HAVING delta > 0
+                    ORDER BY delta DESC
                 """
                 
-                async with db.execute(query, (start_scrape,)) as cursor:
-                    start_data = await cursor.fetchall()
+                current_start_iso = current_start.isoformat()
+                current_end_iso = current_end.isoformat()
                 
-                logger.info(f"Start scrape has {len(start_data)} members")
+                async with db.execute(query, (current_start_iso, current_end_iso)) as cursor:
+                    current_data = await cursor.fetchall()
                 
-                # Get credits at end of period
-                async with db.execute(query, (end_scrape,)) as cursor:
-                    end_data = await cursor.fetchall()
-                
-                logger.info(f"End scrape has {len(end_data)} members")
-                
-                if not start_data or not end_data:
-                    logger.warning("No data found in start or end scrapes")
+                if not current_data:
+                    logger.warning("No members with positive credit growth in current period")
                     return None
                 
-                # Build start credits map
-                start_map = {member_id: (username, credits) for member_id, username, credits in start_data}
+                logger.info(f"Found {len(current_data)} members with positive growth")
                 
-                # Calculate deltas
+                # Convert to list of dicts
                 delta_list = []
-                for member_id, username, end_credits in end_data:
-                    if member_id in start_map:
-                        start_credits = start_map[member_id][1]
-                        delta = end_credits - start_credits
-                    else:
-                        # New member during period
-                        delta = end_credits
-                    
-                    if delta > 0:
-                        delta_list.append({
-                            "username": username,
-                            "credits": delta,
-                            "user_id": str(member_id)
-                        })
-                
-                if not delta_list:
-                    logger.warning("No members with positive credit growth")
-                    return None
-                
-                logger.info(f"Found {len(delta_list)} members with positive growth")
+                for member_id, username, min_cred, max_cred, delta in current_data:
+                    delta_list.append({
+                        "username": username,
+                        "credits": delta,
+                        "user_id": str(member_id)
+                    })
                 
                 # Filter invalid entries
                 delta_filtered = self._filter_invalid_entries(delta_list)
@@ -296,42 +275,30 @@ class Leaderboard(commands.Cog):
                     entry["rank"] = i
                 
                 # Do the same for previous period
-                prev_start_scrape, prev_end_scrape = await self._get_best_scrapes_in_period(db, previous_start, previous_end)
+                previous_start_iso = previous_start.isoformat()
+                previous_end_iso = previous_end.isoformat()
+                
+                async with db.execute(query, (previous_start_iso, previous_end_iso)) as cursor:
+                    previous_data = await cursor.fetchall()
                 
                 previous_rankings = []
-                if prev_start_scrape and prev_end_scrape:
-                    logger.info(f"Previous period: start scrape {prev_start_scrape}, end scrape {prev_end_scrape}")
+                if previous_data:
+                    logger.info(f"Previous period: {len(previous_data)} members with positive growth")
                     
-                    async with db.execute(query, (prev_start_scrape,)) as cursor:
-                        prev_start_data = await cursor.fetchall()
+                    prev_delta_list = []
+                    for member_id, username, min_cred, max_cred, delta in previous_data:
+                        prev_delta_list.append({
+                            "username": username,
+                            "credits": delta,
+                            "user_id": str(member_id)
+                        })
                     
-                    async with db.execute(query, (prev_end_scrape,)) as cursor:
-                        prev_end_data = await cursor.fetchall()
+                    prev_delta_filtered = self._filter_invalid_entries(prev_delta_list)
+                    prev_delta_filtered.sort(key=lambda x: x["credits"], reverse=True)
+                    previous_rankings = prev_delta_filtered[:20]
                     
-                    if prev_start_data and prev_end_data:
-                        prev_start_map = {member_id: (username, credits) for member_id, username, credits in prev_start_data}
-                        
-                        prev_delta_list = []
-                        for member_id, username, end_credits in prev_end_data:
-                            if member_id in prev_start_map:
-                                start_credits = prev_start_map[member_id][1]
-                                delta = end_credits - start_credits
-                            else:
-                                delta = end_credits
-                            
-                            if delta > 0:
-                                prev_delta_list.append({
-                                    "username": username,
-                                    "credits": delta,
-                                    "user_id": str(member_id)
-                                })
-                        
-                        prev_delta_filtered = self._filter_invalid_entries(prev_delta_list)
-                        prev_delta_filtered.sort(key=lambda x: x["credits"], reverse=True)
-                        previous_rankings = prev_delta_filtered[:20]
-                        
-                        for i, entry in enumerate(previous_rankings, 1):
-                            entry["rank"] = i
+                    for i, entry in enumerate(previous_rankings, 1):
+                        entry["rank"] = i
                 
                 return {
                     "current": current_rankings,
