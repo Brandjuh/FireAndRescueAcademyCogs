@@ -6,10 +6,13 @@ Extended with Helpshift local storage and indexing.
 import aiosqlite
 import json
 import time
+import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime
 from .models import FAQItem, FAQVersion, HelpshiftArticle, HelpshiftSection, ArticleVersion, CrawlReport
+
+log = logging.getLogger("red.faqmanager.database")
 
 
 class FAQDatabase:
