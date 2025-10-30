@@ -671,9 +671,22 @@ class FAQManager(red_commands.Cog):
             color = discord.Color.blurple()
             source_text = "Mission Chief Help Center (Live)"
         
+        # Discord embed description limit is 4096 chars
+        # We show up to 1900 chars to leave room for formatting
+        MAX_EMBED_LENGTH = 1900
+        full_content = result.content
+        
+        # Check if content is truncated
+        is_truncated = len(full_content) > MAX_EMBED_LENGTH
+        display_content = result.get_excerpt(MAX_EMBED_LENGTH) if is_truncated else full_content
+        
+        # Add truncation notice
+        if is_truncated:
+            display_content += f"\n\n*[Content truncated - {len(full_content)} total characters. Click 'View Full Answer' to see complete text]*"
+        
         embed = discord.Embed(
             title=result.title,
-            description=result.get_excerpt(500),
+            description=display_content,
             color=color
         )
         
@@ -760,6 +773,16 @@ class FAQResultView(discord.ui.View):
                 style=discord.ButtonStyle.link
             ))
         
+        # Add "View Full Answer" button if content is long
+        if len(main_result.content) > 1900:
+            self.view_full_button = discord.ui.Button(
+                label="📄 View Full Answer",
+                style=discord.ButtonStyle.primary,
+                emoji="📄"
+            )
+            self.view_full_button.callback = self.view_full_callback
+            self.add_item(self.view_full_button)
+        
         if suggestions:
             self.show_suggestions_button = discord.ui.Button(
                 label=f"Show {len(suggestions)} Suggestions",
@@ -778,6 +801,57 @@ class FAQResultView(discord.ui.View):
     
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user_id
+    
+    async def view_full_callback(self, interaction: discord.Interaction):
+        """Show full answer text in a new message."""
+        await interaction.response.defer(ephemeral=True)
+        
+        # Split long content into chunks (Discord message limit: 2000 chars)
+        content = self.main_result.content
+        
+        if len(content) <= 1900:
+            # Fits in one message
+            embed = discord.Embed(
+                title=f"📄 Full Answer: {self.main_result.title}",
+                description=content,
+                color=discord.Color.green()
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            # Need to split into multiple messages
+            chunks = []
+            current_chunk = ""
+            
+            # Split by paragraphs first
+            paragraphs = content.split('\n\n')
+            
+            for para in paragraphs:
+                if len(current_chunk) + len(para) + 2 <= 1900:
+                    current_chunk += para + "\n\n"
+                else:
+                    if current_chunk:
+                        chunks.append(current_chunk.strip())
+                    current_chunk = para + "\n\n"
+            
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            
+            # Send first chunk with title
+            embed = discord.Embed(
+                title=f"📄 Full Answer: {self.main_result.title} (Part 1/{len(chunks)})",
+                description=chunks[0],
+                color=discord.Color.green()
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            # Send remaining chunks
+            for i, chunk in enumerate(chunks[1:], 2):
+                embed = discord.Embed(
+                    title=f"📄 Full Answer: {self.main_result.title} (Part {i}/{len(chunks)})",
+                    description=chunk,
+                    color=discord.Color.green()
+                )
+                await interaction.followup.send(embed=embed, ephemeral=True)
     
     async def show_suggestions_callback(self, interaction: discord.Interaction):
         """Show suggestions embed."""
@@ -888,7 +962,8 @@ class EditFAQModal(discord.ui.Modal, title="Edit FAQ"):
     )
     
     answer = discord.ui.TextInput(
-        label="Answer",
+        label="Answer (max 2000 chars)",
+        placeholder="Long answers will show 'View Full Answer' button",
         style=discord.TextStyle.paragraph,
         required=True,
         max_length=2000
@@ -1101,8 +1176,8 @@ class AddFAQModalWithCategory(discord.ui.Modal, title="Add New FAQ"):
     )
     
     answer = discord.ui.TextInput(
-        label="Answer (Markdown supported)",
-        placeholder="Alarm and Response Regulation allows...",
+        label="Answer (Markdown supported, max 2000 chars)",
+        placeholder="Full answer text. Long answers will show 'View Full Answer' button.",
         style=discord.TextStyle.paragraph,
         required=True,
         max_length=2000
