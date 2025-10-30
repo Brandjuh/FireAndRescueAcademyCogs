@@ -482,6 +482,9 @@ class HelpshiftCrawler:
             section_soup = BeautifulSoup(section_html, 'lxml')
             article_links = section_soup.find_all('a', href=lambda x: x and '/faq/' in x)
             
+            # Debug: show what we found
+            log.info(f"Section '{section_name}': found {len(article_links)} article links")
+            
             for article_link in article_links[:max_articles]:
                 article_url = article_link.get('href')
                 if not article_url.startswith('http'):
@@ -492,10 +495,34 @@ class HelpshiftCrawler:
                 article_html = await self._fetch(article_url)
                 if article_html:
                     article_soup = BeautifulSoup(article_html, 'lxml')
+                    
+                    # Debug: Show page title
+                    page_title = article_soup.find('title')
+                    log.info(f"Page title tag: {page_title.get_text() if page_title else 'None'}")
+                    
+                    # Try to extract properly
+                    title = None
+                    # Look for h1 first
+                    h1_tags = article_soup.find_all('h1')
+                    log.info(f"Found {len(h1_tags)} h1 tags")
+                    for h1 in h1_tags:
+                        h1_text = h1.get_text(strip=True)
+                        log.info(f"H1 text: '{h1_text}'")
+                        if h1_text and len(h1_text) > 3 and h1_text.lower() not in ['home', 'help', 'faq']:
+                            title = h1_text
+                            break
+                    
+                    if not title:
+                        title = article_title if article_title else "Unknown Title"
+                    
                     body = self._extract_body(article_soup)
                     
+                    # Debug body length
+                    log.info(f"Body length for '{title}': {len(body)} chars")
+                    log.info(f"Body preview: {body[:100]}...")
+                    
                     results['articles_tested'].append({
-                        'title': article_title,
+                        'title': title,
                         'url': article_url,
                         'body_length': len(body),
                         'body_preview': body[:200] + '...' if len(body) > 200 else body
