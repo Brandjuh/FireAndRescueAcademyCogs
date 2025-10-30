@@ -56,6 +56,10 @@ class FAQManager(red_commands.Cog):
         # Set database reference for compatibility wrapper
         self.helpshift_scraper.set_database(self.database)
         
+        # Initialize crawler
+        from .helpshift_scraper import HelpshiftCrawler
+        self.crawler = HelpshiftCrawler(self.database, max_concurrency=4)
+        
         # In-memory FAQ cache
         self._faq_cache: List[FAQItem] = []
         self._cache_loaded = False
@@ -95,6 +99,7 @@ class FAQManager(red_commands.Cog):
     def cog_unload(self):
         """Cleanup on cog unload."""
         asyncio.create_task(self.helpshift_scraper.close())
+        asyncio.create_task(self.crawler.close())
     
     # ==================== SEARCH COMMANDS ====================
     
@@ -481,6 +486,153 @@ class FAQManager(red_commands.Cog):
         else:
             log.setLevel(logging.INFO)
             await ctx.send("✅ Debug mode **disabled**.", ephemeral=True)
+    
+    # ==================== CRAWL COMMANDS ====================
+    
+    @faq_admin.group(name="crawl")
+    async def faq_crawl(self, ctx: red_commands.Context):
+        """Helpshift crawler management commands."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+    
+    @faq_crawl.command(name="now")
+    async def crawl_now(self, ctx: red_commands.Context):
+        """Start a full crawl immediately."""
+        await ctx.send("🔄 Starting Helpshift crawl... This may take several minutes.", ephemeral=True)
+        
+        try:
+            report = await self.crawler.crawl_full()
+            
+            # Create report embed
+            embed = discord.Embed(
+                title="📊 Crawl Report",
+                color=discord.Color.green() if not report.errors else discord.Color.orange()
+            )
+            
+            embed.add_field(name="Duration", value=f"{report.duration_seconds:.1f}s", inline=True)
+            embed.add_field(name="Sections", value=str(report.sections_found), inline=True)
+            embed.add_field(name="Total Articles", value=str(report.articles_total), inline=True)
+            
+            embed.add_field(name="📝 New", value=str(report.articles_new), inline=True)
+            embed.add_field(name="🔄 Updated", value=str(report.articles_updated), inline=True)
+            embed.add_field(name="✓ Unchanged", value=str(report.articles_unchanged), inline=True)
+            
+            if report.articles_deleted > 0:
+                embed.add_field(name="🗑️ Deleted", value=str(report.articles_deleted), inline=True)
+            
+            if report.errors:
+                error_text = "\n".join(f"• {err[:100]}" for err in report.errors[:5])
+                if len(report.errors) > 5:
+                    error_text += f"\n... and {len(report.errors) - 5} more errors"
+                embed.add_field(name="⚠️ Errors", value=error_text, inline=False)
+            
+            embed.set_footer(text=f"Started: {report.started_at}")
+            
+            await ctx.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            log.error(f"Crawl failed: {e}", exc_info=True)
+            await ctx.send(f"❌ Crawl failed: {str(e)}", ephemeral=True)
+    
+    @faq_crawl.command(name="status")
+    async def crawl_status(self, ctx: red_commands.Context):
+        """Show the last crawl report."""
+        try:
+            report = await self.database.get_last_crawl_report()
+            
+            if not report:
+                await ctx.send("📭 No crawl reports found. Run `/faq crawl now` to start a crawl.", ephemeral=True)
+                return
+            
+            embed = discord.Embed(
+                title="📊 Last Crawl Report",
+                color=discord.Color.blue()
+            )
+            
+            embed.add_field(name="Started", value=report.started_at, inline=True)
+            embed.add_field(name="Duration", value=f"{report.duration_seconds:.1f}s", inline=True)
+            embed.add_field(name="Sections", value=str(report.sections_found), inline=True)
+            
+            embed.add_field(name="Total Articles", value=str(report.articles_total), inline=True)
+            embed.add_field(name="📝 New", value=str(report.articles_new), inline=True)
+            embed.add_field(name="🔄 Updated", value=str(report.articles_updated), inline=True)
+            
+            embed.add_field(name="✓ Unchanged", value=str(report.articles_unchanged), inline=True)
+            embed.add_field(name="🗑️ Deleted", value=str(report.articles_deleted), inline=True)
+            embed.add_field(name="Errors", value=str(len(report.errors)), inline=True)
+            
+            if report.errors:
+                error_text = "\n".join(f"• {err[:100]}" for err in report.errors[:3])
+                if len(report.errors) > 3:
+                    error_text += f"\n... and {len(report.errors) - 3} more"
+                embed.add_field(name="⚠️ Recent Errors", value=error_text, inline=False)
+            
+            # Get database stats
+            stats = await self.database.get_statistics()
+            embed.add_field(
+                name="📚 Database",
+                value=f"Articles: {stats['helpshift_articles']}\nSections: {stats['helpshift_sections']}",
+                inline=False
+            )
+            
+            await ctx.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            log.error(f"Failed to get crawl status: {e}", exc_info=True)
+            await ctx.send(f"❌ Error getting status: {str(e)}", ephemeral=True)
+    
+    @faq_crawl.command(name="test")
+    async def crawl_test(self, ctx: red_commands.Context):
+        """Run a test crawl (doesn't save to database)."""
+        await ctx.defer(ephemeral=True)
+        
+        try:
+            results = await self.crawler.test_crawl(max_sections=2, max_articles=3)
+            
+            if 'error' in results:
+                await ctx.send(f"❌ Test failed: {results['error']}", ephemeral=True)
+                return
+            
+            embed = discord.Embed(
+                title="🧪 Test Crawl Results",
+                description=f"Found {results['sections_found']} sections on home page",
+                color=discord.Color.blue()
+            )
+            
+            # Show tested sections
+            if results['sections_tested']:
+                section_text = "\n".join(
+                    f"• {s['name']}" 
+                    for s in results['sections_tested']
+                )
+                embed.add_field(name="Sections Tested", value=section_text, inline=False)
+            
+            # Show tested articles
+            if results['articles_tested']:
+                article_text = "\n".join(
+                    f"• {a['title'][:60]} ({a['body_length']} chars)"
+                    for a in results['articles_tested'][:5]
+                )
+                embed.add_field(
+                    name=f"Articles Tested ({len(results['articles_tested'])})",
+                    value=article_text,
+                    inline=False
+                )
+                
+                # Show preview of first article
+                if results['articles_tested']:
+                    first = results['articles_tested'][0]
+                    embed.add_field(
+                        name="Preview",
+                        value=first['body_preview'][:200],
+                        inline=False
+                    )
+            
+            await ctx.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            log.error(f"Test crawl failed: {e}", exc_info=True)
+            await ctx.send(f"❌ Test failed: {str(e)}", ephemeral=True)
     
     # ==================== AUTOCOMPLETE ====================
     
