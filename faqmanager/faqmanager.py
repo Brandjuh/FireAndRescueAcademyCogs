@@ -489,13 +489,14 @@ class FAQManager(red_commands.Cog):
     
     # ==================== CRAWL COMMANDS ====================
     
-    @faq_admin.group(name="crawl")
-    async def faq_crawl(self, ctx: red_commands.Context):
+    @red_commands.hybrid_group(name="faqcrawl", aliases=["crawl"])
+    @checks.admin_or_permissions(manage_guild=True)
+    async def faq_crawl_group(self, ctx: red_commands.Context):
         """Helpshift crawler management commands."""
         if ctx.invoked_subcommand is None:
             await ctx.send_help(ctx.command)
     
-    @faq_crawl.command(name="now")
+    @faq_crawl_group.command(name="now")
     async def crawl_now(self, ctx: red_commands.Context):
         """Start a full crawl immediately."""
         # Support both prefix and slash
@@ -541,7 +542,7 @@ class FAQManager(red_commands.Cog):
             log.error(f"Crawl failed: {e}", exc_info=True)
             await ctx.send(f"❌ Crawl failed: {str(e)}", ephemeral=True)
     
-    @faq_crawl.command(name="status")
+    @faq_crawl_group.command(name="status")
     async def crawl_status(self, ctx: red_commands.Context):
         """Show the last crawl report."""
         try:
@@ -588,7 +589,7 @@ class FAQManager(red_commands.Cog):
             log.error(f"Failed to get crawl status: {e}", exc_info=True)
             await ctx.send(f"❌ Error getting status: {str(e)}", ephemeral=True)
     
-    @faq_crawl.command(name="test")
+    @faq_crawl_group.command(name="test")
     async def crawl_test(self, ctx: red_commands.Context):
         """Run a test crawl (doesn't save to database)."""
         await ctx.defer(ephemeral=True)
