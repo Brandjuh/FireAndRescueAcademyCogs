@@ -1,20 +1,21 @@
 """
-Database Management for FAQ System
-Handles SQLite storage with CRUD operations and version history.
+Database Management for FAQ System (v2)
+Extended with Helpshift local storage and indexing.
 """
 
 import aiosqlite
 import json
 import time
 from pathlib import Path
-from typing import Optional, List, Dict, Any
-from .models import FAQItem, FAQVersion
+from typing import Optional, List, Dict, Any, Tuple
+from datetime import datetime
+from .models import FAQItem, FAQVersion, HelpshiftArticle, HelpshiftSection, ArticleVersion, CrawlReport
 
 
 class FAQDatabase:
     """
     Manages FAQ storage with SQLite backend.
-    Supports CRUD operations, soft delete, and version history.
+    Supports both custom FAQs and local Helpshift article storage.
     """
     
     def __init__(self, db_path: Path):
@@ -30,6 +31,8 @@ class FAQDatabase:
     async def initialize(self):
         """Create database tables if they don't exist."""
         async with aiosqlite.connect(self.db_path) as db:
+            # ==================== CUSTOM FAQ TABLES ====================
+            
             # Main FAQ table
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS faqs (
@@ -46,7 +49,7 @@ class FAQDatabase:
                 )
             """)
             
-            # Version history table
+            # Version history table for custom FAQs
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS faq_versions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,7 +61,73 @@ class FAQDatabase:
                 )
             """)
             
-            # Create indexes for better performance
+            # ==================== HELPSHIFT TABLES ====================
+            
+            # Sections table
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS helpshift_sections (
+                    id INTEGER PRIMARY KEY,
+                    slug TEXT NOT NULL,
+                    url TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    last_seen_utc TEXT NOT NULL
+                )
+            """)
+            
+            # Articles table
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS helpshift_articles (
+                    id INTEGER PRIMARY KEY,
+                    slug TEXT NOT NULL,
+                    url TEXT NOT NULL UNIQUE,
+                    title TEXT NOT NULL,
+                    section_id INTEGER,
+                    section_name TEXT,
+                    last_updated_text TEXT,
+                    last_seen_utc TEXT NOT NULL,
+                    body_md TEXT NOT NULL,
+                    hash_body TEXT NOT NULL,
+                    lang TEXT NOT NULL DEFAULT 'en',
+                    is_deleted INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY (section_id) REFERENCES helpshift_sections(id)
+                )
+            """)
+            
+            # Article version history
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS article_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    article_id INTEGER NOT NULL,
+                    saved_utc TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    body_md TEXT NOT NULL,
+                    hash_body TEXT NOT NULL,
+                    FOREIGN KEY (article_id) REFERENCES helpshift_articles(id)
+                )
+            """)
+            
+            # Simple token index for search
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS helpshift_index (
+                    term TEXT NOT NULL,
+                    article_id INTEGER NOT NULL,
+                    weight REAL NOT NULL,
+                    PRIMARY KEY(term, article_id),
+                    FOREIGN KEY (article_id) REFERENCES helpshift_articles(id)
+                )
+            """)
+            
+            # Crawl state tracking
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS crawl_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            """)
+            
+            # ==================== INDEXES ====================
+            
+            # Custom FAQ indexes
             await db.execute("""
                 CREATE INDEX IF NOT EXISTS idx_faqs_deleted 
                 ON faqs(is_deleted)
@@ -72,18 +141,38 @@ class FAQDatabase:
                 ON faq_versions(faq_id)
             """)
             
+            # Helpshift indexes
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_articles_title 
+                ON helpshift_articles(title)
+            """)
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_articles_hash 
+                ON helpshift_articles(hash_body)
+            """)
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_articles_deleted 
+                ON helpshift_articles(is_deleted)
+            """)
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_articles_section 
+                ON helpshift_articles(section_id)
+            """)
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_index_term 
+                ON helpshift_index(term)
+            """)
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_article_versions_article_id 
+                ON article_versions(article_id)
+            """)
+            
             await db.commit()
     
+    # ==================== CUSTOM FAQ METHODS (unchanged) ====================
+    
     async def add_faq(self, faq: FAQItem) -> int:
-        """
-        Add a new FAQ to the database.
-        
-        Args:
-            faq: FAQItem to add
-            
-        Returns:
-            ID of the newly created FAQ
-        """
+        """Add a new FAQ to the database."""
         current_time = int(time.time())
         faq.created_at = current_time
         faq.updated_at = current_time
@@ -107,16 +196,7 @@ class FAQDatabase:
             return cursor.lastrowid
     
     async def get_faq(self, faq_id: int, include_deleted: bool = False) -> Optional[FAQItem]:
-        """
-        Retrieve a FAQ by ID.
-        
-        Args:
-            faq_id: FAQ ID to retrieve
-            include_deleted: Whether to include soft-deleted FAQs
-            
-        Returns:
-            FAQItem or None if not found
-        """
+        """Retrieve a FAQ by ID."""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             
@@ -134,15 +214,7 @@ class FAQDatabase:
             return None
     
     async def get_all_faqs(self, include_deleted: bool = False) -> List[FAQItem]:
-        """
-        Retrieve all FAQs from the database.
-        
-        Args:
-            include_deleted: Whether to include soft-deleted FAQs
-            
-        Returns:
-            List of FAQItem objects
-        """
+        """Retrieve all FAQs from the database."""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             
@@ -157,28 +229,16 @@ class FAQDatabase:
             return [self._row_to_faq(row) for row in rows]
     
     async def update_faq(self, faq: FAQItem, editor_id: int) -> bool:
-        """
-        Update an existing FAQ and create a version snapshot.
-        
-        Args:
-            faq: FAQItem with updated data (must have ID)
-            editor_id: Discord user ID making the edit
-            
-        Returns:
-            True if successful, False otherwise
-        """
+        """Update an existing FAQ and create a version snapshot."""
         if not faq.id:
             return False
         
-        # Get current version for snapshot
         current = await self.get_faq(faq.id)
         if not current:
             return False
         
-        # Create version snapshot
-        await self._save_version(current, editor_id)
+        await self._save_faq_version(current, editor_id)
         
-        # Update FAQ
         faq.updated_at = int(time.time())
         
         async with aiosqlite.connect(self.db_path) as db:
@@ -199,70 +259,20 @@ class FAQDatabase:
             return True
     
     async def delete_faq(self, faq_id: int, soft: bool = True) -> bool:
-        """
-        Delete a FAQ (soft or hard delete).
-        
-        Args:
-            faq_id: ID of FAQ to delete
-            soft: If True, mark as deleted; if False, remove from DB
-            
-        Returns:
-            True if successful, False otherwise
-        """
+        """Delete a FAQ (soft or hard delete)."""
         async with aiosqlite.connect(self.db_path) as db:
             if soft:
-                # Soft delete - mark as deleted
                 await db.execute("""
                     UPDATE faqs SET is_deleted = 1 WHERE id = ?
                 """, (faq_id,))
             else:
-                # Hard delete - remove from database
                 await db.execute("DELETE FROM faqs WHERE id = ?", (faq_id,))
             
             await db.commit()
             return True
     
-    async def search_faqs(self, query: str, category: Optional[str] = None) -> List[FAQItem]:
-        """
-        Simple text search in FAQs (for basic fallback).
-        Use fuzzy_search.py for advanced searching.
-        
-        Args:
-            query: Search query
-            category: Optional category filter
-            
-        Returns:
-            List of matching FAQItems
-        """
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            
-            sql = """
-                SELECT * FROM faqs 
-                WHERE is_deleted = 0 
-                AND (question LIKE ? OR answer_md LIKE ? OR synonyms_json LIKE ?)
-            """
-            params = [f"%{query}%", f"%{query}%", f"%{query}%"]
-            
-            if category:
-                sql += " AND category = ?"
-                params.append(category)
-            
-            sql += " ORDER BY updated_at DESC LIMIT 20"
-            
-            cursor = await db.execute(sql, params)
-            rows = await cursor.fetchall()
-            
-            return [self._row_to_faq(row) for row in rows]
-    
-    async def _save_version(self, faq: FAQItem, editor_id: int):
-        """
-        Save a version snapshot of a FAQ.
-        
-        Args:
-            faq: FAQItem to snapshot
-            editor_id: User making the edit
-        """
+    async def _save_faq_version(self, faq: FAQItem, editor_id: int):
+        """Save a version snapshot of a FAQ."""
         snapshot = faq.to_dict()
         version = FAQVersion(
             faq_id=faq.id,
@@ -283,17 +293,8 @@ class FAQDatabase:
             ))
             await db.commit()
     
-    async def get_versions(self, faq_id: int, limit: int = 10) -> List[FAQVersion]:
-        """
-        Get version history for a FAQ.
-        
-        Args:
-            faq_id: FAQ ID
-            limit: Maximum number of versions to retrieve
-            
-        Returns:
-            List of FAQVersion objects, newest first
-        """
+    async def get_faq_versions(self, faq_id: int, limit: int = 10) -> List[FAQVersion]:
+        """Get version history for a FAQ."""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             
@@ -334,112 +335,356 @@ class FAQDatabase:
             is_deleted=bool(row['is_deleted'])
         )
     
-    async def get_statistics(self) -> Dict[str, Any]:
+    # ==================== HELPSHIFT METHODS (NEW) ====================
+    
+    async def upsert_section(self, section: HelpshiftSection):
+        """Insert or update a Helpshift section."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT INTO helpshift_sections (id, slug, url, name, last_seen_utc)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    slug = excluded.slug,
+                    url = excluded.url,
+                    name = excluded.name,
+                    last_seen_utc = excluded.last_seen_utc
+            """, (section.id, section.slug, section.url, section.name, section.last_seen_utc))
+            await db.commit()
+    
+    async def upsert_article(self, article: HelpshiftArticle) -> Tuple[str, bool]:
         """
-        Get database statistics.
+        Insert or update a Helpshift article with change detection.
         
         Returns:
-            Dictionary with stats (total FAQs, deleted, categories, etc.)
+            Tuple of (status, version_saved)
+            status: 'new', 'updated', or 'unchanged'
+            version_saved: whether a version snapshot was created
         """
         async with aiosqlite.connect(self.db_path) as db:
-            # Total FAQs
-            cursor = await db.execute("SELECT COUNT(*) FROM faqs WHERE is_deleted = 0")
-            total = (await cursor.fetchone())[0]
+            db.row_factory = aiosqlite.Row
             
-            # Deleted FAQs
-            cursor = await db.execute("SELECT COUNT(*) FROM faqs WHERE is_deleted = 1")
-            deleted = (await cursor.fetchone())[0]
-            
-            # Categories
+            # Check if article exists
             cursor = await db.execute("""
-                SELECT category, COUNT(*) as count 
-                FROM faqs 
-                WHERE is_deleted = 0 AND category IS NOT NULL
-                GROUP BY category
-            """)
-            categories = {row[0]: row[1] for row in await cursor.fetchall()}
+                SELECT id, hash_body, title, section_name FROM helpshift_articles WHERE id = ?
+            """, (article.id,))
+            existing = await cursor.fetchone()
             
-            # Total versions
+            if existing:
+                # Check if content changed
+                if existing['hash_body'] == article.hash_body:
+                    # Unchanged - just update last_seen and metadata
+                    await db.execute("""
+                        UPDATE helpshift_articles 
+                        SET last_seen_utc = ?,
+                            title = ?,
+                            section_name = ?,
+                            is_deleted = 0
+                        WHERE id = ?
+                    """, (article.last_seen_utc, article.title, article.section_name, article.id))
+                    await db.commit()
+                    return ('unchanged', False)
+                else:
+                    # Changed - save version and update
+                    await self._save_article_version(db, existing)
+                    
+                    await db.execute("""
+                        UPDATE helpshift_articles 
+                        SET slug = ?, url = ?, title = ?, section_id = ?, section_name = ?,
+                            last_updated_text = ?, last_seen_utc = ?, body_md = ?, hash_body = ?,
+                            is_deleted = 0
+                        WHERE id = ?
+                    """, (
+                        article.slug, article.url, article.title, article.section_id,
+                        article.section_name, article.last_updated_text, article.last_seen_utc,
+                        article.body_md, article.hash_body, article.id
+                    ))
+                    await db.commit()
+                    return ('updated', True)
+            else:
+                # New article
+                await db.execute("""
+                    INSERT INTO helpshift_articles 
+                    (id, slug, url, title, section_id, section_name, last_updated_text,
+                     last_seen_utc, body_md, hash_body, lang, is_deleted)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                """, (
+                    article.id, article.slug, article.url, article.title, article.section_id,
+                    article.section_name, article.last_updated_text, article.last_seen_utc,
+                    article.body_md, article.hash_body, article.lang
+                ))
+                await db.commit()
+                return ('new', False)
+    
+    async def _save_article_version(self, db: aiosqlite.Connection, existing_row: aiosqlite.Row):
+        """Save a version snapshot of an article."""
+        now_utc = datetime.utcnow().isoformat() + 'Z'
+        
+        await db.execute("""
+            INSERT INTO article_versions (article_id, saved_utc, title, body_md, hash_body)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            existing_row['id'],
+            now_utc,
+            existing_row['title'],
+            existing_row.get('body_md', ''),  # Safe fallback
+            existing_row['hash_body']
+        ))
+        await db.commit()
+    
+    async def mark_missing_articles_deleted(self, seen_article_ids: List[int]) -> int:
+        """
+        Mark articles not in seen_article_ids as deleted.
+        
+        Returns:
+            Number of articles marked as deleted
+        """
+        if not seen_article_ids:
+            return 0
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            placeholders = ','.join('?' * len(seen_article_ids))
+            cursor = await db.execute(f"""
+                UPDATE helpshift_articles 
+                SET is_deleted = 1 
+                WHERE id NOT IN ({placeholders}) AND is_deleted = 0
+            """, seen_article_ids)
+            await db.commit()
+            return cursor.rowcount
+    
+    async def get_article(self, article_id: int, include_deleted: bool = False) -> Optional[HelpshiftArticle]:
+        """Get a Helpshift article by ID."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            query = "SELECT * FROM helpshift_articles WHERE id = ?"
+            params = [article_id]
+            
+            if not include_deleted:
+                query += " AND is_deleted = 0"
+            
+            cursor = await db.execute(query, params)
+            row = await cursor.fetchone()
+            
+            if row:
+                return self._row_to_article(row)
+            return None
+    
+    async def search_articles(
+        self,
+        query: str,
+        limit: int = 20,
+        include_deleted: bool = False
+    ) -> List[HelpshiftArticle]:
+        """Simple text search in articles (basic fallback)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            sql = """
+                SELECT * FROM helpshift_articles 
+                WHERE (title LIKE ? OR body_md LIKE ?)
+            """
+            params = [f"%{query}%", f"%{query}%"]
+            
+            if not include_deleted:
+                sql += " AND is_deleted = 0"
+            
+            sql += " ORDER BY last_seen_utc DESC LIMIT ?"
+            params.append(limit)
+            
+            cursor = await db.execute(sql, params)
+            rows = await cursor.fetchall()
+            
+            return [self._row_to_article(row) for row in rows]
+    
+    async def get_all_articles(self, include_deleted: bool = False) -> List[HelpshiftArticle]:
+        """Get all Helpshift articles."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            query = "SELECT * FROM helpshift_articles"
+            if not include_deleted:
+                query += " WHERE is_deleted = 0"
+            query += " ORDER BY title ASC"
+            
+            cursor = await db.execute(query)
+            rows = await cursor.fetchall()
+            
+            return [self._row_to_article(row) for row in rows]
+    
+    async def get_article_titles(self, limit: int = 100) -> List[str]:
+        """Get article titles for autocomplete."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                SELECT title FROM helpshift_articles 
+                WHERE is_deleted = 0 
+                ORDER BY last_seen_utc DESC 
+                LIMIT ?
+            """, (limit,))
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
+    
+    def _row_to_article(self, row: aiosqlite.Row) -> HelpshiftArticle:
+        """Convert database row to HelpshiftArticle."""
+        return HelpshiftArticle(
+            id=row['id'],
+            slug=row['slug'],
+            url=row['url'],
+            title=row['title'],
+            section_id=row['section_id'],
+            section_name=row['section_name'],
+            last_updated_text=row['last_updated_text'],
+            last_seen_utc=row['last_seen_utc'],
+            body_md=row['body_md'],
+            hash_body=row['hash_body'],
+            lang=row['lang'],
+            is_deleted=bool(row['is_deleted'])
+        )
+    
+    # ==================== CRAWL STATE ====================
+    
+    async def set_crawl_state(self, key: str, value: str):
+        """Set a crawl state value."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT INTO crawl_state (key, value)
+                VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """, (key, value))
+            await db.commit()
+    
+    async def get_crawl_state(self, key: str) -> Optional[str]:
+        """Get a crawl state value."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                SELECT value FROM crawl_state WHERE key = ?
+            """, (key,))
+            row = await cursor.fetchone()
+            return row[0] if row else None
+    
+    async def save_crawl_report(self, report: CrawlReport):
+        """Save a crawl report to state."""
+        await self.set_crawl_state('last_crawl_report', json.dumps(report.to_dict()))
+    
+    async def get_last_crawl_report(self) -> Optional[CrawlReport]:
+        """Get the last crawl report."""
+        data = await self.get_crawl_state('last_crawl_report')
+        if data:
+            report_dict = json.loads(data)
+            return CrawlReport(**report_dict)
+        return None
+    
+    # ==================== STATISTICS ====================
+    
+    async def get_statistics(self) -> Dict[str, Any]:
+        """Get database statistics."""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Custom FAQs
+            cursor = await db.execute("SELECT COUNT(*) FROM faqs WHERE is_deleted = 0")
+            custom_total = (await cursor.fetchone())[0]
+            
+            cursor = await db.execute("SELECT COUNT(*) FROM faqs WHERE is_deleted = 1")
+            custom_deleted = (await cursor.fetchone())[0]
+            
+            # Helpshift articles
+            cursor = await db.execute("SELECT COUNT(*) FROM helpshift_articles WHERE is_deleted = 0")
+            articles_total = (await cursor.fetchone())[0]
+            
+            cursor = await db.execute("SELECT COUNT(*) FROM helpshift_articles WHERE is_deleted = 1")
+            articles_deleted = (await cursor.fetchone())[0]
+            
+            # Sections
+            cursor = await db.execute("SELECT COUNT(*) FROM helpshift_sections")
+            sections_total = (await cursor.fetchone())[0]
+            
+            # Version counts
             cursor = await db.execute("SELECT COUNT(*) FROM faq_versions")
-            versions = (await cursor.fetchone())[0]
+            faq_versions = (await cursor.fetchone())[0]
+            
+            cursor = await db.execute("SELECT COUNT(*) FROM article_versions")
+            article_versions = (await cursor.fetchone())[0]
             
             return {
-                'total_faqs': total,
-                'deleted_faqs': deleted,
-                'categories': categories,
-                'total_versions': versions
+                'custom_faqs': custom_total,
+                'custom_deleted': custom_deleted,
+                'helpshift_articles': articles_total,
+                'helpshift_deleted': articles_deleted,
+                'helpshift_sections': sections_total,
+                'faq_versions': faq_versions,
+                'article_versions': article_versions
             }
 
 
-# Test functions for development
-async def _test_database():
-    """Test database operations."""
+# Test functions
+async def _test_helpshift_storage():
+    """Test Helpshift storage functionality."""
     import tempfile
     import os
+    from datetime import datetime
     
-    # Create temporary database
     temp_dir = tempfile.mkdtemp()
-    db_path = Path(temp_dir) / "test_faq.db"
+    db_path = Path(temp_dir) / "test_faq_v2.db"
     
     try:
         db = FAQDatabase(db_path)
         await db.initialize()
-        print("✓ Database initialized")
+        print("✓ Database v2 initialized with Helpshift tables")
         
-        # Test 1: Add FAQ
-        faq = FAQItem(
-            question="What is ARR?",
-            answer_md="Alarm and Response Regulation system",
-            category="Game Mechanics",
-            synonyms=["arr", "alarm rules"],
-            author_id=123456789
+        # Test section
+        section = HelpshiftSection(
+            id=1,
+            slug="user-interface",
+            url="https://xyrality.helpshift.com/hc/en/23-mission-chief/section/1-user-interface/",
+            name="User Interface Overview",
+            last_seen_utc=datetime.utcnow().isoformat() + 'Z'
         )
-        faq_id = await db.add_faq(faq)
-        assert faq_id > 0
-        print(f"✓ Test 1: FAQ added with ID {faq_id}")
+        await db.upsert_section(section)
+        print("✓ Section added")
         
-        # Test 2: Retrieve FAQ
-        retrieved = await db.get_faq(faq_id)
+        # Test article
+        article = HelpshiftArticle(
+            id=1000,
+            slug="mission-list",
+            url="https://xyrality.helpshift.com/hc/en/23-mission-chief/faq/1000-mission-list/",
+            title="Mission List",
+            section_id=1,
+            section_name="User Interface Overview",
+            last_updated_text="379d",
+            last_seen_utc=datetime.utcnow().isoformat() + 'Z',
+            body_md="The mission list shows all available missions...",
+            hash_body=HelpshiftArticle.compute_hash("The mission list shows all available missions..."),
+            lang='en'
+        )
+        
+        status, version_saved = await db.upsert_article(article)
+        assert status == 'new'
+        print(f"✓ Article added (status: {status})")
+        
+        # Test update (unchanged)
+        status, version_saved = await db.upsert_article(article)
+        assert status == 'unchanged'
+        print(f"✓ Article re-saved (status: {status})")
+        
+        # Test update (changed)
+        article.body_md = "Updated content about mission list..."
+        article.hash_body = HelpshiftArticle.compute_hash(article.body_md)
+        status, version_saved = await db.upsert_article(article)
+        assert status == 'updated'
+        assert version_saved
+        print(f"✓ Article updated (status: {status}, version saved: {version_saved})")
+        
+        # Test retrieval
+        retrieved = await db.get_article(1000)
         assert retrieved is not None
-        assert retrieved.question == "What is ARR?"
-        print("✓ Test 2: FAQ retrieved successfully")
+        assert "Updated content" in retrieved.body_md
+        print("✓ Article retrieved successfully")
         
-        # Test 3: Update FAQ
-        retrieved.answer_md = "Updated answer about ARR"
-        success = await db.update_faq(retrieved, editor_id=987654321)
-        assert success
-        print("✓ Test 3: FAQ updated")
-        
-        # Test 4: Version history
-        versions = await db.get_versions(faq_id)
-        assert len(versions) > 0
-        print(f"✓ Test 4: {len(versions)} version(s) saved")
-        
-        # Test 5: Get all FAQs
-        all_faqs = await db.get_all_faqs()
-        assert len(all_faqs) > 0
-        print(f"✓ Test 5: Retrieved {len(all_faqs)} FAQ(s)")
-        
-        # Test 6: Search
-        results = await db.search_faqs("ARR")
-        assert len(results) > 0
-        print(f"✓ Test 6: Search found {len(results)} result(s)")
-        
-        # Test 7: Soft delete
-        await db.delete_faq(faq_id, soft=True)
-        deleted_check = await db.get_faq(faq_id)
-        assert deleted_check is None
-        print("✓ Test 7: Soft delete successful")
-        
-        # Test 8: Statistics
+        # Test statistics
         stats = await db.get_statistics()
-        assert 'total_faqs' in stats
-        print(f"✓ Test 8: Statistics: {stats}")
+        print(f"✓ Statistics: {stats}")
         
-        print("\n✅ All database tests passed!")
+        print("\n✅ All Helpshift storage tests passed!")
         
     finally:
-        # Cleanup
         if db_path.exists():
             os.remove(db_path)
         os.rmdir(temp_dir)
@@ -447,4 +692,4 @@ async def _test_database():
 
 if __name__ == "__main__":
     import asyncio
-    asyncio.run(_test_database())
+    asyncio.run(_test_helpshift_storage())
