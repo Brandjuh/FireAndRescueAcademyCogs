@@ -7,12 +7,14 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+import hashlib
 
 
 class Source(Enum):
     """Source of FAQ content."""
     CUSTOM = "custom"
-    HELPSHIFT = "helpshift"
+    HELPSHIFT_LOCAL = "helpshift_local"
+    HELPSHIFT_LIVE = "helpshift_live"
 
 
 @dataclass
@@ -78,40 +80,129 @@ class FAQItem:
 
 
 @dataclass
-class HelpshiftArticle:
+class HelpshiftSection:
     """
-    Represents a scraped article from Mission Chief Help Center.
+    Represents a section from Mission Chief Help Center.
     
     Attributes:
-        title: Article title
-        url: Full URL to the article
-        section: Section/category name
-        body: Article body (plain text or safe markdown)
-        last_updated: Last update info (e.g., "379d")
-        snippet: Short preview for search results
+        id: Numeric section ID from URL
+        slug: URL slug
+        url: Full section URL
+        name: Section display name
+        last_seen_utc: ISO timestamp when last crawled
     """
-    title: str
+    id: int
+    slug: str
     url: str
-    section: str
-    body: str
-    last_updated: Optional[str] = None
-    snippet: Optional[str] = None
+    name: str
+    last_seen_utc: str
+
+    @staticmethod
+    def parse_id_from_url(url: str) -> Optional[int]:
+        """Extract numeric ID from section URL."""
+        try:
+            # URL format: .../section/123-slug-name/
+            parts = url.split('/section/')
+            if len(parts) > 1:
+                id_part = parts[1].split('-')[0]
+                return int(id_part)
+        except (ValueError, IndexError):
+            pass
+        return None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            'id': self.id,
+            'slug': self.slug,
+            'url': self.url,
+            'name': self.name,
+            'last_seen_utc': self.last_seen_utc
+        }
+
+
+@dataclass
+class HelpshiftArticle:
+    """
+    Represents a locally stored article from Mission Chief Help Center.
+    
+    Attributes:
+        id: Numeric article ID from URL
+        slug: URL slug
+        url: Full article URL
+        title: Article title
+        section_id: Parent section ID
+        section_name: Parent section name
+        last_updated_text: Last updated text from article (e.g., "379d")
+        last_seen_utc: ISO timestamp when last crawled
+        body_md: Article body in markdown/plaintext
+        hash_body: SHA256 hash of normalized body for change detection
+        lang: Language code
+        is_deleted: Whether article was removed from site
+    """
+    id: int
+    slug: str
+    url: str
+    title: str
+    body_md: str
+    hash_body: str
+    last_seen_utc: str
+    section_id: Optional[int] = None
+    section_name: Optional[str] = None
+    last_updated_text: Optional[str] = None
+    lang: str = 'en'
+    is_deleted: bool = False
+
+    @staticmethod
+    def parse_id_from_url(url: str) -> Optional[int]:
+        """Extract numeric ID from article URL."""
+        try:
+            # URL format: .../faq/1000-slug-name/
+            parts = url.split('/faq/')
+            if len(parts) > 1:
+                id_part = parts[1].split('-')[0]
+                return int(id_part)
+        except (ValueError, IndexError):
+            pass
+        return None
+
+    @staticmethod
+    def compute_hash(body: str) -> str:
+        """Compute SHA256 hash of normalized body."""
+        normalized = ' '.join(body.split())  # Normalize whitespace
+        return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
 
     def get_excerpt(self, max_length: int = 500) -> str:
-        """Get a safe excerpt of the body for display."""
-        text = self.snippet or self.body
-        if len(text) <= max_length:
-            return text
-        return text[:max_length].rsplit(' ', 1)[0] + '...'
+        """Get a safe excerpt of the body."""
+        if len(self.body_md) <= max_length:
+            return self.body_md
+        return self.body_md[:max_length].rsplit(' ', 1)[0] + '...'
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            'id': self.id,
+            'slug': self.slug,
+            'url': self.url,
+            'title': self.title,
+            'section_id': self.section_id,
+            'section_name': self.section_name,
+            'last_updated_text': self.last_updated_text,
+            'last_seen_utc': self.last_seen_utc,
+            'body_md': self.body_md,
+            'hash_body': self.hash_body,
+            'lang': self.lang,
+            'is_deleted': self.is_deleted
+        }
 
 
 @dataclass
 class SearchResult:
     """
-    Unified search result that can represent either Custom or Helpshift content.
+    Unified search result that can represent Custom, Local Helpshift, or Live Helpshift content.
     
     Attributes:
-        source: Source type (CUSTOM or HELPSHIFT)
+        source: Source type
         title: Display title
         content: Main content/answer
         category: Category/section
@@ -119,6 +210,7 @@ class SearchResult:
         url: Optional URL (for Helpshift)
         last_updated: Last update info
         faq_id: Database ID (for custom FAQs)
+        article_id: Database ID (for local Helpshift)
     """
     source: Source
     title: str
@@ -128,6 +220,7 @@ class SearchResult:
     url: Optional[str] = None
     last_updated: Optional[str] = None
     faq_id: Optional[int] = None
+    article_id: Optional[int] = None
 
     def get_excerpt(self, max_length: int = 500) -> str:
         """Get a safe excerpt of the content."""
@@ -148,16 +241,17 @@ class SearchResult:
         )
 
     @classmethod
-    def from_helpshift_article(cls, article: HelpshiftArticle, score: float) -> 'SearchResult':
+    def from_helpshift_article(cls, article: HelpshiftArticle, score: float, live: bool = False) -> 'SearchResult':
         """Create SearchResult from Helpshift article."""
         return cls(
-            source=Source.HELPSHIFT,
+            source=Source.HELPSHIFT_LIVE if live else Source.HELPSHIFT_LOCAL,
             title=article.title,
-            content=article.body,
-            category=article.section,
+            content=article.body_md,
+            category=article.section_name,
             score=score,
             url=article.url,
-            last_updated=article.last_updated
+            last_updated=article.last_updated_text,
+            article_id=article.id
         )
 
 
@@ -187,6 +281,82 @@ class FAQVersion:
             'snapshot': self.snapshot,
             'saved_at': self.saved_at,
             'editor_id': self.editor_id
+        }
+
+
+@dataclass
+class ArticleVersion:
+    """
+    Represents a version snapshot of a Helpshift article.
+    
+    Attributes:
+        id: Version ID
+        article_id: Reference to the article
+        saved_utc: ISO timestamp
+        title: Title at this version
+        body_md: Body at this version
+        hash_body: Hash at this version
+    """
+    article_id: int
+    saved_utc: str
+    title: str
+    body_md: str
+    hash_body: str
+    id: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            'id': self.id,
+            'article_id': self.article_id,
+            'saved_utc': self.saved_utc,
+            'title': self.title,
+            'body_md': self.body_md,
+            'hash_body': self.hash_body
+        }
+
+
+@dataclass
+class CrawlReport:
+    """
+    Report of a crawl operation.
+    
+    Attributes:
+        started_at: ISO timestamp when crawl started
+        completed_at: ISO timestamp when crawl completed
+        duration_seconds: Duration in seconds
+        sections_found: Number of sections discovered
+        articles_total: Total articles processed
+        articles_new: New articles added
+        articles_updated: Articles with changes
+        articles_unchanged: Articles with no changes
+        articles_deleted: Articles marked as deleted
+        errors: List of error messages
+    """
+    started_at: str
+    completed_at: str
+    duration_seconds: float
+    sections_found: int = 0
+    articles_total: int = 0
+    articles_new: int = 0
+    articles_updated: int = 0
+    articles_unchanged: int = 0
+    articles_deleted: int = 0
+    errors: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            'started_at': self.started_at,
+            'completed_at': self.completed_at,
+            'duration_seconds': self.duration_seconds,
+            'sections_found': self.sections_found,
+            'articles_total': self.articles_total,
+            'articles_new': self.articles_new,
+            'articles_updated': self.articles_updated,
+            'articles_unchanged': self.articles_unchanged,
+            'articles_deleted': self.articles_deleted,
+            'errors': self.errors
         }
 
 
@@ -245,24 +415,5 @@ MOCK_FAQ_ITEMS = [
         created_at=1700000200,
         updated_at=1700000200,
         author_id=123456789
-    )
-]
-
-MOCK_HELPSHIFT_ARTICLES = [
-    HelpshiftArticle(
-        title="Mission List",
-        url="https://xyrality.helpshift.com/hc/en/23-mission-chief/faq/1000-mission-list/",
-        section="User Interface Overview",
-        body="The mission list shows all available missions on the map. You can filter by type, sort by distance, and use the search function to find specific missions.",
-        last_updated="379d",
-        snippet="View and manage all your active missions..."
-    ),
-    HelpshiftArticle(
-        title="Building Your Station",
-        url="https://xyrality.helpshift.com/hc/en/23-mission-chief/faq/1001-building-station/",
-        section="Getting Started",
-        body="To build a new station, click on the Build menu and select the type of station you want. Fire stations cost 100,000 credits and can house 6 vehicles.",
-        last_updated="120d",
-        snippet="Learn how to expand your emergency services network..."
     )
 ]
