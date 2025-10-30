@@ -498,7 +498,14 @@ class FAQManager(red_commands.Cog):
     @faq_crawl.command(name="now")
     async def crawl_now(self, ctx: red_commands.Context):
         """Start a full crawl immediately."""
-        await ctx.send("🔄 Starting Helpshift crawl... This may take several minutes.", ephemeral=True)
+        # Support both prefix and slash
+        if ctx.interaction:
+            await ctx.defer(ephemeral=True)
+            send_msg = lambda content=None, embed=None: ctx.send(content=content, embed=embed, ephemeral=True)
+        else:
+            send_msg = ctx.send
+        
+        await send_msg("🔄 Starting Helpshift crawl... This may take several minutes.")
         
         try:
             report = await self.crawler.crawl_full()
