@@ -426,7 +426,7 @@ class FAQDatabase:
             existing_row['id'],
             now_utc,
             existing_row['title'],
-            existing_row.get('body_md', ''),  # Safe fallback
+            existing_row['body_md'] if 'body_md' in existing_row.keys() else '',
             existing_row['hash_body']
         ))
         await db.commit()
