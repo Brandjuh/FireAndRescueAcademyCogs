@@ -577,13 +577,16 @@ class HelpshiftScraper:
     async def search_all_articles(self, query: str, max_articles: int = 20) -> List[HelpshiftArticle]:
         """Search local database for articles."""
         if not self.database:
+            log.warning("Database not set in HelpshiftScraper")
             return []
         
         try:
+            log.debug(f"Searching database for: '{query}'")
             articles = await self.database.search_articles(query, limit=max_articles)
+            log.info(f"Found {len(articles)} articles in local database for query: '{query}'")
             return articles
         except Exception as e:
-            log.error(f"Error searching local articles: {e}")
+            log.error(f"Error searching local articles: {e}", exc_info=True)
             return []
     
     def get_cached_titles(self) -> List[str]:
