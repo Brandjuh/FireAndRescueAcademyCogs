@@ -360,7 +360,25 @@ class HelpshiftCrawler:
     
     def _extract_body(self, soup: BeautifulSoup) -> str:
         """Extract and normalize article body to markdown-like text."""
-        body_selectors = ['.article-body', '.faq-body', '.content', 'article', 'main']
+        
+        # Remove unwanted elements before parsing
+        for unwanted in soup.find_all(['script', 'style', 'nav', 'header', 'footer']):
+            unwanted.decompose()
+        
+        # Remove cookie banners and popups
+        for cookie_banner in soup.find_all(class_=['cookie', 'gdpr', 'consent', 'banner', 'popup']):
+            cookie_banner.decompose()
+        
+        # Try specific article selectors first
+        body_selectors = [
+            '.article-body',
+            '.faq-content',
+            '.help-article',
+            'article.content',
+            '.markdown-body',
+            'div[role="main"]',
+            'main'
+        ]
         
         body_elem = None
         for selector in body_selectors:
@@ -368,32 +386,69 @@ class HelpshiftCrawler:
             if body_elem:
                 break
         
+        # Fallback: find the main content area
         if not body_elem:
+            # Try to find div with most paragraph content
+            content_divs = soup.find_all('div', class_=lambda x: x and ('content' in x.lower() or 'article' in x.lower()))
+            if content_divs:
+                body_elem = max(content_divs, key=lambda d: len(d.find_all('p')))
+        
+        if not body_elem:
+            # Last resort: collect all paragraphs
             paragraphs = soup.find_all('p')
-            return '\n\n'.join(p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True))
+            # Filter out very short paragraphs (likely navigation/footer)
+            paragraphs = [p for p in paragraphs if len(p.get_text(strip=True)) > 20]
+            return '\n\n'.join(p.get_text(strip=True) for p in paragraphs)
         
         parts = []
+        seen_text = set()  # Avoid duplicates
+        
         for child in body_elem.descendants:
             if child.name in ['h1', 'h2']:
                 text = child.get_text(strip=True)
-                if text:
+                if text and text not in seen_text and len(text) > 2:
                     parts.append(f"\n## {text}\n")
+                    seen_text.add(text)
             elif child.name in ['h3', 'h4']:
                 text = child.get_text(strip=True)
-                if text:
+                if text and text not in seen_text and len(text) > 2:
                     parts.append(f"\n### {text}\n")
+                    seen_text.add(text)
             elif child.name == 'li':
                 text = child.get_text(strip=True)
-                if text:
+                if text and len(text) > 2:
                     parts.append(f"• {text}\n")
             elif child.name == 'p':
                 text = child.get_text(strip=True)
-                if text:
+                # Skip very short paragraphs and already seen text
+                if text and len(text) > 15 and text not in seen_text:
                     parts.append(f"{text}\n\n")
+                    seen_text.add(text)
         
         result = ''.join(parts)
+        
+        # Clean up
         lines = [line.strip() for line in result.split('\n') if line.strip()]
-        return '\n\n'.join(lines)
+        cleaned = '\n\n'.join(lines)
+        
+        # Remove common footer/header phrases
+        unwanted_phrases = [
+            'This cookie policy',
+            'We use cookies',
+            'Accept cookies',
+            'Privacy Policy',
+            'Terms of Service',
+            'Cookie Settings'
+        ]
+        
+        for phrase in unwanted_phrases:
+            if cleaned.lower().startswith(phrase.lower()):
+                # Find the next paragraph and start from there
+                parts = cleaned.split('\n\n')
+                if len(parts) > 1:
+                    cleaned = '\n\n'.join(parts[1:])
+        
+        return cleaned
     
     async def test_crawl(self, max_sections: int = 2, max_articles: int = 5) -> Dict:
         """Test crawl without saving to database."""
