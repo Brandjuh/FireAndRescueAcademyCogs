@@ -65,6 +65,10 @@ class HelpshiftCrawler:
     REQUEST_TIMEOUT = 10
     MAX_RETRIES = 2
     MAX_BODY_LENGTH = 80000  # Truncate very long articles
+
+
+# Backwards compatibility alias
+HelpshiftScraper = HelpshiftCrawler
     
     def __init__(self, database: FAQDatabase, max_concurrency: int = 4):
         """
@@ -588,3 +592,58 @@ class HelpshiftCrawler:
                     })
         
         return results
+
+
+# ==================== BACKWARDS COMPATIBILITY ====================
+
+class HelpshiftScraper:
+    """
+    Backwards compatibility wrapper for old HelpshiftScraper interface.
+    Now reads from local database instead of live scraping.
+    """
+    
+    def __init__(self, cache_ttl: int = 600):
+        """Initialize with dummy parameters for compatibility."""
+        self.cache_ttl = cache_ttl
+        self.database: Optional[FAQDatabase] = None
+    
+    def set_database(self, database: FAQDatabase):
+        """Set database reference (called by cog)."""
+        self.database = database
+    
+    async def close(self):
+        """Compatibility method - no-op."""
+        pass
+    
+    async def search_all_articles(self, query: str, max_articles: int = 20) -> List[HelpshiftArticle]:
+        """
+        Search local database for articles (compatibility method).
+        
+        Args:
+            query: Search query
+            max_articles: Maximum articles to return
+            
+        Returns:
+            List of HelpshiftArticle objects from local database
+        """
+        if not self.database:
+            return []
+        
+        try:
+            # Simple search in local database
+            articles = await self.database.search_articles(query, limit=max_articles)
+            return articles
+        except Exception as e:
+            log.error(f"Error searching local articles: {e}")
+            return []
+    
+    def get_cached_titles(self) -> List[str]:
+        """
+        Get cached article titles for autocomplete (compatibility method).
+        Returns empty list for now - autocomplete will be handled differently.
+        """
+        return []
+    
+    def clear_cache(self):
+        """Compatibility method - no-op."""
+        pass
