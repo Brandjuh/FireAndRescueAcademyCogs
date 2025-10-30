@@ -1,26 +1,23 @@
 """
-Helpshift Web Scraper
-Scrapes Mission Chief Help Center (Xyrality Helpshift) for FAQ articles.
+Helpshift Web Crawler (v2)
+Periodically scrapes and stores Mission Chief Help Center locally.
 """
 
 import aiohttp
 import asyncio
 import time
 import logging
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict, Set
 from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
-from collections import defaultdict
-from .models import HelpshiftArticle
+from datetime import datetime
+from .models import HelpshiftArticle, HelpshiftSection, CrawlReport
+from .database import FAQDatabase
 
-log = logging.getLogger("red.faqmanager.helpshift")
+log = logging.getLogger("red.faqmanager.crawler")
 
 
 class RateLimiter:
-    """
-    Token bucket rate limiter for HTTP requests.
-    Allows burst of 4 requests, then 2 requests per second.
-    """
+    """Token bucket rate limiter for HTTP requests."""
     
     def __init__(self, rate: float = 2.0, burst: int = 4):
         """
@@ -42,11 +39,11 @@ class RateLimiter:
             now = time.monotonic()
             elapsed = now - self.last_update
             
-            # Refill tokens based on elapsed time
+            # Refill tokens
             self.tokens = min(self.burst, self.tokens + elapsed * self.rate)
             self.last_update = now
             
-            # Wait if no tokens available
+            # Wait if no tokens
             if self.tokens < 1:
                 wait_time = (1 - self.tokens) / self.rate
                 await asyncio.sleep(wait_time)
@@ -55,36 +52,42 @@ class RateLimiter:
                 self.tokens -= 1
 
 
-class HelpshiftScraper:
+class HelpshiftCrawler:
     """
-    Scrapes Xyrality's Mission Chief Help Center.
-    Implements rate limiting, caching, and fallback error handling.
+    Crawls Mission Chief Help Center and stores articles locally.
+    Supports incremental updates with change detection.
     """
     
     BASE_URL = "https://xyrality.helpshift.com"
     HOME_URL = f"{BASE_URL}/hc/en/23-mission-chief/"
     USER_AGENT = "FARA-FAQBot/1.0 (Red-DiscordBot; +https://github.com/Cog-Creators/Red-DiscordBot)"
     
-    # Timeouts
     REQUEST_TIMEOUT = 10
     MAX_RETRIES = 2
+    MAX_BODY_LENGTH = 80000  # Truncate very long articles
     
-    def __init__(self, cache_ttl: int = 600):
+    def __init__(self, database: FAQDatabase, max_concurrency: int = 4):
         """
-        Initialize scraper.
+        Initialize crawler.
         
         Args:
-            cache_ttl: Cache time-to-live in seconds (default 10 minutes)
+            database: FAQDatabase instance for storage
+            max_concurrency: Max concurrent article fetches
         """
+        self.database = database
         self.rate_limiter = RateLimiter(rate=2.0, burst=4)
-        self.cache_ttl = cache_ttl
-        
-        # In-memory caches
-        self._section_cache: Dict[str, Tuple[List[Tuple[str, str]], float]] = {}
-        self._article_cache: Dict[str, Tuple[HelpshiftArticle, float]] = {}
-        self._title_cache: List[Tuple[str, float]] = []  # For autocomplete
-        
+        self.semaphore = asyncio.Semaphore(max_concurrency)
         self.session: Optional[aiohttp.ClientSession] = None
+        
+        # Crawl statistics
+        self.stats = {
+            'sections_found': 0,
+            'articles_new': 0,
+            'articles_updated': 0,
+            'articles_unchanged': 0,
+            'articles_total': 0,
+            'errors': []
+        }
     
     async def _ensure_session(self):
         """Ensure aiohttp session exists."""
@@ -102,11 +105,11 @@ class HelpshiftScraper:
     
     async def _fetch(self, url: str, retries: int = MAX_RETRIES) -> Optional[str]:
         """
-        Fetch HTML content from URL with rate limiting and retries.
+        Fetch HTML content with rate limiting and retries.
         
         Args:
             url: URL to fetch
-            retries: Number of retries on failure
+            retries: Number of retry attempts
             
         Returns:
             HTML content or None on failure
@@ -119,20 +122,25 @@ class HelpshiftScraper:
                 async with self.session.get(url) as response:
                     if response.status == 200:
                         return await response.text()
+                    elif response.status == 429:
+                        # Rate limited - wait and retry
+                        retry_after = int(response.headers.get('Retry-After', 5))
+                        await asyncio.sleep(retry_after + (asyncio.get_event_loop().time() % 1))
+                        continue
+                    elif response.status >= 500 and attempt < retries:
+                        # Server error - retry with backoff
+                        wait = (2 ** attempt) + (asyncio.get_event_loop().time() % 1)
+                        await asyncio.sleep(wait)
+                        continue
                     else:
                         log.warning(f"HTTP {response.status} for {url}")
-                        if response.status >= 500 and attempt < retries:
-                            # Server error - retry with backoff
-                            wait = (2 ** attempt) + (asyncio.get_event_loop().time() % 1)
-                            await asyncio.sleep(wait)
-                            continue
                         return None
             
             except asyncio.TimeoutError:
-                log.warning(f"Timeout fetching {url} (attempt {attempt + 1}/{retries + 1})")
                 if attempt < retries:
                     await asyncio.sleep(1 + (asyncio.get_event_loop().time() % 0.5))
                     continue
+                log.warning(f"Timeout fetching {url}")
                 return None
             
             except aiohttp.ClientError as e:
@@ -141,157 +149,323 @@ class HelpshiftScraper:
         
         return None
     
-    def _is_cache_valid(self, timestamp: float) -> bool:
-        """Check if cached data is still valid."""
-        return (time.time() - timestamp) < self.cache_ttl
-    
-    async def get_sections(self) -> List[Tuple[str, str]]:
+    async def crawl_full(self) -> CrawlReport:
         """
-        Get all sections from the help center home page.
+        Perform a full crawl of all sections and articles.
         
         Returns:
-            List of (section_name, section_url) tuples
+            CrawlReport with statistics
         """
-        # Check cache
-        if self.HOME_URL in self._section_cache:
-            sections, timestamp = self._section_cache[self.HOME_URL]
-            if self._is_cache_valid(timestamp):
-                log.debug("Returning cached sections")
-                return sections
+        start_time = datetime.utcnow()
+        start_iso = start_time.isoformat() + 'Z'
         
+        # Reset stats
+        self.stats = {
+            'sections_found': 0,
+            'articles_new': 0,
+            'articles_updated': 0,
+            'articles_unchanged': 0,
+            'articles_total': 0,
+            'errors': []
+        }
+        
+        try:
+            log.info("Starting full crawl of Helpshift...")
+            
+            # Fetch sections from home page
+            sections = await self._crawl_sections()
+            self.stats['sections_found'] = len(sections)
+            
+            if not sections:
+                log.error("No sections found on home page")
+                self.stats['errors'].append("No sections found on home page")
+            
+            # Track seen article IDs
+            seen_article_ids: Set[int] = set()
+            
+            # Crawl each section
+            for section in sections:
+                try:
+                    article_ids = await self._crawl_section(section)
+                    seen_article_ids.update(article_ids)
+                except Exception as e:
+                    error_msg = f"Error crawling section {section.name}: {e}"
+                    log.error(error_msg, exc_info=True)
+                    self.stats['errors'].append(error_msg)
+            
+            # Mark missing articles as deleted
+            if seen_article_ids:
+                deleted_count = await self.database.mark_missing_articles_deleted(list(seen_article_ids))
+                log.info(f"Marked {deleted_count} articles as deleted")
+            
+            end_time = datetime.utcnow()
+            duration = (end_time - start_time).total_seconds()
+            
+            report = CrawlReport(
+                started_at=start_iso,
+                completed_at=end_time.isoformat() + 'Z',
+                duration_seconds=duration,
+                sections_found=self.stats['sections_found'],
+                articles_total=self.stats['articles_total'],
+                articles_new=self.stats['articles_new'],
+                articles_updated=self.stats['articles_updated'],
+                articles_unchanged=self.stats['articles_unchanged'],
+                articles_deleted=deleted_count if seen_article_ids else 0,
+                errors=self.stats['errors']
+            )
+            
+            # Save report
+            await self.database.save_crawl_report(report)
+            
+            log.info(
+                f"Crawl completed: {self.stats['articles_total']} articles "
+                f"({self.stats['articles_new']} new, {self.stats['articles_updated']} updated, "
+                f"{self.stats['articles_unchanged']} unchanged) in {duration:.1f}s"
+            )
+            
+            return report
+        
+        except Exception as e:
+            log.error(f"Crawl failed: {e}", exc_info=True)
+            
+            end_time = datetime.utcnow()
+            duration = (end_time - start_time).total_seconds()
+            
+            self.stats['errors'].append(f"Fatal error: {str(e)}")
+            
+            return CrawlReport(
+                started_at=start_iso,
+                completed_at=end_time.isoformat() + 'Z',
+                duration_seconds=duration,
+                sections_found=self.stats['sections_found'],
+                articles_total=self.stats['articles_total'],
+                articles_new=self.stats['articles_new'],
+                articles_updated=self.stats['articles_updated'],
+                articles_unchanged=self.stats['articles_unchanged'],
+                errors=self.stats['errors']
+            )
+    
+    async def _crawl_sections(self) -> List[HelpshiftSection]:
+        """Crawl home page and extract sections."""
         html = await self._fetch(self.HOME_URL)
         if not html:
-            log.error("Failed to fetch help center home page")
             return []
         
         soup = BeautifulSoup(html, 'lxml')
         sections = []
+        now_utc = datetime.utcnow().isoformat() + 'Z'
         
-        # Try multiple selector strategies
+        # Try multiple selectors
         selectors = [
             ('a', {'href': lambda x: x and '/section/' in x}),
             ('div.section-card a', {}),
-            ('a.section-link', {})
+            ('.section-link', {})
         ]
         
         for tag, attrs in selectors:
-            links = soup.find_all(tag, attrs)
-            if links:
-                for link in links:
-                    href = link.get('href', '')
-                    if '/section/' in href:
-                        title = link.get_text(strip=True)
-                        full_url = href if href.startswith('http') else self.BASE_URL + href
-                        sections.append((title, full_url))
+            links = soup.find_all(tag, attrs) if isinstance(tag, str) else soup.select(tag)
+            
+            for link in links:
+                href = link.get('href', '')
+                if '/section/' not in href:
+                    continue
                 
-                if sections:
-                    break
+                full_url = href if href.startswith('http') else self.BASE_URL + href
+                title = link.get_text(strip=True)
+                
+                # Parse section ID
+                section_id = HelpshiftSection.parse_id_from_url(full_url)
+                if not section_id:
+                    continue
+                
+                # Extract slug
+                slug = full_url.split('/section/')[-1].rstrip('/')
+                
+                section = HelpshiftSection(
+                    id=section_id,
+                    slug=slug,
+                    url=full_url,
+                    name=title,
+                    last_seen_utc=now_utc
+                )
+                
+                sections.append(section)
+                
+                # Save section to DB
+                try:
+                    await self.database.upsert_section(section)
+                except Exception as e:
+                    log.error(f"Failed to save section {section_id}: {e}")
+            
+            if sections:
+                break
         
-        # Cache results
-        if sections:
-            self._section_cache[self.HOME_URL] = (sections, time.time())
-            log.info(f"Found {len(sections)} sections")
-        else:
-            log.warning("No sections found with any selector")
-        
+        log.info(f"Found {len(sections)} sections")
         return sections
     
-    async def get_section_articles(self, section_url: str) -> List[Tuple[str, str]]:
+    async def _crawl_section(self, section: HelpshiftSection) -> List[int]:
         """
-        Get all articles from a section page.
+        Crawl a section page and extract article links.
         
-        Args:
-            section_url: URL of the section
-            
         Returns:
-            List of (article_title, article_url) tuples
+            List of article IDs processed
         """
-        # Check cache
-        if section_url in self._section_cache:
-            articles, timestamp = self._section_cache[section_url]
-            if self._is_cache_valid(timestamp):
-                return articles
-        
-        html = await self._fetch(section_url)
+        html = await self._fetch(section.url)
         if not html:
             return []
         
         soup = BeautifulSoup(html, 'lxml')
-        articles = []
+        article_links = []
         
-        # Try multiple selectors
+        # Try multiple selectors for article links
         selectors = [
             ('a', {'href': lambda x: x and '/faq/' in x}),
             ('div.article-list a', {}),
-            ('a.article-link', {})
+            ('.article-link', {})
         ]
         
         for tag, attrs in selectors:
-            links = soup.find_all(tag, attrs)
-            if links:
-                for link in links:
-                    href = link.get('href', '')
-                    if '/faq/' in href:
-                        title = link.get_text(strip=True)
-                        full_url = href if href.startswith('http') else self.BASE_URL + href
-                        articles.append((title, full_url))
+            links = soup.find_all(tag, attrs) if isinstance(tag, str) else soup.select(tag)
+            
+            for link in links:
+                href = link.get('href', '')
+                if '/faq/' not in href:
+                    continue
                 
-                if articles:
-                    break
+                full_url = href if href.startswith('http') else self.BASE_URL + href
+                title = link.get_text(strip=True)
+                
+                article_links.append((title, full_url))
+            
+            if article_links:
+                break
         
-        # Cache results
-        if articles:
-            self._section_cache[section_url] = (articles, time.time())
+        log.debug(f"Section '{section.name}': found {len(article_links)} articles")
         
-        return articles
+        # Fetch articles with concurrency limit
+        tasks = [
+            self._fetch_and_store_article(url, title, section)
+            for title, url in article_links
+        ]
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Collect successful article IDs
+        article_ids = []
+        for result in results:
+            if isinstance(result, int):
+                article_ids.append(result)
+            elif isinstance(result, Exception):
+                error_msg = f"Article fetch error: {result}"
+                log.error(error_msg)
+                self.stats['errors'].append(error_msg)
+        
+        return article_ids
     
-    async def get_article(self, article_url: str, section_name: str = "") -> Optional[HelpshiftArticle]:
+    async def _fetch_and_store_article(
+        self,
+        url: str,
+        expected_title: str,
+        section: HelpshiftSection
+    ) -> Optional[int]:
         """
-        Get full article content from an article URL.
+        Fetch an article and store it in the database.
+        
+        Returns:
+            Article ID if successful, None otherwise
+        """
+        async with self.semaphore:  # Limit concurrency
+            try:
+                html = await self._fetch(url)
+                if not html:
+                    return None
+                
+                soup = BeautifulSoup(html, 'lxml')
+                
+                # Extract title
+                title = None
+                for selector in ['h1', 'h2', '.article-title', '.faq-title']:
+                    elem = soup.select_one(selector)
+                    if elem:
+                        title = elem.get_text(strip=True)
+                        break
+                
+                if not title:
+                    title = expected_title
+                
+                # Extract last updated
+                last_updated = None
+                for text in soup.stripped_strings:
+                    if 'Last Updated:' in text or 'Updated:' in text:
+                        parts = text.split(':')
+                        if len(parts) > 1:
+                            last_updated = parts[1].strip()
+                        break
+                
+                # Extract body
+                body_md = self._extract_body(soup)
+                
+                # Truncate if too long
+                if len(body_md) > self.MAX_BODY_LENGTH:
+                    body_md = body_md[:self.MAX_BODY_LENGTH] + "\n\n[Content truncated...]"
+                
+                # Parse article ID
+                article_id = HelpshiftArticle.parse_id_from_url(url)
+                if not article_id:
+                    log.warning(f"Could not parse article ID from {url}")
+                    return None
+                
+                # Extract slug
+                slug = url.split('/faq/')[-1].rstrip('/')
+                
+                # Compute hash
+                hash_body = HelpshiftArticle.compute_hash(body_md)
+                
+                # Create article
+                article = HelpshiftArticle(
+                    id=article_id,
+                    slug=slug,
+                    url=url,
+                    title=title,
+                    section_id=section.id,
+                    section_name=section.name,
+                    last_updated_text=last_updated,
+                    last_seen_utc=datetime.utcnow().isoformat() + 'Z',
+                    body_md=body_md,
+                    hash_body=hash_body,
+                    lang='en'
+                )
+                
+                # Store in database
+                status, version_saved = await self.database.upsert_article(article)
+                
+                self.stats['articles_total'] += 1
+                
+                if status == 'new':
+                    self.stats['articles_new'] += 1
+                elif status == 'updated':
+                    self.stats['articles_updated'] += 1
+                else:
+                    self.stats['articles_unchanged'] += 1
+                
+                return article_id
+            
+            except Exception as e:
+                error_msg = f"Error processing article {url}: {e}"
+                log.error(error_msg, exc_info=True)
+                self.stats['errors'].append(error_msg)
+                return None
+    
+    def _extract_body(self, soup: BeautifulSoup) -> str:
+        """
+        Extract and normalize article body to markdown-like text.
         
         Args:
-            article_url: URL of the article
-            section_name: Name of the section (for metadata)
+            soup: BeautifulSoup object
             
         Returns:
-            HelpshiftArticle or None on failure
+            Normalized markdown text
         """
-        # Check cache
-        if article_url in self._article_cache:
-            article, timestamp = self._article_cache[article_url]
-            if self._is_cache_valid(timestamp):
-                return article
-        
-        html = await self._fetch(article_url)
-        if not html:
-            return None
-        
-        soup = BeautifulSoup(html, 'lxml')
-        
-        # Extract title
-        title = None
-        for selector in ['h1', 'h2', '.article-title', '.faq-title']:
-            title_elem = soup.select_one(selector)
-            if title_elem:
-                title = title_elem.get_text(strip=True)
-                break
-        
-        if not title:
-            log.warning(f"Could not find title for {article_url}")
-            title = "Untitled Article"
-        
-        # Extract last updated
-        last_updated = None
-        for text in soup.stripped_strings:
-            if 'Last Updated:' in text or 'Updated:' in text:
-                # Extract something like "379d" or "3 months ago"
-                parts = text.split(':')
-                if len(parts) > 1:
-                    last_updated = parts[1].strip()
-                break
-        
-        # Extract body content
-        body = ""
         body_selectors = [
             '.article-body',
             '.faq-body',
@@ -300,236 +474,117 @@ class HelpshiftScraper:
             'main'
         ]
         
+        body_elem = None
         for selector in body_selectors:
             body_elem = soup.select_one(selector)
             if body_elem:
-                # Convert to plain text with some structure
-                body = self._html_to_markdown(body_elem)
                 break
         
-        if not body:
+        if not body_elem:
             # Fallback: get all paragraphs
             paragraphs = soup.find_all('p')
-            body = '\n\n'.join(p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True))
+            return '\n\n'.join(p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True))
         
-        # Create snippet (first 300 chars)
-        snippet = body[:300] + "..." if len(body) > 300 else body
-        
-        article = HelpshiftArticle(
-            title=title,
-            url=article_url,
-            section=section_name,
-            body=body,
-            last_updated=last_updated,
-            snippet=snippet
-        )
-        
-        # Cache result
-        self._article_cache[article_url] = (article, time.time())
-        
-        # Add to title cache for autocomplete
-        self._add_to_title_cache(title)
-        
-        return article
+        # Convert HTML to markdown-like text
+        return self._html_to_markdown(body_elem)
     
     def _html_to_markdown(self, element) -> str:
-        """
-        Convert HTML element to simplified markdown-like text.
-        
-        Args:
-            element: BeautifulSoup element
-            
-        Returns:
-            Formatted text
-        """
-        text_parts = []
+        """Convert HTML element to simplified markdown."""
+        parts = []
         
         for child in element.descendants:
-            if child.name == 'h1' or child.name == 'h2':
-                text_parts.append(f"\n**{child.get_text(strip=True)}**\n")
-            elif child.name == 'h3' or child.name == 'h4':
-                text_parts.append(f"\n*{child.get_text(strip=True)}*\n")
+            if child.name in ['h1', 'h2']:
+                text = child.get_text(strip=True)
+                if text and text not in ''.join(parts[-5:]):  # Avoid duplicates
+                    parts.append(f"\n## {text}\n")
+            elif child.name in ['h3', 'h4']:
+                text = child.get_text(strip=True)
+                if text and text not in ''.join(parts[-5:]):
+                    parts.append(f"\n### {text}\n")
             elif child.name == 'li':
-                text_parts.append(f"• {child.get_text(strip=True)}\n")
+                text = child.get_text(strip=True)
+                if text:
+                    parts.append(f"• {text}\n")
             elif child.name == 'p':
-                text_parts.append(f"{child.get_text(strip=True)}\n\n")
-            elif isinstance(child, str) and child.strip():
-                if not any(child in str(p) for p in text_parts[-3:]):
-                    text_parts.append(child.strip() + " ")
+                text = child.get_text(strip=True)
+                if text:
+                    parts.append(f"{text}\n\n")
+            elif isinstance(child, str):
+                text = child.strip()
+                if text and len(text) > 3:
+                    # Only add if not already in recent parts
+                    if text not in ''.join(parts[-10:]):
+                        parts.append(text + " ")
         
-        return ''.join(text_parts).strip()
-    
-    def _add_to_title_cache(self, title: str):
-        """Add title to autocomplete cache."""
-        current_time = time.time()
-        # Remove expired entries
-        self._title_cache = [(t, ts) for t, ts in self._title_cache if self._is_cache_valid(ts)]
-        # Add new title if not already present
-        if title not in [t for t, _ in self._title_cache]:
-            self._title_cache.append((title, current_time))
-    
-    def get_cached_titles(self) -> List[str]:
-        """
-        Get all cached article titles for autocomplete.
+        result = ''.join(parts)
         
-        Returns:
-            List of article titles
-        """
-        current_time = time.time()
-        valid_titles = [
-            title for title, timestamp in self._title_cache
-            if self._is_cache_valid(timestamp)
-        ]
-        return valid_titles
+        # Clean up excessive whitespace
+        lines = [line.strip() for line in result.split('\n')]
+        lines = [line for line in lines if line]
+        
+        return '\n\n'.join(lines)
     
-    async def search_all_articles(self, query: str, max_articles: int = 20) -> List[HelpshiftArticle]:
+    async def test_crawl(self, max_sections: int = 2, max_articles: int = 5) -> Dict[str, any]:
         """
-        Search across all sections for articles matching query.
-        This is the main search entry point.
+        Test crawl without saving to database.
         
         Args:
-            query: Search query
-            max_articles: Maximum articles to fetch
+            max_sections: Maximum sections to test
+            max_articles: Maximum articles per section to test
             
         Returns:
-            List of HelpshiftArticle objects
+            Dictionary with test results
         """
-        sections = await self.get_sections()
-        if not sections:
-            log.error("No sections found")
-            return []
+        log.info(f"Starting test crawl (max {max_sections} sections, {max_articles} articles each)")
         
-        articles = []
+        # Fetch sections
+        html = await self._fetch(self.HOME_URL)
+        if not html:
+            return {'error': 'Failed to fetch home page'}
         
-        # Fetch articles from all sections (limited)
-        for section_name, section_url in sections[:5]:  # Limit to first 5 sections
-            section_articles = await self.get_section_articles(section_url)
+        soup = BeautifulSoup(html, 'lxml')
+        section_links = soup.find_all('a', href=lambda x: x and '/section/' in x)
+        
+        results = {
+            'sections_found': len(section_links),
+            'sections_tested': [],
+            'articles_tested': []
+        }
+        
+        for link in section_links[:max_sections]:
+            section_url = link.get('href')
+            if not section_url.startswith('http'):
+                section_url = self.BASE_URL + section_url
             
-            for article_title, article_url in section_articles:
-                if len(articles) >= max_articles:
-                    break
+            section_name = link.get_text(strip=True)
+            results['sections_tested'].append({'name': section_name, 'url': section_url})
+            
+            # Fetch section articles
+            section_html = await self._fetch(section_url)
+            if not section_html:
+                continue
+            
+            section_soup = BeautifulSoup(section_html, 'lxml')
+            article_links = section_soup.find_all('a', href=lambda x: x and '/faq/' in x)
+            
+            for article_link in article_links[:max_articles]:
+                article_url = article_link.get('href')
+                if not article_url.startswith('http'):
+                    article_url = self.BASE_URL + article_url
                 
-                # Fetch full article (will be cached)
-                article = await self.get_article(article_url, section_name)
-                if article:
-                    articles.append(article)
-            
-            if len(articles) >= max_articles:
-                break
+                article_title = article_link.get_text(strip=True)
+                
+                # Fetch article
+                article_html = await self._fetch(article_url)
+                if article_html:
+                    article_soup = BeautifulSoup(article_html, 'lxml')
+                    body = self._extract_body(article_soup)
+                    
+                    results['articles_tested'].append({
+                        'title': article_title,
+                        'url': article_url,
+                        'body_length': len(body),
+                        'body_preview': body[:200] + '...' if len(body) > 200 else body
+                    })
         
-        log.info(f"Fetched {len(articles)} articles from Helpshift")
-        return articles
-    
-    def clear_cache(self):
-        """Clear all caches."""
-        self._section_cache.clear()
-        self._article_cache.clear()
-        self._title_cache.clear()
-        log.info("Cleared all caches")
-
-
-# Mock HTML responses for testing
-MOCK_HOME_HTML = """
-<html>
-<body>
-    <div class="sections">
-        <a href="/hc/en/23-mission-chief/section/1-user-interface/">User Interface Overview</a>
-        <a href="/hc/en/23-mission-chief/section/2-getting-started/">Getting Started</a>
-        <a href="/hc/en/23-mission-chief/section/3-game-mechanics/">Game Mechanics</a>
-    </div>
-</body>
-</html>
-"""
-
-MOCK_SECTION_HTML = """
-<html>
-<body>
-    <div class="article-list">
-        <a href="/hc/en/23-mission-chief/faq/1000-mission-list/">Mission List</a>
-        <a href="/hc/en/23-mission-chief/faq/1001-dispatch-center/">Dispatch Center</a>
-    </div>
-</body>
-</html>
-"""
-
-MOCK_ARTICLE_HTML = """
-<html>
-<body>
-    <h1>Mission List</h1>
-    <div class="meta">Last Updated: 379d</div>
-    <article class="article-body">
-        <p>The mission list shows all available missions on your map.</p>
-        <h3>Features:</h3>
-        <ul>
-            <li>Filter by mission type</li>
-            <li>Sort by distance</li>
-            <li>Search function</li>
-        </ul>
-        <p>You can customize the mission list view in the settings.</p>
-    </article>
-</body>
-</html>
-"""
-
-
-async def _test_scraper():
-    """Test scraper with mock responses."""
-    print("=== Helpshift Scraper Tests ===\n")
-    
-    scraper = HelpshiftScraper(cache_ttl=300)
-    
-    # Test 1: Rate limiter
-    print("Test 1: Rate limiter")
-    start = time.time()
-    for i in range(5):
-        await scraper.rate_limiter.acquire()
-    elapsed = time.time() - start
-    assert elapsed >= 0.5  # Should take at least 0.5s for 5 requests (burst 4 + 1 wait)
-    print(f"✓ Rate limiter working (5 requests in {elapsed:.2f}s)")
-    
-    # Test 2: HTML parsing (mock)
-    print("\nTest 2: HTML parsing")
-    soup = BeautifulSoup(MOCK_ARTICLE_HTML, 'lxml')
-    title = soup.find('h1').get_text(strip=True)
-    assert title == "Mission List"
-    print(f"✓ Parsed title: {title}")
-    
-    # Test 3: Markdown conversion
-    print("\nTest 3: HTML to markdown conversion")
-    soup = BeautifulSoup(MOCK_ARTICLE_HTML, 'lxml')
-    body_elem = soup.find('article')
-    body_text = scraper._html_to_markdown(body_elem)
-    assert "Mission List" in body_text or "mission list" in body_text
-    assert "Filter" in body_text or "filter" in body_text
-    print(f"✓ Converted HTML to text ({len(body_text)} chars)")
-    
-    # Test 4: Cache functionality
-    print("\nTest 4: Cache functionality")
-    test_url = "https://test.example.com/article"
-    test_article = HelpshiftArticle(
-        title="Test Article",
-        url=test_url,
-        section="Test",
-        body="Test content",
-        last_updated="1d"
-    )
-    scraper._article_cache[test_url] = (test_article, time.time())
-    
-    # Should return cached version
-    assert scraper._is_cache_valid(time.time())
-    print("✓ Cache validation working")
-    
-    # Test 5: Title cache for autocomplete
-    print("\nTest 5: Title cache for autocomplete")
-    scraper._add_to_title_cache("Mission List")
-    scraper._add_to_title_cache("Dispatch Center")
-    titles = scraper.get_cached_titles()
-    assert len(titles) == 2
-    print(f"✓ Title cache: {titles}")
-    
-    await scraper.close()
-    print("\n✅ All scraper tests passed!")
-
-
-if __name__ == "__main__":
-    asyncio.run(_test_scraper())
+        return results
