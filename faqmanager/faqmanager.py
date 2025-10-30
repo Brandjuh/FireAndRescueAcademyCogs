@@ -30,6 +30,22 @@ class FAQManager(red_commands.Cog):
     Advanced FAQ system with smart search, Helpshift integration, and role-based management.
     """
     
+    # Predefined FAQ categories
+    FAQ_CATEGORIES = [
+        "Game Mechanics",
+        "Economy & Credits",
+        "Vehicles & Equipment",
+        "Buildings & Stations",
+        "Missions & Calls",
+        "Alliance & Multiplayer",
+        "Map & POIs",
+        "Events & Specials",
+        "Account & Settings",
+        "Technical Support",
+        "Getting Started",
+        "Advanced Tips"
+    ]
+    
     def __init__(self, bot):
         self.bot = bot
         
@@ -246,16 +262,17 @@ class FAQManager(red_commands.Cog):
         """Add a new custom FAQ entry."""
         # Check permissions
         if not await self._is_editor(ctx.guild, ctx.author):
-            await ctx.send("❌ You don't have permission to add FAQs.", ephemeral=True)
+            await ctx.send("❌ You don't have permission to add FAQs.")
             return
         
-        # Modals only work with slash commands
-        if not ctx.interaction:
-            await ctx.send("❌ This command only works as a slash command. Use `/faqadmin add` instead.")
-            return
-        
-        modal = AddFAQModal(self, ctx.author.id)
-        await ctx.interaction.response.send_modal(modal)
+        # Show category selection
+        view = CategorySelectView(self, ctx.author.id)
+        embed = discord.Embed(
+            title="📝 Add New FAQ",
+            description="First, select a category for your FAQ:",
+            color=discord.Color.green()
+        )
+        await ctx.send(embed=embed, view=view)
     
     @faq_admin.command(name="edit")
     @app_commands.describe(faq_id="ID of the FAQ to edit")
@@ -1155,3 +1172,157 @@ class ConfirmOutdatedView(discord.ui.View):
     
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user_id
+
+
+class CategorySelectView(discord.ui.View):
+    """View for selecting FAQ category."""
+    
+    def __init__(self, cog: FAQManager, user_id: int):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.user_id = user_id
+        
+        # Create select menu with categories
+        options = [
+            discord.SelectOption(label=category, value=category)
+            for category in cog.FAQ_CATEGORIES
+        ]
+        
+        select = discord.ui.Select(
+            placeholder="Choose a category...",
+            options=options,
+            custom_id="category_select"
+        )
+        select.callback = self.category_selected
+        self.add_item(select)
+    
+    async def category_selected(self, interaction: discord.Interaction):
+        """Handle category selection."""
+        category = interaction.data['values'][0]
+        
+        # Open modal with pre-selected category
+        modal = AddFAQModalWithCategory(self.cog, interaction.user.id, category)
+        await interaction.response.send_modal(modal)
+        self.stop()
+    
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user_id
+
+
+class AddFAQModalWithCategory(discord.ui.Modal, title="Add New FAQ"):
+    """Modal for adding a new FAQ with pre-selected category."""
+    
+    question = discord.ui.TextInput(
+        label="Question",
+        placeholder="What is ARR?",
+        style=discord.TextStyle.short,
+        required=True,
+        max_length=300
+    )
+    
+    answer = discord.ui.TextInput(
+        label="Answer (Markdown supported)",
+        placeholder="Alarm and Response Regulation allows...",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=2000
+    )
+    
+    synonyms = discord.ui.TextInput(
+        label="Synonyms (optional - auto-generated if empty)",
+        placeholder="Leave empty for auto-generation, or enter: arr, alarm rules",
+        style=discord.TextStyle.short,
+        required=False,
+        max_length=500
+    )
+    
+    def __init__(self, cog: FAQManager, author_id: int, category: str):
+        super().__init__()
+        self.cog = cog
+        self.author_id = author_id
+        self.category = category
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        
+        # Auto-generate synonyms if empty
+        if not self.synonyms.value or self.synonyms.value.strip() == "":
+            synonym_list = self._auto_generate_synonyms(
+                self.question.value,
+                self.answer.value
+            )
+        else:
+            synonym_list = [s.strip() for s in self.synonyms.value.split(',')]
+        
+        # Create FAQ
+        faq = FAQItem(
+            question=self.question.value,
+            answer_md=self.answer.value,
+            category=self.category,
+            synonyms=synonym_list,
+            author_id=self.author_id
+        )
+        
+        # Save to database
+        try:
+            faq_id = await self.cog.database.add_faq(faq)
+            await self.cog._reload_faq_cache()
+            
+            synonym_text = ", ".join(synonym_list) if synonym_list else "None"
+            
+            embed = discord.Embed(
+                title="✅ FAQ Added",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Question", value=self.question.value, inline=False)
+            embed.add_field(name="Category", value=self.category, inline=True)
+            embed.add_field(name="FAQ ID", value=f"`{faq_id}`", inline=True)
+            embed.add_field(name="Auto-generated Synonyms", value=synonym_text[:1024], inline=False)
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        
+        except Exception as e:
+            log.error(f"Error adding FAQ: {e}", exc_info=True)
+            await interaction.followup.send("❌ Failed to add FAQ. Please try again.", ephemeral=True)
+    
+    def _auto_generate_synonyms(self, question: str, answer: str) -> List[str]:
+        """Auto-generate synonyms from question and answer text."""
+        # Common stop words to ignore
+        stop_words = {
+            'the', 'is', 'at', 'which', 'on', 'a', 'an', 'as', 'are', 'was', 'were',
+            'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will',
+            'would', 'should', 'could', 'may', 'might', 'must', 'can', 'to', 'of', 'in',
+            'for', 'with', 'about', 'how', 'what', 'when', 'where', 'why', 'who', 'i',
+            'you', 'my', 'your', 'this', 'that', 'these', 'those', 'it', 'its', 'there',
+            'their', 'they', 'them', 'or', 'and', 'but', 'if', 'then', 'than', 'so'
+        }
+        
+        # Extract words from question and answer
+        text = (question + " " + answer).lower()
+        
+        # Remove punctuation and split into words
+        import re
+        words = re.findall(r'\b\w+\b', text)
+        
+        # Filter: minimum 3 chars, not in stop words, appears more than once or is in question
+        word_counts = {}
+        question_words = set(re.findall(r'\b\w+\b', question.lower()))
+        
+        for word in words:
+            if len(word) >= 3 and word not in stop_words:
+                word_counts[word] = word_counts.get(word, 0) + 1
+        
+        # Select important words: in question OR appears multiple times
+        synonyms = []
+        for word, count in word_counts.items():
+            if word in question_words or count >= 2:
+                if word not in synonyms:
+                    synonyms.append(word)
+        
+        # Limit to top 10 most relevant
+        synonyms = sorted(synonyms, key=lambda w: (
+            2 if w in question_words else 1,
+            word_counts.get(w, 0)
+        ), reverse=True)[:10]
+        
+        return synonyms
