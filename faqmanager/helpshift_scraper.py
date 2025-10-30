@@ -408,18 +408,14 @@ class HelpshiftCrawler:
         seen_text = set()  # Avoid duplicates
         
         # Extract text with structure
-        for element in body_elem.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'p', 'li', 'div']):
-            # Skip if this element is inside another one we already processed
-            if any(parent in seen_text for parent in element.parents):
-                continue
-            
+        for element in body_elem.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'p', 'li']):
             text = element.get_text(strip=True)
             
             # Skip empty or very short text
             if not text or len(text) < 5:
                 continue
             
-            # Skip if we've seen this exact text
+            # Skip if we've seen this exact text (deduplication)
             if text in seen_text:
                 continue
             
@@ -438,11 +434,8 @@ class HelpshiftCrawler:
                     seen_text.add(text)
             elif element.name == 'p':
                 if len(text) > 15:
-                    # Check if this paragraph is not just a child's text repeated
-                    children_text = ' '.join(child.get_text(strip=True) for child in element.find_all())
-                    if not children_text or len(text) > len(children_text) * 0.8:
-                        parts.append(f"{text}\n\n")
-                        seen_text.add(text)
+                    parts.append(f"{text}\n\n")
+                    seen_text.add(text)
         
         result = ''.join(parts)
         
