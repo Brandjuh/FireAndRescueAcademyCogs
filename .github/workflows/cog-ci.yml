@@ -1,0 +1,118 @@
+name: Cog QA
+
+on:
+  pull_request:
+    paths:
+      - "cogs/**"
+      - "scripts/**"
+      - ".github/workflows/**"
+      - "pyproject.toml"
+      - "requirements*.txt"
+  push:
+    branches: [ main ]
+    paths:
+      - "cogs/**"
+      - "scripts/**"
+      - ".github/workflows/**"
+      - "pyproject.toml"
+      - "requirements*.txt"
+
+permissions:
+  contents: read
+
+jobs:
+  detect-changes:
+    name: Detect changed cogs
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      any_changed: ${{ steps.set-matrix.outputs.any_changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: set-matrix
+        run: |
+          set -e
+          # Vind gewijzigde paden sinds merge-base met main (of vorige commit op push)
+          BASE_REF="${{ github.event.pull_request.base.sha || github.event.before }}"
+          HEAD_REF="${{ github.sha }}"
+          CHANGED=$(git diff --name-only "$BASE_REF" "$HEAD_REF" -- cogs/ | cut -d/ -f1-2 | sort -u || true)
+
+          if [ -z "$CHANGED" ]; then
+            echo "Geen specifieke cogs gewijzigd; val terug op alle cogs."
+            # Bouw matrix van alle top-level cogs
+            ALL=$(ls -d cogs/*/ 2>/dev/null | sed 's#/$##' | tr '\n' ' ')
+            if [ -z "$ALL" ]; then
+              echo "::error::Geen cogs gevonden in cogs/."
+              exit 1
+            fi
+            arr=$(printf '%s\n' $ALL | jq -R . | jq -s .)
+            echo "matrix={\"cog_path\":$arr}" >> $GITHUB_OUTPUT
+            echo "any_changed=false" >> $GITHUB_OUTPUT
+          else
+            arr=$(printf '%s\n' $CHANGED | jq -R . | jq -s .)
+            echo "matrix={\"cog_path\":$arr}" >> $GITHUB_OUTPUT
+            echo "any_changed=true" >> $GITHUB_OUTPUT
+          fi
+
+  qa:
+    name: QA ${{ matrix.cog_path }}
+    needs: detect-changes
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+    env:
+      COG_PATH: ${{ matrix.cog_path }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt', 'pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install deps (tools + project)
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff pyright bandit codespell pytest
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+
+      - name: Ruff format (check)
+        run: ruff format --check "$COG_PATH"
+
+      - name: Ruff lint
+        run: ruff check "$COG_PATH"
+
+      - name: Type check (pyright)
+        run: |
+          # pyright werkt repo-breed; beperk tot cog path via --project of --verifytypes is overkill
+          pyright "$COG_PATH" || (echo "::error::Pyright failures in $COG_PATH" && exit 1)
+
+      - name: Security scan (bandit)
+        run: bandit -q -r "$COG_PATH"
+
+      - name: Spelling (codespell)
+        run: codespell "$COG_PATH" --quiet-level=2
+
+      - name: Meta check (info.json, setup, logger, duplicates)
+        run: |
+          python scripts/cog_meta_check.py "$COG_PATH"
+
+      - name: Tests
+        run: |
+          if [ -d "$COG_PATH/tests" ]; then
+            pytest -q "$COG_PATH/tests"
+          else
+            echo "Geen tests voor $COG_PATH; sla pytest over."
+          fi
