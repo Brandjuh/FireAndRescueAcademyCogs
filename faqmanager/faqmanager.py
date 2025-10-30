@@ -54,11 +54,11 @@ class FAQManager(red_commands.Cog):
         
         # Default guild settings
         default_guild = {
-            "editor_roles": [],  # List of role IDs that can edit FAQs
-            "outdated_log_channel": None,  # Channel ID for outdated reports
-            "suggestion_threshold": 75,  # Score threshold for showing suggestions
-            "autocomplete_ttl": 600,  # Autocomplete cache TTL (10 min)
-            "debug_mode": False  # Enable debug logging
+            "editor_roles": [],
+            "outdated_log_channel": None,
+            "suggestion_threshold": 75,
+            "autocomplete_ttl": 600,
+            "debug_mode": False
         }
         self.config.register_guild(**default_guild)
         
@@ -100,13 +100,11 @@ class FAQManager(red_commands.Cog):
     
     async def _is_editor(self, guild: discord.Guild, member: discord.Member) -> bool:
         """Check if user has editor permissions."""
-        # Server admins always have access
         if member.guild_permissions.administrator:
             return True
         if member.guild_permissions.manage_guild:
             return True
         
-        # Check configured editor roles
         editor_role_ids = await self.config.guild(guild).editor_roles()
         user_role_ids = [role.id for role in member.roles]
         
@@ -127,23 +125,19 @@ class FAQManager(red_commands.Cog):
         """
         await ctx.defer(ephemeral=True)
         
-        # Get settings
         threshold = await self.config.guild(ctx.guild).suggestion_threshold()
         self.fuzzy_search.suggestion_threshold = threshold
         
         try:
-            # Search custom FAQs
             custom_main, custom_suggestions = self.fuzzy_search.search_custom(
                 query, self._faq_cache, max_results=5
             )
             
-            # Search Helpshift (async)
             helpshift_articles = await self.helpshift_scraper.search_all_articles(query, max_articles=10)
             helpshift_main, helpshift_suggestions = self.fuzzy_search.search_helpshift(
                 query, helpshift_articles, max_results=5
             )
             
-            # Combine results (custom gets slight boost)
             all_results = []
             if custom_main:
                 all_results.append(custom_main)
@@ -152,7 +146,6 @@ class FAQManager(red_commands.Cog):
                 all_results.append(helpshift_main)
             all_results.extend(helpshift_suggestions)
             
-            # Sort by score
             all_results.sort(key=lambda x: x.score, reverse=True)
             
             if not all_results:
@@ -164,11 +157,9 @@ class FAQManager(red_commands.Cog):
                 await ctx.send(embed=embed, ephemeral=True)
                 return
             
-            # Determine main result
             top_result = all_results[0]
             remaining_results = all_results[1:5]
             
-            # Create embed
             embed = await self._create_result_embed(top_result, query)
             view = FAQResultView(self, top_result, remaining_results, query, ctx.author.id)
             
@@ -186,13 +177,10 @@ class FAQManager(red_commands.Cog):
     @red_commands.hybrid_command(name="faqsuggest")
     @app_commands.describe(query="Search term")
     async def faq_suggest(self, ctx: red_commands.Context, *, query: str):
-        """
-        Show only suggestions for a search query (no main result).
-        """
+        """Show only suggestions for a search query (no main result)."""
         await ctx.defer(ephemeral=True)
         
         try:
-            # Combined search
             helpshift_articles = await self.helpshift_scraper.search_all_articles(query, max_articles=10)
             
             main, suggestions = self.fuzzy_search.search_combined(
@@ -211,7 +199,6 @@ class FAQManager(red_commands.Cog):
                 await ctx.send(embed=embed, ephemeral=True)
                 return
             
-            # Create suggestion embed
             embed = discord.Embed(
                 title=f"💡 Suggestions for: {query}",
                 description="Select one of the options below:",
@@ -236,9 +223,7 @@ class FAQManager(red_commands.Cog):
     
     @red_commands.hybrid_command(name="faqme")
     async def faq_me(self, ctx: red_commands.Context):
-        """
-        Open a personal FAQ search mode with an interactive search field.
-        """
+        """Open a personal FAQ search mode with an interactive search field."""
         embed = discord.Embed(
             title="🔍 Personal FAQ Search",
             description="Use the button below to start searching FAQs.\n\nThis is a private search just for you!",
@@ -259,20 +244,18 @@ class FAQManager(red_commands.Cog):
     
     @faq_admin.command(name="add")
     async def faq_add(self, ctx: red_commands.Context):
-        """Add a new custom FAQ entry."""
-        # Check permissions
+        """Add a new custom FAQ entry with category selection."""
         if not await self._is_editor(ctx.guild, ctx.author):
-            await ctx.send("❌ You don't have permission to add FAQs.")
+            await ctx.send("❌ You don't have permission to add FAQs.", ephemeral=True)
             return
         
-        # Show category selection
         view = CategorySelectView(self, ctx.author.id)
         embed = discord.Embed(
             title="📝 Add New FAQ",
             description="First, select a category for your FAQ:",
             color=discord.Color.green()
         )
-        await ctx.send(embed=embed, view=view)
+        await ctx.send(embed=embed, view=view, ephemeral=True)
     
     @faq_admin.command(name="edit")
     @app_commands.describe(faq_id="ID of the FAQ to edit")
@@ -282,13 +265,11 @@ class FAQManager(red_commands.Cog):
             await ctx.send("❌ You don't have permission to edit FAQs.", ephemeral=True)
             return
         
-        # Get FAQ
         faq = await self.database.get_faq(faq_id)
         if not faq:
             await ctx.send(f"❌ FAQ with ID `{faq_id}` not found.", ephemeral=True)
             return
         
-        # Modals only work with slash commands
         if not ctx.interaction:
             await ctx.send("❌ This command only works as a slash command. Use `/faqadmin edit` instead.")
             return
@@ -328,7 +309,6 @@ class FAQManager(red_commands.Cog):
         
         await ctx.defer(ephemeral=True)
         
-        # Search for FAQ
         helpshift_articles = await self.helpshift_scraper.search_all_articles(query, max_articles=5)
         main, suggestions = self.fuzzy_search.search_combined(
             query, self._faq_cache, helpshift_articles, max_results=5
@@ -342,12 +322,10 @@ class FAQManager(red_commands.Cog):
             return
         
         if len(all_results) == 1:
-            # Post immediately
             embed = await self._create_result_embed(all_results[0], query, public=True)
             await ctx.send(embed=embed)
             await ctx.send("✅ FAQ posted!", ephemeral=True)
         else:
-            # Show selection menu
             view = PostSelectView(self, all_results, ctx.channel, ctx.author.id)
             embed = discord.Embed(
                 title="📤 Select FAQ to Post",
@@ -369,18 +347,16 @@ class FAQManager(red_commands.Cog):
             color=discord.Color.green()
         )
         
-        # Group FAQs by category
         categorized = {}
-        for faq in self._faq_cache[:50]:  # Limit to 50
+        for faq in self._faq_cache[:50]:
             category = faq.category or "Uncategorized"
             if category not in categorized:
                 categorized[category] = []
             categorized[category].append(faq)
         
-        # Add fields per category
         for category, faqs in sorted(categorized.items()):
             lines = []
-            for faq in faqs[:10]:  # Max 10 per category to avoid embed limits
+            for faq in faqs[:10]:
                 lines.append(f"`ID {faq.id:03d}` • {faq.question[:60]}")
             
             embed.add_field(
@@ -456,7 +432,6 @@ class FAQManager(red_commands.Cog):
     async def faq_settings(self, ctx: red_commands.Context):
         """Configure FAQ system settings."""
         if ctx.invoked_subcommand is None:
-            # Show current settings
             settings = await self.config.guild(ctx.guild).all()
             
             outdated_channel = ctx.guild.get_channel(settings['outdated_log_channel']) if settings['outdated_log_channel'] else None
@@ -496,7 +471,6 @@ class FAQManager(red_commands.Cog):
         """Toggle debug logging."""
         await self.config.guild(ctx.guild).debug_mode.set(enabled)
         
-        # Update log level
         if enabled:
             log.setLevel(logging.DEBUG)
             await ctx.send("✅ Debug mode **enabled**.", ephemeral=True)
@@ -516,7 +490,6 @@ class FAQManager(red_commands.Cog):
     @faq_crawl_group.command(name="now")
     async def crawl_now(self, ctx: red_commands.Context):
         """Start a full crawl immediately."""
-        # Support both prefix and slash
         if ctx.interaction:
             await ctx.defer(ephemeral=True)
             send_msg = lambda content=None, embed=None: ctx.send(content=content, embed=embed, ephemeral=True)
@@ -528,7 +501,6 @@ class FAQManager(red_commands.Cog):
         try:
             report = await self.crawler.crawl_full()
             
-            # Create report embed
             embed = discord.Embed(
                 title="📊 Crawl Report",
                 color=discord.Color.green() if not report.errors else discord.Color.orange()
@@ -566,7 +538,7 @@ class FAQManager(red_commands.Cog):
             report = await self.database.get_last_crawl_report()
             
             if not report:
-                await ctx.send("📭 No crawl reports found. Run `/faq crawl now` to start a crawl.", ephemeral=True)
+                await ctx.send("📭 No crawl reports found. Run `/faqcrawl now` to start a crawl.", ephemeral=True)
                 return
             
             embed = discord.Embed(
@@ -592,7 +564,6 @@ class FAQManager(red_commands.Cog):
                     error_text += f"\n... and {len(report.errors) - 3} more"
                 embed.add_field(name="⚠️ Recent Errors", value=error_text, inline=False)
             
-            # Get database stats
             stats = await self.database.get_statistics()
             embed.add_field(
                 name="📚 Database",
@@ -624,7 +595,6 @@ class FAQManager(red_commands.Cog):
                 color=discord.Color.blue()
             )
             
-            # Show tested sections
             if results['sections_tested']:
                 section_text = "\n".join(
                     f"• {s['name']}" 
@@ -632,7 +602,6 @@ class FAQManager(red_commands.Cog):
                 )
                 embed.add_field(name="Sections Tested", value=section_text, inline=False)
             
-            # Show tested articles
             if results['articles_tested']:
                 article_text = "\n".join(
                     f"• {a['title'][:60]} ({a['body_length']} chars)"
@@ -644,7 +613,6 @@ class FAQManager(red_commands.Cog):
                     inline=False
                 )
                 
-                # Show preview of first article
                 if results['articles_tested']:
                     first = results['articles_tested'][0]
                     embed.add_field(
@@ -669,10 +637,8 @@ class FAQManager(red_commands.Cog):
             return []
         
         try:
-            # Get cached Helpshift titles
             helpshift_titles = self.helpshift_scraper.get_cached_titles()
             
-            # Perform autocomplete search
             results = self.fuzzy_search.autocomplete_search(
                 current,
                 self._faq_cache,
@@ -680,13 +646,12 @@ class FAQManager(red_commands.Cog):
                 max_results=20
             )
             
-            # Convert to choices
             choices = [
                 app_commands.Choice(name=title[:100], value=title[:100])
                 for title, score in results
             ]
             
-            return choices[:25]  # Discord limit
+            return choices[:25]
         
         except Exception as e:
             log.error(f"Autocomplete error: {e}")
@@ -702,7 +667,7 @@ class FAQManager(red_commands.Cog):
         elif result.source == Source.HELPSHIFT_LOCAL:
             color = discord.Color.blue()
             source_text = "Mission Chief Help Center (Local)"
-        else:  # HELPSHIFT_LIVE
+        else:
             color = discord.Color.blurple()
             source_text = "Mission Chief Help Center (Live)"
         
@@ -718,15 +683,12 @@ class FAQManager(red_commands.Cog):
         if result.last_updated:
             embed.add_field(name="🕒 Last Updated", value=result.last_updated, inline=True)
         
-        # Add FAQ ID for custom items (very important for editing)
         if result.source == Source.CUSTOM and result.faq_id:
             embed.add_field(name="🔢 FAQ ID", value=f"`{result.faq_id}`", inline=True)
         
-        # Add Article ID for local Helpshift items
         if result.source == Source.HELPSHIFT_LOCAL and result.article_id:
             embed.add_field(name="🔢 Article ID", value=f"`{result.article_id}`", inline=True)
         
-        # Build footer text
         footer_parts = [f"Source: {source_text}"]
         if result.source == Source.CUSTOM and result.faq_id:
             footer_parts.append(f"ID: {result.faq_id}")
@@ -791,7 +753,6 @@ class FAQResultView(discord.ui.View):
         self.query = query
         self.user_id = user_id
         
-        # Add view link button if URL exists
         if main_result.url:
             self.add_item(discord.ui.Button(
                 label="View on Help Center",
@@ -799,7 +760,6 @@ class FAQResultView(discord.ui.View):
                 style=discord.ButtonStyle.link
             ))
         
-        # Add suggestions button if there are suggestions
         if suggestions:
             self.show_suggestions_button = discord.ui.Button(
                 label=f"Show {len(suggestions)} Suggestions",
@@ -808,7 +768,6 @@ class FAQResultView(discord.ui.View):
             self.show_suggestions_button.callback = self.show_suggestions_callback
             self.add_item(self.show_suggestions_button)
         
-        # Add outdated button
         self.outdated_button = discord.ui.Button(
             label="Report Outdated",
             style=discord.ButtonStyle.danger,
@@ -901,10 +860,8 @@ class SearchModal(discord.ui.Modal, title="Search FAQs"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         
-        # Perform search (simplified - reuse search command logic)
         query = self.search_query.value
         
-        # Search both sources
         helpshift_articles = await self.cog.helpshift_scraper.search_all_articles(query, max_articles=10)
         main, suggestions = self.cog.fuzzy_search.search_combined(
             query, self.cog._faq_cache, helpshift_articles, max_results=5
@@ -918,78 +875,6 @@ class SearchModal(discord.ui.Modal, title="Search FAQs"):
         embed = await self.cog._create_result_embed(result, query)
         
         await interaction.followup.send(embed=embed, ephemeral=True)
-
-
-class AddFAQModal(discord.ui.Modal, title="Add New FAQ"):
-    """Modal for adding a new FAQ."""
-    
-    question = discord.ui.TextInput(
-        label="Question",
-        placeholder="What is ARR?",
-        style=discord.TextStyle.short,
-        required=True,
-        max_length=300
-    )
-    
-    answer = discord.ui.TextInput(
-        label="Answer (Markdown supported)",
-        placeholder="Alarm and Response Regulation allows...",
-        style=discord.TextStyle.paragraph,
-        required=True,
-        max_length=2000
-    )
-    
-    category = discord.ui.TextInput(
-        label="Category",
-        placeholder="Game Mechanics",
-        style=discord.TextStyle.short,
-        required=False,
-        max_length=100
-    )
-    
-    synonyms = discord.ui.TextInput(
-        label="Synonyms (comma separated)",
-        placeholder="arr, alarm rules, response regulation",
-        style=discord.TextStyle.short,
-        required=False,
-        max_length=500
-    )
-    
-    def __init__(self, cog: FAQManager, author_id: int):
-        super().__init__()
-        self.cog = cog
-        self.author_id = author_id
-    
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        
-        # Parse synonyms
-        synonym_list = [s.strip() for s in self.synonyms.value.split(',')] if self.synonyms.value else []
-        
-        # Create FAQ
-        faq = FAQItem(
-            question=self.question.value,
-            answer_md=self.answer.value,
-            category=self.category.value or None,
-            synonyms=synonym_list,
-            author_id=self.author_id
-        )
-        
-        # Save to database
-        try:
-            faq_id = await self.cog.database.add_faq(faq)
-            await self.cog._reload_faq_cache()
-            
-            embed = discord.Embed(
-                title="✅ FAQ Added",
-                description=f"**Question:** {self.question.value}\n**ID:** {faq_id}",
-                color=discord.Color.green()
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
-        
-        except Exception as e:
-            log.error(f"Error adding FAQ: {e}", exc_info=True)
-            await interaction.followup.send("❌ Failed to add FAQ. Please try again.", ephemeral=True)
 
 
 class EditFAQModal(discord.ui.Modal, title="Edit FAQ"):
@@ -1029,7 +914,6 @@ class EditFAQModal(discord.ui.Modal, title="Edit FAQ"):
         self.faq = faq
         self.editor_id = editor_id
         
-        # Pre-fill with existing data
         self.question.default = faq.question
         self.answer.default = faq.answer_md
         self.category.default = faq.category or ""
@@ -1038,7 +922,6 @@ class EditFAQModal(discord.ui.Modal, title="Edit FAQ"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         
-        # Update FAQ
         self.faq.question = self.question.value
         self.faq.answer_md = self.answer.value
         self.faq.category = self.category.value or None
@@ -1100,9 +983,8 @@ class PostSelectView(discord.ui.View):
         self.channel = channel
         self.user_id = user_id
         
-        # Add select menu
         options = []
-        for i, result in enumerate(results[:25], 1):  # Discord limit: 25 options
+        for i, result in enumerate(results[:25], 1):
             source_icon = "📝" if result.source == Source.CUSTOM else "🌐"
             options.append(discord.SelectOption(
                 label=f"{source_icon} {result.title[:80]}",
@@ -1182,7 +1064,6 @@ class CategorySelectView(discord.ui.View):
         self.cog = cog
         self.user_id = user_id
         
-        # Create select menu with categories
         options = [
             discord.SelectOption(label=category, value=category)
             for category in cog.FAQ_CATEGORIES
@@ -1200,7 +1081,6 @@ class CategorySelectView(discord.ui.View):
         """Handle category selection."""
         category = interaction.data['values'][0]
         
-        # Open modal with pre-selected category
         modal = AddFAQModalWithCategory(self.cog, interaction.user.id, category)
         await interaction.response.send_modal(modal)
         self.stop()
@@ -1229,8 +1109,8 @@ class AddFAQModalWithCategory(discord.ui.Modal, title="Add New FAQ"):
     )
     
     synonyms = discord.ui.TextInput(
-        label="Synonyms (optional - auto-generated if empty)",
-        placeholder="Leave empty for auto-generation, or enter: arr, alarm rules",
+        label="Synonyms (optional - leave empty for preview)",
+        placeholder="Leave empty to preview auto-generated synonyms",
         style=discord.TextStyle.short,
         required=False,
         max_length=500
@@ -1245,16 +1125,41 @@ class AddFAQModalWithCategory(discord.ui.Modal, title="Add New FAQ"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         
-        # Auto-generate synonyms if empty
         if not self.synonyms.value or self.synonyms.value.strip() == "":
+            # Auto-generate and show preview
             synonym_list = self._auto_generate_synonyms(
                 self.question.value,
                 self.answer.value
             )
+            
+            view = SynonymPreviewView(
+                self.cog,
+                self.author_id,
+                self.question.value,
+                self.answer.value,
+                self.category,
+                synonym_list
+            )
+            
+            synonym_text = ", ".join(synonym_list) if synonym_list else "None"
+            
+            embed = discord.Embed(
+                title="🔍 Preview Auto-Generated Synonyms",
+                color=discord.Color.blue()
+            )
+            embed.add_field(name="Question", value=self.question.value, inline=False)
+            embed.add_field(name="Category", value=self.category, inline=True)
+            embed.add_field(name="🤖 Auto-Generated Synonyms", value=synonym_text[:1024], inline=False)
+            embed.set_footer(text="Click 'Accept' to save, or 'Edit' to modify synonyms")
+            
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
         else:
+            # User provided synonyms manually - save directly
             synonym_list = [s.strip() for s in self.synonyms.value.split(',')]
-        
-        # Create FAQ
+            await self._save_faq(interaction, synonym_list)
+    
+    async def _save_faq(self, interaction: discord.Interaction, synonym_list: List[str]):
+        """Save FAQ to database."""
         faq = FAQItem(
             question=self.question.value,
             answer_md=self.answer.value,
@@ -1263,7 +1168,6 @@ class AddFAQModalWithCategory(discord.ui.Modal, title="Add New FAQ"):
             author_id=self.author_id
         )
         
-        # Save to database
         try:
             faq_id = await self.cog.database.add_faq(faq)
             await self.cog._reload_faq_cache()
@@ -1271,13 +1175,13 @@ class AddFAQModalWithCategory(discord.ui.Modal, title="Add New FAQ"):
             synonym_text = ", ".join(synonym_list) if synonym_list else "None"
             
             embed = discord.Embed(
-                title="✅ FAQ Added",
+                title="✅ FAQ Added Successfully",
                 color=discord.Color.green()
             )
             embed.add_field(name="Question", value=self.question.value, inline=False)
             embed.add_field(name="Category", value=self.category, inline=True)
             embed.add_field(name="FAQ ID", value=f"`{faq_id}`", inline=True)
-            embed.add_field(name="Auto-generated Synonyms", value=synonym_text[:1024], inline=False)
+            embed.add_field(name="Synonyms", value=synonym_text[:1024], inline=False)
             
             await interaction.followup.send(embed=embed, ephemeral=True)
         
@@ -1287,7 +1191,6 @@ class AddFAQModalWithCategory(discord.ui.Modal, title="Add New FAQ"):
     
     def _auto_generate_synonyms(self, question: str, answer: str) -> List[str]:
         """Auto-generate synonyms from question and answer text."""
-        # Common stop words to ignore
         stop_words = {
             'the', 'is', 'at', 'which', 'on', 'a', 'an', 'as', 'are', 'was', 'were',
             'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will',
@@ -1297,14 +1200,11 @@ class AddFAQModalWithCategory(discord.ui.Modal, title="Add New FAQ"):
             'their', 'they', 'them', 'or', 'and', 'but', 'if', 'then', 'than', 'so'
         }
         
-        # Extract words from question and answer
         text = (question + " " + answer).lower()
         
-        # Remove punctuation and split into words
         import re
         words = re.findall(r'\b\w+\b', text)
         
-        # Filter: minimum 3 chars, not in stop words, appears more than once or is in question
         word_counts = {}
         question_words = set(re.findall(r'\b\w+\b', question.lower()))
         
@@ -1312,17 +1212,158 @@ class AddFAQModalWithCategory(discord.ui.Modal, title="Add New FAQ"):
             if len(word) >= 3 and word not in stop_words:
                 word_counts[word] = word_counts.get(word, 0) + 1
         
-        # Select important words: in question OR appears multiple times
         synonyms = []
         for word, count in word_counts.items():
             if word in question_words or count >= 2:
                 if word not in synonyms:
                     synonyms.append(word)
         
-        # Limit to top 10 most relevant
         synonyms = sorted(synonyms, key=lambda w: (
             2 if w in question_words else 1,
             word_counts.get(w, 0)
         ), reverse=True)[:10]
         
         return synonyms
+
+
+class SynonymPreviewView(discord.ui.View):
+    """View for previewing and accepting/editing auto-generated synonyms."""
+    
+    def __init__(
+        self,
+        cog: FAQManager,
+        user_id: int,
+        question: str,
+        answer: str,
+        category: str,
+        synonyms: List[str]
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.user_id = user_id
+        self.question = question
+        self.answer = answer
+        self.category = category
+        self.synonyms = synonyms
+    
+    @discord.ui.button(label="✅ Accept & Save", style=discord.ButtonStyle.success)
+    async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Accept auto-generated synonyms and save FAQ."""
+        await interaction.response.defer(ephemeral=True)
+        
+        faq = FAQItem(
+            question=self.question,
+            answer_md=self.answer,
+            category=self.category,
+            synonyms=self.synonyms,
+            author_id=self.user_id
+        )
+        
+        try:
+            faq_id = await self.cog.database.add_faq(faq)
+            await self.cog._reload_faq_cache()
+            
+            synonym_text = ", ".join(self.synonyms) if self.synonyms else "None"
+            
+            embed = discord.Embed(
+                title="✅ FAQ Added Successfully",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Question", value=self.question, inline=False)
+            embed.add_field(name="Category", value=self.category, inline=True)
+            embed.add_field(name="FAQ ID", value=f"`{faq_id}`", inline=True)
+            embed.add_field(name="Synonyms", value=synonym_text[:1024], inline=False)
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            self.stop()
+        
+        except Exception as e:
+            log.error(f"Error adding FAQ: {e}", exc_info=True)
+            await interaction.followup.send("❌ Failed to add FAQ. Please try again.", ephemeral=True)
+    
+    @discord.ui.button(label="✏️ Edit Synonyms", style=discord.ButtonStyle.primary)
+    async def edit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Open modal to edit synonyms before saving."""
+        modal = EditSynonymsModal(
+            self.cog,
+            self.user_id,
+            self.question,
+            self.answer,
+            self.category,
+            self.synonyms
+        )
+        await interaction.response.send_modal(modal)
+        self.stop()
+    
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Cancel FAQ creation."""
+        await interaction.response.send_message("❌ FAQ creation cancelled.", ephemeral=True)
+        self.stop()
+    
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user_id
+
+
+class EditSynonymsModal(discord.ui.Modal, title="Edit Synonyms"):
+    """Modal for editing auto-generated synonyms."""
+    
+    synonyms_input = discord.ui.TextInput(
+        label="Synonyms (comma separated)",
+        placeholder="arr, alarm rules, response regulation",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=500
+    )
+    
+    def __init__(
+        self,
+        cog: FAQManager,
+        author_id: int,
+        question: str,
+        answer: str,
+        category: str,
+        current_synonyms: List[str]
+    ):
+        super().__init__()
+        self.cog = cog
+        self.author_id = author_id
+        self.question = question
+        self.answer = answer
+        self.category = category
+        
+        self.synonyms_input.default = ", ".join(current_synonyms)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        
+        synonym_list = [s.strip() for s in self.synonyms_input.value.split(',')] if self.synonyms_input.value else []
+        
+        faq = FAQItem(
+            question=self.question,
+            answer_md=self.answer,
+            category=self.category,
+            synonyms=synonym_list,
+            author_id=self.author_id
+        )
+        
+        try:
+            faq_id = await self.cog.database.add_faq(faq)
+            await self.cog._reload_faq_cache()
+            
+            synonym_text = ", ".join(synonym_list) if synonym_list else "None"
+            
+            embed = discord.Embed(
+                title="✅ FAQ Added Successfully",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Question", value=self.question, inline=False)
+            embed.add_field(name="Category", value=self.category, inline=True)
+            embed.add_field(name="FAQ ID", value=f"`{faq_id}`", inline=True)
+            embed.add_field(name="Edited Synonyms", value=synonym_text[:1024], inline=False)
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        
+        except Exception as e:
+            log.error(f"Error adding FAQ: {e}", exc_info=True)
+            await interaction.followup.send("❌ Failed to add FAQ. Please try again.", ephemeral=True)
