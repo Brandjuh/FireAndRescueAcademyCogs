@@ -362,91 +362,113 @@ class HelpshiftCrawler:
         """Extract and normalize article body to markdown-like text."""
         
         # Remove unwanted elements before parsing
-        for unwanted in soup.find_all(['script', 'style', 'nav', 'header', 'footer']):
+        for unwanted in soup.find_all(['script', 'style', 'nav', 'header', 'footer', 'aside']):
             unwanted.decompose()
         
         # Remove cookie banners and popups
         for cookie_banner in soup.find_all(class_=['cookie', 'gdpr', 'consent', 'banner', 'popup']):
             cookie_banner.decompose()
         
-        # Try specific article selectors first
-        body_selectors = [
-            '.article-body',
-            '.faq-content',
-            '.help-article',
-            'article.content',
-            '.markdown-body',
-            'div[role="main"]',
-            'main'
+        # Helpshift-specific: Try to find the main article content
+        # Their structure uses specific IDs/classes
+        body_elem = None
+        
+        # Try Helpshift-specific selectors first
+        helpshift_selectors = [
+            'div#main-content',
+            'div.content-wrapper',
+            'div[data-hj-suppress]',
+            'div.hs-doc-content',
+            'article',
+            'div.article-content',
+            '.markdown-body'
         ]
         
-        body_elem = None
-        for selector in body_selectors:
+        for selector in helpshift_selectors:
             body_elem = soup.select_one(selector)
             if body_elem:
+                log.debug(f"Found content with selector: {selector}")
                 break
         
-        # Fallback: find the main content area
+        # If still not found, try to find the richest content div
         if not body_elem:
-            # Try to find div with most paragraph content
-            content_divs = soup.find_all('div', class_=lambda x: x and ('content' in x.lower() or 'article' in x.lower()))
-            if content_divs:
-                body_elem = max(content_divs, key=lambda d: len(d.find_all('p')))
+            all_divs = soup.find_all('div')
+            # Find div with most paragraphs
+            if all_divs:
+                body_elem = max(all_divs, key=lambda d: len(d.find_all('p')))
+                log.debug(f"Using div with most paragraphs: {len(body_elem.find_all('p'))} paragraphs")
         
         if not body_elem:
-            # Last resort: collect all paragraphs
+            # Last resort: collect all meaningful paragraphs
             paragraphs = soup.find_all('p')
-            # Filter out very short paragraphs (likely navigation/footer)
             paragraphs = [p for p in paragraphs if len(p.get_text(strip=True)) > 20]
             return '\n\n'.join(p.get_text(strip=True) for p in paragraphs)
         
         parts = []
         seen_text = set()  # Avoid duplicates
         
-        for child in body_elem.descendants:
-            if child.name in ['h1', 'h2']:
-                text = child.get_text(strip=True)
-                if text and text not in seen_text and len(text) > 2:
+        # Extract text with structure
+        for element in body_elem.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'p', 'li', 'div']):
+            # Skip if this element is inside another one we already processed
+            if any(parent in seen_text for parent in element.parents):
+                continue
+            
+            text = element.get_text(strip=True)
+            
+            # Skip empty or very short text
+            if not text or len(text) < 5:
+                continue
+            
+            # Skip if we've seen this exact text
+            if text in seen_text:
+                continue
+            
+            # Process based on element type
+            if element.name in ['h1', 'h2']:
+                if len(text) > 2 and text.lower() not in ['home', 'help', 'faq', 'support']:
                     parts.append(f"\n## {text}\n")
                     seen_text.add(text)
-            elif child.name in ['h3', 'h4']:
-                text = child.get_text(strip=True)
-                if text and text not in seen_text and len(text) > 2:
+            elif element.name in ['h3', 'h4', 'h5']:
+                if len(text) > 2:
                     parts.append(f"\n### {text}\n")
                     seen_text.add(text)
-            elif child.name == 'li':
-                text = child.get_text(strip=True)
-                if text and len(text) > 2:
+            elif element.name == 'li':
+                if len(text) > 5:
                     parts.append(f"• {text}\n")
-            elif child.name == 'p':
-                text = child.get_text(strip=True)
-                # Skip very short paragraphs and already seen text
-                if text and len(text) > 15 and text not in seen_text:
-                    parts.append(f"{text}\n\n")
                     seen_text.add(text)
+            elif element.name == 'p':
+                if len(text) > 15:
+                    # Check if this paragraph is not just a child's text repeated
+                    children_text = ' '.join(child.get_text(strip=True) for child in element.find_all())
+                    if not children_text or len(text) > len(children_text) * 0.8:
+                        parts.append(f"{text}\n\n")
+                        seen_text.add(text)
         
         result = ''.join(parts)
         
-        # Clean up
-        lines = [line.strip() for line in result.split('\n') if line.strip()]
+        # Clean up whitespace
+        lines = [line.strip() for line in result.split('\n')]
+        lines = [line for line in lines if line]  # Remove empty lines
         cleaned = '\n\n'.join(lines)
         
-        # Remove common footer/header phrases
-        unwanted_phrases = [
+        # Final check: remove common unwanted intro text
+        unwanted_starts = [
             'This cookie policy',
             'We use cookies',
             'Accept cookies',
+            'Cookie Settings',
             'Privacy Policy',
-            'Terms of Service',
-            'Cookie Settings'
+            'Terms of Service'
         ]
         
-        for phrase in unwanted_phrases:
+        for phrase in unwanted_starts:
             if cleaned.lower().startswith(phrase.lower()):
-                # Find the next paragraph and start from there
-                parts = cleaned.split('\n\n')
+                # Remove first paragraph
+                parts = cleaned.split('\n\n', 1)
                 if len(parts) > 1:
-                    cleaned = '\n\n'.join(parts[1:])
+                    cleaned = parts[1]
+                else:
+                    cleaned = ''
         
         return cleaned
     
@@ -496,30 +518,43 @@ class HelpshiftCrawler:
                 if article_html:
                     article_soup = BeautifulSoup(article_html, 'lxml')
                     
-                    # Debug: Show page title
-                    page_title = article_soup.find('title')
-                    log.info(f"Page title tag: {page_title.get_text() if page_title else 'None'}")
-                    
-                    # Try to extract properly
+                    # Extract title from <title> tag (same as in full crawl)
                     title = None
-                    # Look for h1 first
-                    h1_tags = article_soup.find_all('h1')
-                    log.info(f"Found {len(h1_tags)} h1 tags")
-                    for h1 in h1_tags:
-                        h1_text = h1.get_text(strip=True)
-                        log.info(f"H1 text: '{h1_text}'")
-                        if h1_text and len(h1_text) > 3 and h1_text.lower() not in ['home', 'help', 'faq']:
-                            title = h1_text
-                            break
+                    title_tag = article_soup.find('title')
+                    if title_tag:
+                        title_text = title_tag.get_text(strip=True)
+                        log.info(f"Page title tag: {title_text}")
+                        
+                        if '—' in title_text:
+                            title = title_text.split('—')[0].strip()
+                        elif '–' in title_text:
+                            title = title_text.split('–')[0].strip()
+                        elif '|' in title_text:
+                            title = title_text.split('|')[0].strip()
+                        else:
+                            title = title_text.replace('Mission Chief Help Center', '').replace('Help Center', '').strip()
                     
-                    if not title:
+                    # Skip Helpshift system pages
+                    if title and any(skip in title.lower() for skip in ['cookies:', 'helpshift technical', 'privacy policy']):
+                        log.info(f"Skipping Helpshift system page: {title}")
+                        continue
+                    
+                    if not title or len(title) < 3:
                         title = article_title if article_title else "Unknown Title"
+                    
+                    log.info(f"Extracted title: '{title}'")
                     
                     body = self._extract_body(article_soup)
                     
                     # Debug body length
                     log.info(f"Body length for '{title}': {len(body)} chars")
-                    log.info(f"Body preview: {body[:100]}...")
+                    if len(body) > 0:
+                        log.info(f"Body preview: {body[:100]}...")
+                    
+                    # Skip if no content
+                    if len(body) < 50:
+                        log.warning(f"Skipping article with insufficient content: {title}")
+                        continue
                     
                     results['articles_tested'].append({
                         'title': title,
