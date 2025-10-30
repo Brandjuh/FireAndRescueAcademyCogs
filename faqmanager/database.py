@@ -479,11 +479,30 @@ class FAQDatabase:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             
-            sql = """
-                SELECT * FROM helpshift_articles 
-                WHERE (title LIKE ? OR body_md LIKE ?)
-            """
-            params = [f"%{query}%", f"%{query}%"]
+            # Split query into words for better matching
+            words = query.lower().split()
+            
+            # Build WHERE clause with OR for each word
+            where_parts = []
+            params = []
+            
+            for word in words:
+                if len(word) > 2:  # Skip very short words
+                    where_parts.append("(LOWER(title) LIKE ? OR LOWER(body_md) LIKE ?)")
+                    params.extend([f"%{word}%", f"%{word}%"])
+            
+            if not where_parts:
+                # Fallback to simple query
+                sql = """
+                    SELECT * FROM helpshift_articles 
+                    WHERE (LOWER(title) LIKE ? OR LOWER(body_md) LIKE ?)
+                """
+                params = [f"%{query.lower()}%", f"%{query.lower()}%"]
+            else:
+                sql = f"""
+                    SELECT * FROM helpshift_articles 
+                    WHERE ({' OR '.join(where_parts)})
+                """
             
             if not include_deleted:
                 sql += " AND is_deleted = 0"
@@ -493,6 +512,8 @@ class FAQDatabase:
             
             cursor = await db.execute(sql, params)
             rows = await cursor.fetchall()
+            
+            log.debug(f"Database search for '{query}' returned {len(rows)} results")
             
             return [self._row_to_article(row) for row in rows]
     
