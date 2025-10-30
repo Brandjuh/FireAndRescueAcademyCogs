@@ -53,6 +53,9 @@ class FAQManager(red_commands.Cog):
         self.fuzzy_search = FuzzySearchEngine(self.synonym_manager)
         self.helpshift_scraper = HelpshiftScraper()
         
+        # Set database reference for compatibility wrapper
+        self.helpshift_scraper.set_database(self.database)
+        
         # In-memory FAQ cache
         self._faq_cache: List[FAQItem] = []
         self._cache_loaded = False
@@ -519,9 +522,12 @@ class FAQManager(red_commands.Cog):
         if result.source == Source.CUSTOM:
             color = discord.Color.green()
             source_text = "FARA Custom"
-        else:
+        elif result.source == Source.HELPSHIFT_LOCAL:
             color = discord.Color.blue()
-            source_text = "Mission Chief Help Center"
+            source_text = "Mission Chief Help Center (Local)"
+        else:  # HELPSHIFT_LIVE
+            color = discord.Color.blurple()
+            source_text = "Mission Chief Help Center (Live)"
         
         embed = discord.Embed(
             title=result.title,
@@ -539,10 +545,16 @@ class FAQManager(red_commands.Cog):
         if result.source == Source.CUSTOM and result.faq_id:
             embed.add_field(name="🔢 FAQ ID", value=f"`{result.faq_id}`", inline=True)
         
+        # Add Article ID for local Helpshift items
+        if result.source == Source.HELPSHIFT_LOCAL and result.article_id:
+            embed.add_field(name="🔢 Article ID", value=f"`{result.article_id}`", inline=True)
+        
         # Build footer text
         footer_parts = [f"Source: {source_text}"]
         if result.source == Source.CUSTOM and result.faq_id:
             footer_parts.append(f"ID: {result.faq_id}")
+        elif result.source == Source.HELPSHIFT_LOCAL and result.article_id:
+            footer_parts.append(f"Article ID: {result.article_id}")
         footer_parts.append(f"Score: {result.score:.0f}")
         
         embed.set_footer(text=" • ".join(footer_parts))
