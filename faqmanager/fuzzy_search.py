@@ -233,12 +233,14 @@ class FuzzySearchEngine:
         # Title scoring
         title_score = self._best_fuzzy_score(article.title.lower(), expanded_queries)
         
-        # Snippet/Body scoring
-        snippet = article.snippet or article.get_excerpt(300)
-        content_score = self._best_fuzzy_score(snippet.lower(), expanded_queries)
+        # Body scoring (use body_md instead of snippet)
+        body_excerpt = article.get_excerpt(300)
+        content_score = self._best_fuzzy_score(body_excerpt.lower(), expanded_queries)
         
         # Section scoring
-        section_score = self._best_fuzzy_score(article.section.lower(), expanded_queries)
+        section_score = 0.0
+        if article.section_name:
+            section_score = self._best_fuzzy_score(article.section_name.lower(), expanded_queries)
         
         # Exact match boost
         exact_boost = 0.0
