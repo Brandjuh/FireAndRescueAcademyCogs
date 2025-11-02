@@ -979,7 +979,8 @@ class MemberSync(commands.Cog):
         
         for u in unlinked:
             status = "✅ Found" if u['found'] else "❌ Not found"
-            has_server_nick = u['member'].nick is not None
+            # Check if nickname is different from Discord username (= has server nickname)
+            has_server_nick = u['nickname'] != u['member'].name
             nick_type = "Server Nickname" if has_server_nick else "Discord Username"
             value = f"{nick_type}: `{u['nickname']}`\n"
             if u['found']:
@@ -988,6 +989,9 @@ class MemberSync(commands.Cog):
                 value += "❌ No exact match in database"
                 if not has_server_nick:
                     value += "\n⚠️ Tip: User has no server nickname set!"
+                else:
+                    value += f"\n⚠️ Server nickname doesn't match any MC name"
+                    value += f"\n💡 MC names are case-sensitive!"
             
             embed.add_field(
                 name=f"{status} - {u['member'].display_name}",
