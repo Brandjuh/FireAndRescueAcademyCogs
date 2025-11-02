@@ -2,14 +2,12 @@
 Discord UI Views for MemberManager
 Tab-based interface with context-aware buttons
 
-COMPLETE VERSION v2.0
-- Unified sanctions system
-- Tab-specific buttons
-- Smart sanctions view (detail/list modes)
-- Full CRUD operations
-- Search by ID
-- Automatic pagination
-- Warning expiry support
+VERSION v2.1 - IMPROVEMENTS:
+- Note text limited to 1000 characters
+- Audit shows server nicknames
+- Audit has search and full pagination
+- Events shows alliance logs
+- Search works by name and MC ID
 """
 
 import discord
@@ -44,7 +42,8 @@ class MemberOverviewView(discord.ui.View):
         config,
         member_data: MemberData,
         integrations: Dict[str, Any],
-        invoker_id: int
+        invoker_id: int,
+        guild: discord.Guild
     ):
         super().__init__(timeout=300)
         
@@ -54,6 +53,7 @@ class MemberOverviewView(discord.ui.View):
         self.member_data = member_data
         self.integrations = integrations
         self.invoker_id = invoker_id
+        self.guild = guild
         
         self.current_tab = "overview"
         self.message: Optional[discord.Message] = None
@@ -61,6 +61,15 @@ class MemberOverviewView(discord.ui.View):
         # Pagination
         self.infraction_page = 0
         self.infractions_per_page = 5
+        
+        # 🔧 NEW: Audit pagination and search
+        self.audit_page = 0
+        self.audit_per_page = 10
+        self.audit_search_query: Optional[str] = None
+        
+        # 🔧 NEW: Events pagination
+        self.events_page = 0
+        self.events_per_page = 10
         
         # Initialize with correct buttons
         self._rebuild_buttons()
@@ -85,16 +94,27 @@ class MemberOverviewView(discord.ui.View):
         elif self.current_tab == "infractions":
             self.add_item(AddSanctionButton(self, row=1))
             
-            # Only show edit/remove if there are sanctions
             if self._has_sanctions():
                 self.add_item(EditSanctionButton(self, row=1))
                 self.add_item(RemoveSanctionButton(self, row=1))
             
-            # Row 2: Search or pagination
             if self._has_multiple_sanctions():
                 self.add_item(SearchSanctionButton(self, row=2))
-                self.add_item(PreviousPageButton(self, row=2))
-                self.add_item(NextPageButton(self, row=2))
+                self.add_item(PreviousPageButton(self, "infraction", row=2))
+                self.add_item(NextPageButton(self, "infraction", row=2))
+        
+        # 🔧 NEW: Audit buttons
+        elif self.current_tab == "audit":
+            self.add_item(SearchAuditButton(self, row=1))
+            if self.audit_search_query:
+                self.add_item(ClearAuditSearchButton(self, row=1))
+            self.add_item(PreviousPageButton(self, "audit", row=2))
+            self.add_item(NextPageButton(self, "audit", row=2))
+        
+        # 🔧 NEW: Events pagination
+        elif self.current_tab == "events":
+            self.add_item(PreviousPageButton(self, "events", row=2))
+            self.add_item(NextPageButton(self, "events", row=2))
         
         # Row 3: Always visible utilities
         self.add_item(RefreshButton(self, row=3))
@@ -571,51 +591,127 @@ class MemberOverviewView(discord.ui.View):
         return embed
     
     async def get_events_embed(self) -> discord.Embed:
-        """Build the events embed."""
+        """
+        Build the events embed showing alliance logs.
+        
+        🔧 NEW: Shows alliance logs instead of member_events
+        """
         data = self.member_data
         
         embed = discord.Embed(
-            title=f"📅 Events - {data.get_display_name()}",
+            title=f"📅 Alliance Activity - {data.get_display_name()}",
             color=discord.Color.purple()
         )
         
-        try:
-            events = await self.db.get_events(
-                discord_id=data.discord_id,
-                mc_user_id=data.mc_user_id,
-                limit=10
-            )
-        except Exception as e:
-            log.error(f"Error fetching events: {e}")
-            embed.description = "⚠️ Error loading events"
+        if not data.mc_user_id:
+            embed.description = "*No MC account linked - cannot show alliance activity.*"
             return embed
         
-        if not events:
-            embed.description = "*No events recorded for this member.*"
+        # Get alliance logs for this user
+        alliance_scraper = self.integrations.get("alliance_scraper")
+        if not alliance_scraper:
+            embed.description = "⚠️ AllianceScraper not available"
+            return embed
+        
+        try:
+            import aiosqlite
+            
+            # Query logs where this user is involved (executed or affected)
+            async with aiosqlite.connect(alliance_scraper.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                # Calculate pagination
+                offset = self.events_page * self.events_per_page
+                
+                # Get logs for this user
+                sql = """
+                SELECT id, ts, action_key, action_text, executed_name, executed_mc_id,
+                       affected_name, affected_mc_id, description, contribution_amount
+                FROM logs 
+                WHERE executed_mc_id = ? OR affected_mc_id = ?
+                ORDER BY ts DESC
+                LIMIT ? OFFSET ?
+                """
+                cursor = await db.execute(sql, (data.mc_user_id, data.mc_user_id, self.events_per_page, offset))
+                logs = await cursor.fetchall()
+                
+                # Count total for pagination
+                count_cursor = await db.execute(
+                    "SELECT COUNT(*) FROM logs WHERE executed_mc_id = ? OR affected_mc_id = ?",
+                    (data.mc_user_id, data.mc_user_id)
+                )
+                total_count = (await count_cursor.fetchone())[0]
+        
+        except Exception as e:
+            log.error(f"Error fetching alliance logs: {e}")
+            embed.description = "⚠️ Error loading alliance activity"
+            return embed
+        
+        if not logs:
+            embed.description = "*No alliance activity found for this member.*"
             return embed
         
         lines = []
-        for event in events:
-            event_type = event.get("event_type", "unknown")
-            timestamp = format_timestamp(event.get("timestamp", 0), "R")
-            triggered_by = event.get("triggered_by", "system")
+        for log_entry in logs:
+            ts = log_entry["ts"]
+            action_text = log_entry["action_text"] or log_entry["action_key"]
+            description = log_entry["description"]
             
-            event_display = event_type.replace("_", " ").title()
+            # Format timestamp
+            try:
+                dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                timestamp_formatted = format_timestamp(int(dt.timestamp()), "R")
+            except:
+                timestamp_formatted = ts
             
-            lines.append(f"• **{event_display}** | {triggered_by} | {timestamp}")
+            # Build line
+            emoji = self._get_action_emoji(log_entry["action_key"])
+            lines.append(f"{emoji} **{action_text}** | {timestamp_formatted}")
             
-            if event.get("notes"):
-                lines.append(f"  *{truncate_text(event['notes'], 100)}*")
+            if description:
+                lines.append(f"  *{truncate_text(description, 100)}*")
+            
+            # Show contribution if present
+            if log_entry["contribution_amount"]:
+                lines.append(f"  💰 Contribution: ${log_entry['contribution_amount']:,}")
             
             lines.append("")
         
         embed.description = "\n".join(lines)
-        embed.set_footer(text=f"Total events: {len(events)}")
+        
+        # Pagination footer
+        total_pages = (total_count + self.events_per_page - 1) // self.events_per_page
+        current_page = self.events_page + 1
+        
+        embed.set_footer(
+            text=f"Page {current_page}/{total_pages} • Total activity: {total_count} events"
+        )
         
         return embed
     
+    def _get_action_emoji(self, action_key: str) -> str:
+        """Get emoji for alliance action."""
+        emoji_map = {
+            "member_join": "➕",
+            "member_leave": "➖",
+            "member_kicked": "🚫",
+            "member_banned": "⛔",
+            "role_change": "👔",
+            "building_constructed": "🏗️",
+            "building_destroyed": "💥",
+            "mission_started": "🚨",
+            "contribution": "💰",
+            "course_created": "📚",
+            "course_completed": "✅",
+        }
+        return emoji_map.get(action_key, "•")
+    
     async def get_audit_embed(self) -> discord.Embed:
-        """Build the audit log embed."""
+        """
+        Build the audit log embed with search and pagination.
+        
+        🔧 NEW: Full audit log with search, pagination, and server nicknames
+        """
         data = self.member_data
         
         embed = discord.Embed(
@@ -624,10 +720,11 @@ class MemberOverviewView(discord.ui.View):
         )
         
         try:
+            # Get ALL events for this member
             events = await self.db.get_events(
                 discord_id=data.discord_id,
                 mc_user_id=data.mc_user_id,
-                limit=20
+                limit=10000  # Get all events
             )
         except Exception as e:
             log.error(f"Error fetching audit log: {e}")
@@ -644,20 +741,59 @@ class MemberOverviewView(discord.ui.View):
             "infraction_added", "infraction_revoked",
             "sanction_added", "sanction_edited", "sanction_removed",
             "link_created", "link_approved", "link_denied",
-            "role_changed"
+            "role_changed", "contribution_drop", "role_restored"
         ]
         
         audit_events = [e for e in events if e.get("event_type") in admin_actions]
         
+        # 🔧 NEW: Apply search filter
+        if self.audit_search_query:
+            filtered = []
+            query_lower = self.audit_search_query.lower()
+            
+            for event in audit_events:
+                # Search in event type, triggered_by, and notes
+                searchable = [
+                    event.get("event_type", "").lower(),
+                    event.get("triggered_by", "").lower(),
+                    event.get("notes", "").lower(),
+                    str(event.get("event_data", {})).lower()
+                ]
+                
+                if any(query_lower in field for field in searchable):
+                    filtered.append(event)
+            
+            audit_events = filtered
+        
         if not audit_events:
-            embed.description = "*No administrative actions recorded.*"
+            if self.audit_search_query:
+                embed.description = f"*No audit entries matching '{self.audit_search_query}'*"
+            else:
+                embed.description = "*No administrative actions recorded.*"
             return embed
         
+        # Pagination
+        total_count = len(audit_events)
+        total_pages = (total_count + self.audit_per_page - 1) // self.audit_per_page
+        current_page = self.audit_page + 1
+        
+        start_idx = self.audit_page * self.audit_per_page
+        end_idx = start_idx + self.audit_per_page
+        page_events = audit_events[start_idx:end_idx]
+        
         lines = []
-        for entry in audit_events[:15]:
+        for entry in page_events:
             event_type = entry.get("event_type", "unknown")
             timestamp = format_timestamp(entry.get("timestamp", 0), "R")
             triggered_by = entry.get("triggered_by", "system")
+            actor_id = entry.get("actor_id")
+            
+            # 🔧 NEW: Get server nickname instead of Discord username
+            actor_display = triggered_by
+            if actor_id and self.guild:
+                member = self.guild.get_member(actor_id)
+                if member:
+                    actor_display = member.display_name  # Server nickname
             
             # Action emoji mapping
             action_emoji = {
@@ -672,13 +808,15 @@ class MemberOverviewView(discord.ui.View):
                 "link_created": "🔗",
                 "link_approved": "✅",
                 "link_denied": "❌",
-                "role_changed": "👔"
+                "role_changed": "👔",
+                "contribution_drop": "📉",
+                "role_restored": "🔄"
             }.get(event_type, "•")
             
             action_display = event_type.replace("_", " ").title()
             
             lines.append(f"{action_emoji} **{action_display}**")
-            lines.append(f"  *By {triggered_by} • {timestamp}*")
+            lines.append(f"  *By {actor_display} • {timestamp}*")
             
             event_data = entry.get("event_data", {})
             if isinstance(event_data, dict):
@@ -692,7 +830,13 @@ class MemberOverviewView(discord.ui.View):
             lines.append("")
         
         embed.description = "\n".join(lines)
-        embed.set_footer(text=f"Showing last {len(audit_events)} administrative actions")
+        
+        # Footer with pagination and search info
+        footer_text = f"Page {current_page}/{total_pages} • Total: {total_count} entries"
+        if self.audit_search_query:
+            footer_text += f" • Filtered by: '{self.audit_search_query}'"
+        
+        embed.set_footer(text=footer_text)
         
         return embed
 
@@ -716,6 +860,8 @@ class TabButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         self.parent_view.current_tab = self.tab_name
         self.parent_view.infraction_page = 0
+        self.parent_view.audit_page = 0  # Reset audit page
+        self.parent_view.events_page = 0  # Reset events page
         await self.parent_view._update_view(interaction)
 
 
@@ -871,41 +1017,103 @@ class SearchSanctionButton(discord.ui.Button):
         await interaction.response.send_modal(modal)
 
 
+# 🔧 NEW: Audit buttons
+class SearchAuditButton(discord.ui.Button):
+    """Search audit log button."""
+    
+    def __init__(self, parent_view: MemberOverviewView, row: int):
+        super().__init__(
+            label="Search Audit",
+            style=discord.ButtonStyle.primary,
+            emoji="🔍",
+            custom_id="mm:search_audit",
+            row=row
+        )
+        self.parent_view = parent_view
+    
+    async def callback(self, interaction: discord.Interaction):
+        modal = SearchAuditModal(self.parent_view)
+        await interaction.response.send_modal(modal)
+
+
+class ClearAuditSearchButton(discord.ui.Button):
+    """Clear audit search button."""
+    
+    def __init__(self, parent_view: MemberOverviewView, row: int):
+        super().__init__(
+            label="Clear Search",
+            style=discord.ButtonStyle.secondary,
+            emoji="🗑️",
+            custom_id="mm:clear_audit_search",
+            row=row
+        )
+        self.parent_view = parent_view
+    
+    async def callback(self, interaction: discord.Interaction):
+        self.parent_view.audit_search_query = None
+        self.parent_view.audit_page = 0
+        await self.parent_view._update_view(interaction)
+
+
 # ==================== PAGINATION BUTTONS ====================
 
 class PreviousPageButton(discord.ui.Button):
     """Previous page button."""
     
-    def __init__(self, parent_view: MemberOverviewView, row: int):
+    def __init__(self, parent_view: MemberOverviewView, page_type: str, row: int):
+        # Determine if disabled based on page type
+        if page_type == "infraction":
+            disabled = parent_view.infraction_page == 0
+        elif page_type == "audit":
+            disabled = parent_view.audit_page == 0
+        else:  # events
+            disabled = parent_view.events_page == 0
+        
         super().__init__(
             label="◀ Previous",
             style=discord.ButtonStyle.secondary,
-            custom_id="mm:prev_page",
+            custom_id=f"mm:prev_page:{page_type}",
             row=row,
-            disabled=(parent_view.infraction_page == 0)
+            disabled=disabled
         )
         self.parent_view = parent_view
+        self.page_type = page_type
     
     async def callback(self, interaction: discord.Interaction):
-        if self.parent_view.infraction_page > 0:
-            self.parent_view.infraction_page -= 1
+        if self.page_type == "infraction":
+            if self.parent_view.infraction_page > 0:
+                self.parent_view.infraction_page -= 1
+        elif self.page_type == "audit":
+            if self.parent_view.audit_page > 0:
+                self.parent_view.audit_page -= 1
+        else:  # events
+            if self.parent_view.events_page > 0:
+                self.parent_view.events_page -= 1
+        
         await self.parent_view._update_view(interaction)
 
 
 class NextPageButton(discord.ui.Button):
     """Next page button."""
     
-    def __init__(self, parent_view: MemberOverviewView, row: int):
+    def __init__(self, parent_view: MemberOverviewView, page_type: str, row: int):
         super().__init__(
             label="Next ▶",
             style=discord.ButtonStyle.secondary,
-            custom_id="mm:next_page",
+            custom_id=f"mm:next_page:{page_type}",
             row=row
         )
         self.parent_view = parent_view
+        self.page_type = page_type
     
     async def callback(self, interaction: discord.Interaction):
-        self.parent_view.infraction_page += 1
+        if self.page_type == "infraction":
+            self.parent_view.infraction_page += 1
+        elif self.page_type == "audit":
+            self.parent_view.audit_page += 1
+        else:  # events
+            self.parent_view.events_page += 1
+        
         await self.parent_view._update_view(interaction)
 
 
@@ -914,12 +1122,13 @@ class NextPageButton(discord.ui.Button):
 class AddNoteModal(discord.ui.Modal, title="Add Note"):
     """Modal for adding a new note."""
     
+    # 🔧 CHANGED: max_length to 1000 instead of 2000
     note_text = discord.ui.TextInput(
         label="Note Text",
         style=discord.TextStyle.paragraph,
-        placeholder="Enter your note here...",
+        placeholder="Enter your note here (max 1000 characters)...",
         required=True,
-        max_length=2000
+        max_length=1000  # 🔧 LIMITEER TOT 1000 TEKENS
     )
     
     infraction_ref = discord.ui.TextInput(
@@ -1006,12 +1215,13 @@ class EditNoteModal(discord.ui.Modal, title="Edit Note"):
         max_length=50
     )
     
+    # 🔧 CHANGED: max_length to 1000
     new_text = discord.ui.TextInput(
         label="New Note Text",
         style=discord.TextStyle.paragraph,
-        placeholder="Enter the updated note text...",
+        placeholder="Enter the updated note text (max 1000 chars)...",
         required=True,
-        max_length=2000
+        max_length=1000  # 🔧 LIMITEER TOT 1000 TEKENS
     )
     
     def __init__(self, parent_view: MemberOverviewView):
@@ -1543,3 +1753,28 @@ class SearchSanctionModal(discord.ui.Modal, title="Search Sanction by ID"):
                 f"❌ Error searching sanction: {str(e)}",
                 ephemeral=True
             )
+
+
+# 🔧 NEW: Audit search modal
+class SearchAuditModal(discord.ui.Modal, title="Search Audit Log"):
+    """Modal to search audit log."""
+    
+    query = discord.ui.TextInput(
+        label="Search Query",
+        style=discord.TextStyle.short,
+        placeholder="Enter search term (event type, admin name, etc.)",
+        required=True,
+        max_length=100
+    )
+    
+    def __init__(self, parent_view: MemberOverviewView):
+        super().__init__()
+        self.parent_view = parent_view
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        """Handle audit search."""
+        self.parent_view.audit_search_query = self.query.value
+        self.parent_view.audit_page = 0
+        
+        await interaction.response.defer()
+        await self.parent_view._update_view(interaction)
