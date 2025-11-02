@@ -28,12 +28,10 @@ from .views import MemberOverviewView
 from .utils import fuzzy_search_member, format_contribution_trend
 from .automation import ContributionMonitor
 from .config_commands import ConfigCommands
-from .utils import fuzzy_search_member, format_contribution_trend
-from .automation import ContributionMonitor
 
 log = logging.getLogger("red.FARA.MemberManager")
 
-__version__ = "1.0.0"
+__version__ = "2.1.2"
 
 DEFAULTS = {
     "contribution_threshold": 5.0,
@@ -79,6 +77,7 @@ class MemberManager(ConfigCommands, commands.Cog):
         # Integration references
         self.membersync: Optional[commands.Cog] = None
         self.alliance_scraper: Optional[commands.Cog] = None
+        self.members_scraper: Optional[commands.Cog] = None
         self.sanction_manager: Optional[commands.Cog] = None
         
         # Automation
@@ -148,6 +147,7 @@ class MemberManager(ConfigCommands, commands.Cog):
         """Detect and connect to other cogs."""
         self.membersync = self.bot.get_cog("MemberSync")
         self.alliance_scraper = self.bot.get_cog("AllianceScraper")
+        self.members_scraper = self.bot.get_cog("MembersScraper")
         self.sanction_manager = self.bot.get_cog("SanctionManager")
         
         integrations = []
@@ -155,6 +155,8 @@ class MemberManager(ConfigCommands, commands.Cog):
             integrations.append("MemberSync")
         if self.alliance_scraper:
             integrations.append("AllianceScraper")
+        if self.members_scraper:
+            integrations.append("MembersScraper")
         if self.sanction_manager:
             integrations.append("SanctionManager")
         
