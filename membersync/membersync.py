@@ -850,7 +850,8 @@ class MemberSync(commands.Cog):
             await ctx.send("You are already verified.")
             return
 
-        name = ctx.author.nick or ctx.author.name
+        # FIXED: Use display_name to include global display name
+        name = ctx.author.display_name
         await ctx.send("Looking you up in the roster... this may take a moment.")
 
         cand = await self._find_member_in_db(name, mc_id)
@@ -916,7 +917,8 @@ class MemberSync(commands.Cog):
             if await self.get_link_for_discord(m.id):
                 already_linked += 1
                 continue
-            hit = await self._find_by_exact_name(m.nick or m.name)
+            # FIXED: Use display_name which includes global display name
+            hit = await self._find_by_exact_name(m.display_name)
             if hit:
                 matchable += 1
         
@@ -941,8 +943,8 @@ class MemberSync(commands.Cog):
     @retro_group.command(name="test")
     async def retro_test(self, ctx: commands.Context, member: discord.Member):
         """Test nickname matching for a specific member. Shows exact nickname and if it matches database."""
-        # Get exact nickname
-        nickname = member.nick or member.name
+        # FIXED: Use display_name
+        nickname = member.display_name
         
         # Show in detail
         embed = discord.Embed(
@@ -953,6 +955,7 @@ class MemberSync(commands.Cog):
         embed.add_field(name="Discord User", value=member.mention, inline=False)
         embed.add_field(name="Discord Username", value=f"`{member.name}`", inline=True)
         embed.add_field(name="Server Nickname", value=f"`{member.nick}`" if member.nick else "❌ Not set", inline=True)
+        embed.add_field(name="Global Display Name", value=f"`{member.global_name}`" if member.global_name else "❌ Not set", inline=True)
         embed.add_field(name="Used for Matching", value=f"`{nickname}`", inline=False)
         
         # Show character codes
@@ -1009,7 +1012,8 @@ class MemberSync(commands.Cog):
             if await self.get_link_for_discord(m.id):
                 continue
             
-            nickname = m.nick or m.name
+            # FIXED: Use display_name
+            nickname = m.display_name
             hit = await self._find_by_exact_name(nickname)
             
             unlinked.append({
@@ -1072,7 +1076,8 @@ class MemberSync(commands.Cog):
         for m in role.members:
             if await self.get_link_for_discord(m.id):
                 continue
-            hit = await self._find_by_exact_name(m.nick or m.name)
+            # FIXED: Use display_name
+            hit = await self._find_by_exact_name(m.display_name)
             if not hit:
                 continue
             name, mcid = hit
@@ -1103,7 +1108,8 @@ class MemberSync(commands.Cog):
                 already_linked += 1
                 continue
             
-            name = member.nick or member.name
+            # FIXED: Use display_name
+            name = member.display_name
             hit = await self._find_by_exact_name(name)
             if hit:
                 matchable += 1
@@ -1151,7 +1157,8 @@ class MemberSync(commands.Cog):
                 skipped_already_linked += 1
                 continue
             
-            name = member.nick or member.name
+            # FIXED: Use display_name
+            name = member.display_name
             hit = await self._find_by_exact_name(name)
             
             if not hit:
@@ -1200,7 +1207,8 @@ class MemberSync(commands.Cog):
             if await self.get_link_for_discord(member.id):
                 continue
             
-            name = member.nick or member.name
+            # FIXED: Use display_name
+            name = member.display_name
             hit = await self._find_by_exact_name(name)
             
             if hit:
