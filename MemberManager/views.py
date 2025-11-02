@@ -594,7 +594,7 @@ class MemberOverviewView(discord.ui.View):
         """
         Build the events embed showing alliance logs.
         
-        🔧 NEW: Shows alliance logs instead of member_events
+        🔧 UPDATED: Searches by MC username AND MC ID
         """
         data = self.member_data
         
@@ -603,7 +603,8 @@ class MemberOverviewView(discord.ui.View):
             color=discord.Color.purple()
         )
         
-        if not data.mc_user_id:
+        # Need either MC username or MC ID
+        if not data.mc_username and not data.mc_user_id:
             embed.description = "*No MC account linked - cannot show alliance activity.*"
             return embed
         
@@ -623,32 +624,71 @@ class MemberOverviewView(discord.ui.View):
                 # Calculate pagination
                 offset = self.events_page * self.events_per_page
                 
+                # Build query - search by BOTH name and ID
+                # Clean username (remove "Former member" prefix if present)
+                mc_username = data.mc_username
+                if mc_username and "Former member" in mc_username:
+                    # Extract ID from "Former member (12345)"
+                    import re
+                    match = re.search(r'\((\d+)\)', mc_username)
+                    if match:
+                        mc_username = None  # Only search by ID
+                    else:
+                        mc_username = None
+                
+                # Build WHERE clause
+                where_parts = []
+                params = []
+                
+                if data.mc_user_id:
+                    where_parts.append("(executed_mc_id = ? OR affected_mc_id = ?)")
+                    params.extend([data.mc_user_id, data.mc_user_id])
+                
+                if mc_username:
+                    where_parts.append("(executed_name = ? OR affected_name = ?)")
+                    params.extend([mc_username, mc_username])
+                
+                if not where_parts:
+                    embed.description = "*Cannot determine member identity for log search.*"
+                    return embed
+                
+                where_clause = " OR ".join(where_parts)
+                
                 # Get logs for this user
-                sql = """
+                sql = f"""
                 SELECT id, ts, action_key, action_text, executed_name, executed_mc_id,
                        affected_name, affected_mc_id, description, contribution_amount
                 FROM logs 
-                WHERE executed_mc_id = ? OR affected_mc_id = ?
+                WHERE {where_clause}
                 ORDER BY ts DESC
                 LIMIT ? OFFSET ?
                 """
-                cursor = await db.execute(sql, (data.mc_user_id, data.mc_user_id, self.events_per_page, offset))
+                params.extend([self.events_per_page, offset])
+                
+                cursor = await db.execute(sql, params)
                 logs = await cursor.fetchall()
                 
                 # Count total for pagination
-                count_cursor = await db.execute(
-                    "SELECT COUNT(*) FROM logs WHERE executed_mc_id = ? OR affected_mc_id = ?",
-                    (data.mc_user_id, data.mc_user_id)
-                )
+                count_sql = f"SELECT COUNT(*) FROM logs WHERE {where_clause}"
+                count_params = params[:-2]  # Remove LIMIT and OFFSET params
+                count_cursor = await db.execute(count_sql, count_params)
                 total_count = (await count_cursor.fetchone())[0]
         
         except Exception as e:
-            log.error(f"Error fetching alliance logs: {e}")
-            embed.description = "⚠️ Error loading alliance activity"
+            log.error(f"Error fetching alliance logs: {e}", exc_info=True)
+            embed.description = f"⚠️ Error loading alliance activity: {str(e)}"
             return embed
         
         if not logs:
-            embed.description = "*No alliance activity found for this member.*"
+            embed.description = (
+                f"*No alliance activity found for {data.mc_username or data.mc_user_id}.*\n\n"
+                f"💡 **Tip:** This searches for logs where this member was the executor or was affected.\n"
+                f"Searching for: "
+            )
+            if mc_username:
+                embed.description += f"Name: `{mc_username}` "
+            if data.mc_user_id:
+                embed.description += f"ID: `{data.mc_user_id}`"
             return embed
         
         lines = []
@@ -656,6 +696,8 @@ class MemberOverviewView(discord.ui.View):
             ts = log_entry["ts"]
             action_text = log_entry["action_text"] or log_entry["action_key"]
             description = log_entry["description"]
+            executed_name = log_entry["executed_name"]
+            affected_name = log_entry["affected_name"]
             
             # Format timestamp
             try:
@@ -664,9 +706,17 @@ class MemberOverviewView(discord.ui.View):
             except:
                 timestamp_formatted = ts
             
-            # Build line
+            # Build line with actor info
             emoji = self._get_action_emoji(log_entry["action_key"])
-            lines.append(f"{emoji} **{action_text}** | {timestamp_formatted}")
+            
+            # Show who did what to whom (if different from member)
+            actor_info = ""
+            if executed_name and executed_name != mc_username:
+                actor_info = f" by {executed_name}"
+            if affected_name and affected_name != mc_username and affected_name != executed_name:
+                actor_info += f" → {affected_name}"
+            
+            lines.append(f"{emoji} **{action_text}**{actor_info} | {timestamp_formatted}")
             
             if description:
                 lines.append(f"  *{truncate_text(description, 100)}*")
