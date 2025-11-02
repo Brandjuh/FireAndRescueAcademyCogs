@@ -25,6 +25,7 @@ DEFAULTS = {
     "reviewer_role_ids": [544117282167586836],
     "cooldown_seconds": 30,
     "queue": {},
+    "prune_min_members": 800,  # NEW: Safety threshold (50% van ~1676)
 }
 
 def utcnow_iso() -> str:
@@ -42,7 +43,7 @@ def _mc_profile_url(mc_id: str) -> str:
 class MemberSync(commands.Cog):
     """Synchronises Missionchief members with Discord and handles verification workflow."""
 
-    __version__ = "1.1.0"
+    __version__ = "1.2.0"  # Version bump for critical fixes
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -91,7 +92,6 @@ class MemberSync(commands.Cog):
                 attempts     INTEGER NOT NULL DEFAULT 0
             )""")
             
-            # NEW: member_left_alliance table
             await db.execute("""
             CREATE TABLE IF NOT EXISTS member_left_alliance (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,7 +112,7 @@ class MemberSync(commands.Cog):
             await db.execute("CREATE INDEX IF NOT EXISTS idx_exit_detected ON member_left_alliance(exit_detected_at)")
             
             await db.commit()
-            log.info("✅ MemberSync database initialized with member_left_alliance table")
+            log.info("✅ MemberSync database initialized")
 
     def _guess_alliance_db(self) -> Optional[pathlib.Path]:
         """Try to find the members database - prioritize members_v2.db from scraper_databases."""
@@ -157,14 +157,18 @@ class MemberSync(commands.Cog):
     
     async def _latest_snapshot(self) -> Optional[str]:
         """Get the latest snapshot timestamp."""
-        # Try members_history first (old schema)
-        rows = await self._query_alliance("SELECT MAX(snapshot_utc) AS s FROM members_history")
-        if rows and rows[0]["s"]:
-            return rows[0]["s"]
-        
-        # Try members_current VIEW (works for both old and new schema!)
-        rows = await self._query_alliance("SELECT MAX(scraped_at) AS s FROM members_current")
+        rows = await self._query_alliance("SELECT MAX(timestamp) AS s FROM members")
         return rows[0]["s"] if rows and rows[0]["s"] else None
+
+    async def _get_current_member_count(self) -> int:
+        """Get count of members in latest scrape - for safety checks."""
+        try:
+            rows = await self._query_alliance("SELECT COUNT(*) as cnt FROM members_current")
+            if rows:
+                return rows[0]["cnt"]
+        except Exception as e:
+            log.error(f"Failed to get member count: {e}")
+        return 0
 
     async def get_link_for_mc(self, mc_user_id: str) -> Optional[Dict[str, Any]]:
         """Public API: returns approved link for given MC ID or None."""
@@ -195,7 +199,6 @@ class MemberSync(commands.Cog):
         Find member in database using members_current VIEW.
         
         The VIEW works for BOTH old (alliance.db) and new (members_v2.db) databases!
-        No need for schema detection - just use the VIEW.
         """
         name = _lower(candidate_name) if candidate_name else None
         mcid = str(candidate_mc_id) if candidate_mc_id else None
@@ -251,12 +254,6 @@ class MemberSync(commands.Cog):
                 return r
 
         return None
-
-    def _is_reviewer(self, member: discord.Member) -> bool:
-        if member.guild_permissions.administrator:
-            return True
-        ids = set((self.bot.loop.create_task(self.config.reviewer_role_ids())) or [])
-        return False
 
     async def _get_reviewer_roles(self, guild: discord.Guild) -> List[discord.Role]:
         ids = await self.config.reviewer_role_ids()
@@ -459,12 +456,39 @@ class MemberSync(commands.Cog):
         # Check if VIEW exists in database
         db_path = cfg['alliance_db_path']
         view_status = "❓ Unknown"
+        view_count = 0
+        latest_timestamp = "Unknown"
+        
         if db_path and pathlib.Path(db_path).exists():
             try:
-                rows = await self._query_alliance("SELECT COUNT(*) as cnt FROM members_current LIMIT 1")
+                # Get VIEW count
+                rows = await self._query_alliance("SELECT COUNT(*) as cnt FROM members_current")
                 if rows:
-                    count = rows[0]["cnt"]
-                    view_status = f"✅ Active ({count} members)"
+                    view_count = rows[0]["cnt"]
+                
+                # Get latest timestamp from VIEW
+                rows = await self._query_alliance("SELECT MAX(scraped_at) as latest FROM members_current LIMIT 1")
+                if rows and rows[0]["latest"]:
+                    latest_timestamp = rows[0]["latest"][:19]
+                
+                # CRITICAL CHECK: Verify VIEW is using ONLY latest scrape
+                rows = await self._query_alliance("SELECT MAX(timestamp) as latest FROM members")
+                if rows and rows[0]["latest"]:
+                    db_latest = rows[0]["latest"][:19]
+                    
+                    # Count how many scrapes have this timestamp
+                    rows = await self._query_alliance("SELECT COUNT(*) as cnt FROM members WHERE timestamp=?", (db_latest,))
+                    actual_latest_count = rows[0]["cnt"] if rows else 0
+                    
+                    if db_latest == latest_timestamp and view_count == actual_latest_count:
+                        view_status = f"✅ Active ({view_count} members)"
+                    elif view_count > actual_latest_count * 1.5:
+                        view_status = f"⚠️ DUPLICATES - Shows {view_count} but should be ~{actual_latest_count}"
+                    else:
+                        view_status = f"⚠️ STALE - DB has newer data"
+                else:
+                    view_status = f"✅ Active ({view_count} members)"
+                    
             except Exception as e:
                 view_status = f"❌ Error: {e}"
         
@@ -479,6 +503,9 @@ class MemberSync(commands.Cog):
         
         exit_count = await asyncio.get_running_loop().run_in_executor(None, _check_exits)
         
+        # Get min threshold
+        min_threshold = cfg.get('prune_min_members', 800)
+        
         lines = [
             f"**MemberSync Status**",
             f"Version: `{self.__version__}`",
@@ -486,7 +513,11 @@ class MemberSync(commands.Cog):
             f"**Database:**",
             f"Path: `{cfg['alliance_db_path']}`",
             f"members_current VIEW: {view_status}",
+            f"Latest Scrape: `{latest_timestamp}`",
             f"Exit Records: {exit_count}",
+            f"",
+            f"**Safety:**",
+            f"Prune Min Threshold: {min_threshold} members",
             f"",
             f"**Channels:**",
             f"Review: <#{cfg['review_channel_id']}>",
@@ -521,10 +552,9 @@ class MemberSync(commands.Cog):
         
         await ctx.send("✅ Database file exists\n")
         
-        # 2. Check members_current VIEW
+        # 2. Check VIEW
         await ctx.send(f"**Checking members_current VIEW:**")
         try:
-            # Get VIEW schema
             schema_rows = await self._query_alliance("PRAGMA table_info(members_current)")
             if schema_rows:
                 columns = [dict(r) for r in schema_rows]
@@ -537,63 +567,61 @@ class MemberSync(commands.Cog):
             await ctx.send(f"❌ Error reading VIEW: {e}\n")
             return
         
-        # 3. Search for member in VIEW
-        await ctx.send(f"**Searching for MC-ID `{mc_id}` in members_current VIEW:**")
+        # 3. Check VIEW data quality
+        await ctx.send("**Checking VIEW data quality:**")
+        try:
+            # Get latest from VIEW
+            rows = await self._query_alliance("SELECT MAX(scraped_at) as latest FROM members_current")
+            view_latest = rows[0]["latest"] if rows and rows[0]["latest"] else "None"
+            
+            # Get count from VIEW
+            rows = await self._query_alliance("SELECT COUNT(*) as cnt FROM members_current")
+            view_count = rows[0]["cnt"] if rows else 0
+            
+            # Get latest from raw table
+            rows = await self._query_alliance("SELECT MAX(timestamp) as latest FROM members")
+            db_latest = rows[0]["latest"] if rows and rows[0]["latest"] else "None"
+            
+            # Get count from latest scrape in raw table
+            rows = await self._query_alliance("SELECT COUNT(*) as cnt FROM members WHERE timestamp=?", (db_latest,))
+            actual_count = rows[0]["cnt"] if rows else 0
+            
+            if view_latest == db_latest and view_count == actual_count:
+                await ctx.send(f"✅ VIEW is CORRECT\n- Timestamp: `{view_latest}`\n- Count: {view_count} members\n")
+            else:
+                await ctx.send(f"⚠️ **VIEW MISMATCH!**\n- VIEW timestamp: `{view_latest}` ({view_count} members)\n- DB latest: `{db_latest}` ({actual_count} members)\n")
+                if view_count > actual_count * 1.5:
+                    await ctx.send(f"🚨 **CRITICAL:** VIEW has {view_count / actual_count:.1f}x too many records!\nThis will cause mass role removals!\n")
+        except Exception as e:
+            await ctx.send(f"❌ Error checking quality: {e}\n")
         
-        # Try user_id
+        # 4. Search for member
+        await ctx.send(f"**Searching for MC-ID `{mc_id}`:**")
+        
         rows = await self._query_alliance("SELECT * FROM members_current WHERE user_id=?", (mc_id,))
         if rows:
             member_data = dict(rows[0])
-            await ctx.send(f"✅ **Found via user_id column!**\n```json\n{json.dumps(member_data, indent=2, default=str)}\n```\n")
+            await ctx.send(f"✅ **Found!**\n```json\n{json.dumps(member_data, indent=2, default=str)[:1800]}\n```\n")
         else:
-            await ctx.send(f"⚠️ Not found via user_id column\n")
+            await ctx.send(f"❌ Not found in VIEW\n")
         
-        # Try mc_user_id
-        rows = await self._query_alliance("SELECT * FROM members_current WHERE mc_user_id=?", (mc_id,))
-        if rows:
-            member_data = dict(rows[0])
-            await ctx.send(f"✅ **Found via mc_user_id column!**\n```json\n{json.dumps(member_data, indent=2, default=str)}\n```\n")
-        else:
-            await ctx.send(f"⚠️ Not found via mc_user_id column\n")
-        
-        # Try profile_href
-        rows = await self._query_alliance("SELECT * FROM members_current WHERE profile_href LIKE ?", (f"%/users/{mc_id}%",))
-        if rows:
-            member_data = dict(rows[0])
-            await ctx.send(f"✅ **Found via profile_href!**\n```json\n{json.dumps(member_data, indent=2, default=str)}\n```\n")
-        else:
-            await ctx.send(f"⚠️ Not found via profile_href\n")
-        
-        # 4. Show sample members
-        await ctx.send("**Sample members in VIEW (first 3):**")
-        all_members = await self._query_alliance("SELECT * FROM members_current LIMIT 3")
-        
-        if all_members:
-            for i, row in enumerate(all_members, 1):
-                sample = dict(row)
-                await ctx.send(f"```json\nMember {i}:\n{json.dumps(sample, indent=2, default=str)}\n```")
-        else:
-            await ctx.send("❌ No members found in VIEW!\n")
-        
-        # 5. Check MemberSync links
-        await ctx.send(f"\n**Checking MemberSync links for MC-ID `{mc_id}`:**")
+        # 5. Check link
+        await ctx.send(f"**Checking MemberSync link:**")
         link = await self.get_link_for_mc(mc_id)
         
         if link:
             await ctx.send(f"✅ **Link exists:**\n```json\n{json.dumps(link, indent=2, default=str)}\n```")
         else:
-            await ctx.send(f"⚠️ No link found in MemberSync database\n")
+            await ctx.send(f"⚠️ No link found\n")
         
-        # 6. Simulate prune check - FIXED VERSION
-        await ctx.send(f"\n**Simulating prune logic for MC-ID `{mc_id}`:**")
+        # 6. Simulate prune
+        await ctx.send(f"**Simulating prune for MC-ID `{mc_id}`:**")
         
         try:
-            # Get all current member IDs
             current_ids: set[str] = set()
             rows = await self._query_alliance("SELECT user_id, mc_user_id, profile_href FROM members_current")
             
             for r in rows:
-                # FIXED: Convert sqlite3.Row to dict first
                 rd = dict(r)
                 mc = rd.get("user_id") or rd.get("mc_user_id")
                 if not mc:
@@ -605,35 +633,19 @@ class MemberSync(commands.Cog):
                     current_ids.add(str(mc))
             
             if mc_id in current_ids:
-                await ctx.send(f"✅ MC-ID `{mc_id}` IS in prune whitelist (would NOT be removed)")
+                await ctx.send(f"✅ MC-ID `{mc_id}` is SAFE (in whitelist)")
             else:
-                await ctx.send(f"❌ MC-ID `{mc_id}` is NOT in prune whitelist (WOULD BE REMOVED!)")
+                await ctx.send(f"❌ MC-ID `{mc_id}` would be REMOVED!")
             
-            await ctx.send(f"\n**Total IDs in prune whitelist:** {len(current_ids)}")
+            await ctx.send(f"**Whitelist size:** {len(current_ids)} members")
+            
+            # Safety check
+            min_threshold = await self.config.prune_min_members()
+            if len(current_ids) < min_threshold:
+                await ctx.send(f"⚠️ **SAFETY TRIGGERED:** Only {len(current_ids)} members (min: {min_threshold})\nPrune would be ABORTED!")
+            
         except Exception as e:
-            await ctx.send(f"❌ **Prune simulation failed:** {e}")
-            log.exception("Prune simulation error")
-        
-        # 7. Check exit records
-        await ctx.send(f"\n**Checking exit records for MC-ID `{mc_id}`:**")
-        
-        def _check_exits():
-            con = sqlite3.connect(self.links_db)
-            con.row_factory = sqlite3.Row
-            try:
-                cur = con.execute("SELECT * FROM member_left_alliance WHERE mc_user_id=? ORDER BY exit_detected_at DESC", (mc_id,))
-                return [dict(r) for r in cur.fetchall()]
-            finally:
-                con.close()
-        
-        exit_records = await asyncio.get_running_loop().run_in_executor(None, _check_exits)
-        
-        if exit_records:
-            await ctx.send(f"✅ **Found {len(exit_records)} exit record(s):**")
-            for record in exit_records[:3]:  # Show max 3
-                await ctx.send(f"```json\n{json.dumps(record, indent=2, default=str)}\n```")
-        else:
-            await ctx.send(f"⚠️ No exit records found")
+            await ctx.send(f"❌ Simulation failed: {e}")
 
     @membersync_group.command(name="prune")
     async def manual_prune(self, ctx: commands.Context, dry_run: bool = True):
@@ -667,13 +679,21 @@ class MemberSync(commands.Cog):
         embed.add_field(name="Already Gone", value=str(result['already_gone']), inline=True)
         embed.add_field(name="Errors", value=str(result['errors']), inline=True)
         
+        if result.get('safety_triggered'):
+            embed.add_field(
+                name="⚠️ SAFETY ABORT", 
+                value=f"Only {result.get('view_member_count', 0)} members in VIEW (min: {result.get('min_threshold', 800)})\n**Prune aborted to prevent mass removal!**", 
+                inline=False
+            )
+            embed.color = discord.Color.red()
+        
         if result['details']:
-            details_text = "\n".join(result['details'][:10])  # Max 10 lines
+            details_text = "\n".join(result['details'][:10])
             if len(result['details']) > 10:
                 details_text += f"\n... and {len(result['details']) - 10} more"
             embed.add_field(name="Details", value=details_text, inline=False)
         
-        if dry_run and result['left_alliance'] > 0:
+        if dry_run and result['left_alliance'] > 0 and not result.get('safety_triggered'):
             embed.set_footer(text=f"Run '[p]membersync prune False' to actually remove {result['left_alliance']} roles")
         
         await ctx.send(embed=embed)
@@ -781,6 +801,24 @@ class MemberSync(commands.Cog):
         """Set the path to the alliance database file (alliance.db or members_v2.db)."""
         await self.config.alliance_db_path.set(path)
         await ctx.send(f"Alliance DB path set to `{path}`")
+
+    @config_group.command(name="setminthreshold")
+    async def setminthreshold(self, ctx: commands.Context, count: int):
+        """
+        Set minimum member count threshold for prune safety checks.
+        
+        If the VIEW returns fewer members than this, prune will abort to prevent mass role removal.
+        Recommended: Set to ~50% of your expected member count (e.g., 838 for 1676 members).
+        
+        Default: 800
+        """
+        if count < 1:
+            await ctx.send("❌ Threshold must be at least 1")
+            return
+        
+        await self.config.prune_min_members.set(count)
+        await ctx.send(f"✅ Prune minimum threshold set to **{count} members**\n"
+                      f"Prune will abort if VIEW returns fewer than {count} members.")
 
     @commands.hybrid_command(name="verify")
     @commands.cooldown(1, 30, commands.BucketType.user)
@@ -901,9 +939,6 @@ class MemberSync(commands.Cog):
     async def bulk_scan(self, ctx: commands.Context):
         """
         Scan ALL server members to see how many can be auto-verified by nickname match.
-        
-        This scans everyone on the server, not just those with the Verified role.
-        Use this after a prune or when setting up MemberSync for the first time.
         """
         await ctx.send("🔍 Scanning all server members... this may take a moment.")
         
@@ -914,12 +949,10 @@ class MemberSync(commands.Cog):
             if member.bot:
                 continue
             
-            # Check if already linked
             if await self.get_link_for_discord(member.id):
                 already_linked += 1
                 continue
             
-            # Check if nickname matches database
             name = member.nick or member.name
             hit = await self._find_by_exact_name(name)
             if hit:
@@ -944,9 +977,6 @@ class MemberSync(commands.Cog):
         """
         Auto-verify ALL server members with matching nicknames.
         
-        This will grant the Verified role to everyone whose nickname exactly matches
-        a name in the alliance database.
-        
         Usage: [p]membersync bulk apply CONFIRM
         """
         if confirm != "CONFIRM":
@@ -967,12 +997,10 @@ class MemberSync(commands.Cog):
             if member.bot:
                 continue
             
-            # Check if already linked
             if await self.get_link_for_discord(member.id):
                 skipped_already_linked += 1
                 continue
             
-            # Check if nickname matches database
             name = member.nick or member.name
             hit = await self._find_by_exact_name(name)
             
@@ -986,14 +1014,12 @@ class MemberSync(commands.Cog):
                 await self._approve_link(ctx.guild, member, mcid, approver=ctx.author if isinstance(ctx.author, discord.Member) else None)
                 verified += 1
                 
-                # Progress update every 10 members
                 if verified % 10 == 0:
                     await ctx.send(f"⏳ Progress: {verified} members verified...")
             except Exception as e:
                 log.error(f"Failed to verify {member.name}: {e}")
                 errors += 1
         
-        # Final results
         embed = discord.Embed(
             title="✅ Bulk Verification Complete",
             color=discord.Color.green()
@@ -1012,8 +1038,6 @@ class MemberSync(commands.Cog):
     async def bulk_list(self, ctx: commands.Context):
         """
         Show a list of server members who can be auto-verified.
-        
-        Lists up to 20 members whose nicknames match the database.
         """
         await ctx.send("🔍 Finding matchable members...")
         
@@ -1023,11 +1047,9 @@ class MemberSync(commands.Cog):
             if member.bot:
                 continue
             
-            # Check if already linked
             if await self.get_link_for_discord(member.id):
                 continue
             
-            # Check if nickname matches database
             name = member.nick or member.name
             hit = await self._find_by_exact_name(name)
             
@@ -1035,7 +1057,6 @@ class MemberSync(commands.Cog):
                 mc_name, mcid = hit
                 matches.append((member, mc_name, mcid))
                 
-                # Limit to 20 to avoid message too long
                 if len(matches) >= 20:
                     break
         
@@ -1063,9 +1084,6 @@ class MemberSync(commands.Cog):
     async def bulk_restore_roles(self, ctx: commands.Context):
         """
         Restore Verified role to all members who have approved links in the database.
-        
-        Use this after a prune or when members lost their Verified role.
-        This checks everyone who is linked in the database and gives them back the role.
         """
         role_id = await self.config.verified_role_id()
         role = ctx.guild.get_role(int(role_id)) if role_id else None
@@ -1076,7 +1094,6 @@ class MemberSync(commands.Cog):
         
         await ctx.send("🔄 Scanning database for approved links...")
         
-        # Get all approved links from database
         def _run():
             con = sqlite3.connect(self.links_db)
             con.row_factory = sqlite3.Row
@@ -1102,24 +1119,20 @@ class MemberSync(commands.Cog):
             discord_id = int(link["discord_id"])
             mc_id = link["mc_user_id"]
             
-            # Get Discord member
             member = ctx.guild.get_member(discord_id)
             
             if not member:
                 not_in_server += 1
                 continue
             
-            # Check if they already have the role
             if role in member.roles:
                 already_has += 1
                 continue
             
-            # Give them the role back
             try:
                 await member.add_roles(role, reason="MemberSync: Restore verified role from database")
                 restored += 1
                 
-                # Progress update every 10 members
                 if restored % 10 == 0:
                     await ctx.send(f"⏳ Progress: {restored} roles restored...")
                 
@@ -1127,7 +1140,6 @@ class MemberSync(commands.Cog):
                 log.error(f"Failed to restore role for {member.name}: {e}")
                 errors += 1
         
-        # Final results
         embed = discord.Embed(
             title="✅ Role Restoration Complete",
             color=discord.Color.green()
@@ -1148,8 +1160,6 @@ class MemberSync(commands.Cog):
     async def bulk_check_roles(self, ctx: commands.Context):
         """
         Check how many linked members are missing their Verified role.
-        
-        Use this to see if you need to run restoreroles.
         """
         role_id = await self.config.verified_role_id()
         role = ctx.guild.get_role(int(role_id)) if role_id else None
@@ -1160,7 +1170,6 @@ class MemberSync(commands.Cog):
         
         await ctx.send("🔍 Checking roles for all linked members...")
         
-        # Get all approved links
         def _run():
             con = sqlite3.connect(self.links_db)
             con.row_factory = sqlite3.Row
@@ -1224,29 +1233,27 @@ class MemberSync(commands.Cog):
 
     async def _prune_once(self, guild: Optional[discord.Guild] = None, dry_run: bool = False, manual: bool = False) -> Dict[str, Any]:
         """
-        FIXED: Prune verified roles from members no longer in the alliance.
-        
-        Now with proper sqlite3.Row handling and exit tracking!
+        FIXED: Prune verified roles from members no longer in the alliance WITH SAFETY CHECKS.
         """
         if not guild:
             guild = self.bot.guilds[0] if self.bot.guilds else None
         
         if not guild:
-            return {'checked': 0, 'left_alliance': 0, 'removed': 0, 'already_gone': 0, 'errors': 0, 'details': []}
+            return {'checked': 0, 'left_alliance': 0, 'removed': 0, 'already_gone': 0, 'errors': 0, 'details': [], 'safety_triggered': False}
         
         role_id = await self.config.verified_role_id()
         role = guild.get_role(int(role_id)) if role_id else None
         
         if not role:
             log.warning("No verified role configured for prune check")
-            return {'checked': 0, 'left_alliance': 0, 'removed': 0, 'already_gone': 0, 'errors': 0, 'details': []}
+            return {'checked': 0, 'left_alliance': 0, 'removed': 0, 'already_gone': 0, 'errors': 0, 'details': [], 'safety_triggered': False}
 
         db_path = await self.config.alliance_db_path()
         if not db_path:
             log.warning("No alliance database configured for prune check")
-            return {'checked': 0, 'left_alliance': 0, 'removed': 0, 'already_gone': 0, 'errors': 0, 'details': []}
+            return {'checked': 0, 'left_alliance': 0, 'removed': 0, 'already_gone': 0, 'errors': 0, 'details': [], 'safety_triggered': False}
         
-        # FIXED: Get current member IDs from members_current VIEW with proper dict conversion
+        # Get current member IDs from members_current VIEW
         current_ids: set[str] = set()
         current_members_data: Dict[str, Dict] = {}
         
@@ -1254,7 +1261,6 @@ class MemberSync(commands.Cog):
             rows = await self._query_alliance("SELECT * FROM members_current")
             
             for r in rows:
-                # CRITICAL FIX: Convert sqlite3.Row to dict FIRST
                 rd = dict(r)
                 mc = rd.get("user_id") or rd.get("mc_user_id")
                 if not mc:
@@ -1267,7 +1273,23 @@ class MemberSync(commands.Cog):
                     current_members_data[str(mc)] = rd
         except Exception as e:
             log.exception("Failed to query current members: %s", e)
-            return {'checked': 0, 'left_alliance': 0, 'removed': 0, 'already_gone': 0, 'errors': 0, 'details': [f"Database error: {e}"]}
+            return {'checked': 0, 'left_alliance': 0, 'removed': 0, 'already_gone': 0, 'errors': 0, 'details': [f"Database error: {e}"], 'safety_triggered': False}
+
+        # CRITICAL SAFETY CHECK
+        min_threshold = await self.config.prune_min_members()
+        if len(current_ids) < min_threshold:
+            log.error(f"🚨 PRUNE SAFETY ABORT: Only {len(current_ids)} members in VIEW (min: {min_threshold})")
+            return {
+                'checked': 0,
+                'left_alliance': 0,
+                'removed': 0,
+                'already_gone': 0,
+                'errors': 0,
+                'details': [f"🚨 SAFETY ABORT: Only {len(current_ids)} members in VIEW (expected >{min_threshold})"],
+                'safety_triggered': True,
+                'view_member_count': len(current_ids),
+                'min_threshold': min_threshold
+            }
 
         # Get all approved links
         def _run():
@@ -1302,7 +1324,7 @@ class MemberSync(commands.Cog):
                 left_alliance += 1
                 member = guild.get_member(did)
                 
-                # Get last known data from old scrapes (if available)
+                # Get last known data
                 last_known_data = current_members_data.get(mcid, {})
                 username = last_known_data.get("name") or link.get("mc_name") or "Unknown"
                 rank = last_known_data.get("role") or ""
@@ -1310,11 +1332,10 @@ class MemberSync(commands.Cog):
                 rate = last_known_data.get("contribution_rate") or 0.0
                 last_seen = last_known_data.get("scraped_at") or now
                 
-                # Record the exit in member_left_alliance table
+                # Record the exit
                 def _record_exit():
                     con = sqlite3.connect(self.links_db)
                     try:
-                        # Check if already recorded
                         cur = con.execute("SELECT id FROM member_left_alliance WHERE mc_user_id=? AND discord_id=?", (mcid, did))
                         existing = cur.fetchone()
                         
@@ -1326,7 +1347,6 @@ class MemberSync(commands.Cog):
                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """, (mcid, username, did, rank, credits, rate, last_seen, now, "auto-detected", 0, 0))
                         else:
-                            # Update existing record
                             con.execute("""
                                 UPDATE member_left_alliance 
                                 SET exit_detected_at=?, role_removed=?, username=?, rank_role=?, earned_credits=?, contribution_rate=?
@@ -1401,7 +1421,8 @@ class MemberSync(commands.Cog):
             'removed': removed,
             'already_gone': already_gone,
             'errors': errors,
-            'details': details
+            'details': details,
+            'safety_triggered': False
         }
 
 
