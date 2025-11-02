@@ -107,6 +107,7 @@ class LogsScraper(commands.Cog):
                 await self._scrape_all_logs(None, max_pages=5)
                 
             except asyncio.CancelledError:
+                await self._debug_log("❌ Background scrape task cancelled")
                 break
             except Exception as e:
                 await self._debug_log(f"❌ Background scrape error: {e}")
@@ -507,6 +508,41 @@ class LogsScraper(commands.Cog):
             new_state = not current
         
         await ctx.send(f"🔍 Debug mode: {'ON' if new_state else 'OFF'}")
+    
+    @logs_group.command(name="taskstatus")
+    async def task_status(self, ctx):
+        """Check if background scraping task is running"""
+        if self.scrape_task is None:
+            await ctx.send("❌ Background task is NOT running!")
+        elif self.scrape_task.done():
+            await ctx.send("⚠️ Background task exists but is DONE (crashed or completed)")
+            try:
+                exc = self.scrape_task.exception()
+                if exc:
+                    await ctx.send(f"💥 Task exception: {exc}")
+            except:
+                pass
+        elif self.scrape_task.cancelled():
+            await ctx.send("⚠️ Background task was CANCELLED")
+        else:
+            await ctx.send("✅ Background task is running")
+            last_scrape = await self.config.last_scrape()
+            if last_scrape:
+                await ctx.send(f"📅 Last scrape: {last_scrape}")
+    
+    @logs_group.command(name="restarttask")
+    async def restart_task(self, ctx):
+        """Restart the background scraping task"""
+        # Cancel old task if exists
+        if self.scrape_task and not self.scrape_task.done():
+            self.scrape_task.cancel()
+            await ctx.send("🛑 Cancelled old task")
+            await asyncio.sleep(1)
+        
+        # Start new task
+        self.scrape_task = self.bot.loop.create_task(self._background_scrape())
+        await ctx.send("✅ Background scraping task restarted!")
+        await self._debug_log("✅ Background task manually restarted", ctx)
 
 async def setup(bot):
     await bot.add_cog(LogsScraper(bot))
