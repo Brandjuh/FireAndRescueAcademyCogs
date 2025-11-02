@@ -938,7 +938,63 @@ class MemberSync(commands.Cog):
         
         await ctx.send(embed=embed)
     
-    @retro_group.command(name="debug")
+    @retro_group.command(name="test")
+    async def retro_test(self, ctx: commands.Context, member: discord.Member):
+        """Test nickname matching for a specific member. Shows exact nickname and if it matches database."""
+        # Get exact nickname
+        nickname = member.nick or member.name
+        
+        # Show in detail
+        embed = discord.Embed(
+            title=f"🔍 Nickname Test for {member.display_name}",
+            color=discord.Color.blue()
+        )
+        
+        embed.add_field(name="Discord User", value=member.mention, inline=False)
+        embed.add_field(name="Discord Username", value=f"`{member.name}`", inline=True)
+        embed.add_field(name="Server Nickname", value=f"`{member.nick}`" if member.nick else "❌ Not set", inline=True)
+        embed.add_field(name="Used for Matching", value=f"`{nickname}`", inline=False)
+        
+        # Show character codes
+        char_codes = " ".join([f"{ord(c):04x}" for c in nickname])
+        embed.add_field(name="Character Codes (hex)", value=f"`{char_codes[:100]}`", inline=False)
+        
+        # Check if already linked
+        link = await self.get_link_for_discord(member.id)
+        if link:
+            embed.add_field(name="✅ Already Linked", value=f"MC-ID: `{link['mc_user_id']}`", inline=False)
+        else:
+            embed.add_field(name="Link Status", value="❌ Not linked", inline=False)
+            
+            # Try to find in database
+            hit = await self._find_by_exact_name(nickname)
+            
+            if hit:
+                embed.add_field(name="✅ MATCH FOUND!", value=f"MC Name: `{hit[0]}`\nMC ID: `{hit[1]}`", inline=False)
+                embed.color = discord.Color.green()
+            else:
+                embed.add_field(name="❌ NO MATCH", value="Nickname not found in database", inline=False)
+                embed.color = discord.Color.red()
+                
+                # Try case-insensitive variations
+                variations = [
+                    nickname.lower(),
+                    nickname.upper(),
+                    nickname.title(),
+                    nickname.replace("_", " "),
+                    nickname.replace(" ", "_")
+                ]
+                
+                found_variations = []
+                for var in variations[:3]:  # Test first 3
+                    var_hit = await self._find_by_exact_name(var)
+                    if var_hit:
+                        found_variations.append(f"✅ `{var}` → `{var_hit[0]}`")
+                
+                if found_variations:
+                    embed.add_field(name="💡 Similar names found", value="\n".join(found_variations), inline=False)
+        
+        await ctx.send(embed=embed)
     async def retro_debug(self, ctx: commands.Context, limit: int = 10):
         """Debug why retro scan finds no matches. Shows unlinked members and their nicknames."""
         role_id = await self.config.verified_role_id()
