@@ -911,10 +911,12 @@ class MembersScraper(commands.Cog):
         
         # VIEW status with quality check
         if view_exists:
-            if view_count == latest_count and view_timestamp == latest_timestamp:
+            if view_count == latest_count and view_timestamp[:19] == latest_timestamp[:19]:
                 sync_status = f"✅ Correct ({view_count} members)"
             elif view_count > latest_count * 1.5:
                 sync_status = f"⚠️ DUPLICATES ({view_count} members, should be {latest_count})"
+            elif view_count < latest_count * 0.5:
+                sync_status = f"⚠️ Missing data ({view_count} vs {latest_count})"
             else:
                 sync_status = f"⚠️ Mismatch ({view_count} vs {latest_count})"
         else:
