@@ -24,11 +24,11 @@ class MembersScraper(commands.Cog):
         
         # Default config including log channel for exit notifications
         default_global = {
-            "exit_log_channel_id": None,  # Channel for exit notifications
+            "exit_log_channel_id": None,
         }
         self.config.register_global(**default_global)
         
-        # Setup database path in shared location - USE DIFFERENT NAME!
+        # Setup database path in shared location
         base_path = data_manager.cog_data_path(raw_name="scraper_databases")
         base_path.mkdir(parents=True, exist_ok=True)
         self.db_path = str(base_path / "members_v2.db")
@@ -106,7 +106,9 @@ class MembersScraper(commands.Cog):
                     )
                 ''')
                 
-                # MemberSync compatibility VIEW
+                # CRITICAL FIX: MemberSync compatibility VIEW
+                # OLD BROKEN VIEW used DATE(timestamp) which gets ALL scrapes from today
+                # NEW FIXED VIEW uses MAX(timestamp) to get ONLY the latest scrape
                 cursor.execute('DROP VIEW IF EXISTS members_current')
                 cursor.execute('''
                     CREATE VIEW members_current AS
@@ -120,9 +122,9 @@ class MembersScraper(commands.Cog):
                         '' as profile_href,
                         timestamp as scraped_at
                     FROM members
-                    WHERE DATE(timestamp) = (SELECT MAX(DATE(timestamp)) FROM members)
+                    WHERE timestamp = (SELECT MAX(timestamp) FROM members)
                 ''')
-                log.info("✅ MemberSync VIEW created")
+                log.info("✅ MemberSync VIEW created (using MAX(timestamp) for latest scrape only)")
                 
                 conn.commit()
                 conn.close()
@@ -363,7 +365,7 @@ class MembersScraper(commands.Cog):
     
     async def _detect_exits(self, current_members, ctx=None):
         """
-        NEW: Detect members who left since last scrape and log them
+        Detect members who left since last scrape and log them
         """
         await self._debug_log("🔍 Starting exit detection...", ctx)
         
@@ -424,7 +426,7 @@ class MembersScraper(commands.Cog):
     
     async def _log_exits_to_database(self, exits, ctx=None):
         """
-        NEW: Log exits to member_left_alliance table in MemberSync database
+        Log exits to member_left_alliance table in MemberSync database
         """
         if not exits:
             return
@@ -509,7 +511,7 @@ class MembersScraper(commands.Cog):
     
     async def _send_exit_notifications(self, exits, ctx=None):
         """
-        NEW: Send Discord notifications for exits
+        Send Discord notifications for exits
         """
         if not exits:
             return
@@ -624,7 +626,7 @@ class MembersScraper(commands.Cog):
         
         await self._debug_log(f"📊 Total members scraped: {len(all_members)} across {page - 1} pages", ctx)
         
-        # NEW: Detect exits before saving (only if not backfilling)
+        # Detect exits before saving (only if not backfilling)
         exits = []
         if not custom_timestamp:  # Only detect exits on live scrapes
             exits = await self._detect_exits(all_members, ctx)
@@ -835,8 +837,6 @@ class MembersScraper(commands.Cog):
         """
         Set the channel where exit notifications will be sent.
         
-        This is where you'll see notifications when members leave the alliance.
-        
         Usage: [p]members setexitchannel #channel-name
         """
         await self.config.exit_log_channel_id.set(int(channel.id))
@@ -858,11 +858,28 @@ class MembersScraper(commands.Cog):
         cursor.execute("SELECT MIN(timestamp), MAX(timestamp) FROM members")
         date_range = cursor.fetchone()
         
-        cursor.execute("SELECT COUNT(*), timestamp FROM members GROUP BY timestamp ORDER BY timestamp DESC LIMIT 1")
-        latest = cursor.fetchone()
+        # FIXED: Get count from LATEST scrape only
+        cursor.execute("SELECT MAX(timestamp) FROM members")
+        latest_timestamp = cursor.fetchone()[0]
         
+        cursor.execute("SELECT COUNT(*) FROM members WHERE timestamp = ?", (latest_timestamp,))
+        latest_count = cursor.fetchone()[0]
+        
+        # Check VIEW
         cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='members_current'")
         view_exists = cursor.fetchone()[0] > 0
+        
+        # Check VIEW count
+        view_count = 0
+        view_timestamp = "Unknown"
+        if view_exists:
+            cursor.execute("SELECT COUNT(*) FROM members_current")
+            view_count = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT MAX(scraped_at) FROM members_current")
+            view_timestamp_row = cursor.fetchone()
+            if view_timestamp_row and view_timestamp_row[0]:
+                view_timestamp = view_timestamp_row[0][:19]
         
         conn.close()
         
@@ -890,11 +907,21 @@ class MembersScraper(commands.Cog):
             embed.add_field(name="First Record", value=date_range[0][:10], inline=True)
             embed.add_field(name="Last Record", value=date_range[1][:10], inline=True)
         
-        if latest:
-            embed.add_field(name="Latest Scrape", value=f"{latest[0]} members\n{latest[1][:16]}", inline=False)
+        if latest_timestamp:
+            embed.add_field(name="Latest Scrape", value=f"{latest_count} members\n{latest_timestamp[:16]}", inline=False)
         
-        sync_status = "✅ Active" if view_exists else "❌ Missing"
-        embed.add_field(name="MemberSync Compatibility", value=sync_status, inline=True)
+        # VIEW status with quality check
+        if view_exists:
+            if view_count == latest_count and view_timestamp == latest_timestamp:
+                sync_status = f"✅ Correct ({view_count} members)"
+            elif view_count > latest_count * 1.5:
+                sync_status = f"⚠️ DUPLICATES ({view_count} members, should be {latest_count})"
+            else:
+                sync_status = f"⚠️ Mismatch ({view_count} vs {latest_count})"
+        else:
+            sync_status = "❌ Missing"
+        
+        embed.add_field(name="MemberSync VIEW", value=sync_status, inline=True)
         
         embed.add_field(name="Exit Detection", value=exit_status, inline=True)
         embed.add_field(name="Exit Records", value=f"{exit_count:,}", inline=True)
