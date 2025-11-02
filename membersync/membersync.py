@@ -907,14 +907,94 @@ class MemberSync(commands.Cog):
         if not role:
             await ctx.send("Verified role not configured.")
             return
-        todo = 0
+        
+        total_verified = len(role.members)
+        already_linked = 0
+        matchable = 0
+        
         for m in role.members:
             if await self.get_link_for_discord(m.id):
+                already_linked += 1
                 continue
             hit = await self._find_by_exact_name(m.nick or m.name)
             if hit:
-                todo += 1
-        await ctx.send(f"Retro scan: {todo} member(s) can be auto-linked.")
+                matchable += 1
+        
+        embed = discord.Embed(
+            title="📊 Retro Scan Results",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="Total Verified", value=f"{total_verified} members", inline=True)
+        embed.add_field(name="Already Linked", value=f"{already_linked} members", inline=True)
+        embed.add_field(name="Can Auto-Link", value=f"{matchable} members", inline=True)
+        embed.add_field(name="No Match", value=f"{total_verified - already_linked - matchable} members", inline=True)
+        
+        if matchable > 0:
+            embed.set_footer(text=f"Use [p]membersync retro apply to link {matchable} members")
+        elif total_verified == already_linked:
+            embed.set_footer(text="✅ All verified members are already linked!")
+        else:
+            embed.set_footer(text="⚠️ Some members have nicknames that don't match MC names. Use [p]membersync retro debug for details.")
+        
+        await ctx.send(embed=embed)
+    
+    @retro_group.command(name="debug")
+    async def retro_debug(self, ctx: commands.Context, limit: int = 10):
+        """Debug why retro scan finds no matches. Shows unlinked members and their nicknames."""
+        role_id = await self.config.verified_role_id()
+        role = ctx.guild.get_role(int(role_id)) if role_id else None
+        if not role:
+            await ctx.send("Verified role not configured.")
+            return
+        
+        unlinked = []
+        
+        for m in role.members:
+            if await self.get_link_for_discord(m.id):
+                continue
+            
+            nickname = m.nick or m.name
+            hit = await self._find_by_exact_name(nickname)
+            
+            unlinked.append({
+                'member': m,
+                'nickname': nickname,
+                'found': hit is not None,
+                'mc_name': hit[0] if hit else None,
+                'mc_id': hit[1] if hit else None
+            })
+            
+            if len(unlinked) >= limit:
+                break
+        
+        if not unlinked:
+            await ctx.send("✅ All verified members are already linked!")
+            return
+        
+        embed = discord.Embed(
+            title=f"🔍 Retro Debug (showing {len(unlinked)} unlinked members)",
+            color=discord.Color.orange(),
+            description="These members have Verified role but no link:"
+        )
+        
+        for u in unlinked:
+            status = "✅ Found" if u['found'] else "❌ Not found"
+            value = f"Discord Nickname: `{u['nickname']}`\n"
+            if u['found']:
+                value += f"MC Name: `{u['mc_name']}`\nMC ID: `{u['mc_id']}`"
+            else:
+                value += "No exact match in database"
+            
+            embed.add_field(
+                name=f"{status} - {u['member'].mention}",
+                value=value,
+                inline=False
+            )
+        
+        if len(unlinked) >= limit:
+            embed.set_footer(text=f"Showing first {limit} only. Increase limit parameter to see more.")
+        
+        await ctx.send(embed=embed)
 
     @retro_group.command(name="apply")
     async def retro_apply(self, ctx: commands.Context):
