@@ -404,6 +404,8 @@ class ReferenceModal(discord.ui.Modal):
                 required=True,
                 placeholder="e.g., SWAT Team East, batch 3",
             )
+            # FIX: Add the TextInput to the modal
+            self.add_item(self.ref)
 
     async def on_submit(self, interaction: discord.Interaction):
         discipline, training, days, fee, num_classes, reminder_only = self.state
