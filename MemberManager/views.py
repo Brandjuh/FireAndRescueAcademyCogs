@@ -33,7 +33,8 @@ class MemberOverviewView(discord.ui.View):
         db,
         config,
         member_data: MemberData,
-        integrations: Dict[str, Any]
+        integrations: Dict[str, Any],
+        invoker_id: int = None
     ):
         super().__init__(timeout=300)  # 5 minute timeout
         
@@ -42,6 +43,7 @@ class MemberOverviewView(discord.ui.View):
         self.config = config
         self.member_data = member_data
         self.integrations = integrations
+        self.invoker_id = invoker_id
         
         self.current_tab = "overview"
         self.message: Optional[discord.Message] = None
@@ -52,7 +54,9 @@ class MemberOverviewView(discord.ui.View):
     
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Only allow the command invoker to use buttons."""
-        # For now, allow anyone with permissions
+        if self.invoker_id:
+            return interaction.user.id == self.invoker_id
+        # If no invoker_id set, allow anyone with permissions
         return True
     
     async def on_timeout(self):
