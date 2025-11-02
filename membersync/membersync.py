@@ -1120,7 +1120,79 @@ class MemberSync(commands.Cog):
         
         await ctx.send(embed=embed)
 
-    @membersync_group.group(name="bulk")
+    @retro_group.command(name="conflicts")
+    async def retro_conflicts(self, ctx: commands.Context):
+        """Show members whose display name matches an MC-ID that's already linked to someone else."""
+        role_id = await self.config.verified_role_id()
+        role = ctx.guild.get_role(int(role_id)) if role_id else None
+        if not role:
+            await ctx.send("Verified role not configured.")
+            return
+        
+        conflicts = []
+        
+        for m in role.members:
+            # Skip if already linked
+            if await self.get_link_for_discord(m.id):
+                continue
+            
+            # Find match
+            hit = await self._find_by_exact_name(m.display_name)
+            if not hit:
+                continue
+            
+            mc_name, mcid = hit
+            
+            # Check if MC-ID is already linked
+            existing_link = await self.get_link_for_mc(mcid)
+            if existing_link:
+                linked_discord_id = int(existing_link['discord_id'])
+                linked_member = ctx.guild.get_member(linked_discord_id)
+                
+                conflicts.append({
+                    'current_member': m,
+                    'mc_name': mc_name,
+                    'mc_id': mcid,
+                    'linked_discord_id': linked_discord_id,
+                    'linked_member': linked_member
+                })
+        
+        if not conflicts:
+            await ctx.send("✅ No conflicts found! All matchable members can be linked.")
+            return
+        
+        embed = discord.Embed(
+            title=f"⚠️ MC-ID Conflicts ({len(conflicts)} found)",
+            color=discord.Color.orange(),
+            description="These members match MC names that are already linked to other Discord accounts:"
+        )
+        
+        for c in conflicts:
+            field_name = f"{c['current_member'].display_name} wants MC: {c['mc_name']}"
+            
+            if c['linked_member']:
+                field_value = (
+                    f"❌ **Conflict:** MC-ID `{c['mc_id']}` is already linked to:\n"
+                    f"└ {c['linked_member'].mention} (`{c['linked_member'].display_name}`)\n\n"
+                    f"**Possible causes:**\n"
+                    f"• Same name (both named `{c['mc_name']}`)\n"
+                    f"• Alt account\n"
+                    f"• Old Discord account\n\n"
+                    f"**Manual review needed!**"
+                )
+            else:
+                field_value = (
+                    f"❌ **Conflict:** MC-ID `{c['mc_id']}` is already linked to:\n"
+                    f"└ Discord ID `{c['linked_discord_id']}` (not in server anymore)\n\n"
+                    f"💡 You may want to unlink the old account:\n"
+                    f"`[p]membersync unlink {c['linked_discord_id']}`"
+                )
+            
+            embed.add_field(name=field_name, value=field_value, inline=False)
+        
+        embed.set_footer(text="Use [p]membersync link @user <mc_id> to manually link the correct ones")
+        
+        await ctx.send(embed=embed)
     async def bulk_group(self, ctx: commands.Context):
         """Bulk verification tools - scan ALL server members (not just verified)."""
         pass
@@ -1411,6 +1483,58 @@ class MemberSync(commands.Cog):
             return
         await self._approve_link(ctx.guild, member, mc_id, approver=ctx.author if isinstance(ctx.author, discord.Member) else None)
         await ctx.send(f"Linked {member.mention} to MC `{mc_id}`.")
+
+    @membersync_group.command(name="unlink")
+    async def unlink(self, ctx: commands.Context, discord_id: int):
+        """Remove a link between Discord user and MC-ID. Use this for old/incorrect links."""
+        if not await self._user_is_reviewer(ctx.author):
+            await ctx.send("You are not allowed to do this.")
+            return
+        
+        # Check if link exists
+        def _check_and_delete():
+            con = sqlite3.connect(self.links_db)
+            con.row_factory = sqlite3.Row
+            try:
+                # Get link info first
+                link = con.execute("SELECT * FROM links WHERE discord_id=?", (str(discord_id),)).fetchone()
+                if not link:
+                    return None
+                
+                link_dict = dict(link)
+                
+                # Delete it
+                con.execute("DELETE FROM links WHERE discord_id=?", (str(discord_id),))
+                con.commit()
+                
+                return link_dict
+            finally:
+                con.close()
+        
+        deleted_link = await asyncio.get_running_loop().run_in_executor(None, _check_and_delete)
+        
+        if not deleted_link:
+            await ctx.send(f"❌ No link found for Discord ID `{discord_id}`")
+            return
+        
+        # Try to remove role
+        member = ctx.guild.get_member(discord_id)
+        role_id = await self.config.verified_role_id()
+        role = ctx.guild.get_role(int(role_id)) if role_id else None
+        
+        if member and role and role in member.roles:
+            try:
+                await member.remove_roles(role, reason=f"MemberSync: Unlinked by {ctx.author}")
+            except Exception:
+                pass
+        
+        # Log
+        log_ch_id = await self.config.log_channel_id()
+        ch = ctx.guild.get_channel(int(log_ch_id)) if log_ch_id else None
+        if isinstance(ch, discord.TextChannel):
+            await ch.send(f"🔓 Unlinked Discord `{discord_id}` from MC `{deleted_link['mc_user_id']}` by {ctx.author.mention}")
+        
+        await ctx.send(f"✅ Unlinked Discord ID `{discord_id}` from MC `{deleted_link['mc_user_id']}`")
 
     @commands.Cog.listener()
     async def on_ready(self):
