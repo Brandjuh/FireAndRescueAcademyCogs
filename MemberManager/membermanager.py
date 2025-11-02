@@ -616,64 +616,183 @@ class MemberManager(ConfigCommands, commands.Cog):
                         if verified_role and verified_role in member.roles:
                             data.is_verified = True
         
-        # Get MC data from MemberSync link
+        # Get MC data and link status from MemberSync
         if self.membersync:
+            link = None
+            
+            # Get link data
             if discord_id and not mc_user_id:
                 link = await self.membersync.get_link_for_discord(discord_id)
                 if link:
                     data.mc_user_id = link.get("mc_user_id")
-                    data.link_status = link.get("status", "unknown")
+                    data.link_status = link.get("status", "none")
             elif mc_user_id and not discord_id:
                 link = await self.membersync.get_link_for_mc(mc_user_id)
                 if link:
-                    data.discord_id = link.get("discord_id")
-                    data.link_status = link.get("status", "unknown")
+                    data.discord_id = int(link.get("discord_id"))
+                    data.link_status = link.get("status", "none")
+            elif discord_id and mc_user_id:
+                # Both provided, just get status
+                link = await self.membersync.get_link_for_discord(discord_id)
+                if link:
+                    data.link_status = link.get("status", "none")
+            
+            # Set is_verified ONLY if link exists AND is approved
+            if link and link.get("status") == "approved":
+                data.is_verified = True
+                
+                # Also check if they have the verified role
+                if discord_id:
+                    member = guild.get_member(discord_id)
+                    if member:
+                        verified_role_id = await self.membersync.config.verified_role_id()
+                        if verified_role_id:
+                            verified_role = guild.get_role(verified_role_id)
+                            if verified_role and verified_role not in member.roles:
+                                log.warning(f"Member {discord_id} is linked but missing verified role")
+            else:
+                data.is_verified = False
+                data.link_status = link.get("status", "none") if link else "none"
         
-        # Get MC data from AllianceScraper
-        if data.mc_user_id and self.alliance_scraper:
-            mc_data = await self._get_mc_data(data.mc_user_id)
-            if mc_data:
-                data.mc_username = mc_data.get("name")
-                data.mc_role = mc_data.get("role")
-                data.contribution_rate = mc_data.get("contribution_rate")
+        # Get MC data from MembersScraper
+        mc_in_alliance = False
+        if data.mc_user_id and self.members_scraper:
+            try:
+                mc_data = await self._get_mc_data(data.mc_user_id)
+                if mc_data:
+                    data.mc_username = mc_data.get("name")
+                    data.mc_role = mc_data.get("role")
+                    data.contribution_rate = mc_data.get("contribution_rate")
+                    mc_in_alliance = True
+            except Exception as e:
+                log.error(f"Failed to get MC data for {data.mc_user_id}: {e}")
+        
+        # If has MC ID but not in alliance, they're not active
+        if data.mc_user_id and not mc_in_alliance:
+            data.mc_username = f"Former member ({data.mc_user_id})"
+            data.mc_role = "Left alliance"
         
         # Get notes count
         if self.db:
-            notes = await self.db.get_notes(
-                discord_id=data.discord_id,
-                mc_user_id=data.mc_user_id
-            )
-            data.notes_count = len(notes)
+            try:
+                notes = await self.db.get_notes(
+                    discord_id=data.discord_id,
+                    mc_user_id=data.mc_user_id
+                )
+                data.notes_count = len(notes)
+            except Exception as e:
+                log.error(f"Failed to get notes: {e}")
+                data.notes_count = 0
         
-        # Get infractions count
-        if self.db:
-            infractions = await self.db.get_infractions(
-                discord_id=data.discord_id,
-                mc_user_id=data.mc_user_id
-            )
-            data.infractions_count = len([i for i in infractions if i["status"] == "active"])
+        # Get sanctions from SanctionManager with expiry logic
+        if self.sanction_manager:
+            try:
+                sanctions = self.sanction_manager.db.get_user_sanctions(
+                    guild_id=guild.id,
+                    discord_user_id=data.discord_id,
+                    mc_user_id=data.mc_user_id
+                )
+                
+                # Calculate 30 days ago for expiry check
+                from datetime import datetime, timezone, timedelta
+                now = int(datetime.now(timezone.utc).timestamp())
+                thirty_days_ago = now - (30 * 86400)
+                
+                # Count only active sanctions (not expired)
+                active_sanctions = []
+                for sanction in sanctions:
+                    status = sanction.get("status", "active")
+                    is_warning = "Warning" in sanction.get("sanction_type", "")
+                    created_at = sanction.get("created_at", 0)
+                    
+                    # Count as active if:
+                    # 1. Status is active AND
+                    # 2. Either not a warning OR warning is < 30 days old
+                    if status == "active":
+                        if not is_warning or created_at >= thirty_days_ago:
+                            active_sanctions.append(sanction)
+                
+                data.infractions_count = len(active_sanctions)
+                
+                # Calculate severity score
+                data.severity_score = 0
+                for sanction in active_sanctions:
+                    stype = sanction.get("sanction_type", "")
+                    if "Warning" in stype:
+                        if "1st" in stype:
+                            data.severity_score += 2
+                        elif "2nd" in stype:
+                            data.severity_score += 4
+                        elif "3rd" in stype:
+                            data.severity_score += 6
+                        else:
+                            data.severity_score += 1
+                    elif "Kick" in stype:
+                        data.severity_score += 7
+                    elif "Ban" in stype:
+                        data.severity_score += 10
+                    elif "Mute" in stype:
+                        data.severity_score += 3
+                    else:
+                        data.severity_score += 1
+            
+            except Exception as e:
+                log.error(f"Failed to get sanctions: {e}")
+                data.infractions_count = 0
+                data.severity_score = 0
         
         return data
     
     async def _get_mc_data(self, mc_user_id: str) -> Optional[Dict[str, Any]]:
-        """Get MC member data from AllianceScraper."""
-        if not self.alliance_scraper:
+        """
+        Get MC member data from MembersScraper (members_v2.db).
+        """
+        if not self.members_scraper:
+            log.warning("MembersScraper not available")
             return None
         
         try:
-            # Query alliance database
-            rows = await self.alliance_scraper._query_alliance(
-                "SELECT name, role, contribution_rate, earned_credits "
-                "FROM members_current WHERE user_id=? OR mc_user_id=?",
-                (mc_user_id, mc_user_id)
-            )
+            import sqlite3
+            from pathlib import Path
             
-            if rows:
-                return dict(rows[0])
+            # Get database path from MembersScraper
+            db_path = Path(self.members_scraper.db_path)
+            
+            if not db_path.exists():
+                log.error(f"Database not found: {db_path}")
+                return None
+            
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            # Get most recent record INCLUDING contribution_rate
+            cursor.execute("""
+                SELECT member_id, username, rank, earned_credits, contribution_rate, online_status, timestamp
+                FROM members
+                WHERE member_id = ?
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """, (mc_user_id,))
+            
+            row = cursor.fetchone()
+            conn.close()
+            
+            if row:
+                result = {
+                    "user_id": row["member_id"],
+                    "name": row["username"],
+                    "role": row["rank"],
+                    "earned_credits": row["earned_credits"],
+                    "contribution_rate": row["contribution_rate"]
+                }
+                return result
+            else:
+                return None
+                
         except Exception as e:
-            log.error(f"Failed to get MC data: {e}", exc_info=True)
-        
-        return None
+            log.error(f"Failed to get MC data for {mc_user_id}: {e}", exc_info=True)
+            return None
 
 
 # This is the standard way to set up a cog for Red-DiscordBot
