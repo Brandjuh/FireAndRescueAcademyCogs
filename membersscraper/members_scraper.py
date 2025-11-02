@@ -224,7 +224,7 @@ class MembersScraper(commands.Cog):
         
         return is_logged_in
     
-    async def _scrape_members_page(self, session, page_num, ctx=None):
+    async def _scrape_members_page(self, session, page_num, timestamp, ctx=None):
         """Scrape a single page of members"""
         url = f"{self.members_url}?page={page_num}"
         await self._debug_log(f"🌐 Scraping page {page_num}: {url}", ctx)
@@ -249,7 +249,6 @@ class MembersScraper(commands.Cog):
                     
                     soup = BeautifulSoup(html, 'html.parser')
                     members_data = []
-                    timestamp = datetime.utcnow().isoformat()
                     
                     await self._debug_log(f"🔍 Searching for all <tr> tags with links...", ctx)
                     
@@ -598,12 +597,16 @@ class MembersScraper(commands.Cog):
         page = 1
         max_pages = 100
         
+        # CRITICAL FIX: Create single timestamp for entire scrape
+        scrape_timestamp = custom_timestamp if custom_timestamp else datetime.utcnow().isoformat()
+        
         await self._debug_log(f"🚀 Starting member scrape (max {max_pages} pages)", ctx)
+        await self._debug_log(f"📅 Scrape timestamp: {scrape_timestamp}", ctx)
         
         empty_page_count = 0
         
         while page <= max_pages:
-            members = await self._scrape_members_page(session, page, ctx)
+            members = await self._scrape_members_page(session, page, scrape_timestamp, ctx)
             
             if not members:
                 empty_page_count += 1
@@ -614,10 +617,6 @@ class MembersScraper(commands.Cog):
                     break
             else:
                 empty_page_count = 0
-                
-                if custom_timestamp:
-                    for member in members:
-                        member['timestamp'] = custom_timestamp
                 
                 all_members.extend(members)
                 await self._debug_log(f"✅ Page {page}: {len(members)} members (total so far: {len(all_members)})", ctx)
