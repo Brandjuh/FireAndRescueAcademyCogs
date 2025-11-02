@@ -1172,20 +1172,30 @@ class MemberSync(commands.Cog):
             
             if c['linked_member']:
                 field_value = (
-                    f"❌ **Conflict:** MC-ID `{c['mc_id']}` is already linked to:\n"
-                    f"└ {c['linked_member'].mention} (`{c['linked_member'].display_name}`)\n\n"
+                    f"**Current member (wants link):**\n"
+                    f"└ {c['current_member'].mention}\n"
+                    f"└ Display: `{c['current_member'].display_name}`\n"
+                    f"└ Discord ID: `{c['current_member'].id}`\n\n"
+                    f"❌ **MC-ID `{c['mc_id']}` is already linked to:**\n"
+                    f"└ {c['linked_member'].mention}\n"
+                    f"└ Display: `{c['linked_member'].display_name}`\n"
+                    f"└ Discord ID: `{c['linked_discord_id']}`\n\n"
                     f"**Possible causes:**\n"
-                    f"• Same name (both named `{c['mc_name']}`)\n"
+                    f"• Same display name (both show as `{c['mc_name']}`)\n"
                     f"• Alt account\n"
-                    f"• Old Discord account\n\n"
-                    f"**Manual review needed!**"
+                    f"• Name change\n\n"
+                    f"**Solution:** Check which one is the real `{c['mc_name']}`"
                 )
             else:
                 field_value = (
-                    f"❌ **Conflict:** MC-ID `{c['mc_id']}` is already linked to:\n"
+                    f"**Current member (wants link):**\n"
+                    f"└ {c['current_member'].mention}\n"
+                    f"└ Discord ID: `{c['current_member'].id}`\n\n"
+                    f"❌ **MC-ID `{c['mc_id']}` is already linked to:**\n"
                     f"└ Discord ID `{c['linked_discord_id']}` (not in server anymore)\n\n"
-                    f"💡 You may want to unlink the old account:\n"
-                    f"`[p]membersync unlink {c['linked_discord_id']}`"
+                    f"💡 **You may want to unlink the old account:**\n"
+                    f"`[p]membersync unlink {c['linked_discord_id']}`\n"
+                    f"Then retry retro apply to link the current member."
                 )
             
             embed.add_field(name=field_name, value=field_value, inline=False)
