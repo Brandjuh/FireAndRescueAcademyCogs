@@ -11,7 +11,7 @@ import discord
 from redbot.core import commands, checks, Config
 from redbot.core.data_manager import cog_data_path
 
-__version__ = "0.6.1"
+__version__ = "0.7.0"
 
 log = logging.getLogger("red.FARA.AllianceLogsPub")
 
@@ -302,10 +302,10 @@ class AllianceLogsPub(commands.Cog):
         return NL.join(lines)
 
     async def _publish_single_log(self, row: Dict[str, Any], main_ch: discord.TextChannel, 
-                                   mirrors: Dict, style: str, emoji_titles: bool) -> bool:
+                                   mirrors: Dict, style: str, emoji_titles: bool, skip_duplicate_check: bool = False) -> bool:
         log_id = int(row["id"])
         
-        if await self._is_already_posted(log_id):
+        if not skip_duplicate_check and await self._is_already_posted(log_id):
             log.info("Skipping log ID %d - already posted", log_id)
             return False
         
@@ -363,9 +363,10 @@ class AllianceLogsPub(commands.Cog):
             log.exception("Unexpected error posting log ID %d: %s", log_id, ex)
             return False
 
-        if not await self._mark_log_posted(log_id):
-            log.error("RACE CONDITION: Log ID %d was posted by another process!", log_id)
-            return False
+        if not skip_duplicate_check:
+            if not await self._mark_log_posted(log_id):
+                log.error("RACE CONDITION: Log ID %d was posted by another process!", log_id)
+                return False
         
         await self._set_last_id(log_id)
         log.debug("Updated last_id to %d after posting", log_id)
@@ -644,6 +645,74 @@ class AllianceLogsPub(commands.Cog):
     async def run(self, ctx: commands.Context):
         n = await self._tick_once()
         await ctx.send(f"✅ Posted {n} new log(s).")
+
+    @alog_group.command(name="cleanposted")
+    async def clean_posted(self, ctx: commands.Context, from_id: int, to_id: int):
+        """Remove entries from posted_logs table between two IDs (inclusive)
+        
+        This allows logs to be re-posted. Use with caution!
+        Example: !alog cleanposted 1286 1422
+        """
+        if from_id > to_id:
+            await ctx.send("❌ from_id must be less than or equal to to_id")
+            return
+        
+        if to_id - from_id > 1000:
+            await ctx.send("❌ Can only clean max 1000 logs at once (safety limit)")
+            return
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "SELECT COUNT(*) FROM posted_logs WHERE log_id >= ? AND log_id <= ?",
+                (from_id, to_id)
+            )
+            row = await cur.fetchone()
+            count_before = row[0] if row else 0
+            
+            await db.execute(
+                "DELETE FROM posted_logs WHERE log_id >= ? AND log_id <= ?",
+                (from_id, to_id)
+            )
+            await db.commit()
+        
+        await ctx.send(f"✅ Cleaned {count_before} entries from posted_logs (IDs {from_id}-{to_id})")
+        await ctx.send(f"ℹ️ These logs can now be re-posted. Run `!alog run` to post them.")
+        log.info("Cleaned posted_logs: %d entries between %d-%d (by %s)", 
+                 count_before, from_id, to_id, ctx.author)
+
+    @alog_group.command(name="taskstatus")
+    async def task_status(self, ctx: commands.Context):
+        """Check if background posting task is running"""
+        if self._bg_task is None:
+            await ctx.send("❌ Background task is NOT running!")
+        elif self._bg_task.done():
+            await ctx.send("⚠️ Background task exists but is DONE (crashed or completed)")
+            try:
+                exc = self._bg_task.exception()
+                if exc:
+                    await ctx.send(f"💥 Task exception: {exc}")
+            except:
+                pass
+        elif self._bg_task.cancelled():
+            await ctx.send("⚠️ Background task was CANCELLED")
+        else:
+            await ctx.send("✅ Background task is running")
+            cfg = await self.config.all()
+            await ctx.send(f"ℹ️ Runs every {cfg['interval_minutes']} minutes")
+
+    @alog_group.command(name="restarttask")
+    async def restart_task(self, ctx: commands.Context):
+        """Restart the background posting task"""
+        # Cancel old task if exists
+        if self._bg_task and not self._bg_task.done():
+            self._bg_task.cancel()
+            await ctx.send("🛑 Cancelled old task")
+            await asyncio.sleep(1)
+        
+        # Start new task
+        self._bg_task = asyncio.create_task(self._bg_loop())
+        await ctx.send("✅ Background posting task restarted!")
+        log.info("Background task manually restarted by %s", ctx.author)
 
 
 async def setup(bot):
