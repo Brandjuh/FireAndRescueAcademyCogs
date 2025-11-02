@@ -1072,18 +1072,53 @@ class MemberSync(commands.Cog):
         if not role:
             await ctx.send("Verified role not configured.")
             return
+        
         count = 0
+        skipped_mc_taken = 0
+        skipped_discord_taken = 0
+        
         for m in role.members:
+            # Check if Discord user already linked
             if await self.get_link_for_discord(m.id):
+                skipped_discord_taken += 1
                 continue
+            
             # FIXED: Use display_name
             hit = await self._find_by_exact_name(m.display_name)
             if not hit:
                 continue
+            
             name, mcid = hit
-            await self._approve_link(ctx.guild, m, mcid, approver=ctx.author if isinstance(ctx.author, discord.Member) else None)
-            count += 1
-        await ctx.send(f"Retro applied: {count} link(s).")
+            
+            # FIXED: Check if MC-ID is already linked to someone else
+            existing_link = await self.get_link_for_mc(mcid)
+            if existing_link:
+                skipped_mc_taken += 1
+                log.warning(f"MC-ID {mcid} ({name}) is already linked to Discord {existing_link['discord_id']}, skipping {m.name}")
+                continue
+            
+            try:
+                await self._approve_link(ctx.guild, m, mcid, approver=ctx.author if isinstance(ctx.author, discord.Member) else None)
+                count += 1
+            except Exception as e:
+                log.error(f"Failed to link {m.name}: {e}")
+        
+        embed = discord.Embed(
+            title="✅ Retro Apply Complete",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="✅ Linked", value=f"{count} members", inline=True)
+        embed.add_field(name="⏭️ Already Linked", value=f"{skipped_discord_taken} members", inline=True)
+        embed.add_field(name="⚠️ MC-ID Taken", value=f"{skipped_mc_taken} members", inline=True)
+        
+        if skipped_mc_taken > 0:
+            embed.add_field(
+                name="ℹ️ Note", 
+                value=f"{skipped_mc_taken} member(s) matched names that are already linked to other Discord accounts. They need manual review.",
+                inline=False
+            )
+        
+        await ctx.send(embed=embed)
 
     @membersync_group.group(name="bulk")
     async def bulk_group(self, ctx: commands.Context):
