@@ -979,14 +979,18 @@ class MemberSync(commands.Cog):
         
         for u in unlinked:
             status = "✅ Found" if u['found'] else "❌ Not found"
-            value = f"Discord Nickname: `{u['nickname']}`\n"
+            has_server_nick = u['member'].nick is not None
+            nick_type = "Server Nickname" if has_server_nick else "Discord Username"
+            value = f"{nick_type}: `{u['nickname']}`\n"
             if u['found']:
-                value += f"MC Name: `{u['mc_name']}`\nMC ID: `{u['mc_id']}`"
+                value += f"✅ MC Name: `{u['mc_name']}`\n✅ MC ID: `{u['mc_id']}`"
             else:
-                value += "No exact match in database"
+                value += "❌ No exact match in database"
+                if not has_server_nick:
+                    value += "\n⚠️ Tip: User has no server nickname set!"
             
             embed.add_field(
-                name=f"{status} - {u['member'].mention}",
+                name=f"{status} - {u['member'].display_name}",
                 value=value,
                 inline=False
             )
