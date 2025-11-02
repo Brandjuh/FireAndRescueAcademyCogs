@@ -1193,6 +1193,8 @@ class MemberSync(commands.Cog):
         embed.set_footer(text="Use [p]membersync link @user <mc_id> to manually link the correct ones")
         
         await ctx.send(embed=embed)
+
+    @membersync_group.group(name="bulk")
     async def bulk_group(self, ctx: commands.Context):
         """Bulk verification tools - scan ALL server members (not just verified)."""
         pass
