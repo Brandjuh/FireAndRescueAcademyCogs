@@ -480,7 +480,11 @@ class MemberSync(commands.Cog):
                     rows = await self._query_alliance("SELECT COUNT(*) as cnt FROM members WHERE timestamp=?", (db_latest,))
                     actual_latest_count = rows[0]["cnt"] if rows else 0
                     
-                    if view_count == actual_latest_count and latest_timestamp == db_latest:
+                    # Compare timestamps (ignore microseconds differences)
+                    view_ts = latest_timestamp[:19] if latest_timestamp else ""
+                    db_ts = db_latest[:19] if db_latest else ""
+                    
+                    if view_count == actual_latest_count and view_ts == db_ts:
                         view_status = f"✅ Active ({view_count} members)"
                     elif view_count > actual_latest_count * 1.5:
                         view_status = f"⚠️ DUPLICATES - Shows {view_count} but should be ~{actual_latest_count}"
