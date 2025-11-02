@@ -1204,6 +1204,217 @@ class MemberSync(commands.Cog):
         
         await ctx.send(embed=embed)
 
+    @retro_group.command(name="resolve")
+    async def retro_resolve(self, ctx: commands.Context, mc_id: str):
+        """
+        Resolve a conflict by unlinking BOTH Discord accounts for a given MC-ID.
+        This forces the real user to re-verify with the correct account.
+        
+        Usage: [p]membersync retro resolve 318565
+        """
+        if not await self._user_is_reviewer(ctx.author):
+            await ctx.send("❌ You are not allowed to do this.")
+            return
+        
+        # Find the existing link
+        existing_link = await self.get_link_for_mc(mc_id)
+        if not existing_link:
+            await ctx.send(f"❌ No link found for MC-ID `{mc_id}`")
+            return
+        
+        linked_discord_id = int(existing_link['discord_id'])
+        
+        # Find who wants this MC-ID (search Verified members)
+        role_id = await self.config.verified_role_id()
+        role = ctx.guild.get_role(int(role_id)) if role_id else None
+        
+        conflicting_member = None
+        if role:
+            for m in role.members:
+                if m.id == linked_discord_id:
+                    continue  # Skip the already-linked one
+                
+                hit = await self._find_by_exact_name(m.display_name)
+                if hit and hit[1] == str(mc_id):
+                    conflicting_member = m
+                    break
+        
+        # Unlink the existing account
+        def _unlink():
+            con = sqlite3.connect(self.links_db)
+            try:
+                con.execute("DELETE FROM links WHERE mc_user_id=?", (str(mc_id),))
+                con.commit()
+            finally:
+                con.close()
+        
+        await asyncio.get_running_loop().run_in_executor(None, _unlink)
+        
+        # Remove role from both accounts
+        removed_from = []
+        
+        # Remove from linked account
+        linked_member = ctx.guild.get_member(linked_discord_id)
+        if linked_member and role and role in linked_member.roles:
+            try:
+                await linked_member.remove_roles(role, reason=f"MemberSync: Conflict resolution by {ctx.author}")
+                removed_from.append(f"{linked_member.mention} (ID: {linked_discord_id})")
+                
+                # Try to send DM
+                try:
+                    await linked_member.send(
+                        f"⚠️ **Verification Reset**\n\n"
+                        f"Your link to MC account `{mc_id}` has been removed due to a conflict.\n"
+                        f"Please re-verify with `!verify` to link your correct Discord account."
+                    )
+                except:
+                    pass
+            except Exception as e:
+                log.error(f"Failed to remove role from {linked_discord_id}: {e}")
+        
+        # Remove from conflicting account if found
+        if conflicting_member and role and role in conflicting_member.roles:
+            try:
+                await conflicting_member.remove_roles(role, reason=f"MemberSync: Conflict resolution by {ctx.author}")
+                removed_from.append(f"{conflicting_member.mention} (ID: {conflicting_member.id})")
+                
+                # Try to send DM
+                try:
+                    await conflicting_member.send(
+                        f"⚠️ **Verification Required**\n\n"
+                        f"There was a conflict with MC account `{mc_id}`.\n"
+                        f"Please use `!verify {mc_id}` to link your Discord account."
+                    )
+                except:
+                    pass
+            except Exception as e:
+                log.error(f"Failed to remove role from {conflicting_member.id}: {e}")
+        
+        # Log the action
+        log_ch_id = await self.config.log_channel_id()
+        ch = ctx.guild.get_channel(int(log_ch_id)) if log_ch_id else None
+        if isinstance(ch, discord.TextChannel):
+            log_msg = f"🔄 **Conflict Resolved** by {ctx.author.mention}\n"
+            log_msg += f"MC-ID: `{mc_id}`\n"
+            log_msg += f"Unlinked and removed roles from:\n"
+            log_msg += "\n".join(f"• {account}" for account in removed_from)
+            log_msg += f"\n\nBoth accounts must re-verify with the correct account."
+            await ch.send(log_msg)
+        
+        # Send confirmation
+        embed = discord.Embed(
+            title="✅ Conflict Resolved",
+            color=discord.Color.green(),
+            description=f"Successfully unlinked MC-ID `{mc_id}` and removed Verified role from all accounts."
+        )
+        
+        if removed_from:
+            embed.add_field(
+                name="Roles Removed From",
+                value="\n".join(removed_from),
+                inline=False
+            )
+        
+        embed.add_field(
+            name="Next Steps",
+            value=f"Both users can now use `!verify {mc_id}` to link the correct account.",
+            inline=False
+        )
+        
+        await ctx.send(embed=embed)
+
+    @retro_group.command(name="resolveall")
+    async def retro_resolve_all(self, ctx: commands.Context, confirm: str = None):
+        """
+        Resolve ALL conflicts at once by unlinking both accounts for each conflict.
+        
+        Usage: [p]membersync retro resolveall CONFIRM
+        """
+        if not await self._user_is_reviewer(ctx.author):
+            await ctx.send("❌ You are not allowed to do this.")
+            return
+        
+        if confirm != "CONFIRM":
+            await ctx.send(
+                "⚠️ **Warning:** This will unlink ALL conflicting MC-IDs and remove Verified roles!\n\n"
+                f"To proceed, run: `{ctx.prefix}membersync retro resolveall CONFIRM`"
+            )
+            return
+        
+        # Find all conflicts
+        role_id = await self.config.verified_role_id()
+        role = ctx.guild.get_role(int(role_id)) if role_id else None
+        if not role:
+            await ctx.send("Verified role not configured.")
+            return
+        
+        conflicts = []
+        for m in role.members:
+            if await self.get_link_for_discord(m.id):
+                continue
+            
+            hit = await self._find_by_exact_name(m.display_name)
+            if not hit:
+                continue
+            
+            mc_name, mcid = hit
+            existing_link = await self.get_link_for_mc(mcid)
+            if existing_link:
+                conflicts.append(mcid)
+        
+        if not conflicts:
+            await ctx.send("✅ No conflicts found!")
+            return
+        
+        await ctx.send(f"🔄 Resolving {len(conflicts)} conflicts...")
+        
+        resolved = 0
+        for mcid in conflicts:
+            try:
+                # Simulate calling retro resolve for each
+                existing_link = await self.get_link_for_mc(mcid)
+                if not existing_link:
+                    continue
+                
+                linked_discord_id = int(existing_link['discord_id'])
+                
+                # Unlink
+                def _unlink():
+                    con = sqlite3.connect(self.links_db)
+                    try:
+                        con.execute("DELETE FROM links WHERE mc_user_id=?", (str(mcid),))
+                        con.commit()
+                    finally:
+                        con.close()
+                
+                await asyncio.get_running_loop().run_in_executor(None, _unlink)
+                
+                # Remove roles
+                linked_member = ctx.guild.get_member(linked_discord_id)
+                if linked_member and role and role in linked_member.roles:
+                    await linked_member.remove_roles(role, reason=f"MemberSync: Bulk conflict resolution by {ctx.author}")
+                    try:
+                        await linked_member.send(
+                            f"⚠️ Your link to MC `{mcid}` was removed due to conflict. Please re-verify with `!verify`"
+                        )
+                    except:
+                        pass
+                
+                resolved += 1
+            except Exception as e:
+                log.error(f"Failed to resolve conflict for MC-ID {mcid}: {e}")
+        
+        # Log
+        log_ch_id = await self.config.log_channel_id()
+        ch = ctx.guild.get_channel(int(log_ch_id)) if log_ch_id else None
+        if isinstance(ch, discord.TextChannel):
+            await ch.send(
+                f"🔄 **Bulk Conflict Resolution** by {ctx.author.mention}\n"
+                f"Resolved {resolved} conflicts. All affected users must re-verify."
+            )
+        
+        await ctx.send(f"✅ Resolved {resolved} conflicts! All affected users can now re-verify.")
+
     @membersync_group.group(name="bulk")
     async def bulk_group(self, ctx: commands.Context):
         """Bulk verification tools - scan ALL server members (not just verified)."""
