@@ -137,7 +137,6 @@ class MemberOverviewView(discord.ui.View):
     @discord.ui.button(
         label="Add Note",
         style=discord.ButtonStyle.success,
-        emoji="ðŸ“",
         custom_id="mm:add_note",
         row=1
     )
@@ -153,7 +152,6 @@ class MemberOverviewView(discord.ui.View):
     @discord.ui.button(
         label="Edit Note",
         style=discord.ButtonStyle.secondary,
-        emoji="âœï¸",
         custom_id="mm:edit_note",
         row=1
     )
@@ -177,7 +175,6 @@ class MemberOverviewView(discord.ui.View):
     @discord.ui.button(
         label="Delete Note",
         style=discord.ButtonStyle.danger,
-        emoji="ðŸ—‘ï¸",
         custom_id="mm:delete_note",
         row=1
     )
@@ -201,7 +198,6 @@ class MemberOverviewView(discord.ui.View):
     @discord.ui.button(
         label="Export Data",
         style=discord.ButtonStyle.secondary,
-        emoji="ðŸ’¾",
         custom_id="mm:export",
         row=1
     )
@@ -219,7 +215,6 @@ class MemberOverviewView(discord.ui.View):
     @discord.ui.button(
         label="Close",
         style=discord.ButtonStyle.danger,
-        emoji="âŒ",
         custom_id="mm:close",
         row=1
     )
