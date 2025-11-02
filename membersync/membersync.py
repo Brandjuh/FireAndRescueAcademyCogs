@@ -474,18 +474,20 @@ class MemberSync(commands.Cog):
                 # CRITICAL CHECK: Verify VIEW is using ONLY latest scrape
                 rows = await self._query_alliance("SELECT MAX(timestamp) as latest FROM members")
                 if rows and rows[0]["latest"]:
-                    db_latest = rows[0]["latest"][:19]
+                    db_latest = rows[0]["latest"]
                     
                     # Count how many scrapes have this timestamp
                     rows = await self._query_alliance("SELECT COUNT(*) as cnt FROM members WHERE timestamp=?", (db_latest,))
                     actual_latest_count = rows[0]["cnt"] if rows else 0
                     
-                    if db_latest == latest_timestamp and view_count == actual_latest_count:
+                    if view_count == actual_latest_count and latest_timestamp == db_latest:
                         view_status = f"✅ Active ({view_count} members)"
                     elif view_count > actual_latest_count * 1.5:
                         view_status = f"⚠️ DUPLICATES - Shows {view_count} but should be ~{actual_latest_count}"
+                    elif actual_latest_count == 0:
+                        view_status = f"⚠️ Empty - No data in latest scrape"
                     else:
-                        view_status = f"⚠️ STALE - DB has newer data"
+                        view_status = f"⚠️ STALE - VIEW has {view_count}, DB has {actual_latest_count}"
                 else:
                     view_status = f"✅ Active ({view_count} members)"
                     
