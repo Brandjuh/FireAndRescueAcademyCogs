@@ -845,6 +845,15 @@ class FAQManager(red_commands.Cog):
         """Setup category tags in forum channel."""
         existing_tags = {tag.name: tag for tag in forum_channel.available_tags}
         
+        # Always create an "Uncategorized" tag for FAQs without category
+        if "Uncategorized" not in existing_tags:
+            try:
+                if len(forum_channel.available_tags) < 20:
+                    await forum_channel.create_tag(name="Uncategorized", emoji="📋")
+                    log.info("Created forum tag: Uncategorized")
+            except Exception as e:
+                log.warning(f"Cannot create Uncategorized tag: {e}")
+        
         # Add missing category tags
         for category in self.FAQ_CATEGORIES:
             if category not in existing_tags:
@@ -861,13 +870,27 @@ class FAQManager(red_commands.Cog):
     async def _export_faq_to_forum(self, forum_channel: discord.ForumChannel, result: SearchResult):
         """Export a single FAQ to forum as a thread."""
         try:
-            # Get appropriate tag
+            # Get appropriate tag - try to match category first
             tag = None
+            
             if result.category:
+                # Try to find matching tag
                 for forum_tag in forum_channel.available_tags:
                     if forum_tag.name == result.category:
                         tag = forum_tag
                         break
+            
+            # If no tag found, use "Uncategorized" tag
+            if tag is None:
+                for forum_tag in forum_channel.available_tags:
+                    if forum_tag.name == "Uncategorized":
+                        tag = forum_tag
+                        break
+            
+            # If still no tag, use the first available tag (forum requires at least one)
+            if tag is None and forum_channel.available_tags:
+                tag = forum_channel.available_tags[0]
+                log.warning(f"No matching tag found for '{result.title}', using first available tag: {tag.name}")
             
             # Create thread name (max 100 chars)
             source_prefix = "📌" if result.source == Source.CUSTOM else "🔖"
@@ -882,12 +905,23 @@ class FAQManager(red_commands.Cog):
             
             # Add source info to footer
             if result.source == Source.CUSTOM:
-                embed.set_footer(text=f"Custom FAQ • ID: {result.faq_id}")
+                footer_text = f"Custom FAQ • ID: {result.faq_id}"
             else:
-                embed.set_footer(text=f"Helpshift Article • ID: {result.article_id}")
+                footer_text = f"Helpshift Article • ID: {result.article_id}"
             
-            # Create thread with embed
+            # Add category if different from tag
+            if result.category and tag and tag.name != result.category:
+                footer_text += f" • Category: {result.category}"
+            
+            embed.set_footer(text=footer_text)
+            
+            # Create thread with at least one tag (required by some forums)
             applied_tags = [tag] if tag else []
+            
+            # If forum requires tags but we have none, this will fail with proper error
+            if not applied_tags:
+                log.error(f"Cannot create thread '{result.title}' - no tags available and forum requires tags")
+                raise ValueError(f"Forum requires tags but no tags are available. Please create tags in {forum_channel.name}")
             
             # Discord requires either content or embed, we use embed
             message = await forum_channel.create_thread(
@@ -898,13 +932,19 @@ class FAQManager(red_commands.Cog):
                 auto_archive_duration=10080  # 7 days
             )
             
-            log.info(f"✅ Created forum thread: {thread_name}")
+            log.info(f"✅ Created forum thread: {thread_name} (tag: {tag.name if tag else 'none'})")
             
             return message.thread
             
         except discord.HTTPException as e:
             log.error(f"Discord API error creating thread '{result.title}': {e}")
             log.error(f"Error details - Status: {e.status}, Code: {e.code}, Text: {e.text}")
+            
+            # Provide helpful error message for tag requirement
+            if e.code == 40067:
+                log.error(f"Forum requires tags! Available tags: {[t.name for t in forum_channel.available_tags]}")
+                log.error(f"FAQ category: {result.category}")
+            
             raise
             
         except Exception as e:
