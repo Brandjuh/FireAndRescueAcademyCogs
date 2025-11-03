@@ -489,14 +489,192 @@ class FAQManager(red_commands.Cog):
     @faq_forum.command(name="export")
     @app_commands.describe(
         forum_channel="Forum channel to export to",
-        source="Which FAQs to export"
+        source="Which FAQs to export",
+        game_version="Filter by game version (USA content only by default)"
     )
     async def forum_export(
         self, 
         ctx: red_commands.Context, 
         forum_channel: discord.ForumChannel,
-        source: Literal["custom", "helpshift", "all"] = "all"
+        source: Literal["custom", "helpshift", "all"] = "all",
+        game_version: Literal["usa", "uk", "au", "all"] = "usa"
     ):
+        """
+        Export FAQs to a Discord Forum channel.
+        Creates one thread per FAQ with category tags.
+        
+        By default, only exports USA-specific content.
+        """
+        if not await self._is_editor(ctx.guild, ctx.author):
+            await ctx.send("❌ You don't have permission to export FAQs.", ephemeral=True)
+            return
+        
+        await ctx.defer(ephemeral=True)
+        
+        try:
+            # Collect FAQs to export
+            faqs_to_export = []
+            
+            if source in ["custom", "all"]:
+                for faq in self._faq_cache:
+                    faqs_to_export.append(SearchResult.from_faq_item(faq, 100))
+            
+            if source in ["helpshift", "all"]:
+                helpshift_articles = await self.database.get_all_articles()
+                
+                # Filter by game version
+                for article in helpshift_articles[:500]:  # Increased limit
+                    # Skip if version filtering is enabled
+                    if game_version != "all":
+                        if self._is_wrong_game_version(article.title, article.body_md, game_version):
+                            log.debug(f"Skipping {game_version.upper()}-filtered article: {article.title}")
+                            continue
+                    
+                    faqs_to_export.append(SearchResult.from_helpshift_article(article, 100))
+            
+            if not faqs_to_export:
+                await ctx.send(f"❌ No FAQs to export for {game_version.upper()} version.", ephemeral=True)
+                return
+            
+            # Setup forum tags (categories) and wait for them to be created
+            setup_msg = await ctx.send(
+                f"🏷️ Setting up forum tags... Please wait.",
+                ephemeral=True
+            )
+            
+            fallback_tag_name = await self._setup_forum_tags(forum_channel)
+            
+            # Refresh forum channel to get updated tags
+            forum_channel = await ctx.guild.fetch_channel(forum_channel.id)
+            
+            # Verify we have tags
+            if not forum_channel.available_tags:
+                await setup_msg.edit(
+                    content="❌ No tags available in forum and bot cannot create them. Please:\n"
+                            "1. Manually create at least one tag in the forum channel\n"
+                            "2. Or grant bot 'Manage Channels' permission\n"
+                            "3. Then try export again"
+                )
+                return
+            
+            version_text = f" ({game_version.upper()} version only)" if game_version != "all" else " (all versions)"
+            
+            await setup_msg.edit(
+                content=f"✅ Forum has {len(forum_channel.available_tags)} tags available.\n"
+                        f"📋 Default tag: **{fallback_tag_name}**\n"
+                        f"🌍 Version filter: **{version_text}**\n"
+                        f"Tags: {', '.join(t.name for t in forum_channel.available_tags[:5])}"
+            )
+            
+            # Export FAQs with aggressive rate limiting
+            exported = 0
+            failed = 0
+            skipped_version = 0
+            error_log = []
+            
+            progress_msg = await ctx.send(
+                f"📤 Starting export of {len(faqs_to_export)} FAQs to {forum_channel.mention}...\n\n"
+                f"⏱️ Estimated time: ~{len(faqs_to_export) * 4 // 60} minutes\n"
+                f"🌍 Exporting: {game_version.upper()}{version_text}\n"
+                f"*Please be patient - Discord rate limits are strict!*",
+                ephemeral=True
+            )
+            
+            consecutive_failures = 0
+            
+            for i, result in enumerate(faqs_to_export):
+                try:
+                    log.info(f"Exporting FAQ {i+1}/{len(faqs_to_export)}: {result.title}")
+                    
+                    await self._export_faq_to_forum(forum_channel, result, fallback_tag_name)
+                    exported += 1
+                    consecutive_failures = 0
+                    
+                    # Update progress every 5 FAQs or on last item
+                    if (i + 1) % 5 == 0 or (i + 1) == len(faqs_to_export):
+                        await progress_msg.edit(
+                            content=f"📤 Progress: {i + 1}/{len(faqs_to_export)} FAQs\n"
+                                    f"✅ Exported: {exported}\n"
+                                    f"❌ Failed: {failed}\n"
+                                    f"⏱️ ~{(len(faqs_to_export) - i - 1) * 4 // 60} minutes remaining"
+                        )
+                    
+                    # Aggressive rate limit protection - 4 seconds between each thread
+                    await asyncio.sleep(4)
+                    
+                except discord.HTTPException as e:
+                    log.error(f"Discord API error exporting '{result.title}': {e}")
+                    failed += 1
+                    consecutive_failures += 1
+                    error_log.append(f"API Error - {result.title[:50]}: {str(e)[:100]}")
+                    
+                    # If rate limited, wait much longer
+                    if e.status == 429:
+                        retry_after = getattr(e, 'retry_after', 60)
+                        log.warning(f"Rate limited! Waiting {retry_after} seconds...")
+                        await progress_msg.edit(
+                            content=f"⏸️ Rate limited by Discord!\n"
+                                    f"Waiting {int(retry_after)}s before continuing...\n\n"
+                                    f"📤 Progress: {i + 1}/{len(faqs_to_export)}\n"
+                                    f"✅ Exported: {exported}\n"
+                                    f"❌ Failed: {failed}"
+                        )
+                        await asyncio.sleep(retry_after + 5)  # Wait extra 5 seconds
+                        
+                        # Retry this FAQ
+                        try:
+                            await self._export_faq_to_forum(forum_channel, result, fallback_tag_name)
+                            exported += 1
+                            failed -= 1
+                            consecutive_failures = 0
+                        except Exception as retry_error:
+                            log.error(f"Retry failed for '{result.title}': {retry_error}")
+                    
+                    # If we have 3 consecutive failures, slow down even more
+                    if consecutive_failures >= 3:
+                        log.warning(f"Multiple consecutive failures, increasing delay")
+                        await asyncio.sleep(10)
+                    
+                    continue
+                    
+                except discord.Forbidden as e:
+                    log.error(f"Permission error exporting '{result.title}': {e}")
+                    failed += 1
+                    error_log.append(f"Permission - {result.title[:50]}")
+                    continue
+                    
+                except Exception as e:
+                    log.error(f"Unexpected error exporting '{result.title}': {e}", exc_info=True)
+                    failed += 1
+                    error_log.append(f"Error - {result.title[:50]}: {str(e)[:100]}")
+                    continue
+            
+            # Final report
+            embed = discord.Embed(
+                title="✅ Forum Export Complete" if failed == 0 else "⚠️ Forum Export Completed with Errors",
+                color=discord.Color.green() if failed == 0 else discord.Color.orange()
+            )
+            embed.add_field(name="Forum", value=forum_channel.mention, inline=False)
+            embed.add_field(name="🌍 Version", value=game_version.upper(), inline=True)
+            embed.add_field(name="✅ Exported", value=str(exported), inline=True)
+            embed.add_field(name="❌ Failed", value=str(failed), inline=True)
+            
+            # Add error details if any
+            if error_log:
+                error_text = "\n".join(error_log[:10])
+                if len(error_log) > 10:
+                    error_text += f"\n... and {len(error_log) - 10} more errors"
+                embed.add_field(name="🔍 Error Details", value=f"```{error_text[:1000]}```", inline=False)
+            
+            embed.set_footer(text="Export complete! Check bot logs for detailed information.")
+            
+            await progress_msg.edit(content=None, embed=embed)
+            
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to post in that forum channel.\n\nRequired permissions:\n- View Channel\n- Send Messages in Threads\n- Create Public Threads", ephemeral=True)
+        except Exception as e:
+            log.error(f"Forum export failed: {e}", exc_info=True)
+            await ctx.send(f"❌ Export failed: {str(e)}\n\nCheck bot logs for details.", ephemeral=True)
         """
         Export FAQs to a Discord Forum channel.
         Creates one thread per FAQ with category tags.
@@ -882,7 +1060,116 @@ class FAQManager(red_commands.Cog):
         
         await ctx.send(embed=embed, view=view, ephemeral=True)
     
-    async def _setup_forum_tags(self, forum_channel: discord.ForumChannel):
+    def _is_wrong_game_version(self, title: str, body: str, target_version: str) -> bool:
+        """
+        Check if content is for a different game version.
+        
+        Args:
+            title: Article title
+            body: Article body text
+            target_version: Target version (usa, uk, au)
+            
+        Returns:
+            True if content should be skipped (wrong version)
+        """
+        title_lower = title.lower()
+        body_lower = body.lower() if body else ""
+        
+        # Version indicators in title/body
+        version_indicators = {
+            "uk": ["(uk version)", "(uk)", "uk version", "uk only", "hart", "ses building"],
+            "au": ["(au version)", "(au)", "au version", "au only", "australian"],
+            "usa": ["(us version)", "(us)", "us version", "us only"]
+        }
+        
+        # Check if title/body explicitly mentions a different version
+        for version, indicators in version_indicators.items():
+            if version == target_version:
+                continue  # Skip checking our target version
+            
+            for indicator in indicators:
+                if indicator in title_lower or indicator in body_lower:
+                    log.debug(f"Found {version.upper()} indicator '{indicator}' in: {title}")
+                    return True
+        
+        # Special cases for UK-specific content
+        if target_version == "usa":
+            uk_specific_terms = [
+                "hart base",
+                "hart vehicle", 
+                "ses building",
+                "ses station",
+                "hazardous area response team",
+                "uk fire service"
+            ]
+            
+            for term in uk_specific_terms:
+                if term in title_lower:
+                    log.debug(f"Found UK-specific term '{term}' in: {title}")
+                    return True
+        
+        # If no version-specific markers found, include it
+        return False
+    
+    async def _setup_forum_tags(self, forum_channel: discord.ForumChannel) -> str:
+        """
+        Setup category tags in forum channel.
+        
+        Returns:
+            Name of the fallback tag to use
+        """
+        existing_tags = {tag.name: tag for tag in forum_channel.available_tags}
+        
+        # Determine fallback tag name
+        fallback_tag_name = None
+        
+        # Check for common fallback tag names in order of preference
+        fallback_options = ["Official Game FAQ", "Uncategorized", "General", "FAQ"]
+        
+        for option in fallback_options:
+            if option in existing_tags:
+                fallback_tag_name = option
+                log.info(f"Using existing fallback tag: {fallback_tag_name}")
+                break
+        
+        # If no fallback found, we'll create one
+        if not fallback_tag_name:
+            fallback_tag_name = "Official Game FAQ"
+        
+        tags_to_create = []
+        
+        # Create fallback tag if it doesn't exist
+        if fallback_tag_name not in existing_tags:
+            tags_to_create.append((fallback_tag_name, "📋"))
+        
+        # Add missing category tags
+        for category in self.FAQ_CATEGORIES:
+            if category not in existing_tags and len(forum_channel.available_tags) + len(tags_to_create) < 20:
+                tags_to_create.append((category, None))
+        
+        # Create tags with delay between each
+        for tag_name, emoji in tags_to_create:
+            try:
+                if len(forum_channel.available_tags) < 20:
+                    if emoji:
+                        await forum_channel.create_tag(name=tag_name, emoji=emoji)
+                    else:
+                        await forum_channel.create_tag(name=tag_name)
+                    log.info(f"Created forum tag: {tag_name}")
+                    await asyncio.sleep(1)  # Wait between tag creations
+            except discord.Forbidden:
+                log.warning(f"Cannot create forum tag {tag_name} - missing Manage Channels permission")
+            except discord.HTTPException as e:
+                log.error(f"Failed to create forum tag {tag_name}: {e}")
+            except Exception as e:
+                log.error(f"Unexpected error creating tag {tag_name}: {e}")
+        
+        # Wait a bit for Discord to sync
+        if tags_to_create:
+            await asyncio.sleep(2)
+            log.info(f"Created {len(tags_to_create)} tags, waiting for sync...")
+        
+        return fallback_tag_name
         """Setup category tags in forum channel."""
         existing_tags = {tag.name: tag for tag in forum_channel.available_tags}
         
