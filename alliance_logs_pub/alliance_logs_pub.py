@@ -11,7 +11,7 @@ import discord
 from redbot.core import commands, checks, Config
 from redbot.core.data_manager import cog_data_path
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 log = logging.getLogger("red.FARA.AllianceLogsPub")
 
@@ -105,6 +105,8 @@ def now_utc() -> str:
     return datetime.utcnow().isoformat()
 
 class AllianceLogsPub(commands.Cog):
+    """Robust alliance logs publisher - tracks only last_id, no posted_logs table"""
+    
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=0xFA109AF1, force_registration=True)
@@ -117,22 +119,21 @@ class AllianceLogsPub(commands.Cog):
     async def cog_load(self):
         await self._init_db()
         await self._maybe_start_background()
+        log.info("AllianceLogsPub v%s loaded (robust mode - no posted_logs table)", __version__)
 
     async def cog_unload(self):
         if self._bg_task:
             self._bg_task.cancel()
 
     async def _init_db(self):
+        """Initialize database - ONLY stores last_id, no posted_logs table"""
         self.data_path.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("CREATE TABLE IF NOT EXISTS state(k TEXT PRIMARY KEY, v TEXT)")
-            await db.execute("""
-            CREATE TABLE IF NOT EXISTS posted_logs(
-                log_id INTEGER PRIMARY KEY,
-                posted_at TEXT NOT NULL
-            )
-            """)
+            # Clean up old posted_logs table if it exists (migration)
+            await db.execute("DROP TABLE IF EXISTS posted_logs")
             await db.commit()
+            log.info("Database initialized (posted_logs table removed)")
 
     async def _get_last_id(self) -> int:
         async with aiosqlite.connect(self.db_path) as db:
@@ -149,24 +150,6 @@ class AllianceLogsPub(commands.Cog):
                 (str(int(v)),),
             )
             await db.commit()
-
-    async def _mark_log_posted(self, log_id: int) -> bool:
-        async with aiosqlite.connect(self.db_path) as db:
-            try:
-                await db.execute(
-                    "INSERT INTO posted_logs(log_id, posted_at) VALUES(?, ?)",
-                    (int(log_id), now_utc())
-                )
-                await db.commit()
-                return True
-            except aiosqlite.IntegrityError:
-                log.warning("Duplicate detected: Log ID %d was already posted", log_id)
-                return False
-
-    async def _is_already_posted(self, log_id: int) -> bool:
-        async with aiosqlite.connect(self.db_path) as db:
-            cur = await db.execute("SELECT 1 FROM posted_logs WHERE log_id = ?", (int(log_id),))
-            return await cur.fetchone() is not None
 
     def _profile_url(self, mc_user_id: str) -> Optional[str]:
         if not mc_user_id:
@@ -302,12 +285,9 @@ class AllianceLogsPub(commands.Cog):
         return NL.join(lines)
 
     async def _publish_single_log(self, row: Dict[str, Any], main_ch: discord.TextChannel, 
-                                   mirrors: Dict, style: str, emoji_titles: bool, skip_duplicate_check: bool = False) -> bool:
+                                   mirrors: Dict, style: str, emoji_titles: bool) -> bool:
+        """Publish a single log - NO duplicate checking, assumes sequential processing"""
         log_id = int(row["id"])
-        
-        if not skip_duplicate_check and await self._is_already_posted(log_id):
-            log.info("Skipping log ID %d - already posted", log_id)
-            return False
         
         title, color, emoji, key = self._title_from_row(row)
         title_text = f"{emoji} {title}" if emoji_titles and emoji else title
@@ -363,14 +343,11 @@ class AllianceLogsPub(commands.Cog):
             log.exception("Unexpected error posting log ID %d: %s", log_id, ex)
             return False
 
-        if not skip_duplicate_check:
-            if not await self._mark_log_posted(log_id):
-                log.error("RACE CONDITION: Log ID %d was posted by another process!", log_id)
-                return False
-        
+        # Update last_id after successful post
         await self._set_last_id(log_id)
         log.debug("Updated last_id to %d after posting", log_id)
 
+        # Mirror to action-specific channels
         if key and key in mirrors:
             m = mirrors[key]
             if m.get("enabled"):
@@ -392,6 +369,7 @@ class AllianceLogsPub(commands.Cog):
         return True
 
     async def _tick_once(self) -> int:
+        """Process one batch of logs - sequential, no duplicate checking needed"""
         if self._posting_lock.locked():
             log.info("Skipping tick - already posting")
             return 0
@@ -399,6 +377,7 @@ class AllianceLogsPub(commands.Cog):
         async with self._posting_lock:
             sc = self.bot.get_cog("LogsScraper")
             if not sc or not hasattr(sc, "get_logs_after"):
+                log.warning("LogsScraper not available")
                 return 0
             
             last_id = await self._get_last_id()
@@ -406,12 +385,17 @@ class AllianceLogsPub(commands.Cog):
             
             guild = self.bot.guilds[0] if self.bot.guilds else None
             if not guild:
+                log.warning("No guild available")
                 return 0
+            
             ch_id = await self.config.main_channel_id()
             if not ch_id:
+                log.warning("No main channel configured")
                 return 0
+            
             main_ch = guild.get_channel(int(ch_id))
             if not isinstance(main_ch, discord.TextChannel):
+                log.warning("Main channel not found or not a text channel")
                 return 0
             
             mirrors = await self.config.mirrors()
@@ -427,8 +411,8 @@ class AllianceLogsPub(commands.Cog):
             if not rows:
                 return 0
             
-            log.info("Fetched %d logs after ID %d (IDs: %s)", 
-                    len(rows), last_id, [r["id"] for r in rows[:10]])
+            log.info("Fetched %d logs after ID %d (IDs: %s to %s)", 
+                    len(rows), last_id, rows[0]["id"], rows[-1]["id"])
             
             posted = 0
             for idx, row in enumerate(rows):
@@ -436,10 +420,13 @@ class AllianceLogsPub(commands.Cog):
                 
                 if success:
                     posted += 1
+                    # Rate limiting every 5 posts
                     if (posted % 5) == 0:
                         await asyncio.sleep(1)
                 else:
-                    log.debug("Failed to post log ID %d, continuing", row["id"])
+                    # If posting fails, stop here - don't skip logs
+                    log.warning("Failed to post log ID %d, stopping batch", row["id"])
+                    break
             
             log.info("Posted %d/%d logs successfully", posted, len(rows))
             return posted
@@ -450,6 +437,7 @@ class AllianceLogsPub(commands.Cog):
 
     async def _bg_loop(self):
         await self.bot.wait_until_red_ready()
+        log.info("Background posting loop started")
         while True:
             try:
                 await self._tick_once()
@@ -473,10 +461,11 @@ class AllianceLogsPub(commands.Cog):
         cfg = await self.config.all()
         lines = [
             "```",
-            f"AllianceLogsPub version: {__version__}",
+            f"AllianceLogsPub version: {__version__} (Robust Mode)",
             f"Style: {cfg['style']}  Emoji titles: {cfg['emoji_titles']}",
             f"Max posts per run: {cfg['max_posts_per_run']}",
             f"Mirrors configured: {len(cfg.get('mirrors', {}))}",
+            "No posted_logs table - sequential processing only",
             "```",
         ]
         await ctx.send(NL.join(lines))
@@ -489,6 +478,7 @@ class AllianceLogsPub(commands.Cog):
         scraper_available = sc is not None and hasattr(sc, "get_logs_after")
         
         total_logs = "N/A"
+        pending = 0
         if scraper_available:
             try:
                 import sqlite3
@@ -498,38 +488,32 @@ class AllianceLogsPub(commands.Cog):
                 row = cursor.fetchone()
                 if row:
                     total_logs = f"{row[0]} (max ID: {row[1]})"
+                    pending = row[1] - last_id if row[1] else 0
                 conn.close()
             except Exception as e:
                 total_logs = f"Error: {e}"
-        
-        posted_count = 0
-        try:
-            async with aiosqlite.connect(self.db_path) as db:
-                cur = await db.execute("SELECT COUNT(*) FROM posted_logs")
-                row = await cur.fetchone()
-                if row:
-                    posted_count = row[0]
-        except Exception:
-            pass
         
         cfg = await self.config.all()
         
         lines = [
             "```",
-            "=== AllianceLogsPub Status ===",
+            "=== AllianceLogsPub Status (Robust Mode) ===",
             f"Last processed ID: {last_id}",
             f"Total logs in DB: {total_logs}",
-            f"Posted logs tracked: {posted_count}",
+            f"Pending logs: {pending}",
             f"Scraper available: {scraper_available}",
             f"Max posts per run: {cfg['max_posts_per_run']}",
             f"Interval: {cfg['interval_minutes']} minutes",
             f"Main channel: {cfg.get('main_channel_id')}",
+            "",
+            "Note: No posted_logs table - sequential only",
             "```",
         ]
         await ctx.send("\n".join(lines))
 
     @alog_group.command(name="setlastid")
     async def setlastid(self, ctx: commands.Context, new_id: int):
+        """Set last processed ID - use to skip or reprocess logs"""
         old_id = await self._get_last_id()
         await self._set_last_id(int(new_id))
         await ctx.send(f"✅ Updated last_id from {old_id} to {new_id}")
@@ -643,42 +627,9 @@ class AllianceLogsPub(commands.Cog):
 
     @alog_group.command(name="run")
     async def run(self, ctx: commands.Context):
+        """Manually trigger one batch of posts"""
         n = await self._tick_once()
         await ctx.send(f"✅ Posted {n} new log(s).")
-
-    @alog_group.command(name="cleanposted")
-    async def clean_posted(self, ctx: commands.Context, from_id: int, to_id: int):
-        """Remove entries from posted_logs table between two IDs (inclusive)
-        
-        This allows logs to be re-posted. Use with caution!
-        Example: !alog cleanposted 1286 1422
-        """
-        if from_id > to_id:
-            await ctx.send("❌ from_id must be less than or equal to to_id")
-            return
-        
-        if to_id - from_id > 1000:
-            await ctx.send("❌ Can only clean max 1000 logs at once (safety limit)")
-            return
-        
-        async with aiosqlite.connect(self.db_path) as db:
-            cur = await db.execute(
-                "SELECT COUNT(*) FROM posted_logs WHERE log_id >= ? AND log_id <= ?",
-                (from_id, to_id)
-            )
-            row = await cur.fetchone()
-            count_before = row[0] if row else 0
-            
-            await db.execute(
-                "DELETE FROM posted_logs WHERE log_id >= ? AND log_id <= ?",
-                (from_id, to_id)
-            )
-            await db.commit()
-        
-        await ctx.send(f"✅ Cleaned {count_before} entries from posted_logs (IDs {from_id}-{to_id})")
-        await ctx.send(f"ℹ️ These logs can now be re-posted. Run `!alog run` to post them.")
-        log.info("Cleaned posted_logs: %d entries between %d-%d (by %s)", 
-                 count_before, from_id, to_id, ctx.author)
 
     @alog_group.command(name="taskstatus")
     async def task_status(self, ctx: commands.Context):
