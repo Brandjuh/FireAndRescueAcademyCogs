@@ -339,11 +339,11 @@ class FAQManager(red_commands.Cog):
     async def faq_list(self, ctx: red_commands.Context):
         """List all custom FAQs with their IDs."""
         if not self._faq_cache:
-            await ctx.send("ðŸ“ No custom FAQs found.", ephemeral=True)
+            await ctx.send("No custom FAQs found.", ephemeral=True)
             return
         
         embed = discord.Embed(
-            title="ðŸ“š Custom FAQs",
+            title="Custom FAQs",
             description=f"Total: {len(self._faq_cache)} FAQ(s)",
             color=discord.Color.green()
         )
@@ -358,10 +358,10 @@ class FAQManager(red_commands.Cog):
         for category, faqs in sorted(categorized.items()):
             lines = []
             for faq in faqs[:10]:
-                lines.append(f"`ID {faq.id:03d}` â€¢ {faq.question[:60]}")
+                lines.append(f"`ID {faq.id:03d}` - {faq.question[:60]}")
             
             embed.add_field(
-                name=f"ðŸ“‚ {category}",
+                name=f"[{category}]",
                 value="\n".join(lines),
                 inline=False
             )
