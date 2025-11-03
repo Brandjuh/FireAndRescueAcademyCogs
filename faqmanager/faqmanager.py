@@ -478,7 +478,265 @@ class FAQManager(red_commands.Cog):
             log.setLevel(logging.INFO)
             await ctx.send("✅ Debug mode **disabled**.", ephemeral=True)
     
-    # ==================== CRAWL COMMANDS ====================
+    # ==================== FORUM EXPORT ====================
+    
+    @faq_admin.group(name="forum")
+    async def faq_forum(self, ctx: red_commands.Context):
+        """Export FAQs to Discord Forum channel."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+    
+    @faq_forum.command(name="export")
+    @app_commands.describe(
+        forum_channel="Forum channel to export to",
+        source="Which FAQs to export"
+    )
+    async def forum_export(
+        self, 
+        ctx: red_commands.Context, 
+        forum_channel: discord.ForumChannel,
+        source: Literal["custom", "helpshift", "all"] = "all"
+    ):
+        """
+        Export FAQs to a Discord Forum channel.
+        Creates one thread per FAQ with category tags.
+        """
+        if not await self._is_editor(ctx.guild, ctx.author):
+            await ctx.send("❌ You don't have permission to export FAQs.", ephemeral=True)
+            return
+        
+        await ctx.defer(ephemeral=True)
+        
+        try:
+            # Collect FAQs to export
+            faqs_to_export = []
+            
+            if source in ["custom", "all"]:
+                for faq in self._faq_cache:
+                    faqs_to_export.append(SearchResult.from_faq_item(faq, 100))
+            
+            if source in ["helpshift", "all"]:
+                helpshift_articles = await self.database.get_all_articles()
+                for article in helpshift_articles[:100]:  # Limit to prevent rate limiting
+                    faqs_to_export.append(SearchResult.from_helpshift_article(article, 100))
+            
+            if not faqs_to_export:
+                await ctx.send("❌ No FAQs to export.", ephemeral=True)
+                return
+            
+            # Setup forum tags (categories)
+            await self._setup_forum_tags(forum_channel)
+            
+            # Export FAQs
+            exported = 0
+            failed = 0
+            
+            progress_msg = await ctx.send(
+                f"📤 Exporting {len(faqs_to_export)} FAQs to {forum_channel.mention}...",
+                ephemeral=True
+            )
+            
+            for i, result in enumerate(faqs_to_export):
+                try:
+                    await self._export_faq_to_forum(forum_channel, result)
+                    exported += 1
+                    
+                    # Update progress every 5 FAQs
+                    if (i + 1) % 5 == 0:
+                        await progress_msg.edit(
+                            content=f"📤 Progress: {i + 1}/{len(faqs_to_export)} FAQs exported..."
+                        )
+                    
+                    # Rate limit protection
+                    await asyncio.sleep(1)
+                    
+                except Exception as e:
+                    log.error(f"Failed to export FAQ {result.title}: {e}")
+                    failed += 1
+            
+            # Final report
+            embed = discord.Embed(
+                title="✅ Forum Export Complete",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Forum", value=forum_channel.mention, inline=False)
+            embed.add_field(name="✅ Exported", value=str(exported), inline=True)
+            embed.add_field(name="❌ Failed", value=str(failed), inline=True)
+            embed.add_field(name="Total", value=str(len(faqs_to_export)), inline=True)
+            
+            await progress_msg.edit(content=None, embed=embed)
+            
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to post in that forum channel.", ephemeral=True)
+        except Exception as e:
+            log.error(f"Forum export failed: {e}", exc_info=True)
+            await ctx.send(f"❌ Export failed: {str(e)}", ephemeral=True)
+    
+    @faq_forum.command(name="sync")
+    @app_commands.describe(forum_channel="Forum channel to sync")
+    async def forum_sync(self, ctx: red_commands.Context, forum_channel: discord.ForumChannel):
+        """
+        Sync existing forum threads with updated FAQ content.
+        Updates threads that match FAQ titles.
+        """
+        if not await self._is_editor(ctx.guild, ctx.author):
+            await ctx.send("❌ You don't have permission to sync FAQs.", ephemeral=True)
+            return
+        
+        await ctx.defer(ephemeral=True)
+        
+        try:
+            # Get all active threads in forum
+            threads = forum_channel.threads
+            archived_threads = []
+            
+            # Also get archived threads
+            async for thread in forum_channel.archived_threads(limit=100):
+                archived_threads.append(thread)
+            
+            all_threads = list(threads) + archived_threads
+            
+            if not all_threads:
+                await ctx.send("❌ No threads found in forum to sync.", ephemeral=True)
+                return
+            
+            updated = 0
+            skipped = 0
+            
+            progress_msg = await ctx.send(
+                f"🔄 Syncing {len(all_threads)} forum threads...",
+                ephemeral=True
+            )
+            
+            # Build FAQ lookup by title
+            faq_lookup = {}
+            for faq in self._faq_cache:
+                faq_lookup[faq.question.lower()] = SearchResult.from_faq_item(faq, 100)
+            
+            helpshift_articles = await self.database.get_all_articles()
+            for article in helpshift_articles:
+                faq_lookup[article.title.lower()] = SearchResult.from_helpshift_article(article, 100)
+            
+            for thread in all_threads:
+                try:
+                    # Extract FAQ title from thread name (remove emojis and [Custom]/[Helpshift])
+                    thread_title = thread.name
+                    for prefix in ["📌 ", "🔖 ", "[Custom] ", "[Helpshift] "]:
+                        thread_title = thread_title.replace(prefix, "")
+                    
+                    thread_title = thread_title.strip().lower()
+                    
+                    if thread_title in faq_lookup:
+                        result = faq_lookup[thread_title]
+                        
+                        # Get first message in thread
+                        async for message in thread.history(limit=1, oldest_first=True):
+                            if message.author == ctx.guild.me:
+                                # Update the message
+                                embed = await self._create_result_embed(result, "", public=True)
+                                await message.edit(embed=embed)
+                                updated += 1
+                                break
+                    else:
+                        skipped += 1
+                    
+                    await asyncio.sleep(0.5)
+                    
+                except Exception as e:
+                    log.error(f"Failed to sync thread {thread.name}: {e}")
+                    skipped += 1
+            
+            embed = discord.Embed(
+                title="✅ Forum Sync Complete",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Forum", value=forum_channel.mention, inline=False)
+            embed.add_field(name="🔄 Updated", value=str(updated), inline=True)
+            embed.add_field(name="⏭️ Skipped", value=str(skipped), inline=True)
+            embed.add_field(name="Total Threads", value=str(len(all_threads)), inline=True)
+            
+            await progress_msg.edit(content=None, embed=embed)
+            
+        except discord.Forbidden:
+            await ctx.send("❌ I don't have permission to access that forum channel.", ephemeral=True)
+        except Exception as e:
+            log.error(f"Forum sync failed: {e}", exc_info=True)
+            await ctx.send(f"❌ Sync failed: {str(e)}", ephemeral=True)
+    
+    @faq_forum.command(name="clear")
+    @app_commands.describe(forum_channel="Forum channel to clear")
+    async def forum_clear(self, ctx: red_commands.Context, forum_channel: discord.ForumChannel):
+        """
+        Clear all threads from a forum channel (requires confirmation).
+        ⚠️ Warning: This will delete ALL threads in the forum!
+        """
+        if not await self._is_editor(ctx.guild, ctx.author):
+            await ctx.send("❌ You don't have permission to clear forums.", ephemeral=True)
+            return
+        
+        # Show confirmation
+        view = ConfirmForumClearView(self, forum_channel, ctx.author.id)
+        embed = discord.Embed(
+            title="⚠️ Confirm Forum Clear",
+            description=f"Are you sure you want to delete **ALL threads** from {forum_channel.mention}?\n\n**This cannot be undone!**",
+            color=discord.Color.red()
+        )
+        
+        await ctx.send(embed=embed, view=view, ephemeral=True)
+    
+    async def _setup_forum_tags(self, forum_channel: discord.ForumChannel):
+        """Setup category tags in forum channel."""
+        existing_tags = {tag.name: tag for tag in forum_channel.available_tags}
+        
+        # Add missing category tags
+        for category in self.FAQ_CATEGORIES:
+            if category not in existing_tags:
+                try:
+                    # Discord allows max 20 tags
+                    if len(forum_channel.available_tags) < 20:
+                        await forum_channel.create_tag(name=category)
+                        log.info(f"Created forum tag: {category}")
+                except discord.Forbidden:
+                    log.warning(f"Cannot create forum tag {category} - missing permissions")
+                except Exception as e:
+                    log.error(f"Failed to create forum tag {category}: {e}")
+    
+    async def _export_faq_to_forum(self, forum_channel: discord.ForumChannel, result: SearchResult):
+        """Export a single FAQ to forum as a thread."""
+        # Get appropriate tag
+        tag = None
+        if result.category:
+            for forum_tag in forum_channel.available_tags:
+                if forum_tag.name == result.category:
+                    tag = forum_tag
+                    break
+        
+        # Create thread name
+        source_prefix = "📌" if result.source == Source.CUSTOM else "🔖"
+        thread_name = f"{source_prefix} {result.title[:95]}"  # Max 100 chars for thread name
+        
+        # Create embed
+        embed = await self._create_result_embed(result, "", public=True)
+        
+        # Add source info to footer
+        if result.source == Source.CUSTOM:
+            embed.set_footer(text=f"Custom FAQ • ID: {result.faq_id}")
+        else:
+            embed.set_footer(text=f"Helpshift Article • ID: {result.article_id}")
+        
+        # Create thread
+        applied_tags = [tag] if tag else []
+        
+        thread = await forum_channel.create_thread(
+            name=thread_name,
+            content=None,
+            embed=embed,
+            applied_tags=applied_tags
+        )
+        
+        log.info(f"Created forum thread: {thread_name}")
+        
+        return thread
     
     @red_commands.hybrid_group(name="faqcrawl", aliases=["crawl"])
     @checks.admin_or_permissions(manage_guild=True)
@@ -1125,6 +1383,75 @@ class ConfirmOutdatedView(discord.ui.View):
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Cancel the report."""
         await interaction.response.send_message("❌ Report cancelled.", ephemeral=True)
+        self.stop()
+    
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user_id
+
+
+class ConfirmForumClearView(discord.ui.View):
+    """View for confirming forum clear operation."""
+    
+    def __init__(self, cog: FAQManager, forum_channel: discord.ForumChannel, user_id: int):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.forum_channel = forum_channel
+        self.user_id = user_id
+    
+    @discord.ui.button(label="⚠️ Confirm Clear", style=discord.ButtonStyle.danger)
+    async def confirm_clear(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            deleted = 0
+            failed = 0
+            
+            # Get all threads
+            threads = list(self.forum_channel.threads)
+            
+            # Get archived threads
+            async for thread in self.forum_channel.archived_threads(limit=100):
+                threads.append(thread)
+            
+            progress_msg = await interaction.followup.send(
+                f"🗑️ Deleting {len(threads)} threads...",
+                ephemeral=True
+            )
+            
+            for i, thread in enumerate(threads):
+                try:
+                    await thread.delete()
+                    deleted += 1
+                    
+                    if (i + 1) % 5 == 0:
+                        await progress_msg.edit(
+                            content=f"🗑️ Progress: {i + 1}/{len(threads)} threads deleted..."
+                        )
+                    
+                    await asyncio.sleep(1)  # Rate limit protection
+                    
+                except Exception as e:
+                    log.error(f"Failed to delete thread {thread.name}: {e}")
+                    failed += 1
+            
+            embed = discord.Embed(
+                title="✅ Forum Cleared",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Forum", value=self.forum_channel.mention, inline=False)
+            embed.add_field(name="🗑️ Deleted", value=str(deleted), inline=True)
+            embed.add_field(name="❌ Failed", value=str(failed), inline=True)
+            
+            await progress_msg.edit(content=None, embed=embed)
+            self.stop()
+            
+        except Exception as e:
+            log.error(f"Forum clear failed: {e}", exc_info=True)
+            await interaction.followup.send(f"❌ Clear failed: {str(e)}", ephemeral=True)
+    
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("❌ Forum clear cancelled.", ephemeral=True)
         self.stop()
     
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
