@@ -88,6 +88,7 @@ class MemberOverviewView(discord.ui.View):
         # Row 1: Context-specific action buttons
         if self.current_tab == "notes":
             self.add_item(AddNoteButton(self, row=1))
+            self.add_item(ViewNoteButton(self, row=1))  # 🔧 NEW: View full note
             self.add_item(EditNoteButton(self, row=1))
             self.add_item(DeleteNoteButton(self, row=1))
         
@@ -382,7 +383,7 @@ class MemberOverviewView(discord.ui.View):
                 inline=False
             )
         
-        embed.set_footer(text=f"Total notes: {len(notes)} | Use Edit/Delete buttons to manage")
+        embed.set_footer(text=f"Total notes: {len(notes)} | Use 'View Note' to see full text • Edit/Delete to manage")
         
         return embed
     
@@ -1002,6 +1003,24 @@ class DeleteNoteButton(discord.ui.Button):
         await interaction.response.send_modal(modal)
 
 
+class ViewNoteButton(discord.ui.Button):
+    """View full note button."""
+    
+    def __init__(self, parent_view: MemberOverviewView, row: int):
+        super().__init__(
+            label="View Note",
+            style=discord.ButtonStyle.primary,
+            emoji="👁️",
+            custom_id="mm:view_note",
+            row=row
+        )
+        self.parent_view = parent_view
+    
+    async def callback(self, interaction: discord.Interaction):
+        modal = ViewNoteModal(self.parent_view)
+        await interaction.response.send_modal(modal)
+
+
 # ==================== SANCTION BUTTONS ====================
 
 class AddSanctionButton(discord.ui.Button):
@@ -1394,6 +1413,125 @@ class DeleteNoteModal(discord.ui.Modal, title="Delete Note"):
             log.error(f"Error deleting note: {e}")
             await interaction.response.send_message(
                 f"❌ Error deleting note: {str(e)}",
+                ephemeral=True
+            )
+
+
+class ViewNoteModal(discord.ui.Modal, title="View Full Note"):
+    """Modal to view the full text of a note."""
+    
+    ref_code = discord.ui.TextInput(
+        label="Note Reference Code",
+        style=discord.TextStyle.short,
+        placeholder="e.g., N2025-000123",
+        required=True,
+        max_length=50
+    )
+    
+    def __init__(self, parent_view: MemberOverviewView):
+        super().__init__()
+        self.parent_view = parent_view
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        """Display the full note."""
+        try:
+            # Get the note
+            notes = await self.parent_view.db.get_notes(
+                ref_code=self.ref_code.value
+            )
+            
+            if not notes:
+                await interaction.response.send_message(
+                    f"❌ Note `{self.ref_code.value}` not found.",
+                    ephemeral=True
+                )
+                return
+            
+            note = notes[0]
+            
+            # Build detailed embed
+            embed = discord.Embed(
+                title=f"📝 Full Note: {self.ref_code.value}",
+                color=discord.Color.gold()
+            )
+            
+            # Note text (full, no truncation)
+            note_text = note.get("note_text", "")
+            char_count = len(note_text)
+            
+            embed.description = f"{note_text}\n\n*({char_count} characters)*"
+            
+            # Author info
+            author_name = note.get("author_name", "Unknown")
+            created_at = note.get("created_at", 0)
+            
+            author_info = (
+                f"**Author:** {author_name}\n"
+                f"**Created:** {format_timestamp(created_at, 'F')}\n"
+                f"**Age:** {format_timestamp(created_at, 'R')}"
+            )
+            
+            # Check if edited
+            if note.get("updated_by"):
+                updated_by_name = note.get("updated_by_name", "Unknown")
+                updated_at = note.get("updated_at", 0)
+                author_info += f"\n**Last edited by:** {updated_by_name}\n"
+                author_info += f"**Edited:** {format_timestamp(updated_at, 'R')}"
+            
+            embed.add_field(
+                name="ℹ️ Note Information",
+                value=author_info,
+                inline=False
+            )
+            
+            # Status
+            status = note.get("status", "active")
+            is_pinned = note.get("is_pinned", False)
+            
+            status_info = []
+            if status == "active":
+                status_info.append("**Status:** 🟢 Active")
+            else:
+                status_info.append(f"**Status:** ⚫ {status.title()}")
+            
+            if is_pinned:
+                status_info.append("**Pinned:** 📌 Yes")
+            
+            if note.get("expires_at"):
+                expires_at = note["expires_at"]
+                status_info.append(f"**Expires:** {format_timestamp(expires_at, 'R')}")
+            
+            if note.get("infraction_ref"):
+                status_info.append(f"**Linked to:** `{note['infraction_ref']}`")
+            
+            if status_info:
+                embed.add_field(
+                    name="📊 Status",
+                    value="\n".join(status_info),
+                    inline=False
+                )
+            
+            # Tags
+            if note.get("tags"):
+                try:
+                    import json
+                    tags = json.loads(note["tags"]) if isinstance(note["tags"], str) else note["tags"]
+                    if tags:
+                        tag_str = ", ".join(f"`{tag}`" for tag in tags)
+                        embed.add_field(
+                            name="🏷️ Tags",
+                            value=tag_str,
+                            inline=False
+                        )
+                except:
+                    pass
+            
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            log.error(f"Error viewing note: {e}", exc_info=True)
+            await interaction.response.send_message(
+                f"❌ Error viewing note: {str(e)}",
                 ephemeral=True
             )
 
