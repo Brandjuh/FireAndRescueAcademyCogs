@@ -522,13 +522,23 @@ class FAQManager(red_commands.Cog):
             if source in ["helpshift", "all"]:
                 helpshift_articles = await self.database.get_all_articles()
                 
-                # Filter by game version
+                # Filter by game version and content quality
                 for article in helpshift_articles[:500]:  # Increased limit
                     # Skip if version filtering is enabled
                     if game_version != "all":
                         if self._is_wrong_game_version(article.title, article.body_md, game_version):
                             log.debug(f"Skipping {game_version.upper()}-filtered article: {article.title}")
                             continue
+                    
+                    # Skip articles without meaningful content
+                    if not article.body_md or len(article.body_md.strip()) < 100:
+                        log.debug(f"Skipping article with insufficient content (<100 chars): {article.title}")
+                        continue
+                    
+                    # Skip if body is just the title repeated
+                    if article.body_md.strip().lower() == article.title.strip().lower():
+                        log.debug(f"Skipping article with duplicate title as body: {article.title}")
+                        continue
                     
                     faqs_to_export.append(SearchResult.from_helpshift_article(article, 100))
             
@@ -586,7 +596,7 @@ class FAQManager(red_commands.Cog):
                 try:
                     log.info(f"Exporting FAQ {i+1}/{len(faqs_to_export)}: {result.title}")
                     
-                    await self._export_faq_to_forum(forum_channel, result, fallback_tag_name)
+                    await self._export_faq_to_forum(forum_channel, result, fallback_tag_name=fallback_tag_name)
                     exported += 1
                     consecutive_failures = 0
                     
@@ -623,7 +633,7 @@ class FAQManager(red_commands.Cog):
                         
                         # Retry this FAQ
                         try:
-                            await self._export_faq_to_forum(forum_channel, result, fallback_tag_name)
+                            await self._export_faq_to_forum(forum_channel, result, fallback_tag_name=fallback_tag_name)
                             exported += 1
                             failed -= 1
                             consecutive_failures = 0
@@ -998,13 +1008,15 @@ class FAQManager(red_commands.Cog):
             
             # Test tag creation
             await ctx.send("🏷️ Setting up forum tags...", ephemeral=True)
-            await self._setup_forum_tags(forum_channel)
+            fallback_tag_name = await self._setup_forum_tags(forum_channel)
+            
+            await ctx.send(f"✅ Fallback tag set to: **{fallback_tag_name}**", ephemeral=True)
             
             # Test thread creation
             await ctx.send("📝 Creating test thread...", ephemeral=True)
             
             try:
-                thread = await self._export_faq_to_forum(forum_channel, test_faq)
+                thread = await self._export_faq_to_forum(forum_channel, test_faq, fallback_tag_name=fallback_tag_name)
                 
                 success_embed = discord.Embed(
                     title="✅ Test Successful!",
@@ -1074,39 +1086,45 @@ class FAQManager(red_commands.Cog):
         """
         title_lower = title.lower()
         body_lower = body.lower() if body else ""
+        combined = title_lower + " " + body_lower
         
-        # Version indicators in title/body
+        # Version indicators - must be case-insensitive and catch all variants
         version_indicators = {
-            "uk": ["(uk version)", "(uk)", "uk version", "uk only", "hart", "ses building"],
-            "au": ["(au version)", "(au)", "au version", "au only", "australian"],
-            "usa": ["(us version)", "(us)", "us version", "us only"]
+            "uk": [
+                "(uk version)", "(uk)", "uk version", "uk only", 
+                "hart", "hart base", "hart vehicle", "hart team",
+                "ses building", "ses station", "ses unit",
+                "hazardous area response",
+                "uk fire service", "uk police", "uk ambulance",
+                "british", "england", "scotland", "wales"
+            ],
+            "au": [
+                "(au version)", "(au)", "au version", "au only",
+                "(australian version)", "australian", "australia",
+                "nsw", "queensland", "victoria", "south australia"
+            ],
+            "usa": [
+                "(us version)", "(us)", "us version", "us only",
+                "(usa version)", "american"
+            ]
         }
         
-        # Check if title/body explicitly mentions a different version
+        # Check if content explicitly mentions a different version
         for version, indicators in version_indicators.items():
             if version == target_version:
                 continue  # Skip checking our target version
             
             for indicator in indicators:
-                if indicator in title_lower or indicator in body_lower:
-                    log.debug(f"Found {version.upper()} indicator '{indicator}' in: {title}")
+                # Check in title first (most reliable)
+                if indicator in title_lower:
+                    log.debug(f"Found {version.upper()} indicator in TITLE '{indicator}': {title}")
                     return True
-        
-        # Special cases for UK-specific content
-        if target_version == "usa":
-            uk_specific_terms = [
-                "hart base",
-                "hart vehicle", 
-                "ses building",
-                "ses station",
-                "hazardous area response team",
-                "uk fire service"
-            ]
-            
-            for term in uk_specific_terms:
-                if term in title_lower:
-                    log.debug(f"Found UK-specific term '{term}' in: {title}")
-                    return True
+                
+                # Only check body for strong indicators (ones with "version" or specific names)
+                if any(strong in indicator for strong in ["version", "hart", "ses", "australian"]):
+                    if indicator in body_lower:
+                        log.debug(f"Found {version.upper()} indicator in BODY '{indicator}': {title}")
+                        return True
         
         # If no version-specific markers found, include it
         return False
@@ -1206,7 +1224,7 @@ class FAQManager(red_commands.Cog):
             await asyncio.sleep(2)
             log.info(f"Created {len(tags_to_create)} tags, waiting for sync...")
     
-    async def _export_faq_to_forum(self, forum_channel: discord.ForumChannel, result: SearchResult):
+    async def _export_faq_to_forum(self, forum_channel: discord.ForumChannel, result: SearchResult, fallback_tag_name: str = "Official Game FAQ"):
         """Export a single FAQ to forum as a thread."""
         try:
             # Refresh available tags to get latest
@@ -1219,16 +1237,16 @@ class FAQManager(red_commands.Cog):
             tag = None
             
             if result.category:
-                # Try to find matching tag
+                # Try to find matching tag (case-insensitive)
                 for forum_tag in available_tags:
                     if forum_tag.name.lower() == result.category.lower():
                         tag = forum_tag
                         break
             
-            # If no tag found, use "Uncategorized" tag
+            # If no tag found, use fallback tag (Official Game FAQ / Uncategorized)
             if tag is None:
                 for forum_tag in available_tags:
-                    if forum_tag.name == "Uncategorized":
+                    if forum_tag.name == fallback_tag_name:
                         tag = forum_tag
                         break
             
@@ -1286,6 +1304,7 @@ class FAQManager(red_commands.Cog):
             log.error(f"  Available tags: {available_tag_names}")
             log.error(f"  FAQ category: {result.category}")
             log.error(f"  Selected tag: {tag.name if tag else 'NONE'}")
+            log.error(f"  Fallback tag name: {fallback_tag_name}")
             raise
             
         except Exception as e:
