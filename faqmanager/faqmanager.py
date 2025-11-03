@@ -56,6 +56,7 @@ class FAQManager(red_commands.Cog):
         default_guild = {
             "editor_roles": [],
             "outdated_log_channel": None,
+            "auto_post_forum_channel": None,  # NEW: Auto-post new/edited FAQs here
             "suggestion_threshold": 75,
             "autocomplete_ttl": 600,
             "debug_mode": False
@@ -478,6 +479,13 @@ class FAQManager(red_commands.Cog):
             log.setLevel(logging.INFO)
             await ctx.send("âœ… Debug mode **disabled**.", ephemeral=True)
     
+    @faq_settings.command(name="forum")
+    @app_commands.describe(channel="Forum channel for auto-posting FAQs")
+    async def settings_forum(self, ctx: red_commands.Context, channel: discord.ForumChannel):
+        """Set the forum channel where new/edited FAQs are automatically posted."""
+        await self.config.guild(ctx.guild).auto_post_forum_channel.set(channel.id)
+        await ctx.send(f"New and edited FAQs will automatically post to {channel.mention}.", ephemeral=True)
+    
     # ==================== CRAWL COMMANDS ====================
     
     @red_commands.hybrid_group(name="faqcrawl", aliases=["crawl"])
@@ -627,709 +635,6 @@ class FAQManager(red_commands.Cog):
             log.error(f"Test crawl failed: {e}", exc_info=True)
             await ctx.send(f"âŒ Test failed: {str(e)}", ephemeral=True)
     
-    # ==================== FORUM EXPORT ====================
-    
-    @faq_admin.group(name="forum")
-    async def faq_forum(self, ctx: red_commands.Context):
-        """Export FAQs to Discord Forum channel."""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
-    
-    @faq_forum.command(name="export")
-    @app_commands.describe(
-        forum_channel="Forum channel to export to",
-        source="Which FAQs to export",
-        game_version="Filter by game version (USA content only by default)"
-    )
-    async def forum_export(
-        self, 
-        ctx: red_commands.Context, 
-        forum_channel: discord.ForumChannel,
-        source: Literal["custom", "helpshift", "all"] = "all",
-        game_version: Literal["usa", "uk", "au", "all"] = "usa"
-    ):
-        """
-        Export FAQs to a Discord Forum channel.
-        Creates one thread per FAQ with category tags.
-        
-        By default, only exports USA-specific content with quality validation.
-        """
-        if not await self._is_editor(ctx.guild, ctx.author):
-            await ctx.send("❌ You don't have permission to export FAQs.", ephemeral=True)
-            return
-        
-        await ctx.defer(ephemeral=True)
-        
-        try:
-            # Get existing threads to prevent duplicates
-            existing_threads = await self._get_existing_forum_threads(forum_channel)
-            
-            # Collect FAQs to export
-            faqs_to_export = []
-            
-            if source in ["custom", "all"]:
-                for faq in self._faq_cache:
-                    faqs_to_export.append(SearchResult.from_faq_item(faq, 100))
-            
-            if source in ["helpshift", "all"]:
-                helpshift_articles = await self.database.get_all_articles()
-                
-                # Filter by game version and content quality
-                for article in helpshift_articles:
-                    # Skip if already exists
-                    if article.title in existing_threads:
-                        log.debug(f"Skipping duplicate thread: {article.title}")
-                        continue
-                    
-                    # Skip if version filtering is enabled
-                    if game_version != "all":
-                        if self._is_wrong_game_version(article.title, article.body_md, game_version):
-                            log.debug(f"Skipping {game_version.upper()}-filtered article: {article.title}")
-                            continue
-                    
-                    # CRITICAL: Skip articles without meaningful content
-                    if not self._has_valid_content(article.title, article.body_md):
-                        log.debug(f"Skipping article with invalid content: {article.title}")
-                        continue
-                    
-                    faqs_to_export.append(SearchResult.from_helpshift_article(article, 100))
-            
-            # Remove duplicates from custom FAQs too
-            faqs_to_export = [faq for faq in faqs_to_export if faq.title not in existing_threads]
-            
-            if not faqs_to_export:
-                await ctx.send(f"❌ No new FAQs to export (all exist or filtered out).", ephemeral=True)
-                return
-            
-            # Setup forum tags (categories) and wait for them to be created
-            setup_msg = await ctx.send(
-                f"🏷️ Setting up forum tags... Please wait.",
-                ephemeral=True
-            )
-            
-            fallback_tag_name = await self._setup_forum_tags(forum_channel)
-            
-            # Refresh forum channel to get updated tags
-            forum_channel = await ctx.guild.fetch_channel(forum_channel.id)
-            
-            # Verify we have tags
-            if not forum_channel.available_tags:
-                await setup_msg.edit(
-                    content="❌ No tags available in forum and bot cannot create them. Please:\n"
-                            "1. Manually create at least one tag in the forum channel\n"
-                            "2. Or grant bot 'Manage Channels' permission\n"
-                            "3. Then try export again"
-                )
-                return
-            
-            version_text = f" ({game_version.upper()} version only)" if game_version != "all" else " (all versions)"
-            
-            await setup_msg.edit(
-                content=f"✅ Forum has {len(forum_channel.available_tags)} tags available.\n"
-                        f"📋 Default tag: **{fallback_tag_name}**\n"
-                        f"🌍 Version filter: **{version_text}**\n"
-                        f"🔄 Found {len(existing_threads)} existing threads (will skip)\n"
-                        f"Tags: {', '.join(t.name for t in forum_channel.available_tags[:5])}"
-            )
-            
-            # Export FAQs with aggressive rate limiting
-            exported = 0
-            failed = 0
-            skipped_duplicate = 0
-            error_log = []
-            
-            progress_msg = await ctx.send(
-                f"📤 Starting export of {len(faqs_to_export)} NEW FAQs to {forum_channel.mention}...\n\n"
-                f"⏱️ Estimated time: ~{len(faqs_to_export) * 4 // 60} minutes\n"
-                f"🌍 Exporting: {game_version.upper()}{version_text}\n"
-                f"✅ Content validation: Enabled\n"
-                f"🔄 Duplicate detection: {len(existing_threads)} threads will be skipped\n"
-                f"*Please be patient - Discord rate limits are strict!*",
-                ephemeral=True
-            )
-            
-            consecutive_failures = 0
-            
-            for i, result in enumerate(faqs_to_export):
-                try:
-                    log.info(f"Exporting FAQ {i+1}/{len(faqs_to_export)}: {result.title}")
-                    
-                    await self._export_faq_to_forum(forum_channel, result, fallback_tag_name=fallback_tag_name)
-                    exported += 1
-                    consecutive_failures = 0
-                    
-                    # Update progress every 5 FAQs or on last item
-                    if (i + 1) % 5 == 0 or (i + 1) == len(faqs_to_export):
-                        await progress_msg.edit(
-                            content=f"📤 Progress: {i + 1}/{len(faqs_to_export)} FAQs\n"
-                                    f"✅ Exported: {exported}\n"
-                                    f"❌ Failed: {failed}\n"
-                                    f"⏱️ ~{(len(faqs_to_export) - i - 1) * 4 // 60} minutes remaining"
-                        )
-                    
-                    # Aggressive rate limit protection - 4 seconds between each thread
-                    await asyncio.sleep(4)
-                    
-                except discord.HTTPException as e:
-                    log.error(f"Discord API error exporting '{result.title}': {e}")
-                    failed += 1
-                    consecutive_failures += 1
-                    error_log.append(f"API Error - {result.title[:50]}: {str(e)[:100]}")
-                    
-                    # If rate limited, wait much longer
-                    if e.status == 429:
-                        retry_after = getattr(e, 'retry_after', 60)
-                        log.warning(f"Rate limited! Waiting {retry_after} seconds...")
-                        await progress_msg.edit(
-                            content=f"⏸️ Rate limited by Discord!\n"
-                                    f"Waiting {int(retry_after)}s before continuing...\n\n"
-                                    f"📤 Progress: {i + 1}/{len(faqs_to_export)}\n"
-                                    f"✅ Exported: {exported}\n"
-                                    f"❌ Failed: {failed}"
-                        )
-                        await asyncio.sleep(retry_after + 5)  # Wait extra 5 seconds
-                        
-                        # Retry this FAQ
-                        try:
-                            await self._export_faq_to_forum(forum_channel, result, fallback_tag_name=fallback_tag_name)
-                            exported += 1
-                            failed -= 1
-                            consecutive_failures = 0
-                        except Exception as retry_error:
-                            log.error(f"Retry failed for '{result.title}': {retry_error}")
-                    
-                    # If we have 3 consecutive failures, slow down even more
-                    if consecutive_failures >= 3:
-                        log.warning(f"Multiple consecutive failures, increasing delay")
-                        await asyncio.sleep(10)
-                    
-                    continue
-                    
-                except discord.Forbidden as e:
-                    log.error(f"Permission error exporting '{result.title}': {e}")
-                    failed += 1
-                    error_log.append(f"Permission - {result.title[:50]}")
-                    continue
-                    
-                except Exception as e:
-                    log.error(f"Unexpected error exporting '{result.title}': {e}", exc_info=True)
-                    failed += 1
-                    error_log.append(f"Error - {result.title[:50]}: {str(e)[:100]}")
-                    continue
-            
-            # Final report
-            embed = discord.Embed(
-                title="✅ Forum Export Complete" if failed == 0 else "⚠️ Forum Export Completed with Errors",
-                color=discord.Color.green() if failed == 0 else discord.Color.orange()
-            )
-            embed.add_field(name="Forum", value=forum_channel.mention, inline=False)
-            embed.add_field(name="🌍 Version", value=game_version.upper(), inline=True)
-            embed.add_field(name="✅ Exported", value=str(exported), inline=True)
-            embed.add_field(name="❌ Failed", value=str(failed), inline=True)
-            embed.add_field(name="🔄 Skipped (duplicates)", value=str(len(existing_threads)), inline=True)
-            
-            # Add error details if any
-            if error_log:
-                error_text = "\n".join(error_log[:10])
-                if len(error_log) > 10:
-                    error_text += f"\n... and {len(error_log) - 10} more errors"
-                embed.add_field(name="🔍 Error Details", value=f"```{error_text[:1000]}```", inline=False)
-            
-            embed.set_footer(text="Export complete! Check bot logs for detailed information.")
-            
-            await progress_msg.edit(content=None, embed=embed)
-            
-        except discord.Forbidden:
-            await ctx.send("❌ I don't have permission to post in that forum channel.\n\nRequired permissions:\n- View Channel\n- Send Messages in Threads\n- Create Public Threads", ephemeral=True)
-        except Exception as e:
-            log.error(f"Forum export failed: {e}", exc_info=True)
-            await ctx.send(f"❌ Export failed: {str(e)}\n\nCheck bot logs for details.", ephemeral=True)
-    
-    async def _get_existing_forum_threads(self, forum_channel: discord.ForumChannel) -> set:
-        """Get set of existing thread titles to prevent duplicates."""
-        existing = set()
-        
-        try:
-            # Get active threads
-            for thread in forum_channel.threads:
-                # Remove emoji prefixes
-                clean_title = thread.name.replace("📌 ", "").replace("🔖 ", "")
-                existing.add(clean_title)
-            
-            # Get archived threads (limited to 100)
-            async for thread in forum_channel.archived_threads(limit=100):
-                clean_title = thread.name.replace("📌 ", "").replace("🔖 ", "")
-                existing.add(clean_title)
-            
-            log.info(f"Found {len(existing)} existing threads in {forum_channel.name}")
-            
-        except Exception as e:
-            log.error(f"Error getting existing threads: {e}")
-        
-        return existing
-    
-    def _has_valid_content(self, title: str, body: str) -> bool:
-        """
-        Check if article has valid, meaningful content.
-        
-        Rejects:
-        - Empty or very short body (<100 chars)
-        - Body is just the title repeated
-        - Body is only whitespace
-        """
-        if not body or len(body.strip()) < 100:
-            log.debug(f"Rejecting - insufficient content (<100 chars): {title}")
-            return False
-        
-        # Check if body is just title repeated
-        if body.strip().lower() == title.strip().lower():
-            log.debug(f"Rejecting - duplicate title as body: {title}")
-            return False
-        
-        # Check if body is mostly whitespace
-        non_whitespace = len(body.replace(" ", "").replace("\n", ""))
-        if non_whitespace < 50:
-            log.debug(f"Rejecting - mostly whitespace: {title}")
-            return False
-        
-        return True
-    
-    def _is_wrong_game_version(self, title: str, body: str, target_version: str) -> bool:
-        """
-        Check if content is for a different game version.
-        
-        Args:
-            title: Article title
-            body: Article body text
-            target_version: Target version (usa, uk, au)
-            
-        Returns:
-            True if content should be skipped (wrong version)
-        """
-        title_lower = title.lower()
-        body_lower = body.lower() if body else ""
-        combined = title_lower + " " + body_lower
-        
-        # Version indicators - must be case-insensitive and catch all variants
-        version_indicators = {
-            "uk": [
-                "(uk version)", "(uk)", "uk version", "uk only", 
-                "hart", "hart base", "hart vehicle", "hart team",
-                "ses building", "ses station", "ses unit",
-                "hazardous area response",
-                "uk fire service", "uk police", "uk ambulance",
-                "british", "england", "scotland", "wales"
-            ],
-            "au": [
-                "(au version)", "(au)", "au version", "au only",
-                "(australian version)", "australian", "australia",
-                "nsw", "queensland", "victoria", "south australia"
-            ],
-            "usa": [
-                "(us version)", "(us)", "us version", "us only",
-                "(usa version)", "american"
-            ]
-        }
-        
-        # Check if content explicitly mentions a different version
-        for version, indicators in version_indicators.items():
-            if version == target_version:
-                continue  # Skip checking our target version
-            
-            for indicator in indicators:
-                # Check in title first (most reliable)
-                if indicator in title_lower:
-                    log.debug(f"Found {version.upper()} indicator in TITLE '{indicator}': {title}")
-                    return True
-                
-                # Only check body for strong indicators (ones with "version" or specific names)
-                if any(strong in indicator for strong in ["version", "hart", "ses", "australian"]):
-                    if indicator in body_lower:
-                        log.debug(f"Found {version.upper()} indicator in BODY '{indicator}': {title}")
-                        return True
-        
-        # If no version-specific markers found, include it
-        return False
-    
-    async def _setup_forum_tags(self, forum_channel: discord.ForumChannel) -> str:
-        """
-        Setup category tags in forum channel.
-        
-        Returns:
-            Name of the fallback tag to use
-        """
-        existing_tags = {tag.name: tag for tag in forum_channel.available_tags}
-        
-        # Determine fallback tag name
-        fallback_tag_name = None
-        
-        # Check for common fallback tag names in order of preference
-        fallback_options = ["Official Game FAQ", "Uncategorized", "General", "FAQ"]
-        
-        for option in fallback_options:
-            if option in existing_tags:
-                fallback_tag_name = option
-                log.info(f"Using existing fallback tag: {fallback_tag_name}")
-                break
-        
-        # If no fallback found, we'll create one
-        if not fallback_tag_name:
-            fallback_tag_name = "Official Game FAQ"
-        
-        tags_to_create = []
-        
-        # Create fallback tag if it doesn't exist
-        if fallback_tag_name not in existing_tags:
-            tags_to_create.append((fallback_tag_name, "📋"))
-        
-        # Add missing category tags
-        for category in self.FAQ_CATEGORIES:
-            if category not in existing_tags and len(forum_channel.available_tags) + len(tags_to_create) < 20:
-                tags_to_create.append((category, None))
-        
-        # Create tags with delay between each
-        for tag_name, emoji in tags_to_create:
-            try:
-                if len(forum_channel.available_tags) < 20:
-                    if emoji:
-                        await forum_channel.create_tag(name=tag_name, emoji=emoji)
-                    else:
-                        await forum_channel.create_tag(name=tag_name)
-                    log.info(f"Created forum tag: {tag_name}")
-                    await asyncio.sleep(1)  # Wait between tag creations
-            except discord.Forbidden:
-                log.warning(f"Cannot create forum tag {tag_name} - missing Manage Channels permission")
-            except discord.HTTPException as e:
-                log.error(f"Failed to create forum tag {tag_name}: {e}")
-            except Exception as e:
-                log.error(f"Unexpected error creating tag {tag_name}: {e}")
-        
-        # Wait a bit for Discord to sync
-        if tags_to_create:
-            await asyncio.sleep(2)
-            log.info(f"Created {len(tags_to_create)} tags, waiting for sync...")
-        
-        return fallback_tag_name
-    
-    async def _export_faq_to_forum(
-        self, 
-        forum_channel: discord.ForumChannel, 
-        result: SearchResult, 
-        *,
-        fallback_tag_name: str = "Official Game FAQ"
-    ):
-        """Export a single FAQ to forum as a thread."""
-        try:
-            # Refresh available tags to get latest
-            available_tags = forum_channel.available_tags
-            
-            if not available_tags:
-                raise ValueError(f"No tags available in forum {forum_channel.name}. Cannot create thread.")
-            
-            # Get appropriate tag - try to match category first
-            tag = None
-            
-            if result.category:
-                # Try to find matching tag (case-insensitive)
-                for forum_tag in available_tags:
-                    if forum_tag.name.lower() == result.category.lower():
-                        tag = forum_tag
-                        break
-            
-            # If no tag found, use fallback tag (Official Game FAQ / Uncategorized)
-            if tag is None:
-                for forum_tag in available_tags:
-                    if forum_tag.name == fallback_tag_name:
-                        tag = forum_tag
-                        break
-            
-            # If still no tag, use the first available tag
-            if tag is None:
-                tag = available_tags[0]
-                log.warning(f"No matching tag for '{result.title}' (category: {result.category}), using: {tag.name}")
-            
-            log.debug(f"Using tag '{tag.name}' for FAQ '{result.title}'")
-            
-            # Create thread name (max 100 chars)
-            source_prefix = "📌" if result.source == Source.CUSTOM else "🔖"
-            thread_name = f"{source_prefix} {result.title}"
-            
-            # Truncate if too long
-            if len(thread_name) > 100:
-                thread_name = thread_name[:97] + "..."
-            
-            # Create embed
-            embed = await self._create_result_embed(result, "", public=True)
-            
-            # Add source info to footer
-            if result.source == Source.CUSTOM:
-                footer_text = f"Custom FAQ • ID: {result.faq_id}"
-            else:
-                footer_text = f"Helpshift Article • ID: {result.article_id}"
-            
-            # Add category if different from tag
-            if result.category and tag.name != result.category:
-                footer_text += f" • Category: {result.category}"
-            
-            embed.set_footer(text=footer_text)
-            
-            # Create thread with tag (required)
-            applied_tags = [tag]
-            
-            # Create thread
-            message = await forum_channel.create_thread(
-                name=thread_name,
-                embed=embed,
-                applied_tags=applied_tags,
-                auto_archive_duration=10080,  # 7 days
-                reason=f"FAQ Export: {result.title[:50]}"
-            )
-            
-            log.info(f"✅ Created forum thread: {thread_name} (tag: {tag.name})")
-            
-            return message.thread
-            
-        except discord.HTTPException as e:
-            # Add extra context to error
-            available_tag_names = [t.name for t in forum_channel.available_tags] if forum_channel.available_tags else ["NONE"]
-            log.error(f"Discord API error creating thread '{result.title}': {e}")
-            log.error(f"  Status: {e.status}, Code: {e.code}")
-            log.error(f"  Available tags: {available_tag_names}")
-            log.error(f"  FAQ category: {result.category}")
-            log.error(f"  Selected tag: {tag.name if tag else 'NONE'}")
-            log.error(f"  Fallback tag name: {fallback_tag_name}")
-            raise
-            
-        except Exception as e:
-            log.error(f"Unexpected error creating thread '{result.title}': {e}", exc_info=True)
-            raise
-    
-    @faq_forum.command(name="sync")
-    @app_commands.describe(forum_channel="Forum channel to sync")
-    async def forum_sync(self, ctx: red_commands.Context, forum_channel: discord.ForumChannel):
-        """
-        Sync existing forum threads with updated FAQ content.
-        Updates threads that match FAQ titles.
-        """
-        if not await self._is_editor(ctx.guild, ctx.author):
-            await ctx.send("❌ You don't have permission to sync FAQs.", ephemeral=True)
-            return
-        
-        await ctx.defer(ephemeral=True)
-        
-        try:
-            # Get all active threads
-            threads = list(forum_channel.threads)
-            
-            # Also get archived threads
-            archived_threads = []
-            async for thread in forum_channel.archived_threads(limit=100):
-                archived_threads.append(thread)
-            
-            all_threads = threads + archived_threads
-            
-            if not all_threads:
-                await ctx.send("❌ No threads found in forum to sync.", ephemeral=True)
-                return
-            
-            updated = 0
-            skipped = 0
-            
-            progress_msg = await ctx.send(
-                f"🔄 Syncing {len(all_threads)} forum threads...",
-                ephemeral=True
-            )
-            
-            # Build FAQ lookup by title
-            faq_lookup = {}
-            for faq in self._faq_cache:
-                faq_lookup[faq.question.lower()] = SearchResult.from_faq_item(faq, 100)
-            
-            helpshift_articles = await self.database.get_all_articles()
-            for article in helpshift_articles:
-                faq_lookup[article.title.lower()] = SearchResult.from_helpshift_article(article, 100)
-            
-            for thread in all_threads:
-                try:
-                    # Extract FAQ title from thread name (remove emojis and prefixes)
-                    thread_title = thread.name
-                    for prefix in ["📌 ", "🔖 ", "[Custom] ", "[Helpshift] "]:
-                        thread_title = thread_title.replace(prefix, "")
-                    
-                    thread_title = thread_title.strip().lower()
-                    
-                    if thread_title in faq_lookup:
-                        result = faq_lookup[thread_title]
-                        
-                        # Get first message in thread
-                        async for message in thread.history(limit=1, oldest_first=True):
-                            if message.author == ctx.guild.me:
-                                # Update the message
-                                embed = await self._create_result_embed(result, "", public=True)
-                                await message.edit(embed=embed)
-                                updated += 1
-                                break
-                    else:
-                        skipped += 1
-                    
-                    await asyncio.sleep(0.5)
-                    
-                except Exception as e:
-                    log.error(f"Failed to sync thread {thread.name}: {e}")
-                    skipped += 1
-            
-            embed = discord.Embed(
-                title="✅ Forum Sync Complete",
-                color=discord.Color.green()
-            )
-            embed.add_field(name="Forum", value=forum_channel.mention, inline=False)
-            embed.add_field(name="🔄 Updated", value=str(updated), inline=True)
-            embed.add_field(name="⏭️ Skipped", value=str(skipped), inline=True)
-            embed.add_field(name="Total Threads", value=str(len(all_threads)), inline=True)
-            
-            await progress_msg.edit(content=None, embed=embed)
-            
-        except discord.Forbidden:
-            await ctx.send("❌ I don't have permission to access that forum channel.", ephemeral=True)
-        except Exception as e:
-            log.error(f"Forum sync failed: {e}", exc_info=True)
-            await ctx.send(f"❌ Sync failed: {str(e)}", ephemeral=True)
-    
-    @faq_forum.command(name="test")
-    @app_commands.describe(forum_channel="Forum channel to test")
-    async def forum_test(self, ctx: red_commands.Context, forum_channel: discord.ForumChannel):
-        """
-        Test forum export with a single FAQ to diagnose issues.
-        """
-        if not await self._is_editor(ctx.guild, ctx.author):
-            await ctx.send("❌ You don't have permission to test forum export.", ephemeral=True)
-            return
-        
-        await ctx.defer(ephemeral=True)
-        
-        try:
-            # Get one FAQ to test
-            test_faq = None
-            if self._faq_cache:
-                test_faq = SearchResult.from_faq_item(self._faq_cache[0], 100)
-            else:
-                helpshift_articles = await self.database.get_all_articles()
-                if helpshift_articles:
-                    test_faq = SearchResult.from_helpshift_article(helpshift_articles[0], 100)
-            
-            if not test_faq:
-                await ctx.send("❌ No FAQs available for testing.", ephemeral=True)
-                return
-            
-            # Test tag setup
-            embed = discord.Embed(
-                title="🧪 Testing Forum Export",
-                description=f"Testing with FAQ: **{test_faq.title}**",
-                color=discord.Color.blue()
-            )
-            
-            await ctx.send(embed=embed, ephemeral=True)
-            
-            # Check permissions
-            perms = forum_channel.permissions_for(ctx.guild.me)
-            
-            perm_check = discord.Embed(
-                title="📋 Permission Check",
-                color=discord.Color.blue()
-            )
-            perm_check.add_field(
-                name="View Channel",
-                value="✅ Yes" if perms.view_channel else "❌ No",
-                inline=True
-            )
-            perm_check.add_field(
-                name="Send Messages",
-                value="✅ Yes" if perms.send_messages else "❌ No",
-                inline=True
-            )
-            perm_check.add_field(
-                name="Create Threads",
-                value="✅ Yes" if perms.create_public_threads else "❌ No",
-                inline=True
-            )
-            perm_check.add_field(
-                name="Send in Threads",
-                value="✅ Yes" if perms.send_messages_in_threads else "❌ No",
-                inline=True
-            )
-            
-            await ctx.send(embed=perm_check, ephemeral=True)
-            
-            if not all([perms.view_channel, perms.send_messages, perms.create_public_threads, perms.send_messages_in_threads]):
-                await ctx.send("❌ Bot is missing required permissions! Grant the permissions shown above and try again.", ephemeral=True)
-                return
-            
-            # Test tag creation
-            await ctx.send("🏷️ Setting up forum tags...", ephemeral=True)
-            fallback_tag_name = await self._setup_forum_tags(forum_channel)
-            
-            await ctx.send(f"✅ Fallback tag set to: **{fallback_tag_name}**", ephemeral=True)
-            
-            # Test thread creation
-            await ctx.send("📝 Creating test thread...", ephemeral=True)
-            
-            try:
-                thread = await self._export_faq_to_forum(forum_channel, test_faq, fallback_tag_name=fallback_tag_name)
-                
-                success_embed = discord.Embed(
-                    title="✅ Test Successful!",
-                    description=f"Created test thread: {thread.mention}\n\nYou can now safely run `/faqadmin forum export`",
-                    color=discord.Color.green()
-                )
-                
-                await ctx.send(embed=success_embed, ephemeral=True)
-                
-            except discord.HTTPException as e:
-                error_embed = discord.Embed(
-                    title="❌ Test Failed - Discord API Error",
-                    description=f"**Status:** {e.status}\n**Code:** {e.code}\n**Message:** {e.text}",
-                    color=discord.Color.red()
-                )
-                error_embed.add_field(
-                    name="💡 Common Causes",
-                    value="• Bot may be rate limited\n• Forum may have reached thread limit\n• Embed may be too large\n• Missing permissions",
-                    inline=False
-                )
-                
-                await ctx.send(embed=error_embed, ephemeral=True)
-                
-        except Exception as e:
-            log.error(f"Forum test failed: {e}", exc_info=True)
-            
-            error_embed = discord.Embed(
-                title="❌ Test Failed - Unexpected Error",
-                description=f"```{str(e)[:1000]}```",
-                color=discord.Color.red()
-            )
-            
-            await ctx.send(embed=error_embed, ephemeral=True)
-    
-    @faq_forum.command(name="clear")
-    @app_commands.describe(forum_channel="Forum channel to clear")
-    async def forum_clear(self, ctx: red_commands.Context, forum_channel: discord.ForumChannel):
-        """
-        Clear all threads from a forum channel (requires confirmation).
-        ⚠️ Warning: This will delete ALL threads in the forum!
-        """
-        if not await self._is_editor(ctx.guild, ctx.author):
-            await ctx.send("❌ You don't have permission to clear forums.", ephemeral=True)
-            return
-        
-        # Show confirmation
-        view = ConfirmForumClearView(self, forum_channel, ctx.author.id)
-        embed = discord.Embed(
-            title="⚠️ Confirm Forum Clear",
-            description=f"Are you sure you want to delete **ALL threads** from {forum_channel.mention}?\n\n**This cannot be undone!**",
-            color=discord.Color.red()
-        )
-        
-        await ctx.send(embed=embed, view=view, ephemeral=True)
-    
     # ==================== AUTOCOMPLETE ====================
     
     @faq_search.autocomplete('query')
@@ -1359,6 +664,95 @@ class FAQManager(red_commands.Cog):
         except Exception as e:
             log.error(f"Autocomplete error: {e}")
             return []
+    
+    # ==================== AUTO-POST/UPDATE HELPERS ====================
+    
+    async def _auto_post_faq_to_forum(self, guild: discord.Guild, faq_item: FAQItem):
+        """Automatically post a new FAQ to the configured forum channel."""
+        try:
+            forum_channel_id = await self.config.guild(guild).auto_post_forum_channel()
+            if not forum_channel_id:
+                log.debug("No auto-post forum channel configured, skipping auto-post")
+                return
+            
+            forum_channel = guild.get_channel(forum_channel_id)
+            if not forum_channel or not isinstance(forum_channel, discord.ForumChannel):
+                log.warning(f"Configured forum channel {forum_channel_id} not found or not a forum")
+                return
+            
+            # Check if thread already exists
+            existing_threads = await self._get_existing_forum_threads(forum_channel)
+            if faq_item.question in existing_threads:
+                log.debug(f"Thread for '{faq_item.question}' already exists, skipping auto-post")
+                return
+            
+            # Create SearchResult from FAQ
+            result = SearchResult.from_faq_item(faq_item, 100)
+            
+            # Get fallback tag
+            fallback_tag_name = "FAQ"  # Simple fallback
+            for tag in forum_channel.available_tags:
+                if tag.name in ["Official Game FAQ", "FAQ", "Uncategorized", "General"]:
+                    fallback_tag_name = tag.name
+                    break
+            
+            # Post to forum
+            await self._export_faq_to_forum(forum_channel, result, fallback_tag_name=fallback_tag_name)
+            log.info(f"Auto-posted FAQ '{faq_item.question}' to {forum_channel.name}")
+            
+        except Exception as e:
+            log.error(f"Failed to auto-post FAQ: {e}", exc_info=True)
+    
+    async def _auto_update_faq_in_forum(self, guild: discord.Guild, faq_item: FAQItem):
+        """Automatically update an existing FAQ thread in the forum."""
+        try:
+            forum_channel_id = await self.config.guild(guild).auto_post_forum_channel()
+            if not forum_channel_id:
+                log.debug("No auto-post forum channel configured, skipping auto-update")
+                return
+            
+            forum_channel = guild.get_channel(forum_channel_id)
+            if not forum_channel or not isinstance(forum_channel, discord.ForumChannel):
+                log.warning(f"Configured forum channel {forum_channel_id} not found or not a forum")
+                return
+            
+            # Find matching thread
+            matching_thread = None
+            clean_question = faq_item.question.strip().lower()
+            
+            # Check active threads
+            for thread in forum_channel.threads:
+                thread_title = thread.name.replace(" ", "").replace(" ", "").strip().lower()
+                if thread_title == clean_question:
+                    matching_thread = thread
+                    break
+            
+            # Check archived threads if not found
+            if not matching_thread:
+                async for thread in forum_channel.archived_threads(limit=100):
+                    thread_title = thread.name.replace(" ", "").replace(" ", "").strip().lower()
+                    if thread_title == clean_question:
+                        matching_thread = thread
+                        break
+            
+            if not matching_thread:
+                log.debug(f"No matching thread found for FAQ '{faq_item.question}', consider it new")
+                # Treat as new FAQ instead
+                await self._auto_post_faq_to_forum(guild, faq_item)
+                return
+            
+            # Update the first message in the thread
+            result = SearchResult.from_faq_item(faq_item, 100)
+            embed = await self._create_result_embed(result, "", public=True)
+            
+            async for message in matching_thread.history(limit=1, oldest_first=True):
+                if message.author == guild.me:
+                    await message.edit(embed=embed)
+                    log.info(f"Auto-updated FAQ thread '{faq_item.question}' in {forum_channel.name}")
+                    break
+            
+        except Exception as e:
+            log.error(f"Failed to auto-update FAQ: {e}", exc_info=True)
     
     # ==================== HELPER METHODS ====================
     
@@ -1834,75 +1228,6 @@ class ConfirmOutdatedView(discord.ui.View):
         return interaction.user.id == self.user_id
 
 
-class ConfirmForumClearView(discord.ui.View):
-    """View for confirming forum clear operation."""
-    
-    def __init__(self, cog: FAQManager, forum_channel: discord.ForumChannel, user_id: int):
-        super().__init__(timeout=60)
-        self.cog = cog
-        self.forum_channel = forum_channel
-        self.user_id = user_id
-    
-    @discord.ui.button(label="⚠️ Confirm Clear", style=discord.ButtonStyle.danger)
-    async def confirm_clear(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        
-        try:
-            deleted = 0
-            failed = 0
-            
-            # Get all threads
-            threads = list(self.forum_channel.threads)
-            
-            # Get archived threads
-            async for thread in self.forum_channel.archived_threads(limit=100):
-                threads.append(thread)
-            
-            progress_msg = await interaction.followup.send(
-                f"🗑️ Deleting {len(threads)} threads...",
-                ephemeral=True
-            )
-            
-            for i, thread in enumerate(threads):
-                try:
-                    await thread.delete()
-                    deleted += 1
-                    
-                    if (i + 1) % 5 == 0:
-                        await progress_msg.edit(
-                            content=f"🗑️ Progress: {i + 1}/{len(threads)} threads deleted..."
-                        )
-                    
-                    await asyncio.sleep(1)  # Rate limit protection
-                    
-                except Exception as e:
-                    log.error(f"Failed to delete thread {thread.name}: {e}")
-                    failed += 1
-            
-            embed = discord.Embed(
-                title="✅ Forum Cleared",
-                color=discord.Color.green()
-            )
-            embed.add_field(name="Forum", value=self.forum_channel.mention, inline=False)
-            embed.add_field(name="🗑️ Deleted", value=str(deleted), inline=True)
-            embed.add_field(name="❌ Failed", value=str(failed), inline=True)
-            
-            await progress_msg.edit(content=None, embed=embed)
-            self.stop()
-            
-        except Exception as e:
-            log.error(f"Forum clear failed: {e}", exc_info=True)
-            await interaction.followup.send(f"❌ Clear failed: {str(e)}", ephemeral=True)
-    
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("❌ Forum clear cancelled.", ephemeral=True)
-        self.stop()
-    
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.user_id
-
-
 class CategorySelectView(discord.ui.View):
     """View for selecting FAQ category."""
     
@@ -2031,6 +1356,10 @@ class AddFAQModalWithCategory(discord.ui.Modal, title="Add New FAQ"):
             embed.add_field(name="Synonyms", value=synonym_text[:1024], inline=False)
             
             await interaction.followup.send(embed=embed, ephemeral=True)
+
+            # Auto-post to forum if configured
+            faq.id = faq_id  # Set the ID for the FAQ object
+            await self.cog._auto_post_faq_to_forum(interaction.guild, faq)
         
         except Exception as e:
             log.error(f"Error adding FAQ: {e}", exc_info=True)
@@ -2122,6 +1451,10 @@ class SynonymPreviewView(discord.ui.View):
             embed.add_field(name="Synonyms", value=synonym_text[:1024], inline=False)
             
             await interaction.followup.send(embed=embed, ephemeral=True)
+
+            # Auto-post to forum if configured
+            faq.id = faq_id  # Set the ID for the FAQ object
+            await self.cog._auto_post_faq_to_forum(interaction.guild, faq)
             self.stop()
         
         except Exception as e:
@@ -2210,6 +1543,10 @@ class EditSynonymsModal(discord.ui.Modal, title="Edit Synonyms"):
             embed.add_field(name="Edited Synonyms", value=synonym_text[:1024], inline=False)
             
             await interaction.followup.send(embed=embed, ephemeral=True)
+
+            # Auto-post to forum if configured
+            faq.id = faq_id  # Set the ID for the FAQ object
+            await self.cog._auto_post_faq_to_forum(interaction.guild, faq)
         
         except Exception as e:
             log.error(f"Error adding FAQ: {e}", exc_info=True)
