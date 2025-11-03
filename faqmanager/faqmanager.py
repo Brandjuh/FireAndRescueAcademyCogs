@@ -530,47 +530,92 @@ class FAQManager(red_commands.Cog):
             # Export FAQs
             exported = 0
             failed = 0
+            error_log = []
             
             progress_msg = await ctx.send(
-                f"📤 Exporting {len(faqs_to_export)} FAQs to {forum_channel.mention}...",
+                f"📤 Starting export of {len(faqs_to_export)} FAQs to {forum_channel.mention}...\n\n*This may take a while. Do not close Discord.*",
                 ephemeral=True
             )
             
             for i, result in enumerate(faqs_to_export):
                 try:
+                    log.info(f"Exporting FAQ {i+1}/{len(faqs_to_export)}: {result.title}")
+                    
                     await self._export_faq_to_forum(forum_channel, result)
                     exported += 1
                     
-                    # Update progress every 5 FAQs
-                    if (i + 1) % 5 == 0:
+                    # Update progress every 5 FAQs or on last item
+                    if (i + 1) % 5 == 0 or (i + 1) == len(faqs_to_export):
                         await progress_msg.edit(
-                            content=f"📤 Progress: {i + 1}/{len(faqs_to_export)} FAQs exported..."
+                            content=f"📤 Progress: {i + 1}/{len(faqs_to_export)} FAQs\n✅ Exported: {exported}\n❌ Failed: {failed}"
                         )
                     
-                    # Rate limit protection
-                    await asyncio.sleep(1)
+                    # Rate limit protection - Discord allows ~2 threads per second
+                    await asyncio.sleep(2)
+                    
+                except discord.HTTPException as e:
+                    log.error(f"Discord API error exporting '{result.title}': {e}")
+                    failed += 1
+                    error_log.append(f"API Error - {result.title[:50]}: {str(e)[:100]}")
+                    
+                    # If rate limited, wait longer
+                    if e.status == 429:
+                        retry_after = getattr(e, 'retry_after', 30)
+                        log.warning(f"Rate limited! Waiting {retry_after} seconds...")
+                        await progress_msg.edit(
+                            content=f"⏸️ Rate limited by Discord. Waiting {retry_after}s...\n\n📤 Progress: {i + 1}/{len(faqs_to_export)}\n✅ Exported: {exported}\n❌ Failed: {failed}"
+                        )
+                        await asyncio.sleep(retry_after)
+                        
+                        # Retry this FAQ
+                        try:
+                            await self._export_faq_to_forum(forum_channel, result)
+                            exported += 1
+                            failed -= 1  # Remove from failed count
+                        except Exception as retry_error:
+                            log.error(f"Retry failed for '{result.title}': {retry_error}")
+                    
+                    # Continue with next FAQ even if this one failed
+                    continue
+                    
+                except discord.Forbidden as e:
+                    log.error(f"Permission error exporting '{result.title}': {e}")
+                    failed += 1
+                    error_log.append(f"Permission - {result.title[:50]}")
+                    continue
                     
                 except Exception as e:
-                    log.error(f"Failed to export FAQ {result.title}: {e}")
+                    log.error(f"Unexpected error exporting '{result.title}': {e}", exc_info=True)
                     failed += 1
+                    error_log.append(f"Error - {result.title[:50]}: {str(e)[:100]}")
+                    continue
             
             # Final report
             embed = discord.Embed(
-                title="✅ Forum Export Complete",
-                color=discord.Color.green()
+                title="✅ Forum Export Complete" if failed == 0 else "⚠️ Forum Export Completed with Errors",
+                color=discord.Color.green() if failed == 0 else discord.Color.orange()
             )
             embed.add_field(name="Forum", value=forum_channel.mention, inline=False)
             embed.add_field(name="✅ Exported", value=str(exported), inline=True)
             embed.add_field(name="❌ Failed", value=str(failed), inline=True)
             embed.add_field(name="Total", value=str(len(faqs_to_export)), inline=True)
             
+            # Add error details if any
+            if error_log:
+                error_text = "\n".join(error_log[:10])
+                if len(error_log) > 10:
+                    error_text += f"\n... and {len(error_log) - 10} more errors"
+                embed.add_field(name="🔍 Error Details", value=f"```{error_text[:1000]}```", inline=False)
+            
+            embed.set_footer(text="Check bot logs for detailed error information")
+            
             await progress_msg.edit(content=None, embed=embed)
             
         except discord.Forbidden:
-            await ctx.send("❌ I don't have permission to post in that forum channel.", ephemeral=True)
+            await ctx.send("❌ I don't have permission to post in that forum channel.\n\nRequired permissions:\n- View Channel\n- Send Messages in Threads\n- Create Public Threads", ephemeral=True)
         except Exception as e:
             log.error(f"Forum export failed: {e}", exc_info=True)
-            await ctx.send(f"❌ Export failed: {str(e)}", ephemeral=True)
+            await ctx.send(f"❌ Export failed: {str(e)}\n\nCheck bot logs for details.", ephemeral=True)
     
     @faq_forum.command(name="sync")
     @app_commands.describe(forum_channel="Forum channel to sync")
@@ -663,6 +708,118 @@ class FAQManager(red_commands.Cog):
             log.error(f"Forum sync failed: {e}", exc_info=True)
             await ctx.send(f"❌ Sync failed: {str(e)}", ephemeral=True)
     
+    @faq_forum.command(name="test")
+    @app_commands.describe(forum_channel="Forum channel to test")
+    async def forum_test(self, ctx: red_commands.Context, forum_channel: discord.ForumChannel):
+        """
+        Test forum export with a single FAQ to diagnose issues.
+        """
+        if not await self._is_editor(ctx.guild, ctx.author):
+            await ctx.send("❌ You don't have permission to test forum export.", ephemeral=True)
+            return
+        
+        await ctx.defer(ephemeral=True)
+        
+        try:
+            # Get one FAQ to test
+            test_faq = None
+            if self._faq_cache:
+                test_faq = SearchResult.from_faq_item(self._faq_cache[0], 100)
+            else:
+                helpshift_articles = await self.database.get_all_articles()
+                if helpshift_articles:
+                    test_faq = SearchResult.from_helpshift_article(helpshift_articles[0], 100)
+            
+            if not test_faq:
+                await ctx.send("❌ No FAQs available for testing.", ephemeral=True)
+                return
+            
+            # Test tag setup
+            embed = discord.Embed(
+                title="🧪 Testing Forum Export",
+                description=f"Testing with FAQ: **{test_faq.title}**",
+                color=discord.Color.blue()
+            )
+            
+            await ctx.send(embed=embed, ephemeral=True)
+            
+            # Check permissions
+            perms = forum_channel.permissions_for(ctx.guild.me)
+            
+            perm_check = discord.Embed(
+                title="📋 Permission Check",
+                color=discord.Color.blue()
+            )
+            perm_check.add_field(
+                name="View Channel",
+                value="✅ Yes" if perms.view_channel else "❌ No",
+                inline=True
+            )
+            perm_check.add_field(
+                name="Send Messages",
+                value="✅ Yes" if perms.send_messages else "❌ No",
+                inline=True
+            )
+            perm_check.add_field(
+                name="Create Threads",
+                value="✅ Yes" if perms.create_public_threads else "❌ No",
+                inline=True
+            )
+            perm_check.add_field(
+                name="Send in Threads",
+                value="✅ Yes" if perms.send_messages_in_threads else "❌ No",
+                inline=True
+            )
+            
+            await ctx.send(embed=perm_check, ephemeral=True)
+            
+            if not all([perms.view_channel, perms.send_messages, perms.create_public_threads, perms.send_messages_in_threads]):
+                await ctx.send("❌ Bot is missing required permissions! Grant the permissions shown above and try again.", ephemeral=True)
+                return
+            
+            # Test tag creation
+            await ctx.send("🏷️ Setting up forum tags...", ephemeral=True)
+            await self._setup_forum_tags(forum_channel)
+            
+            # Test thread creation
+            await ctx.send("📝 Creating test thread...", ephemeral=True)
+            
+            try:
+                thread = await self._export_faq_to_forum(forum_channel, test_faq)
+                
+                success_embed = discord.Embed(
+                    title="✅ Test Successful!",
+                    description=f"Created test thread: {thread.mention}\n\nYou can now safely run `/faqadmin forum export`",
+                    color=discord.Color.green()
+                )
+                
+                await ctx.send(embed=success_embed, ephemeral=True)
+                
+            except discord.HTTPException as e:
+                error_embed = discord.Embed(
+                    title="❌ Test Failed - Discord API Error",
+                    description=f"**Status:** {e.status}\n**Code:** {e.code}\n**Message:** {e.text}",
+                    color=discord.Color.red()
+                )
+                error_embed.add_field(
+                    name="💡 Common Causes",
+                    value="• Bot may be rate limited\n• Forum may have reached thread limit\n• Embed may be too large\n• Missing permissions",
+                    inline=False
+                )
+                
+                await ctx.send(embed=error_embed, ephemeral=True)
+                
+        except Exception as e:
+            log.error(f"Forum test failed: {e}", exc_info=True)
+            
+            error_embed = discord.Embed(
+                title="❌ Test Failed - Unexpected Error",
+                description=f"```{str(e)[:1000]}```",
+                color=discord.Color.red()
+            )
+            
+            await ctx.send(embed=error_embed, ephemeral=True)
+    
     @faq_forum.command(name="clear")
     @app_commands.describe(forum_channel="Forum channel to clear")
     async def forum_clear(self, ctx: red_commands.Context, forum_channel: discord.ForumChannel):
@@ -703,40 +860,56 @@ class FAQManager(red_commands.Cog):
     
     async def _export_faq_to_forum(self, forum_channel: discord.ForumChannel, result: SearchResult):
         """Export a single FAQ to forum as a thread."""
-        # Get appropriate tag
-        tag = None
-        if result.category:
-            for forum_tag in forum_channel.available_tags:
-                if forum_tag.name == result.category:
-                    tag = forum_tag
-                    break
-        
-        # Create thread name
-        source_prefix = "📌" if result.source == Source.CUSTOM else "🔖"
-        thread_name = f"{source_prefix} {result.title[:95]}"  # Max 100 chars for thread name
-        
-        # Create embed
-        embed = await self._create_result_embed(result, "", public=True)
-        
-        # Add source info to footer
-        if result.source == Source.CUSTOM:
-            embed.set_footer(text=f"Custom FAQ • ID: {result.faq_id}")
-        else:
-            embed.set_footer(text=f"Helpshift Article • ID: {result.article_id}")
-        
-        # Create thread
-        applied_tags = [tag] if tag else []
-        
-        thread = await forum_channel.create_thread(
-            name=thread_name,
-            content=None,
-            embed=embed,
-            applied_tags=applied_tags
-        )
-        
-        log.info(f"Created forum thread: {thread_name}")
-        
-        return thread
+        try:
+            # Get appropriate tag
+            tag = None
+            if result.category:
+                for forum_tag in forum_channel.available_tags:
+                    if forum_tag.name == result.category:
+                        tag = forum_tag
+                        break
+            
+            # Create thread name (max 100 chars)
+            source_prefix = "📌" if result.source == Source.CUSTOM else "🔖"
+            thread_name = f"{source_prefix} {result.title}"
+            
+            # Truncate if too long
+            if len(thread_name) > 100:
+                thread_name = thread_name[:97] + "..."
+            
+            # Create embed
+            embed = await self._create_result_embed(result, "", public=True)
+            
+            # Add source info to footer
+            if result.source == Source.CUSTOM:
+                embed.set_footer(text=f"Custom FAQ • ID: {result.faq_id}")
+            else:
+                embed.set_footer(text=f"Helpshift Article • ID: {result.article_id}")
+            
+            # Create thread with embed
+            applied_tags = [tag] if tag else []
+            
+            # Discord requires either content or embed, we use embed
+            message = await forum_channel.create_thread(
+                name=thread_name,
+                content=None,
+                embed=embed,
+                applied_tags=applied_tags,
+                auto_archive_duration=10080  # 7 days
+            )
+            
+            log.info(f"✅ Created forum thread: {thread_name}")
+            
+            return message.thread
+            
+        except discord.HTTPException as e:
+            log.error(f"Discord API error creating thread '{result.title}': {e}")
+            log.error(f"Error details - Status: {e.status}, Code: {e.code}, Text: {e.text}")
+            raise
+            
+        except Exception as e:
+            log.error(f"Unexpected error creating thread '{result.title}': {e}", exc_info=True)
+            raise
     
     @red_commands.hybrid_group(name="faqcrawl", aliases=["crawl"])
     @checks.admin_or_permissions(manage_guild=True)
