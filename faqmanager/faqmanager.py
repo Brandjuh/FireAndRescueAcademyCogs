@@ -524,18 +524,45 @@ class FAQManager(red_commands.Cog):
                 await ctx.send("❌ No FAQs to export.", ephemeral=True)
                 return
             
-            # Setup forum tags (categories)
+            # Setup forum tags (categories) and wait for them to be created
+            setup_msg = await ctx.send(
+                f"🏷️ Setting up forum tags... Please wait.",
+                ephemeral=True
+            )
+            
             await self._setup_forum_tags(forum_channel)
             
-            # Export FAQs
+            # Refresh forum channel to get updated tags
+            forum_channel = await ctx.guild.fetch_channel(forum_channel.id)
+            
+            # Verify we have tags
+            if not forum_channel.available_tags:
+                await setup_msg.edit(
+                    content="❌ No tags available in forum and bot cannot create them. Please:\n"
+                            "1. Manually create at least one tag in the forum channel\n"
+                            "2. Or grant bot 'Manage Channels' permission\n"
+                            "3. Then try export again"
+                )
+                return
+            
+            await setup_msg.edit(
+                content=f"✅ Forum has {len(forum_channel.available_tags)} tags available.\n"
+                        f"Tags: {', '.join(t.name for t in forum_channel.available_tags[:10])}"
+            )
+            
+            # Export FAQs with aggressive rate limiting
             exported = 0
             failed = 0
             error_log = []
             
             progress_msg = await ctx.send(
-                f"📤 Starting export of {len(faqs_to_export)} FAQs to {forum_channel.mention}...\n\n*This may take a while. Do not close Discord.*",
+                f"📤 Starting export of {len(faqs_to_export)} FAQs to {forum_channel.mention}...\n\n"
+                f"⏱️ Estimated time: ~{len(faqs_to_export) * 4 // 60} minutes\n"
+                f"*Please be patient - Discord rate limits are strict!*",
                 ephemeral=True
             )
+            
+            consecutive_failures = 0
             
             for i, result in enumerate(faqs_to_export):
                 try:
@@ -543,39 +570,53 @@ class FAQManager(red_commands.Cog):
                     
                     await self._export_faq_to_forum(forum_channel, result)
                     exported += 1
+                    consecutive_failures = 0
                     
                     # Update progress every 5 FAQs or on last item
                     if (i + 1) % 5 == 0 or (i + 1) == len(faqs_to_export):
                         await progress_msg.edit(
-                            content=f"📤 Progress: {i + 1}/{len(faqs_to_export)} FAQs\n✅ Exported: {exported}\n❌ Failed: {failed}"
+                            content=f"📤 Progress: {i + 1}/{len(faqs_to_export)} FAQs\n"
+                                    f"✅ Exported: {exported}\n"
+                                    f"❌ Failed: {failed}\n"
+                                    f"⏱️ ~{(len(faqs_to_export) - i - 1) * 4 // 60} minutes remaining"
                         )
                     
-                    # Rate limit protection - Discord allows ~2 threads per second
-                    await asyncio.sleep(2)
+                    # Aggressive rate limit protection - 4 seconds between each thread
+                    await asyncio.sleep(4)
                     
                 except discord.HTTPException as e:
                     log.error(f"Discord API error exporting '{result.title}': {e}")
                     failed += 1
+                    consecutive_failures += 1
                     error_log.append(f"API Error - {result.title[:50]}: {str(e)[:100]}")
                     
-                    # If rate limited, wait longer
+                    # If rate limited, wait much longer
                     if e.status == 429:
-                        retry_after = getattr(e, 'retry_after', 30)
+                        retry_after = getattr(e, 'retry_after', 60)
                         log.warning(f"Rate limited! Waiting {retry_after} seconds...")
                         await progress_msg.edit(
-                            content=f"⏸️ Rate limited by Discord. Waiting {retry_after}s...\n\n📤 Progress: {i + 1}/{len(faqs_to_export)}\n✅ Exported: {exported}\n❌ Failed: {failed}"
+                            content=f"⏸️ Rate limited by Discord!\n"
+                                    f"Waiting {int(retry_after)}s before continuing...\n\n"
+                                    f"📤 Progress: {i + 1}/{len(faqs_to_export)}\n"
+                                    f"✅ Exported: {exported}\n"
+                                    f"❌ Failed: {failed}"
                         )
-                        await asyncio.sleep(retry_after)
+                        await asyncio.sleep(retry_after + 5)  # Wait extra 5 seconds
                         
                         # Retry this FAQ
                         try:
                             await self._export_faq_to_forum(forum_channel, result)
                             exported += 1
-                            failed -= 1  # Remove from failed count
+                            failed -= 1
+                            consecutive_failures = 0
                         except Exception as retry_error:
                             log.error(f"Retry failed for '{result.title}': {retry_error}")
                     
-                    # Continue with next FAQ even if this one failed
+                    # If we have 3 consecutive failures, slow down even more
+                    if consecutive_failures >= 3:
+                        log.warning(f"Multiple consecutive failures, increasing delay")
+                        await asyncio.sleep(10)
+                    
                     continue
                     
                 except discord.Forbidden as e:
@@ -607,7 +648,7 @@ class FAQManager(red_commands.Cog):
                     error_text += f"\n... and {len(error_log) - 10} more errors"
                 embed.add_field(name="🔍 Error Details", value=f"```{error_text[:1000]}```", inline=False)
             
-            embed.set_footer(text="Check bot logs for detailed error information")
+            embed.set_footer(text="Export complete! Check bot logs for detailed information.")
             
             await progress_msg.edit(content=None, embed=embed)
             
@@ -845,52 +886,71 @@ class FAQManager(red_commands.Cog):
         """Setup category tags in forum channel."""
         existing_tags = {tag.name: tag for tag in forum_channel.available_tags}
         
+        tags_to_create = []
+        
         # Always create an "Uncategorized" tag for FAQs without category
         if "Uncategorized" not in existing_tags:
-            try:
-                if len(forum_channel.available_tags) < 20:
-                    await forum_channel.create_tag(name="Uncategorized", emoji="📋")
-                    log.info("Created forum tag: Uncategorized")
-            except Exception as e:
-                log.warning(f"Cannot create Uncategorized tag: {e}")
+            tags_to_create.append(("Uncategorized", "📋"))
         
         # Add missing category tags
         for category in self.FAQ_CATEGORIES:
-            if category not in existing_tags:
-                try:
-                    # Discord allows max 20 tags
-                    if len(forum_channel.available_tags) < 20:
-                        await forum_channel.create_tag(name=category)
-                        log.info(f"Created forum tag: {category}")
-                except discord.Forbidden:
-                    log.warning(f"Cannot create forum tag {category} - missing permissions")
-                except Exception as e:
-                    log.error(f"Failed to create forum tag {category}: {e}")
+            if category not in existing_tags and len(forum_channel.available_tags) + len(tags_to_create) < 20:
+                tags_to_create.append((category, None))
+        
+        # Create tags with delay between each
+        for tag_name, emoji in tags_to_create:
+            try:
+                if len(forum_channel.available_tags) < 20:
+                    if emoji:
+                        await forum_channel.create_tag(name=tag_name, emoji=emoji)
+                    else:
+                        await forum_channel.create_tag(name=tag_name)
+                    log.info(f"Created forum tag: {tag_name}")
+                    await asyncio.sleep(1)  # Wait between tag creations
+            except discord.Forbidden:
+                log.warning(f"Cannot create forum tag {tag_name} - missing Manage Channels permission")
+            except discord.HTTPException as e:
+                log.error(f"Failed to create forum tag {tag_name}: {e}")
+            except Exception as e:
+                log.error(f"Unexpected error creating tag {tag_name}: {e}")
+        
+        # Wait a bit for Discord to sync
+        if tags_to_create:
+            await asyncio.sleep(2)
+            log.info(f"Created {len(tags_to_create)} tags, waiting for sync...")
     
     async def _export_faq_to_forum(self, forum_channel: discord.ForumChannel, result: SearchResult):
         """Export a single FAQ to forum as a thread."""
         try:
+            # Refresh available tags to get latest
+            available_tags = forum_channel.available_tags
+            
+            if not available_tags:
+                raise ValueError(f"No tags available in forum {forum_channel.name}. Cannot create thread.")
+            
             # Get appropriate tag - try to match category first
             tag = None
             
             if result.category:
                 # Try to find matching tag
-                for forum_tag in forum_channel.available_tags:
-                    if forum_tag.name == result.category:
+                for forum_tag in available_tags:
+                    if forum_tag.name.lower() == result.category.lower():
                         tag = forum_tag
                         break
             
             # If no tag found, use "Uncategorized" tag
             if tag is None:
-                for forum_tag in forum_channel.available_tags:
+                for forum_tag in available_tags:
                     if forum_tag.name == "Uncategorized":
                         tag = forum_tag
                         break
             
-            # If still no tag, use the first available tag (forum requires at least one)
-            if tag is None and forum_channel.available_tags:
-                tag = forum_channel.available_tags[0]
-                log.warning(f"No matching tag found for '{result.title}', using first available tag: {tag.name}")
+            # If still no tag, use the first available tag
+            if tag is None:
+                tag = available_tags[0]
+                log.warning(f"No matching tag for '{result.title}' (category: {result.category}), using: {tag.name}")
+            
+            log.debug(f"Using tag '{tag.name}' for FAQ '{result.title}'")
             
             # Create thread name (max 100 chars)
             source_prefix = "📌" if result.source == Source.CUSTOM else "🔖"
@@ -910,41 +970,35 @@ class FAQManager(red_commands.Cog):
                 footer_text = f"Helpshift Article • ID: {result.article_id}"
             
             # Add category if different from tag
-            if result.category and tag and tag.name != result.category:
+            if result.category and tag.name != result.category:
                 footer_text += f" • Category: {result.category}"
             
             embed.set_footer(text=footer_text)
             
-            # Create thread with at least one tag (required by some forums)
-            applied_tags = [tag] if tag else []
+            # Create thread with tag (required)
+            applied_tags = [tag]
             
-            # If forum requires tags but we have none, this will fail with proper error
-            if not applied_tags:
-                log.error(f"Cannot create thread '{result.title}' - no tags available and forum requires tags")
-                raise ValueError(f"Forum requires tags but no tags are available. Please create tags in {forum_channel.name}")
-            
-            # Discord requires either content or embed, we use embed
+            # Create thread
             message = await forum_channel.create_thread(
                 name=thread_name,
-                content=None,
                 embed=embed,
                 applied_tags=applied_tags,
-                auto_archive_duration=10080  # 7 days
+                auto_archive_duration=10080,  # 7 days
+                reason=f"FAQ Export: {result.title[:50]}"
             )
             
-            log.info(f"✅ Created forum thread: {thread_name} (tag: {tag.name if tag else 'none'})")
+            log.info(f"✅ Created forum thread: {thread_name} (tag: {tag.name})")
             
             return message.thread
             
         except discord.HTTPException as e:
+            # Add extra context to error
+            available_tag_names = [t.name for t in forum_channel.available_tags] if forum_channel.available_tags else ["NONE"]
             log.error(f"Discord API error creating thread '{result.title}': {e}")
-            log.error(f"Error details - Status: {e.status}, Code: {e.code}, Text: {e.text}")
-            
-            # Provide helpful error message for tag requirement
-            if e.code == 40067:
-                log.error(f"Forum requires tags! Available tags: {[t.name for t in forum_channel.available_tags]}")
-                log.error(f"FAQ category: {result.category}")
-            
+            log.error(f"  Status: {e.status}, Code: {e.code}")
+            log.error(f"  Available tags: {available_tag_names}")
+            log.error(f"  FAQ category: {result.category}")
+            log.error(f"  Selected tag: {tag.name if tag else 'NONE'}")
             raise
             
         except Exception as e:
