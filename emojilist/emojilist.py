@@ -80,10 +80,15 @@ class EmojiList(commands.Cog):
     
     @commands.hybrid_command(name="emojilist")
     @commands.is_owner()
-    async def emoji_list(self, ctx: commands.Context):
+    async def emoji_list(self, ctx: commands.Context, export: bool = False):
         """Display all emojis the bot can access with their code format.
         
         Shows both regular and animated emojis in paginated embeds.
+        
+        Parameters
+        ----------
+        export: bool
+            If True, exports all emojis to a TXT file instead of displaying them.
         """
         # Defer response for slash commands
         if ctx.interaction:
@@ -103,6 +108,11 @@ class EmojiList(commands.Cog):
         
         # Sort emojis: non-animated first, then animated, alphabetically within each group
         all_emojis.sort(key=lambda e: (e.animated, e.name.lower()))
+        
+        # If export is True, generate TXT file
+        if export:
+            await self._export_to_txt(ctx, all_emojis)
+            return
         
         # Create embeds with pagination (10 emojis per page)
         embeds = []
@@ -144,6 +154,50 @@ class EmojiList(commands.Cog):
             view = EmojiListView(embeds, ctx.author.id)
             message = await ctx.send(embed=embeds[0], view=view)
             view.message = message
+    
+    async def _export_to_txt(self, ctx: commands.Context, emojis: list):
+        """Export emojis to a TXT file and send it to the user.
+        
+        Parameters
+        ----------
+        ctx: commands.Context
+            The command context.
+        emojis: list
+            List of emoji objects to export.
+        """
+        # Create the text content
+        lines = []
+        lines.append(f"Bot Emoji List - Total: {len(emojis)}")
+        lines.append("=" * 50)
+        lines.append("")
+        
+        for emoji in emojis:
+            if emoji.animated:
+                code = f"<a:{emoji.name}:{emoji.id}>"
+            else:
+                code = f"<:{emoji.name}:{emoji.id}>"
+            
+            lines.append(f"{emoji.name}: {code}")
+        
+        # Join all lines
+        content = "\n".join(lines)
+        
+        # Create a file-like object
+        from io import BytesIO
+        file_data = BytesIO(content.encode('utf-8'))
+        file_data.seek(0)
+        
+        # Create Discord file
+        file = discord.File(file_data, filename="emoji_list.txt")
+        
+        # Send file with embed
+        embed = discord.Embed(
+            title="📥 Emoji List Export",
+            description=f"Exported **{len(emojis)}** emojis to TXT file.",
+            color=discord.Color.green()
+        )
+        
+        await ctx.send(embed=embed, file=file)
     
     def cog_unload(self):
         """Cleanup when cog is unloaded."""
