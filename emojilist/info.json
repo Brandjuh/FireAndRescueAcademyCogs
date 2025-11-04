@@ -1,0 +1,15 @@
+{
+    "author": [
+        "YourName"
+    ],
+    "description": "Display all emojis the bot can access with their code format for easy copying.",
+    "install_msg": "Thank you for installing EmojiList! Use `[p]emojilist` to view all available emojis.\n\n**Note:** This command is restricted to bot owners only.",
+    "short": "List all bot emojis with their code format",
+    "tags": [
+        "emoji",
+        "utility",
+        "list"
+    ],
+    "type": "COG",
+    "end_user_data_statement": "This cog does not store any end user data."
+}
