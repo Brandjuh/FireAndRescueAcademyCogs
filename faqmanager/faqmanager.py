@@ -56,7 +56,7 @@ class FAQManager(red_commands.Cog):
         default_guild = {
             "editor_roles": [],
             "outdated_log_channel": None,
-            "auto_post_forum_channel": None,  # NEW: Auto-post new/edited FAQs here
+            "auto_post_forum_channel": None,
             "suggestion_threshold": 75,
             "autocomplete_ttl": 600,
             "debug_mode": False
@@ -151,7 +151,7 @@ class FAQManager(red_commands.Cog):
             
             if not all_results:
                 embed = discord.Embed(
-                    title="âŒ No Results Found",
+                    title="No Results Found",
                     description=f"Could not find any FAQs matching **{query}**.\n\nTry different keywords or check spelling.",
                     color=discord.Color.red()
                 )
@@ -169,7 +169,7 @@ class FAQManager(red_commands.Cog):
         except Exception as e:
             log.error(f"Error in faq_search: {e}", exc_info=True)
             embed = discord.Embed(
-                title="âŒ Search Error",
+                title="Search Error",
                 description="An error occurred while searching. Please try again later.",
                 color=discord.Color.red()
             )
@@ -193,7 +193,7 @@ class FAQManager(red_commands.Cog):
             
             if not all_suggestions:
                 embed = discord.Embed(
-                    title="âŒ No Suggestions",
+                    title="No Suggestions",
                     description=f"Could not find any suggestions for **{query}**.",
                     color=discord.Color.red()
                 )
@@ -201,17 +201,17 @@ class FAQManager(red_commands.Cog):
                 return
             
             embed = discord.Embed(
-                title=f"ðŸ’¡ Suggestions for: {query}",
+                title=f"Suggestions for: {query}",
                 description="Select one of the options below:",
                 color=discord.Color.blue()
             )
             
             for i, result in enumerate(all_suggestions[:8], 1):
-                source_icon = "ðŸ“" if result.source == Source.CUSTOM else "ðŸŒ"
+                source_icon = "[Custom]" if result.source == Source.CUSTOM else "[Helpshift]"
                 score_bar = self._create_score_bar(result.score)
                 embed.add_field(
                     name=f"{i}. {source_icon} {result.title}",
-                    value=f"{score_bar} â€¢ {result.category or 'General'}",
+                    value=f"{score_bar} | {result.category or 'General'}",
                     inline=False
                 )
             
@@ -220,13 +220,13 @@ class FAQManager(red_commands.Cog):
         
         except Exception as e:
             log.error(f"Error in faq_suggest: {e}", exc_info=True)
-            await ctx.send("âŒ An error occurred. Please try again.", ephemeral=True)
+            await ctx.send("An error occurred. Please try again.", ephemeral=True)
     
     @red_commands.hybrid_command(name="faqme")
     async def faq_me(self, ctx: red_commands.Context):
         """Open a personal FAQ search mode with an interactive search field."""
         embed = discord.Embed(
-            title="ðŸ” Personal FAQ Search",
+            title="Personal FAQ Search",
             description="Use the button below to start searching FAQs.\n\nThis is a private search just for you!",
             color=discord.Color.green()
         )
@@ -247,12 +247,12 @@ class FAQManager(red_commands.Cog):
     async def faq_add(self, ctx: red_commands.Context):
         """Add a new custom FAQ entry with category selection."""
         if not await self._is_editor(ctx.guild, ctx.author):
-            await ctx.send("âŒ You don't have permission to add FAQs.", ephemeral=True)
+            await ctx.send("You don't have permission to add FAQs.", ephemeral=True)
             return
         
         view = CategorySelectView(self, ctx.author.id)
         embed = discord.Embed(
-            title="ðŸ“ Add New FAQ",
+            title="Add New FAQ",
             description="First, select a category for your FAQ:",
             color=discord.Color.green()
         )
@@ -263,16 +263,16 @@ class FAQManager(red_commands.Cog):
     async def faq_edit(self, ctx: red_commands.Context, faq_id: int):
         """Edit an existing custom FAQ entry."""
         if not await self._is_editor(ctx.guild, ctx.author):
-            await ctx.send("âŒ You don't have permission to edit FAQs.", ephemeral=True)
+            await ctx.send("You don't have permission to edit FAQs.", ephemeral=True)
             return
         
         faq = await self.database.get_faq(faq_id)
         if not faq:
-            await ctx.send(f"âŒ FAQ with ID `{faq_id}` not found.", ephemeral=True)
+            await ctx.send(f"FAQ with ID `{faq_id}` not found.", ephemeral=True)
             return
         
         if not ctx.interaction:
-            await ctx.send("âŒ This command only works as a slash command. Use `/faqadmin edit` instead.")
+            await ctx.send("This command only works as a slash command. Use `/faqadmin edit` instead.")
             return
         
         modal = EditFAQModal(self, faq, ctx.author.id)
@@ -283,17 +283,17 @@ class FAQManager(red_commands.Cog):
     async def faq_remove(self, ctx: red_commands.Context, faq_id: int):
         """Remove a custom FAQ entry (requires confirmation)."""
         if not await self._is_editor(ctx.guild, ctx.author):
-            await ctx.send("âŒ You don't have permission to remove FAQs.", ephemeral=True)
+            await ctx.send("You don't have permission to remove FAQs.", ephemeral=True)
             return
         
         faq = await self.database.get_faq(faq_id)
         if not faq:
-            await ctx.send(f"âŒ FAQ with ID `{faq_id}` not found.", ephemeral=True)
+            await ctx.send(f"FAQ with ID `{faq_id}` not found.", ephemeral=True)
             return
         
         view = ConfirmDeleteView(self, faq, ctx.author.id)
         embed = discord.Embed(
-            title="âš ï¸ Confirm Deletion",
+            title="Confirm Deletion",
             description=f"Are you sure you want to delete this FAQ?\n\n**Question:** {faq.question}\n**ID:** {faq_id}",
             color=discord.Color.orange()
         )
@@ -305,7 +305,7 @@ class FAQManager(red_commands.Cog):
     async def faq_post(self, ctx: red_commands.Context, *, query: str):
         """Search and post a FAQ publicly in the current channel."""
         if not await self._is_editor(ctx.guild, ctx.author):
-            await ctx.send("âŒ You don't have permission to post FAQs.", ephemeral=True)
+            await ctx.send("You don't have permission to post FAQs.", ephemeral=True)
             return
         
         await ctx.defer(ephemeral=True)
@@ -319,17 +319,17 @@ class FAQManager(red_commands.Cog):
         all_results.extend(suggestions)
         
         if not all_results:
-            await ctx.send(f"âŒ No FAQs found matching **{query}**.", ephemeral=True)
+            await ctx.send(f"No FAQs found matching **{query}**.", ephemeral=True)
             return
         
         if len(all_results) == 1:
             embed = await self._create_result_embed(all_results[0], query, public=True)
             await ctx.send(embed=embed)
-            await ctx.send("âœ… FAQ posted!", ephemeral=True)
+            await ctx.send("FAQ posted!", ephemeral=True)
         else:
             view = PostSelectView(self, all_results, ctx.channel, ctx.author.id)
             embed = discord.Embed(
-                title="ðŸ“¤ Select FAQ to Post",
+                title="Select FAQ to Post",
                 description="Choose which FAQ to post publicly:",
                 color=discord.Color.blue()
             )
@@ -384,11 +384,11 @@ class FAQManager(red_commands.Cog):
         """Add a role as FAQ editor."""
         async with self.config.guild(ctx.guild).editor_roles() as roles:
             if role.id in roles:
-                await ctx.send(f"âŒ {role.mention} is already an editor role.", ephemeral=True)
+                await ctx.send(f"{role.mention} is already an editor role.", ephemeral=True)
                 return
             roles.append(role.id)
         
-        await ctx.send(f"âœ… Added {role.mention} as editor role.", ephemeral=True)
+        await ctx.send(f"Added {role.mention} as editor role.", ephemeral=True)
     
     @faq_roles.command(name="remove")
     @app_commands.describe(role="Role to remove from editors")
@@ -396,11 +396,11 @@ class FAQManager(red_commands.Cog):
         """Remove a role from FAQ editors."""
         async with self.config.guild(ctx.guild).editor_roles() as roles:
             if role.id not in roles:
-                await ctx.send(f"âŒ {role.mention} is not an editor role.", ephemeral=True)
+                await ctx.send(f"{role.mention} is not an editor role.", ephemeral=True)
                 return
             roles.remove(role.id)
         
-        await ctx.send(f"âœ… Removed {role.mention} from editor roles.", ephemeral=True)
+        await ctx.send(f"Removed {role.mention} from editor roles.", ephemeral=True)
     
     @faq_roles.command(name="list")
     async def roles_list(self, ctx: red_commands.Context):
@@ -408,19 +408,19 @@ class FAQManager(red_commands.Cog):
         role_ids = await self.config.guild(ctx.guild).editor_roles()
         
         if not role_ids:
-            await ctx.send("ðŸ“ No editor roles configured.", ephemeral=True)
+            await ctx.send("No editor roles configured.", ephemeral=True)
             return
         
         roles = [ctx.guild.get_role(rid) for rid in role_ids]
         roles = [r for r in roles if r is not None]
         
         if not roles:
-            await ctx.send("âš ï¸ Editor roles configured but none found.", ephemeral=True)
+            await ctx.send("Editor roles configured but none found.", ephemeral=True)
             return
         
         role_mentions = [r.mention for r in roles]
         embed = discord.Embed(
-            title="ðŸ›¡ï¸ FAQ Editor Roles",
+            title="FAQ Editor Roles",
             description="\n".join(role_mentions),
             color=discord.Color.blue()
         )
@@ -439,12 +439,12 @@ class FAQManager(red_commands.Cog):
             forum_channel = ctx.guild.get_channel(settings['auto_post_forum_channel']) if settings['auto_post_forum_channel'] else None
             
             embed = discord.Embed(
-                title="âš™ï¸ FAQ Settings",
+                title="FAQ Settings",
                 color=discord.Color.blue()
             )
             embed.add_field(name="Suggestion Threshold", value=str(settings['suggestion_threshold']), inline=True)
             embed.add_field(name="Autocomplete TTL", value=f"{settings['autocomplete_ttl']}s", inline=True)
-            embed.add_field(name="Debug Mode", value="âœ… Enabled" if settings['debug_mode'] else "âŒ Disabled", inline=True)
+            embed.add_field(name="Debug Mode", value="Enabled" if settings['debug_mode'] else "Disabled", inline=True)
             embed.add_field(name="Outdated Log Channel", value=outdated_channel.mention if outdated_channel else "Not set", inline=False)
             embed.add_field(name="Auto-Post Forum", value=forum_channel.mention if forum_channel else "Not set (no auto-posting)", inline=False)
             
@@ -455,18 +455,18 @@ class FAQManager(red_commands.Cog):
     async def settings_threshold(self, ctx: red_commands.Context, value: int):
         """Set the suggestion threshold score."""
         if not 0 <= value <= 100:
-            await ctx.send("âŒ Threshold must be between 0 and 100.", ephemeral=True)
+            await ctx.send("Threshold must be between 0 and 100.", ephemeral=True)
             return
         
         await self.config.guild(ctx.guild).suggestion_threshold.set(value)
-        await ctx.send(f"âœ… Suggestion threshold set to **{value}**.", ephemeral=True)
+        await ctx.send(f"Suggestion threshold set to **{value}**.", ephemeral=True)
     
     @faq_settings.command(name="outdatedlog")
     @app_commands.describe(channel="Channel for outdated reports")
     async def settings_outdated_log(self, ctx: red_commands.Context, channel: discord.TextChannel):
         """Set the channel for outdated content reports."""
         await self.config.guild(ctx.guild).outdated_log_channel.set(channel.id)
-        await ctx.send(f"âœ… Outdated reports will be sent to {channel.mention}.", ephemeral=True)
+        await ctx.send(f"Outdated reports will be sent to {channel.mention}.", ephemeral=True)
     
     @faq_settings.command(name="debug")
     @app_commands.describe(enabled="Enable or disable debug mode")
@@ -476,10 +476,10 @@ class FAQManager(red_commands.Cog):
         
         if enabled:
             log.setLevel(logging.DEBUG)
-            await ctx.send("âœ… Debug mode **enabled**.", ephemeral=True)
+            await ctx.send("Debug mode **enabled**.", ephemeral=True)
         else:
             log.setLevel(logging.INFO)
-            await ctx.send("âœ… Debug mode **disabled**.", ephemeral=True)
+            await ctx.send("Debug mode **disabled**.", ephemeral=True)
     
     @faq_settings.command(name="forum")
     @app_commands.describe(channel="Forum channel for auto-posting FAQs")
@@ -715,11 +715,13 @@ class FAQManager(red_commands.Cog):
         
         try:
             for thread in forum_channel.threads:
-                clean_title = thread.name.replace("Pin ", "").replace("Bookmark ", "")
+                # FIXED: No more prefix removal
+                clean_title = thread.name
                 existing.add(clean_title)
             
             async for thread in forum_channel.archived_threads(limit=100):
-                clean_title = thread.name.replace("Pin ", "").replace("Bookmark ", "")
+                # FIXED: No more prefix removal
+                clean_title = thread.name
                 existing.add(clean_title)
             
             log.info(f"Found {len(existing)} existing threads in {forum_channel.name}")
@@ -873,8 +875,8 @@ class FAQManager(red_commands.Cog):
             
             log.debug(f"Using tag '{tag.name}' for FAQ '{result.title}'")
             
-            source_prefix = "Pin" if result.source == Source.CUSTOM else "Bookmark"
-            thread_name = f"{source_prefix} {result.title}"
+            # FIXED: No more BOOKMARK/PIN prefix
+            thread_name = result.title
             
             if len(thread_name) > 100:
                 thread_name = thread_name[:97] + "..."
@@ -927,13 +929,13 @@ class FAQManager(red_commands.Cog):
         else:
             send_msg = ctx.send
         
-        await send_msg("ðŸ”„ Starting Helpshift crawl... This may take several minutes.")
+        await send_msg("Starting Helpshift crawl... This may take several minutes.")
         
         try:
             report = await self.crawler.crawl_full()
             
             embed = discord.Embed(
-                title="ðŸ“Š Crawl Report",
+                title="Crawl Report",
                 color=discord.Color.green() if not report.errors else discord.Color.orange()
             )
             
@@ -941,18 +943,18 @@ class FAQManager(red_commands.Cog):
             embed.add_field(name="Sections", value=str(report.sections_found), inline=True)
             embed.add_field(name="Total Articles", value=str(report.articles_total), inline=True)
             
-            embed.add_field(name="ðŸ“ New", value=str(report.articles_new), inline=True)
-            embed.add_field(name="ðŸ”„ Updated", value=str(report.articles_updated), inline=True)
-            embed.add_field(name="âœ“ Unchanged", value=str(report.articles_unchanged), inline=True)
+            embed.add_field(name="New", value=str(report.articles_new), inline=True)
+            embed.add_field(name="Updated", value=str(report.articles_updated), inline=True)
+            embed.add_field(name="Unchanged", value=str(report.articles_unchanged), inline=True)
             
             if report.articles_deleted > 0:
-                embed.add_field(name="ðŸ—‘ï¸ Deleted", value=str(report.articles_deleted), inline=True)
+                embed.add_field(name="Deleted", value=str(report.articles_deleted), inline=True)
             
             if report.errors:
-                error_text = "\n".join(f"â€¢ {err[:100]}" for err in report.errors[:5])
+                error_text = "\n".join(f"- {err[:100]}" for err in report.errors[:5])
                 if len(report.errors) > 5:
                     error_text += f"\n... and {len(report.errors) - 5} more errors"
-                embed.add_field(name="âš ï¸ Errors", value=error_text, inline=False)
+                embed.add_field(name="Errors", value=error_text, inline=False)
             
             embed.set_footer(text=f"Started: {report.started_at}")
             
@@ -960,7 +962,7 @@ class FAQManager(red_commands.Cog):
             
         except Exception as e:
             log.error(f"Crawl failed: {e}", exc_info=True)
-            await ctx.send(f"âŒ Crawl failed: {str(e)}", ephemeral=True)
+            await ctx.send(f"Crawl failed: {str(e)}", ephemeral=True)
     
     @faq_crawl_group.command(name="status")
     async def crawl_status(self, ctx: red_commands.Context):
@@ -969,11 +971,11 @@ class FAQManager(red_commands.Cog):
             report = await self.database.get_last_crawl_report()
             
             if not report:
-                await ctx.send("ðŸ“­ No crawl reports found. Run `/faqcrawl now` to start a crawl.", ephemeral=True)
+                await ctx.send("No crawl reports found. Run `/faqcrawl now` to start a crawl.", ephemeral=True)
                 return
             
             embed = discord.Embed(
-                title="ðŸ“Š Last Crawl Report",
+                title="Last Crawl Report",
                 color=discord.Color.blue()
             )
             
@@ -982,22 +984,22 @@ class FAQManager(red_commands.Cog):
             embed.add_field(name="Sections", value=str(report.sections_found), inline=True)
             
             embed.add_field(name="Total Articles", value=str(report.articles_total), inline=True)
-            embed.add_field(name="ðŸ“ New", value=str(report.articles_new), inline=True)
-            embed.add_field(name="ðŸ”„ Updated", value=str(report.articles_updated), inline=True)
+            embed.add_field(name="New", value=str(report.articles_new), inline=True)
+            embed.add_field(name="Updated", value=str(report.articles_updated), inline=True)
             
-            embed.add_field(name="âœ“ Unchanged", value=str(report.articles_unchanged), inline=True)
-            embed.add_field(name="ðŸ—‘ï¸ Deleted", value=str(report.articles_deleted), inline=True)
+            embed.add_field(name="Unchanged", value=str(report.articles_unchanged), inline=True)
+            embed.add_field(name="Deleted", value=str(report.articles_deleted), inline=True)
             embed.add_field(name="Errors", value=str(len(report.errors)), inline=True)
             
             if report.errors:
-                error_text = "\n".join(f"â€¢ {err[:100]}" for err in report.errors[:3])
+                error_text = "\n".join(f"- {err[:100]}" for err in report.errors[:3])
                 if len(report.errors) > 3:
                     error_text += f"\n... and {len(report.errors) - 3} more"
-                embed.add_field(name="âš ï¸ Recent Errors", value=error_text, inline=False)
+                embed.add_field(name="Recent Errors", value=error_text, inline=False)
             
             stats = await self.database.get_statistics()
             embed.add_field(
-                name="ðŸ“š Database",
+                name="Database",
                 value=f"Articles: {stats['helpshift_articles']}\nSections: {stats['helpshift_sections']}",
                 inline=False
             )
@@ -1006,7 +1008,7 @@ class FAQManager(red_commands.Cog):
             
         except Exception as e:
             log.error(f"Failed to get crawl status: {e}", exc_info=True)
-            await ctx.send(f"âŒ Error getting status: {str(e)}", ephemeral=True)
+            await ctx.send(f"Error getting status: {str(e)}", ephemeral=True)
     
     @faq_crawl_group.command(name="test")
     async def crawl_test(self, ctx: red_commands.Context):
@@ -1017,25 +1019,25 @@ class FAQManager(red_commands.Cog):
             results = await self.crawler.test_crawl(max_sections=2, max_articles=3)
             
             if 'error' in results:
-                await ctx.send(f"âŒ Test failed: {results['error']}", ephemeral=True)
+                await ctx.send(f"Test failed: {results['error']}", ephemeral=True)
                 return
             
             embed = discord.Embed(
-                title="ðŸ§ª Test Crawl Results",
+                title="Test Crawl Results",
                 description=f"Found {results['sections_found']} sections on home page",
                 color=discord.Color.blue()
             )
             
             if results['sections_tested']:
                 section_text = "\n".join(
-                    f"â€¢ {s['name']}" 
+                    f"- {s['name']}" 
                     for s in results['sections_tested']
                 )
                 embed.add_field(name="Sections Tested", value=section_text, inline=False)
             
             if results['articles_tested']:
                 article_text = "\n".join(
-                    f"â€¢ {a['title'][:60]} ({a['body_length']} chars)"
+                    f"- {a['title'][:60]} ({a['body_length']} chars)"
                     for a in results['articles_tested'][:5]
                 )
                 embed.add_field(
@@ -1056,7 +1058,7 @@ class FAQManager(red_commands.Cog):
             
         except Exception as e:
             log.error(f"Test crawl failed: {e}", exc_info=True)
-            await ctx.send(f"âŒ Test failed: {str(e)}", ephemeral=True)
+            await ctx.send(f"Test failed: {str(e)}", ephemeral=True)
     
     # ==================== AUTOCOMPLETE ====================
     
@@ -1145,7 +1147,8 @@ class FAQManager(red_commands.Cog):
             
             # Check active threads
             for thread in forum_channel.threads:
-                thread_title = thread.name.replace("Pin ", "").replace("Bookmark ", "").strip().lower()
+                # FIXED: No more prefix removal
+                thread_title = thread.name.strip().lower()
                 if thread_title == clean_question:
                     matching_thread = thread
                     break
@@ -1153,7 +1156,8 @@ class FAQManager(red_commands.Cog):
             # Check archived threads if not found
             if not matching_thread:
                 async for thread in forum_channel.archived_threads(limit=100):
-                    thread_title = thread.name.replace("Pin ", "").replace("Bookmark ", "").strip().lower()
+                    # FIXED: No more prefix removal
+                    thread_title = thread.name.strip().lower()
                     if thread_title == clean_question:
                         matching_thread = thread
                         break
@@ -1179,7 +1183,7 @@ class FAQManager(red_commands.Cog):
     # ==================== HELPER METHODS ====================
     
     async def _create_result_embed(self, result: SearchResult, query: str, public: bool = False) -> discord.Embed:
-        """Create an embed for a search result."""
+        """Create an embed for a search result - FIXED: NO EMOJIS."""
         if result.source == Source.CUSTOM:
             color = discord.Color.green()
             source_text = "FARA Custom"
@@ -1209,17 +1213,18 @@ class FAQManager(red_commands.Cog):
             color=color
         )
         
+        # FIXED: No emojis in field names
         if result.category:
-            embed.add_field(name="ðŸ“‚ Category", value=result.category, inline=True)
+            embed.add_field(name="Category", value=result.category, inline=True)
         
         if result.last_updated:
-            embed.add_field(name="ðŸ•’ Last Updated", value=result.last_updated, inline=True)
+            embed.add_field(name="Last Updated", value=result.last_updated, inline=True)
         
         if result.source == Source.CUSTOM and result.faq_id:
-            embed.add_field(name="ðŸ”¢ FAQ ID", value=f"`{result.faq_id}`", inline=True)
+            embed.add_field(name="FAQ ID", value=f"`{result.faq_id}`", inline=True)
         
         if result.source == Source.HELPSHIFT_LOCAL and result.article_id:
-            embed.add_field(name="ðŸ”¢ Article ID", value=f"`{result.article_id}`", inline=True)
+            embed.add_field(name="Article ID", value=f"`{result.article_id}`", inline=True)
         
         footer_parts = [f"Source: {source_text}"]
         if result.source == Source.CUSTOM and result.faq_id:
@@ -1228,15 +1233,16 @@ class FAQManager(red_commands.Cog):
             footer_parts.append(f"Article ID: {result.article_id}")
         footer_parts.append(f"Score: {result.score:.0f}")
         
-        embed.set_footer(text=" â€¢ ".join(footer_parts))
+        # FIXED: Use pipe separator instead of bullet
+        embed.set_footer(text=" | ".join(footer_parts))
         
         return embed
     
     def _create_score_bar(self, score: float) -> str:
-        """Create a visual score bar."""
+        """Create a visual score bar - FIXED: No Unicode blocks."""
         filled = int(score / 10)
         empty = 10 - filled
-        return f"[{'â–ˆ' * filled}{'â–‘' * empty}] {score:.0f}%"
+        return f"[{'#' * filled}{'-' * empty}] {score:.0f}%"
     
     async def _log_outdated_report(self, report: OutdatedReport, guild: discord.Guild):
         """Log an outdated content report."""
@@ -1252,7 +1258,7 @@ class FAQManager(red_commands.Cog):
         report_channel = guild.get_channel(report.channel_id)
         
         embed = discord.Embed(
-            title="âš ï¸ Outdated Content Report",
+            title="Outdated Content Report",
             color=discord.Color.orange(),
             timestamp=discord.utils.utcnow()
         )
@@ -1295,9 +1301,8 @@ class FAQResultView(discord.ui.View):
         # Add "View Full Answer" button if content is long
         if len(main_result.content) > 1900:
             self.view_full_button = discord.ui.Button(
-                label="ðŸ“„ View Full Answer",
-                style=discord.ButtonStyle.primary,
-                emoji="ðŸ“„"
+                label="View Full Answer",
+                style=discord.ButtonStyle.primary
             )
             self.view_full_button.callback = self.view_full_callback
             self.add_item(self.view_full_button)
@@ -1312,8 +1317,7 @@ class FAQResultView(discord.ui.View):
         
         self.outdated_button = discord.ui.Button(
             label="Report Outdated",
-            style=discord.ButtonStyle.danger,
-            emoji="âš ï¸"
+            style=discord.ButtonStyle.danger
         )
         self.outdated_button.callback = self.report_outdated_callback
         self.add_item(self.outdated_button)
@@ -1331,7 +1335,7 @@ class FAQResultView(discord.ui.View):
         if len(content) <= 1900:
             # Fits in one message
             embed = discord.Embed(
-                title=f"ðŸ“„ Full Answer: {self.main_result.title}",
+                title=f"Full Answer: {self.main_result.title}",
                 description=content,
                 color=discord.Color.green()
             )
@@ -1357,7 +1361,7 @@ class FAQResultView(discord.ui.View):
             
             # Send first chunk with title
             embed = discord.Embed(
-                title=f"ðŸ“„ Full Answer: {self.main_result.title} (Part 1/{len(chunks)})",
+                title=f"Full Answer: {self.main_result.title} (Part 1/{len(chunks)})",
                 description=chunks[0],
                 color=discord.Color.green()
             )
@@ -1366,7 +1370,7 @@ class FAQResultView(discord.ui.View):
             # Send remaining chunks
             for i, chunk in enumerate(chunks[1:], 2):
                 embed = discord.Embed(
-                    title=f"ðŸ“„ Full Answer: {self.main_result.title} (Part {i}/{len(chunks)})",
+                    title=f"Full Answer: {self.main_result.title} (Part {i}/{len(chunks)})",
                     description=chunk,
                     color=discord.Color.green()
                 )
@@ -1375,15 +1379,15 @@ class FAQResultView(discord.ui.View):
     async def show_suggestions_callback(self, interaction: discord.Interaction):
         """Show suggestions embed."""
         embed = discord.Embed(
-            title=f"ðŸ’¡ More results for: {self.query}",
+            title=f"More results for: {self.query}",
             color=discord.Color.blue()
         )
         
         for i, result in enumerate(self.suggestions, 1):
-            source_icon = "ðŸ“" if result.source == Source.CUSTOM else "ðŸŒ"
+            source_icon = "[Custom]" if result.source == Source.CUSTOM else "[Helpshift]"
             embed.add_field(
                 name=f"{i}. {source_icon} {result.title}",
-                value=f"Score: {result.score:.0f} â€¢ {result.category or 'General'}",
+                value=f"Score: {result.score:.0f} | {result.category or 'General'}",
                 inline=False
             )
         
@@ -1394,7 +1398,7 @@ class FAQResultView(discord.ui.View):
         view = ConfirmOutdatedView(self.cog, self.main_result, self.query, interaction.user.id, interaction.channel_id, interaction.guild)
         
         embed = discord.Embed(
-            title="âš ï¸ Report Outdated Content",
+            title="Report Outdated Content",
             description=f"Are you sure you want to report this content as outdated?\n\n**Title:** {self.main_result.title}\n**Source:** {self.main_result.source.value.title()}",
             color=discord.Color.orange()
         )
@@ -1425,7 +1429,7 @@ class PersonalSearchView(discord.ui.View):
         self.cog = cog
         self.user_id = user_id
     
-    @discord.ui.button(label="Start Search", style=discord.ButtonStyle.primary, emoji="ðŸ”")
+    @discord.ui.button(label="Start Search", style=discord.ButtonStyle.primary)
     async def start_search(self, interaction: discord.Interaction, button: discord.ui.Button):
         modal = SearchModal(self.cog)
         await interaction.response.send_modal(modal)
@@ -1461,7 +1465,7 @@ class SearchModal(discord.ui.Modal, title="Search FAQs"):
         )
         
         if not main and not suggestions:
-            await interaction.followup.send("âŒ No results found.", ephemeral=True)
+            await interaction.followup.send("No results found.", ephemeral=True)
             return
         
         result = main or suggestions[0]
@@ -1525,13 +1529,16 @@ class EditFAQModal(discord.ui.Modal, title="Edit FAQ"):
             success = await self.cog.database.update_faq(self.faq, self.editor_id)
             if success:
                 await self.cog._reload_faq_cache()
-                await interaction.followup.send(f"âœ… FAQ **{self.faq.id}** updated successfully.", ephemeral=True)
+                await interaction.followup.send(f"FAQ **{self.faq.id}** updated successfully.", ephemeral=True)
+                
+                # Auto-update forum thread
+                await self.cog._auto_update_faq_in_forum(interaction.guild, self.faq)
             else:
-                await interaction.followup.send("âŒ Failed to update FAQ.", ephemeral=True)
+                await interaction.followup.send("Failed to update FAQ.", ephemeral=True)
         
         except Exception as e:
             log.error(f"Error updating FAQ: {e}", exc_info=True)
-            await interaction.followup.send("âŒ An error occurred. Please try again.", ephemeral=True)
+            await interaction.followup.send("An error occurred. Please try again.", ephemeral=True)
 
 
 class ConfirmDeleteView(discord.ui.View):
@@ -1551,16 +1558,16 @@ class ConfirmDeleteView(discord.ui.View):
             await self.cog.database.delete_faq(self.faq.id, soft=True)
             await self.cog._reload_faq_cache()
             
-            await interaction.followup.send(f"âœ… FAQ **{self.faq.id}** has been deleted.", ephemeral=True)
+            await interaction.followup.send(f"FAQ **{self.faq.id}** has been deleted.", ephemeral=True)
             self.stop()
         
         except Exception as e:
             log.error(f"Error deleting FAQ: {e}", exc_info=True)
-            await interaction.followup.send("âŒ Failed to delete FAQ.", ephemeral=True)
+            await interaction.followup.send("Failed to delete FAQ.", ephemeral=True)
     
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("âŒ Deletion cancelled.", ephemeral=True)
+        await interaction.response.send_message("Deletion cancelled.", ephemeral=True)
         self.stop()
     
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -1579,10 +1586,10 @@ class PostSelectView(discord.ui.View):
         
         options = []
         for i, result in enumerate(results[:25], 1):
-            source_icon = "ðŸ“" if result.source == Source.CUSTOM else "ðŸŒ"
+            source_icon = "[Custom]" if result.source == Source.CUSTOM else "[Helpshift]"
             options.append(discord.SelectOption(
                 label=f"{source_icon} {result.title[:80]}",
-                description=f"Score: {result.score:.0f} â€¢ {result.category or 'General'}",
+                description=f"Score: {result.score:.0f} | {result.category or 'General'}",
                 value=str(i - 1)
             ))
         
@@ -1601,10 +1608,10 @@ class PostSelectView(discord.ui.View):
         
         try:
             await self.channel.send(embed=embed)
-            await interaction.response.send_message("âœ… FAQ posted successfully!", ephemeral=True)
+            await interaction.response.send_message("FAQ posted successfully!", ephemeral=True)
             self.stop()
         except discord.Forbidden:
-            await interaction.response.send_message("âŒ I don't have permission to post in that channel.", ephemeral=True)
+            await interaction.response.send_message("I don't have permission to post in that channel.", ephemeral=True)
     
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user_id
@@ -1622,7 +1629,7 @@ class ConfirmOutdatedView(discord.ui.View):
         self.channel_id = channel_id
         self.guild = guild
     
-    @discord.ui.button(label="Confirm Report", style=discord.ButtonStyle.danger, emoji="âš ï¸")
+    @discord.ui.button(label="Confirm Report", style=discord.ButtonStyle.danger)
     async def confirm_report(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Confirm and submit the outdated report."""
         report = OutdatedReport(
@@ -1637,19 +1644,17 @@ class ConfirmOutdatedView(discord.ui.View):
         )
         
         await self.cog._log_outdated_report(report, self.guild)
-        await interaction.response.send_message("âœ… Thank you! Outdated content has been reported to moderators.", ephemeral=True)
+        await interaction.response.send_message("Thank you! Outdated content has been reported to moderators.", ephemeral=True)
         self.stop()
     
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Cancel the report."""
-        await interaction.response.send_message("âŒ Report cancelled.", ephemeral=True)
+        await interaction.response.send_message("Report cancelled.", ephemeral=True)
         self.stop()
     
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user_id
-
-
 
 
 class ConfirmForumClearView(discord.ui.View):
@@ -1807,12 +1812,12 @@ class AddFAQModalWithCategory(discord.ui.Modal, title="Add New FAQ"):
             synonym_text = ", ".join(synonym_list) if synonym_list else "None"
             
             embed = discord.Embed(
-                title="ðŸ” Preview Auto-Generated Synonyms",
+                title="Preview Auto-Generated Synonyms",
                 color=discord.Color.blue()
             )
             embed.add_field(name="Question", value=self.question.value, inline=False)
             embed.add_field(name="Category", value=self.category, inline=True)
-            embed.add_field(name="ðŸ¤– Auto-Generated Synonyms", value=synonym_text[:1024], inline=False)
+            embed.add_field(name="Auto-Generated Synonyms", value=synonym_text[:1024], inline=False)
             embed.set_footer(text="Click 'Accept' to save, or 'Edit' to modify synonyms")
             
             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
@@ -1838,7 +1843,7 @@ class AddFAQModalWithCategory(discord.ui.Modal, title="Add New FAQ"):
             synonym_text = ", ".join(synonym_list) if synonym_list else "None"
             
             embed = discord.Embed(
-                title="âœ… FAQ Added Successfully",
+                title="FAQ Added Successfully",
                 color=discord.Color.green()
             )
             embed.add_field(name="Question", value=self.question.value, inline=False)
@@ -1854,7 +1859,7 @@ class AddFAQModalWithCategory(discord.ui.Modal, title="Add New FAQ"):
         
         except Exception as e:
             log.error(f"Error adding FAQ: {e}", exc_info=True)
-            await interaction.followup.send("âŒ Failed to add FAQ. Please try again.", ephemeral=True)
+            await interaction.followup.send("Failed to add FAQ. Please try again.", ephemeral=True)
     
     def _auto_generate_synonyms(self, question: str, answer: str) -> List[str]:
         """Auto-generate synonyms from question and answer text."""
@@ -1913,7 +1918,7 @@ class SynonymPreviewView(discord.ui.View):
         self.category = category
         self.synonyms = synonyms
     
-    @discord.ui.button(label="âœ… Accept & Save", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Accept & Save", style=discord.ButtonStyle.success)
     async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Accept auto-generated synonyms and save FAQ."""
         await interaction.response.defer(ephemeral=True)
@@ -1933,7 +1938,7 @@ class SynonymPreviewView(discord.ui.View):
             synonym_text = ", ".join(self.synonyms) if self.synonyms else "None"
             
             embed = discord.Embed(
-                title="âœ… FAQ Added Successfully",
+                title="FAQ Added Successfully",
                 color=discord.Color.green()
             )
             embed.add_field(name="Question", value=self.question, inline=False)
@@ -1942,13 +1947,17 @@ class SynonymPreviewView(discord.ui.View):
             embed.add_field(name="Synonyms", value=synonym_text[:1024], inline=False)
             
             await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            # Auto-post to forum
+            faq.id = faq_id
+            await self.cog._auto_post_faq_to_forum(interaction.guild, faq)
             self.stop()
         
         except Exception as e:
             log.error(f"Error adding FAQ: {e}", exc_info=True)
-            await interaction.followup.send("âŒ Failed to add FAQ. Please try again.", ephemeral=True)
+            await interaction.followup.send("Failed to add FAQ. Please try again.", ephemeral=True)
     
-    @discord.ui.button(label="âœï¸ Edit Synonyms", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Edit Synonyms", style=discord.ButtonStyle.primary)
     async def edit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Open modal to edit synonyms before saving."""
         modal = EditSynonymsModal(
@@ -1962,10 +1971,10 @@ class SynonymPreviewView(discord.ui.View):
         await interaction.response.send_modal(modal)
         self.stop()
     
-    @discord.ui.button(label="âŒ Cancel", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Cancel FAQ creation."""
-        await interaction.response.send_message("âŒ FAQ creation cancelled.", ephemeral=True)
+        await interaction.response.send_message("FAQ creation cancelled.", ephemeral=True)
         self.stop()
     
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -2021,7 +2030,7 @@ class EditSynonymsModal(discord.ui.Modal, title="Edit Synonyms"):
             synonym_text = ", ".join(synonym_list) if synonym_list else "None"
             
             embed = discord.Embed(
-                title="âœ… FAQ Added Successfully",
+                title="FAQ Added Successfully",
                 color=discord.Color.green()
             )
             embed.add_field(name="Question", value=self.question, inline=False)
@@ -2030,7 +2039,11 @@ class EditSynonymsModal(discord.ui.Modal, title="Edit Synonyms"):
             embed.add_field(name="Edited Synonyms", value=synonym_text[:1024], inline=False)
             
             await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            # Auto-post to forum
+            faq.id = faq_id
+            await self.cog._auto_post_faq_to_forum(interaction.guild, faq)
         
         except Exception as e:
             log.error(f"Error adding FAQ: {e}", exc_info=True)
-            await interaction.followup.send("âŒ Failed to add FAQ. Please try again.", ephemeral=True)
+            await interaction.followup.send("Failed to add FAQ. Please try again.", ephemeral=True)
