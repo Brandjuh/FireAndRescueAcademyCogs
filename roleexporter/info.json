@@ -1,0 +1,16 @@
+{
+    "author": [
+        "Brandjuh"
+    ],
+    "description": "Export all server roles with their IDs to a text file",
+    "install_msg": "Thanks for installing RoleExporter! Use `!exportroles` to export all server roles.",
+    "short": "Export server roles to text file",
+    "tags": [
+        "roles",
+        "export",
+        "utility",
+        "admin"
+    ],
+    "type": "COG",
+    "end_user_data_statement": "This cog does not store any user data."
+}
