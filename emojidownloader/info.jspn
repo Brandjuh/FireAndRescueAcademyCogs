@@ -1,0 +1,19 @@
+{
+    "author": [
+        "YourName"
+    ],
+    "description": "Download all custom emojis from a server as a ZIP file for easy backup and migration.",
+    "install_msg": "Thank you for installing EmojiDownloader! Use `[p]emojidownload` in any server to download all emojis as a ZIP file.\n\n**Note:** This command is restricted to bot owners only and must be used in a server.",
+    "short": "Download server emojis as ZIP file",
+    "tags": [
+        "emoji",
+        "utility",
+        "backup",
+        "download"
+    ],
+    "type": "COG",
+    "end_user_data_statement": "This cog does not store any end user data.",
+    "requirements": [
+        "aiohttp"
+    ]
+}
