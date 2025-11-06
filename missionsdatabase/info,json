@@ -1,0 +1,10 @@
+{
+    "author": ["Brandjuh"],
+    "description": "Mission database system that fetches MissionChief missions and posts them to a Discord forum channel.",
+    "install_msg": "Thank you for installing MissionsDatabase! Use `[p]missions setup` to configure the forum channel.",
+    "short": "Mission database for MissionChief",
+    "name": "MissionsDatabase",
+    "tags": ["missionchief", "missions", "database", "forum"],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores guild configuration (forum channel IDs) and mission post tracking data."
+}
