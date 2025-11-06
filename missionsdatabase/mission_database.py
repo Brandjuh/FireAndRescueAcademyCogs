@@ -566,8 +566,3 @@ class MissionsDatabase(commands.Cog):
         else:
             await self._update_mission_post(forum_channel, mission_data, mission_id,
                                            mission_hash, existing, config)
-
-
-# Required for Red-DiscordBot
-async def setup(bot):
-    await bot.add_cog(MissionsDatabase(bot))
