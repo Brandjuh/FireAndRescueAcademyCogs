@@ -42,14 +42,21 @@ class MissionFetcher:
             response.raise_for_status()
             missions = await response.json()
             
-            # The JSON is an object where keys are mission IDs
-            # Convert to list with ID included
-            mission_list = []
-            for mission_id, mission_data in missions.items():
-                mission_data['id'] = mission_id
-                mission_list.append(mission_data)
-            
-            return mission_list
+            # Check if it's already a list or a dict
+            if isinstance(missions, list):
+                # Already a list, just return it
+                return missions
+            elif isinstance(missions, dict):
+                # It's a dict where keys are mission IDs
+                # Convert to list with ID included
+                mission_list = []
+                for mission_id, mission_data in missions.items():
+                    mission_data['id'] = mission_id
+                    mission_list.append(mission_data)
+                return mission_list
+            else:
+                # Unexpected format
+                raise ValueError(f"Unexpected JSON format: {type(missions)}")
     
     @staticmethod
     def calculate_hash(mission_data: Dict) -> str:
