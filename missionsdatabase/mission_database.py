@@ -24,6 +24,11 @@ class MissionsDatabase(commands.Cog):
     Fetches missions from MissionChief and posts them to a Discord forum.
     """
     
+    # Rate limiting settings (configurable)
+    POSTS_PER_BATCH = 5  # Number of posts before taking a longer break
+    BATCH_DELAY = 11  # Seconds to wait between batches
+    POST_DELAY = 1  # Seconds to wait between individual posts
+    
     def __init__(self, bot: Red):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=1234567890, force_registration=True)
@@ -139,14 +144,15 @@ class MissionsDatabase(commands.Cog):
             await ctx.send("❌ Please run setup first using `[p]missions setup`")
             return
         
-        msg = await ctx.send("🔄 Starting mission sync...")
+        msg = await ctx.send("🔄 Starting mission sync...\nThis may take several minutes for the first sync.")
         
         try:
-            stats = await self._sync_missions(ctx.guild)
+            stats = await self._sync_missions(ctx.guild, progress_message=msg)
             
             result_msg = "✅ Mission sync complete!\n"
             result_msg += f"New missions posted: {stats['new_missions']}\n"
             result_msg += f"Updated missions: {stats['updated_missions']}\n"
+            result_msg += f"Unchanged missions: {stats['skipped_missions']}\n"
             result_msg += f"Total missions: {stats['total_missions']}"
             
             await msg.edit(content=result_msg)
@@ -261,6 +267,56 @@ class MissionsDatabase(commands.Cog):
         status = "enabled" if new_state else "disabled"
         await ctx.send(f"✅ Automatic syncing {status}.")
     
+    @missions.command(name="ratelimit")
+    async def missions_ratelimit(self, ctx, posts_per_batch: int = None, 
+                                 batch_delay: int = None, post_delay: float = None):
+        """
+        View or configure rate limiting settings.
+        
+        Without arguments, shows current settings.
+        With arguments, updates the settings.
+        
+        Args:
+            posts_per_batch: Number of posts before taking a longer break (default: 5)
+            batch_delay: Seconds to wait between batches (default: 11)
+            post_delay: Seconds to wait between individual posts (default: 1)
+        """
+        if posts_per_batch is None and batch_delay is None and post_delay is None:
+            # Show current settings
+            msg = "⚙️ **Rate Limiting Settings**\n"
+            msg += f"Posts per batch: {self.POSTS_PER_BATCH}\n"
+            msg += f"Batch delay: {self.BATCH_DELAY} seconds\n"
+            msg += f"Post delay: {self.POST_DELAY} seconds\n\n"
+            msg += f"Use `{ctx.prefix}missions ratelimit <posts_per_batch> <batch_delay> <post_delay>` to change."
+            await ctx.send(msg)
+            return
+        
+        # Update settings
+        if posts_per_batch is not None:
+            if posts_per_batch < 1 or posts_per_batch > 10:
+                await ctx.send("❌ Posts per batch must be between 1 and 10.")
+                return
+            self.POSTS_PER_BATCH = posts_per_batch
+        
+        if batch_delay is not None:
+            if batch_delay < 5 or batch_delay > 60:
+                await ctx.send("❌ Batch delay must be between 5 and 60 seconds.")
+                return
+            self.BATCH_DELAY = batch_delay
+        
+        if post_delay is not None:
+            if post_delay < 0.5 or post_delay > 5:
+                await ctx.send("❌ Post delay must be between 0.5 and 5 seconds.")
+                return
+            self.POST_DELAY = post_delay
+        
+        msg = "✅ Rate limiting settings updated!\n"
+        msg += f"Posts per batch: {self.POSTS_PER_BATCH}\n"
+        msg += f"Batch delay: {self.BATCH_DELAY} seconds\n"
+        msg += f"Post delay: {self.POST_DELAY} seconds"
+        
+        await ctx.send(msg)
+    
     @missions.command(name="update")
     async def missions_update(self, ctx, mission_id: str):
         """
@@ -338,12 +394,13 @@ class MissionsDatabase(commands.Cog):
             log.error(f"Error viewing mission {mission_id}: {e}", exc_info=True)
             await msg.edit(content=f"❌ Error viewing mission: {str(e)}")
     
-    async def _sync_missions(self, guild: discord.Guild) -> dict:
+    async def _sync_missions(self, guild: discord.Guild, progress_message=None) -> dict:
         """
-        Sync missions for a guild.
+        Sync missions for a guild with rate limiting.
         
         Args:
             guild: Discord guild
+            progress_message: Optional message to update with progress
             
         Returns:
             Dictionary with sync statistics
@@ -362,8 +419,11 @@ class MissionsDatabase(commands.Cog):
         stats = {
             'new_missions': 0,
             'updated_missions': 0,
+            'skipped_missions': 0,
             'total_missions': len(missions)
         }
+        
+        processed = 0
         
         for mission_data in missions:
             mission_id = self.fetcher.parse_mission_id(mission_data)
@@ -372,18 +432,58 @@ class MissionsDatabase(commands.Cog):
             # Check if mission exists in database
             existing = await self.db.get_mission_post(mission_id)
             
-            if not existing:
-                # New mission - create forum post
-                await self._create_mission_post(forum_channel, mission_data, mission_id, mission_hash)
-                stats['new_missions'] += 1
-            elif existing['mission_data_hash'] != mission_hash:
-                # Mission changed - update post
-                await self._update_mission_post(forum_channel, mission_data, mission_id, 
-                                               mission_hash, existing, config)
-                stats['updated_missions'] += 1
-            else:
-                # No changes - just update last check timestamp
-                await self.db.update_last_check(mission_id)
+            try:
+                if not existing:
+                    # New mission - create forum post
+                    await self._create_mission_post(forum_channel, mission_data, mission_id, mission_hash)
+                    stats['new_missions'] += 1
+                    
+                    # Rate limiting: wait after creating post
+                    await asyncio.sleep(self.POST_DELAY)
+                    
+                elif existing['mission_data_hash'] != mission_hash:
+                    # Mission changed - update post
+                    await self._update_mission_post(forum_channel, mission_data, mission_id, 
+                                                   mission_hash, existing, config)
+                    stats['updated_missions'] += 1
+                    
+                    # Rate limiting: wait after updating post
+                    await asyncio.sleep(self.POST_DELAY)
+                    
+                else:
+                    # No changes - just update last check timestamp
+                    await self.db.update_last_check(mission_id)
+                    stats['skipped_missions'] += 1
+                
+                processed += 1
+                
+                # Update progress message every 10 missions
+                if progress_message and processed % 10 == 0:
+                    try:
+                        await progress_message.edit(
+                            content=f"🔄 Syncing missions... {processed}/{len(missions)}\n"
+                                   f"New: {stats['new_missions']} | Updated: {stats['updated_missions']}"
+                        )
+                    except:
+                        pass  # Ignore edit errors
+                
+                # Batch rate limiting: after every X new/updated posts, take a longer break
+                if (stats['new_missions'] + stats['updated_missions']) % self.POSTS_PER_BATCH == 0:
+                    if stats['new_missions'] + stats['updated_missions'] > 0:
+                        log.info(f"Rate limit pause after {self.POSTS_PER_BATCH} posts...")
+                        await asyncio.sleep(self.BATCH_DELAY)
+                        
+            except discord.errors.RateLimited as e:
+                # Handle explicit rate limit error
+                log.warning(f"Rate limited! Waiting {e.retry_after} seconds...")
+                await asyncio.sleep(e.retry_after)
+                # Retry this mission
+                continue
+                
+            except Exception as e:
+                log.error(f"Error processing mission {mission_id}: {e}", exc_info=True)
+                # Continue with next mission
+                continue
         
         # Update last sync timestamp
         await self.db.update_last_sync(guild.id)
