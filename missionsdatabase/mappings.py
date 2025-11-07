@@ -225,7 +225,7 @@ TRAININGS = {
     "tactical_medic": "Tactical Rescue Training",
     "sniper": "Sharpshooter Training",
     "coastal_rescue_pilot": "Coastal Air Rescue Operations",
-    "law_enforcement_marine": "TACLET"
+    "law_enforcement_marine": "Law Enforcement Marine (TACLET)"
 }
 
 # Extension name mappings for prerequisites
