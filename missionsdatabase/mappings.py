@@ -260,6 +260,31 @@ EXTENSION_NAMES = {
     "mass_casualty_trailer_extension": "Mass Casualty Trailer Extension"
 }
 
+# Category to Discord Tag mapping
+# Maps mission_categories to Discord forum tags (max 20 characters)
+CATEGORY_TO_TAG = {
+    'fire': 'Fire',
+    'police': 'Police',
+    'ems': 'EMS',
+    'urban': 'Urban',
+    'rural': 'Rural',
+    'water_damage_and_flood': 'Water',
+    'water_rescue': 'Water',
+    'flood': 'Water',
+    'hazmat': 'Hazmat',
+    'mass_casualty': 'Mass Casualty',
+    'technical_rescue': 'Technical',
+    'tow_trucks': 'Technical',
+    'wildfire': 'Wildfire',
+    'forest': 'Wildfire',
+    'highway': 'Specialized',
+    'aviation': 'Specialized',
+    'federal_police': 'Specialized',
+    'swat': 'Specialized',
+    'marine': 'Specialized',
+    'airport': 'Specialized'
+}
+
 
 def format_field_name(field_name: str) -> str:
     """
@@ -354,3 +379,29 @@ def get_extension_name(extension_key: str) -> str:
 def get_specialization_name(spec_id: int) -> str:
     """Get hospital specialization name from ID."""
     return HOSPITAL_SPECIALIZATIONS.get(spec_id, f"Specialization #{spec_id}")
+
+
+def get_tags_for_mission(mission_categories: list) -> list:
+    """
+    Convert mission categories to Discord forum tags.
+    Always includes 'Missions' tag + up to 4 category tags.
+    
+    Args:
+        mission_categories: List of category strings from mission data
+        
+    Returns:
+        List of tag names (max 5 total)
+    """
+    tags = ['Missions']  # Always include main tag
+    
+    # Convert categories to tags and remove duplicates
+    category_tags = set()
+    for category in mission_categories:
+        tag = CATEGORY_TO_TAG.get(category)
+        if tag:
+            category_tags.add(tag)
+    
+    # Add up to 4 additional tags (Discord allows max 5 tags per post)
+    tags.extend(sorted(list(category_tags))[:4])
+    
+    return tags
