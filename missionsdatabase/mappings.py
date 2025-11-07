@@ -251,6 +251,7 @@ EXTENSION_NAMES = {
     "detention_unit_extension": "Detention Unit Extension",
     "federal_police_extension": "Federal Police Extension",
     "bomb_squad_extension": "Bomb Squad Extension",
+    "bomb_disposal_count": "Bomb Squad Extension",
     "police_water_rescue": "Police Water Rescue Extension",
     "smoke_jumper_extension": "Smoke Jumper Extension",
     "atf_expansion": "ATF Expansion",
@@ -282,7 +283,7 @@ def get_vehicle_name(vehicle_key: str) -> str:
     if vehicle_key in EQUIPMENT:
         return EQUIPMENT[vehicle_key]
     
-    # Common vehicle key patterns
+    # Common vehicle key patterns and abbreviations
     vehicle_mappings = {
         "firetrucks": "Fire Trucks",
         "platform_trucks": "Platform Trucks",
@@ -324,7 +325,16 @@ def get_vehicle_name(vehicle_key: str) -> str:
         "police_prisoner_vans": "Police Prisoner Vans",
         "tow_trucks": "Tow Trucks",
         "wreckers": "Wreckers",
-        "flatbed_carriers": "Flatbed Carriers"
+        "flatbed_carriers": "Flatbed Carriers",
+        # German/European abbreviations
+        "elw2": "Mobile Command Vehicle",
+        "elw3": "Wildfire MCC",
+        "gw_gefahrgut": "HazMat",
+        "gw_wasserrettung": "Heavy Rescue + Light Boat",
+        "fwk": "Crew Carrier",
+        "gwm": "Mobile Air",
+        "rw": "Heavy Rescue Vehicle",
+        "dlk": "Platform Truck"
     }
     
     if vehicle_key in vehicle_mappings:
