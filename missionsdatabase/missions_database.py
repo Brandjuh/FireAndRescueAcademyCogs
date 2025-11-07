@@ -211,12 +211,20 @@ class MissionsDatabase(commands.Cog):
                         all_posts = await self.db.get_all_mission_posts()
                         deleted_count = 0
                         
-                        for post_data in all_posts:
+                        for i, post_data in enumerate(all_posts):
                             try:
                                 thread = forum_channel.get_thread(int(post_data['thread_id']))
                                 if thread:
                                     await thread.delete()
                                     deleted_count += 1
+                                    
+                                    # Rate limiting
+                                    await asyncio.sleep(1)
+                                    
+                                    if (deleted_count % 5 == 0):
+                                        await asyncio.sleep(10)
+                                        await msg.edit(content=f"Deleting posts... {deleted_count}/{len(all_posts)}")
+                                        
                             except Exception as e:
                                 log.error(f"Error deleting thread {post_data['thread_id']}: {e}")
                         
@@ -230,6 +238,91 @@ class MissionsDatabase(commands.Cog):
         except Exception as e:
             log.error(f"Error resetting database: {e}", exc_info=True)
             await msg.edit(content=f"❌ Error resetting database: {str(e)}")
+    
+    @missions.command(name="deleteall")
+    async def missions_deleteall(self, ctx):
+        """
+        Delete all mission forum posts (with rate limiting).
+        Database tracking remains intact.
+        """
+        config = await self.db.get_config(ctx.guild.id)
+        if not config:
+            await ctx.send("❌ Not configured. Use `[p]missions setup` first.")
+            return
+        
+        # Confirmation
+        confirm_msg = (
+            "⚠️ **WARNING** ⚠️\n"
+            "This will delete ALL mission forum posts!\n"
+            "Database tracking will remain (you can recreate posts with sync).\n\n"
+            "Type `CONFIRM DELETE` to proceed."
+        )
+        await ctx.send(confirm_msg)
+        
+        def check(m):
+            return m.author == ctx.author and m.channel == ctx.channel
+        
+        try:
+            response = await self.bot.wait_for('message', check=check, timeout=30.0)
+            if response.content != "CONFIRM DELETE":
+                await ctx.send("Deletion cancelled.")
+                return
+        except asyncio.TimeoutError:
+            await ctx.send("Deletion cancelled (timeout).")
+            return
+        
+        msg = await ctx.send("🔄 Deleting forum posts...")
+        
+        try:
+            forum_channel = ctx.guild.get_channel(int(config['forum_channel_id']))
+            if not forum_channel:
+                await msg.edit(content="❌ Forum channel not found.")
+                return
+            
+            all_posts = await self.db.get_all_mission_posts()
+            deleted_count = 0
+            failed_count = 0
+            
+            for i, post_data in enumerate(all_posts):
+                try:
+                    thread = forum_channel.get_thread(int(post_data['thread_id']))
+                    if thread:
+                        await thread.delete()
+                        deleted_count += 1
+                    else:
+                        failed_count += 1
+                    
+                    # Rate limiting
+                    await asyncio.sleep(self.POST_DELAY)
+                    
+                    # Batch rate limiting
+                    if (deleted_count % self.POSTS_PER_BATCH == 0) and deleted_count > 0:
+                        await asyncio.sleep(self.BATCH_DELAY)
+                    
+                    # Progress updates every 10 posts
+                    if (i + 1) % 10 == 0:
+                        await msg.edit(
+                            content=f"🔄 Deleting posts... {i + 1}/{len(all_posts)}\n"
+                                   f"Deleted: {deleted_count} | Failed: {failed_count}"
+                        )
+                        
+                except discord.errors.NotFound:
+                    failed_count += 1
+                except Exception as e:
+                    log.error(f"Error deleting thread {post_data['thread_id']}: {e}")
+                    failed_count += 1
+            
+            result_msg = f"✅ Deletion complete!\n"
+            result_msg += f"Deleted: {deleted_count}\n"
+            result_msg += f"Failed/Not Found: {failed_count}\n"
+            result_msg += f"Total processed: {len(all_posts)}\n\n"
+            result_msg += f"Use `{ctx.prefix}missions sync` to recreate posts."
+            
+            await msg.edit(content=result_msg)
+            
+        except Exception as e:
+            log.error(f"Error deleting posts: {e}", exc_info=True)
+            await msg.edit(content=f"❌ Error deleting posts: {str(e)}")
     
     @missions.command(name="check")
     async def missions_check(self, ctx):
