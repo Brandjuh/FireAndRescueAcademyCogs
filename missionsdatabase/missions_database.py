@@ -14,6 +14,7 @@ import logging
 from .database import MissionsDatabase as DB
 from .mission_fetcher import MissionFetcher
 from .mission_formatter import MissionFormatter
+from .mappings import get_tags_for_mission
 
 log = logging.getLogger("red.missionsdatabase")
 
@@ -90,7 +91,6 @@ class MissionsDatabase(commands.Cog):
     
     async def run_auto_sync(self):
         """Run automatic sync for all configured guilds."""
-        # This will be implemented to sync for all guilds with auto_sync enabled
         log.info("Running automatic mission sync...")
         
         for guild in self.bot.guilds:
@@ -478,8 +478,16 @@ class MissionsDatabase(commands.Cog):
             # Format the mission
             formatted = self.formatter.format_mission_post(target_mission)
             
+            # Get tags
+            categories = target_mission.get('mission_categories', [])
+            tags = get_tags_for_mission(categories)
+            
             # Send in pages if too long
             await msg.delete()
+            
+            # Show tags first
+            await ctx.send(f"**Tags:** {', '.join(tags)}\n")
+            
             for page in pagify(formatted):
                 await ctx.send(box(page))
             
@@ -589,24 +597,27 @@ class MissionsDatabase(commands.Cog):
         title = self.formatter.get_mission_title(mission_data)
         content = self.formatter.format_mission_post(mission_data)
         
-        # Find or create "Missions" tag
-        missions_tag = None
-        for tag in forum_channel.available_tags:
-            if tag.name.lower() == "missions":
-                missions_tag = tag
-                break
+        # Get tags for this mission
+        categories = mission_data.get('mission_categories', [])
+        tag_names = get_tags_for_mission(categories)
         
-        # Create the thread
+        # Find matching tags in forum
+        applied_tags = []
+        for tag in forum_channel.available_tags:
+            if tag.name in tag_names:
+                applied_tags.append(tag)
+        
+        # Create the thread with tags
         thread = await forum_channel.create_thread(
             name=title,
             content=content,
-            applied_tags=[missions_tag] if missions_tag else []
+            applied_tags=applied_tags[:5]  # Max 5 tags
         )
         
         # Save to database
         await self.db.add_mission_post(mission_id, thread.thread.id, mission_hash)
         
-        log.info(f"Created mission post: {mission_id} - {title}")
+        log.info(f"Created mission post: {mission_id} - {title} (Tags: {', '.join(tag_names)})")
     
     async def _update_mission_post(self, forum_channel: discord.ForumChannel,
                                    mission_data: dict, mission_id: str, mission_hash: str,
@@ -622,6 +633,20 @@ class MissionsDatabase(commands.Cog):
                 # Get the starter message
                 starter_message = await thread.fetch_message(thread.id)
                 await starter_message.edit(content=content)
+                
+                # Update tags
+                categories = mission_data.get('mission_categories', [])
+                tag_names = get_tags_for_mission(categories)
+                
+                # Find matching tags in forum
+                applied_tags = []
+                for tag in forum_channel.available_tags:
+                    if tag.name in tag_names:
+                        applied_tags.append(tag)
+                
+                # Update thread tags
+                await thread.edit(applied_tags=applied_tags[:5])
+                
                 await self.db.update_mission_post(mission_id, thread.id, mission_hash)
                 log.info(f"Updated mission post: {mission_id} - {title}")
                 return
