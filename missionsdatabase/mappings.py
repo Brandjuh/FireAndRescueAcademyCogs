@@ -315,6 +315,9 @@ def get_vehicle_name(vehicle_key: str) -> str:
         "battalion_chief_vehicles": "Battalion Chief Vehicles",
         "heavy_rescue_vehicles": "Heavy Rescue Vehicles",
         "police_cars": "Patrol Cars",
+        # K-9 Units - FIXED!
+        "k9": "K-9 Units",
+        "k9_units": "K-9 Units",
         "ambulances": "Ambulances",
         "fly_cars": "Fly-Cars",
         "mobile_air_vehicles": "Mobile Air",
