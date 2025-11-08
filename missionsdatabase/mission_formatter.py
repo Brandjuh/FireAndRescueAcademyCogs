@@ -1,5 +1,6 @@
 """
 Mission formatter for creating Discord forum posts.
+FIXED VERSION - All bugs resolved
 """
 
 from typing import Dict, List
@@ -55,6 +56,12 @@ class MissionFormatter:
             sections.append(prerequisites_section)
             sections.append("")
         
+        # Personnel requirements from additional (SWAT, K-9, etc.) - NEW!
+        personnel_section = MissionFormatter._format_personnel_requirements(mission_data)
+        if personnel_section:
+            sections.append(personnel_section)
+            sections.append("")
+        
         # Requirements - separate vehicles and equipment
         requirements_section = MissionFormatter._format_requirements(mission_data)
         if requirements_section:
@@ -67,7 +74,7 @@ class MissionFormatter:
             sections.append(patient_section)
             sections.append("")
         
-        # Prisoners
+        # Prisoners - FIXED!
         prisoner_section = MissionFormatter._format_prisoners(mission_data)
         if prisoner_section:
             sections.append(prisoner_section)
@@ -85,6 +92,36 @@ class MissionFormatter:
             sections.append(poi_section)
         
         return "\n".join(sections)
+    
+    @staticmethod
+    def _format_personnel_requirements(mission_data: Dict) -> str:
+        """
+        Format personnel training requirements from additional data.
+        This is for trained personnel counts (SWAT, K-9, Sheriff, etc.)
+        """
+        additional = mission_data.get('additional', {})
+        
+        personnel = []
+        
+        # Map personnel fields to display names
+        personnel_fields = {
+            'swat_personnel': 'SWAT Trained Personnel',
+            'k9_personnel': 'K-9 Handler',
+            'sheriff_personnel': 'Sheriff Personnel',
+            'riot_police_personnel': 'Riot Police',
+            'fbi_personnel': 'FBI Personnel',
+            'bomb_tech_personnel': 'Bomb Technician',
+            'drone_operator_personnel': 'Drone Operator'
+        }
+        
+        for field, name in personnel_fields.items():
+            count = additional.get(field, 0)
+            if count > 0:
+                personnel.append(f"- {count} {name}")
+        
+        if personnel:
+            return "**Personnel Requirements:**\n" + "\n".join(personnel)
+        return ""
     
     @staticmethod
     def _format_mission_id(mission_data: Dict) -> str:
@@ -264,7 +301,13 @@ class MissionFormatter:
                 summary = "BLS sufficient (Fly-Car possible)"
             
             lines.append(f"- Transport: {summary}")
-            lines.append(f"- US Codes: {', '.join(us_codes)}")
+            
+            # Format US codes - show first 5 if too many
+            if len(us_codes) > 5:
+                displayed_codes = ', '.join(us_codes[:5])
+                lines.append(f"- US Codes: {displayed_codes} (+{len(us_codes)-5} more)")
+            else:
+                lines.append(f"- US Codes: {', '.join(us_codes)}")
         
         return "\n".join(lines)
     
@@ -300,12 +343,15 @@ class MissionFormatter:
     
     @staticmethod
     def _format_prisoners(mission_data: Dict) -> str:
-        """Format prisoner information."""
+        """
+        Format prisoner information.
+        FIXED: Use correct field names!
+        """
         additional = mission_data.get('additional', {})
         
-        # Check for possible prisoner count
-        possible_prisoners_min = additional.get('possible_prisoner_count_min', 0)
-        possible_prisoners_max = additional.get('possible_prisoner_count_max', 0)
+        # FIXED: Correct field names from JSON
+        possible_prisoners_min = additional.get('min_possible_prisoners', 0)
+        possible_prisoners_max = additional.get('max_possible_prisoners', 0)
         possible_prisoners = additional.get('possible_prisoner_count', 0)
         
         # Use whichever field has data
