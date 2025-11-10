@@ -90,12 +90,14 @@ class DataAggregator:
             utc_now = datetime.now(ZoneInfo("UTC"))
             
             # Game day starts at 04:00 UTC (00:00 EDT)
+            # Find the most recent 04:00 UTC mark
             if utc_now.hour >= 4:
-                game_day_end = utc_now.replace(hour=4, minute=0, second=0, microsecond=0)
+                game_day_start = utc_now.replace(hour=4, minute=0, second=0, microsecond=0)
             else:
-                game_day_end = (utc_now - timedelta(days=1)).replace(hour=4, minute=0, second=0, microsecond=0)
+                game_day_start = (utc_now - timedelta(days=1)).replace(hour=4, minute=0, second=0, microsecond=0)
             
-            game_day_start = game_day_end - timedelta(days=1)
+            # Game day ends NOW (include all logs up to this moment)
+            game_day_end = utc_now
             
             log.info(f"Game Day: {game_day_start.isoformat()} to {game_day_end.isoformat()} (UTC)")
             
