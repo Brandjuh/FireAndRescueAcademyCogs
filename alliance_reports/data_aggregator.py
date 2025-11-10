@@ -55,7 +55,7 @@ class DataAggregator:
             if db_name == "members_v2":
                 db_path = base_path / "cogs/scraper_databases/members_v2.db"
             elif db_name == "logs_v2":
-                db_path = base_path / "cogs/scraper_databases/logs_v2.db"
+                db_path = base_path / "cogs/scraper_databases/logs_v3.db"  # FIXED: Use V3 with correct schema
             elif db_name == "income_v2":
                 db_path = base_path / "cogs/scraper_databases/income_v2.db"
             elif db_name == "buildings_v2":
@@ -170,11 +170,12 @@ class DataAggregator:
                 cursor_logs = conn_logs.cursor()
                 
                 # New joins (action_key = 'added_to_alliance')
+                # NOTE: Using scraped_at instead of ts because ts is in "DD MMM HH:MM" format
                 cursor_logs.execute("""
                     SELECT COUNT(*) FROM logs 
                     WHERE action_key = 'added_to_alliance' 
-                    AND datetime(ts) >= datetime(?)
-                    AND datetime(ts) < datetime(?)
+                    AND datetime(scraped_at) >= datetime(?)
+                    AND datetime(scraped_at) < datetime(?)
                 """, (game_day_start.isoformat(), game_day_end.isoformat()))
                 new_joins = cursor_logs.fetchone()[0]
                 
@@ -182,8 +183,8 @@ class DataAggregator:
                 cursor_logs.execute("""
                     SELECT COUNT(*) FROM logs 
                     WHERE action_key = 'left_alliance' 
-                    AND datetime(ts) >= datetime(?)
-                    AND datetime(ts) < datetime(?)
+                    AND datetime(scraped_at) >= datetime(?)
+                    AND datetime(scraped_at) < datetime(?)
                 """, (game_day_start.isoformat(), game_day_end.isoformat()))
                 left = cursor_logs.fetchone()[0]
                 
@@ -259,8 +260,8 @@ class DataAggregator:
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'created_course' 
-                AND datetime(ts) >= datetime(?)
-                AND datetime(ts) < datetime(?)
+                AND datetime(scraped_at) >= datetime(?)
+                AND datetime(scraped_at) < datetime(?)
             """, (game_day_start.isoformat(), game_day_end.isoformat()))
             started = cursor.fetchone()[0]
             
@@ -268,8 +269,8 @@ class DataAggregator:
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'course_completed' 
-                AND datetime(ts) >= datetime(?)
-                AND datetime(ts) < datetime(?)
+                AND datetime(scraped_at) >= datetime(?)
+                AND datetime(scraped_at) < datetime(?)
             """, (game_day_start.isoformat(), game_day_end.isoformat()))
             completed = cursor.fetchone()[0]
             
@@ -347,16 +348,16 @@ class DataAggregator:
                 cursor_logs.execute("""
                     SELECT COUNT(*) FROM logs 
                     WHERE action_key = 'extension_started' 
-                    AND datetime(ts) >= datetime(?)
-                    AND datetime(ts) < datetime(?)
+                    AND datetime(scraped_at) >= datetime(?)
+                    AND datetime(scraped_at) < datetime(?)
                 """, (game_day_start.isoformat(), game_day_end.isoformat()))
                 ext_started = cursor_logs.fetchone()[0]
                 
                 cursor_logs.execute("""
                     SELECT COUNT(*) FROM logs 
                     WHERE action_key = 'expansion_finished' 
-                    AND datetime(ts) >= datetime(?)
-                    AND datetime(ts) < datetime(?)
+                    AND datetime(scraped_at) >= datetime(?)
+                    AND datetime(scraped_at) < datetime(?)
                 """, (game_day_start.isoformat(), game_day_end.isoformat()))
                 ext_completed = cursor_logs.fetchone()[0]
                 
@@ -393,8 +394,8 @@ class DataAggregator:
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'large_mission_started' 
-                AND datetime(ts) >= datetime(?)
-                AND datetime(ts) < datetime(?)
+                AND datetime(scraped_at) >= datetime(?)
+                AND datetime(scraped_at) < datetime(?)
             """, (game_day_start.isoformat(), game_day_end.isoformat()))
             large_missions = cursor.fetchone()[0]
             
@@ -402,8 +403,8 @@ class DataAggregator:
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'alliance_event_started' 
-                AND datetime(ts) >= datetime(?)
-                AND datetime(ts) < datetime(?)
+                AND datetime(scraped_at) >= datetime(?)
+                AND datetime(scraped_at) < datetime(?)
             """, (game_day_start.isoformat(), game_day_end.isoformat()))
             events = cursor.fetchone()[0]
             
@@ -584,8 +585,8 @@ class DataAggregator:
                 cursor_ms = conn_ms.cursor()
                 cursor_ms.execute("""
                     SELECT COUNT(*) FROM audit 
-                    WHERE datetime(ts) >= datetime(?)
-                    AND datetime(ts) < datetime(?)
+                    WHERE datetime(scraped_at) >= datetime(?)
+                    AND datetime(scraped_at) < datetime(?)
                 """, (game_day_start.isoformat(), game_day_end.isoformat()))
                 verif_actions = cursor_ms.fetchone()[0]
                 conn_ms.close()
@@ -644,14 +645,14 @@ class DataAggregator:
                 cursor_logs.execute("""
                     SELECT COUNT(*) FROM logs 
                     WHERE action_key = 'added_to_alliance' 
-                    AND datetime(ts) BETWEEN datetime(?) AND datetime(?)
+                    AND datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
                 """, (start.isoformat(), end.isoformat()))
                 new_joins = cursor_logs.fetchone()[0]
                 
                 cursor_logs.execute("""
                     SELECT COUNT(*) FROM logs 
                     WHERE action_key = 'left_alliance' 
-                    AND datetime(ts) BETWEEN datetime(?) AND datetime(?)
+                    AND datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
                 """, (start.isoformat(), end.isoformat()))
                 left = cursor_logs.fetchone()[0]
                 
@@ -703,7 +704,7 @@ class DataAggregator:
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'created_course' 
-                AND datetime(ts) BETWEEN datetime(?) AND datetime(?)
+                AND datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
             """, (start.isoformat(), end.isoformat()))
             started = cursor.fetchone()[0]
             
@@ -711,7 +712,7 @@ class DataAggregator:
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'course_completed' 
-                AND datetime(ts) BETWEEN datetime(?) AND datetime(?)
+                AND datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
             """, (start.isoformat(), end.isoformat()))
             completed = cursor.fetchone()[0]
             
@@ -795,14 +796,14 @@ class DataAggregator:
                 cursor_logs.execute("""
                     SELECT COUNT(*) FROM logs 
                     WHERE action_key = 'extension_started' 
-                    AND datetime(ts) BETWEEN datetime(?) AND datetime(?)
+                    AND datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
                 """, (start.isoformat(), end.isoformat()))
                 ext_started = cursor_logs.fetchone()[0]
                 
                 cursor_logs.execute("""
                     SELECT COUNT(*) FROM logs 
                     WHERE action_key = 'expansion_finished' 
-                    AND datetime(ts) BETWEEN datetime(?) AND datetime(?)
+                    AND datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
                 """, (start.isoformat(), end.isoformat()))
                 ext_completed = cursor_logs.fetchone()[0]
                 
@@ -833,7 +834,7 @@ class DataAggregator:
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'large_mission_started' 
-                AND datetime(ts) BETWEEN datetime(?) AND datetime(?)
+                AND datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
             """, (start.isoformat(), end.isoformat()))
             missions = cursor.fetchone()[0]
             
@@ -841,7 +842,7 @@ class DataAggregator:
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'alliance_event_started' 
-                AND datetime(ts) BETWEEN datetime(?) AND datetime(?)
+                AND datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
             """, (start.isoformat(), end.isoformat()))
             events = cursor.fetchone()[0]
             
@@ -988,7 +989,7 @@ class DataAggregator:
                 cursor_ms = conn_ms.cursor()
                 cursor_ms.execute("""
                     SELECT COUNT(*) FROM audit 
-                    WHERE datetime(ts) BETWEEN datetime(?) AND datetime(?)
+                    WHERE datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
                 """, (start.isoformat(), end.isoformat()))
                 verif_actions = cursor_ms.fetchone()[0]
                 total_actions += verif_actions
