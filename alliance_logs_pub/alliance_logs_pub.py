@@ -11,7 +11,7 @@ import discord
 from redbot.core import commands, checks, Config
 from redbot.core.data_manager import cog_data_path
 
-__version__ = "0.8.3"
+__version__ = "0.9.0"
 
 log = logging.getLogger("red.FARA.AllianceLogsPub")
 
@@ -383,20 +383,19 @@ class AllianceLogsPub(commands.Cog):
             last_id = await self._get_last_id()
             max_posts = await self.config.max_posts_per_run()
             
-            guild = self.bot.guilds[0] if self.bot.guilds else None
-            if not guild:
-                log.warning("No guild available")
-                return 0
-            
             ch_id = await self.config.main_channel_id()
             if not ch_id:
                 log.warning("No main channel configured")
                 return 0
             
-            main_ch = guild.get_channel(int(ch_id))
+            # FIX: Get channel first, then use its guild
+            main_ch = self.bot.get_channel(int(ch_id))
             if not isinstance(main_ch, discord.TextChannel):
                 log.warning("Main channel not found or not a text channel")
                 return 0
+            
+            # Use the guild from the channel
+            guild = main_ch.guild
             
             mirrors = await self.config.mirrors()
             style = (await self.config.style()).lower()
@@ -461,7 +460,7 @@ class AllianceLogsPub(commands.Cog):
         cfg = await self.config.all()
         lines = [
             "```",
-            f"AllianceLogsPub version: {__version__} (Robust Mode)",
+            f"AllianceLogsPub version: {__version__} (Robust Mode - Multi-Guild Fix)",
             f"Style: {cfg['style']}  Emoji titles: {cfg['emoji_titles']}",
             f"Max posts per run: {cfg['max_posts_per_run']}",
             f"Mirrors configured: {len(cfg.get('mirrors', {}))}",
@@ -689,24 +688,23 @@ class AllianceLogsPub(commands.Cog):
         max_posts = await self.config.max_posts_per_run()
         await ctx.send(f"✅ last_id={last_id}, max_posts={max_posts}")
         
-        # Step 4: Check guild
-        guild = self.bot.guilds[0] if self.bot.guilds else None
-        if not guild:
-            await ctx.send("❌ STOP: No guild available!")
-            return
-        await ctx.send(f"✅ Guild: {guild.name}")
-        
-        # Step 5: Check channel
+        # Step 4: Check channel FIRST (FIX!)
         ch_id = await self.config.main_channel_id()
         if not ch_id:
             await ctx.send("❌ STOP: No main channel configured!")
             return
         
-        main_ch = guild.get_channel(int(ch_id))
+        main_ch = self.bot.get_channel(int(ch_id))
         if not isinstance(main_ch, discord.TextChannel):
             await ctx.send(f"❌ STOP: Channel {ch_id} not found or not a text channel!")
+            await ctx.send(f"🔍 Bot is in {len(self.bot.guilds)} guilds")
+            await ctx.send(f"🔍 Tried bot.get_channel({ch_id})")
             return
         await ctx.send(f"✅ Channel: {main_ch.mention}")
+        
+        # Step 5: Get guild from channel (FIX!)
+        guild = main_ch.guild
+        await ctx.send(f"✅ Guild: {guild.name}")
         
         # Step 6: Get style settings
         mirrors = await self.config.mirrors()
