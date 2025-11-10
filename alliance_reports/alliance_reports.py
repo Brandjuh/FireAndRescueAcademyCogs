@@ -5,7 +5,7 @@ Comprehensive reporting system for Fire & Rescue Academy alliance data.
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Optional
 
@@ -19,7 +19,7 @@ from .scheduler import ReportScheduler
 
 log = logging.getLogger("red.FARA.AllianceReports")
 
-__version__ = "1.0.1"
+__version__ = "1.0.0"
 
 
 class AllianceReports(commands.Cog):
@@ -117,7 +117,7 @@ class AllianceReports(commands.Cog):
     async def reportset_status(self, ctx: commands.Context):
         """Show current configuration and system status."""
         if not await self._is_authorized(ctx):
-            await ctx.send("You don't have permission to use this command.")
+            await ctx.send("❌ You don't have permission to use this command.")
             return
         
         try:
@@ -126,7 +126,7 @@ class AllianceReports(commands.Cog):
             
             # Add scheduler status
             next_runs = await self.scheduler.get_next_run_times()
-            scheduler_status = f"\nNEXT SCHEDULED RUNS\n"
+            scheduler_status = f"\n⏰ NEXT SCHEDULED RUNS\n"
             
             if next_runs.get("daily"):
                 daily_str = next_runs["daily"].strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -140,7 +140,7 @@ class AllianceReports(commands.Cog):
             else:
                 scheduler_status += f"  Monthly: Not scheduled\n"
             
-            scheduler_status += f"\n  Scheduler: {'Running' if self.scheduler.is_running() else 'Stopped'}"
+            scheduler_status += f"\n  Scheduler: {'🟢 Running' if self.scheduler.is_running() else '🔴 Stopped'}"
             
             full_output = formatted + "\n" + scheduler_status
             
@@ -150,7 +150,7 @@ class AllianceReports(commands.Cog):
         
         except Exception as e:
             log.exception(f"Error showing status: {e}")
-            await ctx.send(f"Error retrieving status: {e}")
+            await ctx.send(f"❌ Error retrieving status: {e}")
     
     @reportset.group(name="channel")
     async def reportset_channel(self, ctx: commands.Context):
@@ -162,44 +162,219 @@ class AllianceReports(commands.Cog):
     async def channel_daily_member(self, ctx: commands.Context, channel: discord.TextChannel):
         """Set the channel for daily member reports."""
         if not await self._is_authorized(ctx):
-            await ctx.send("You don't have permission to use this command.")
+            await ctx.send("❌ You don't have permission to use this command.")
             return
         
         await self.config.daily_member_channel.set(channel.id)
-        await ctx.send(f"Daily member reports will be posted to {channel.mention}")
+        await ctx.send(f"✅ Daily member reports will be posted to {channel.mention}")
     
     @reportset_channel.command(name="dailyadmin")
     async def channel_daily_admin(self, ctx: commands.Context, channel: discord.TextChannel):
         """Set the channel for daily admin reports."""
         if not await self._is_authorized(ctx):
-            await ctx.send("You don't have permission to use this command.")
+            await ctx.send("❌ You don't have permission to use this command.")
             return
         
         await self.config.daily_admin_channel.set(channel.id)
-        await ctx.send(f"Daily admin reports will be posted to {channel.mention}")
+        await ctx.send(f"✅ Daily admin reports will be posted to {channel.mention}")
     
     @reportset_channel.command(name="monthlymember")
     async def channel_monthly_member(self, ctx: commands.Context, channel: discord.TextChannel):
         """Set the channel for monthly member reports."""
         if not await self._is_authorized(ctx):
-            await ctx.send("You don't have permission to use this command.")
+            await ctx.send("❌ You don't have permission to use this command.")
             return
         
         await self.config.monthly_member_channel.set(channel.id)
-        await ctx.send(f"Monthly member reports will be posted to {channel.mention}")
+        await ctx.send(f"✅ Monthly member reports will be posted to {channel.mention}")
     
     @reportset_channel.command(name="monthlyadmin")
     async def channel_monthly_admin(self, ctx: commands.Context, channel: discord.TextChannel):
         """Set the channel for monthly admin reports."""
         if not await self._is_authorized(ctx):
-            await ctx.send("You don't have permission to use this command.")
+            await ctx.send("❌ You don't have permission to use this command.")
             return
         
         await self.config.monthly_admin_channel.set(channel.id)
-        await ctx.send(f"Monthly admin reports will be posted to {channel.mention}")
+        await ctx.send(f"✅ Monthly admin reports will be posted to {channel.mention}")
     
-    # (continuing with other commands exactly as they were...)
-    # I'll skip the middle parts since they don't change
+    @reportset_channel.command(name="error")
+    async def channel_error(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Set the channel for error notifications."""
+        if not await self._is_authorized(ctx):
+            await ctx.send("❌ You don't have permission to use this command.")
+            return
+        
+        await self.config.error_channel.set(channel.id)
+        await ctx.send(f"✅ Error notifications will be sent to {channel.mention}")
+    
+    @reportset.group(name="time")
+    async def reportset_time(self, ctx: commands.Context):
+        """Configure report generation times."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+    
+    @reportset_time.command(name="daily")
+    async def time_daily(self, ctx: commands.Context, time_str: str):
+        """Set daily report generation time (HH:MM format, 24-hour).
+        
+        Example: [p]reportset time daily 06:00
+        """
+        if not await self._is_authorized(ctx):
+            await ctx.send("❌ You don't have permission to use this command.")
+            return
+        
+        if not await self.config_manager.validate_time_format(time_str):
+            await ctx.send("❌ Invalid time format. Use HH:MM (24-hour), e.g., 06:00")
+            return
+        
+        await self.config.daily_time.set(time_str)
+        tz = await self.config.timezone()
+        await ctx.send(f"✅ Daily reports will generate at {time_str} {tz}")
+        
+        # Restart scheduler to apply changes
+        await self.scheduler.stop()
+        await asyncio.sleep(1)
+        await self.scheduler.start()
+    
+    @reportset_time.command(name="monthly")
+    async def time_monthly(self, ctx: commands.Context, day: int, time_str: str):
+        """Set monthly report generation day and time.
+        
+        Special values:
+        - Day 0 or -1: Last day of month (recommended for month-end reports)
+        - Day 1-28: Safe for all months
+        - Day 29-31: May skip shorter months
+        
+        Examples:
+        [p]reportset time monthly 0 06:00    (last day of every month)
+        [p]reportset time monthly 1 06:00    (first day of every month)
+        [p]reportset time monthly 15 06:00   (15th of every month)
+        """
+        if not await self._is_authorized(ctx):
+            await ctx.send("❌ You don't have permission to use this command.")
+            return
+        
+        # NEW: Use the validation method from config_manager
+        if not self.config_manager.validate_monthly_day(day):
+            await ctx.send("❌ Day must be between -1 (or 0 for last day) and 31\n"
+                          "💡 Use `0` or `-1` for last day of month (handles leap years!)\n"
+                          "💡 Use `1-31` for specific day")
+            return
+        
+        if not await self.config_manager.validate_time_format(time_str):
+            await ctx.send("❌ Invalid time format. Use HH:MM (24-hour), e.g., 06:00")
+            return
+        
+        await self.config.monthly_day.set(day)
+        await self.config.monthly_time.set(time_str)
+        tz = await self.config.timezone()
+        
+        # User-friendly message
+        if day <= 0:
+            await ctx.send(f"✅ Monthly reports will generate on the **last day of each month** at {time_str} {tz}\n"
+                          f"📅 This handles leap years and varying month lengths automatically!")
+        else:
+            await ctx.send(f"✅ Monthly reports will generate on day **{day}** at {time_str} {tz}\n"
+                          f"⚠️ Note: Day {day} doesn't exist in all months (Feb has 28/29, some months have 30)")
+        
+        # Restart scheduler
+        await self.scheduler.stop()
+        await asyncio.sleep(1)
+        await self.scheduler.start()
+    
+    @reportset_time.command(name="timezone")
+    async def time_timezone(self, ctx: commands.Context, timezone: str):
+        """Set timezone for report generation.
+        
+        Example: [p]reportset time timezone Europe/Amsterdam
+        """
+        if not await self._is_authorized(ctx):
+            await ctx.send("❌ You don't have permission to use this command.")
+            return
+        
+        try:
+            # Test if timezone is valid
+            ZoneInfo(timezone)
+            await self.config.timezone.set(timezone)
+            await ctx.send(f"✅ Timezone set to {timezone}")
+            
+            # Restart scheduler
+            await self.scheduler.stop()
+            await asyncio.sleep(1)
+            await self.scheduler.start()
+        except Exception as e:
+            await ctx.send(f"❌ Invalid timezone: {e}")
+    
+    @reportset.command(name="adminrole")
+    async def reportset_adminrole(self, ctx: commands.Context, role: discord.Role):
+        """Set the admin role that can configure reports."""
+        if not await self.bot.is_owner(ctx.author):
+            await ctx.send("❌ Only the bot owner can set the admin role.")
+            return
+        
+        await self.config.admin_role_id.set(role.id)
+        await ctx.send(f"✅ Admin role set to {role.mention}")
+    
+    @reportset.command(name="testmode")
+    async def reportset_testmode(self, ctx: commands.Context, enabled: bool):
+        """Enable/disable test mode (generate without posting)."""
+        if not await self._is_authorized(ctx):
+            await ctx.send("❌ You don't have permission to use this command.")
+            return
+        
+        await self.config.test_mode.set(enabled)
+        status = "enabled" if enabled else "disabled"
+        await ctx.send(f"✅ Test mode {status}")
+    
+    @reportset.group(name="database")
+    async def reportset_database(self, ctx: commands.Context):
+        """Manage database paths."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+    
+    @reportset_database.command(name="detect")
+    async def database_detect(self, ctx: commands.Context):
+        """Re-detect all database paths."""
+        if not await self._is_authorized(ctx):
+            await ctx.send("❌ You don't have permission to use this command.")
+            return
+        
+        await ctx.send("🔍 Detecting database paths...")
+        
+        try:
+            # Clear cache
+            self.config_manager._db_cache = {}
+            
+            # Detect
+            db_paths = await self.config_manager.detect_database_paths()
+            
+            if not db_paths:
+                await ctx.send("❌ No databases found")
+                return
+            
+            # Save to config
+            found = 0
+            for key, path in db_paths.items():
+                if path:
+                    await self.config.set_raw(key, value=str(path))
+                    found += 1
+            
+            await ctx.send(f"✅ Found {found}/{len(db_paths)} databases")
+            
+            # Show status
+            await self.reportset_status(ctx)
+        
+        except Exception as e:
+            log.exception(f"Error detecting databases: {e}")
+            await ctx.send(f"❌ Error: {e}")
+    
+    @reportset.command(name="version")
+    async def reportset_version(self, ctx: commands.Context):
+        """Show cog version."""
+        await ctx.send(f"**AllianceReports** version `{__version__}` - V2 Database Support + Smart Last-Day Scheduling")
+    
+    # ==================== REPORT COMMANDS ====================
     
     @commands.group(name="report")
     async def report_group(self, ctx: commands.Context):
@@ -211,10 +386,10 @@ class AllianceReports(commands.Cog):
     async def report_daily_member(self, ctx: commands.Context):
         """Generate daily member report now."""
         if not await self._is_authorized(ctx):
-            await ctx.send("You don't have permission to use this command.")
+            await ctx.send("❌ You don't have permission to use this command.")
             return
         
-        await ctx.send("Generating daily member report...")
+        await ctx.send("📄 Generating daily member report...")
         
         try:
             from .templates.daily_member import DailyMemberReport
@@ -223,162 +398,177 @@ class AllianceReports(commands.Cog):
             embed = await report_gen.generate()
             
             if not embed:
-                await ctx.send("Failed to generate report")
+                await ctx.send("❌ Failed to generate report")
                 return
             
             channel_id = await self.config.daily_member_channel()
             if not channel_id:
-                await ctx.send("No channel configured, posting here:")
+                await ctx.send("ℹ️ No channel configured, posting here:")
                 await ctx.send(embed=embed)
-                await ctx.send("Set channel with `[p]reportset channel dailymember #channel`")
+                await ctx.send("✅ Set channel with `[p]reportset channel dailymember #channel`")
                 return
             
             channel = self.bot.get_channel(int(channel_id))
             if not channel:
-                await ctx.send(f"Configured channel not found (ID: {channel_id})")
+                await ctx.send(f"❌ Configured channel not found (ID: {channel_id})")
                 return
             
             success = await report_gen.post(channel)
             
             if success:
-                await ctx.send(f"Daily member report posted to {channel.mention}")
+                await ctx.send(f"✅ Daily member report posted to {channel.mention}")
             else:
-                await ctx.send("Failed to post report (check logs)")
+                await ctx.send("❌ Failed to post report (check logs)")
         
         except Exception as e:
             log.exception(f"Error generating daily member report: {e}")
-            await ctx.send(f"Error: {e}")
+            await ctx.send(f"❌ Error: {e}")
+    
+    @report_group.command(name="dailyadmin")
+    async def report_daily_admin(self, ctx: commands.Context):
+        """Generate daily admin report now."""
+        if not await self._is_authorized(ctx):
+            await ctx.send("❌ You don't have permission to use this command.")
+            return
+        
+        await ctx.send("📄 Generating daily admin report...")
+        
+        try:
+            from .templates.daily_admin import DailyAdminReport
+            
+            report_gen = DailyAdminReport(self.bot, self.config_manager)
+            embed = await report_gen.generate()
+            
+            if not embed:
+                await ctx.send("❌ Failed to generate report")
+                return
+            
+            channel_id = await self.config.daily_admin_channel()
+            if not channel_id:
+                await ctx.send("ℹ️ No channel configured, posting here:")
+                await ctx.send(embed=embed)
+                await ctx.send("✅ Set channel with `[p]reportset channel dailyadmin #channel`")
+                return
+            
+            channel = self.bot.get_channel(int(channel_id))
+            if not channel:
+                await ctx.send(f"❌ Configured channel not found (ID: {channel_id})")
+                return
+            
+            success = await report_gen.post(channel)
+            
+            if success:
+                await ctx.send(f"✅ Daily admin report posted to {channel.mention}")
+            else:
+                await ctx.send("❌ Failed to post report (check logs)")
+        
+        except Exception as e:
+            log.exception(f"Error generating daily admin report: {e}")
+            await ctx.send(f"❌ Error: {e}")
+    
+    @report_group.command(name="monthlymember")
+    async def report_monthly_member(self, ctx: commands.Context):
+        """Generate monthly member report now."""
+        if not await self._is_authorized(ctx):
+            await ctx.send("❌ You don't have permission to use this command.")
+            return
+        
+        await ctx.send("📄 Generating monthly member report...")
+        
+        try:
+            from .templates.monthly_member import MonthlyMemberReport
+            
+            report_gen = MonthlyMemberReport(self.bot, self.config_manager)
+            embeds = await report_gen.generate()
+            
+            if not embeds:
+                await ctx.send("❌ Failed to generate report")
+                return
+            
+            channel_id = await self.config.monthly_member_channel()
+            if not channel_id:
+                await ctx.send("ℹ️ No channel configured, posting here:")
+                for embed in embeds:
+                    await ctx.send(embed=embed)
+                await ctx.send("✅ Set channel with `[p]reportset channel monthlymember #channel`")
+                return
+            
+            channel = self.bot.get_channel(int(channel_id))
+            if not channel:
+                await ctx.send(f"❌ Configured channel not found (ID: {channel_id})")
+                return
+            
+            success = await report_gen.post(channel)
+            
+            if success:
+                await ctx.send(f"✅ Monthly member report posted to {channel.mention}")
+            else:
+                await ctx.send("❌ Failed to post report (check logs)")
+        
+        except Exception as e:
+            log.exception(f"Error generating monthly member report: {e}")
+            await ctx.send(f"❌ Error: {e}")
     
     @report_group.command(name="debug")
     async def report_debug(self, ctx: commands.Context):
-        """Debug data aggregation - shows actual database contents."""
+        """Debug data aggregation."""
         if not await self._is_authorized(ctx):
-            await ctx.send("You don't have permission to use this command.")
+            await ctx.send("❌ You don't have permission to use this command.")
             return
         
-        await ctx.send("**ALLIANCE REPORTS DEBUG**\nChecking databases and queries...")
+        await ctx.send("🔍 Testing V2 database connections...")
         
         try:
             from .data_aggregator import DataAggregator
-            import json
             
             aggregator = DataAggregator(self.config_manager)
             
-            # ===== CHECK LOGS V2 DATABASE =====
-            await ctx.send("\n**LOGS V2 DATABASE:**")
-            conn_logs = aggregator._get_db_connection("logs_v2")
-            if conn_logs:
-                cursor = conn_logs.cursor()
-                
-                # Show unique action_keys
-                cursor.execute("SELECT DISTINCT action_key FROM logs ORDER BY action_key")
-                action_keys = cursor.fetchall()
-                
-                msg = "**Action Keys in Database:**\n```\n"
-                for key in action_keys[:20]:  # Limit to 20
-                    msg += f"- {key[0]}\n"
-                msg += "```"
-                await ctx.send(msg)
-                
-                # Show recent logs
-                cursor.execute("SELECT action_key, executed_name, affected_name, ts FROM logs ORDER BY ts DESC LIMIT 5")
-                recent = cursor.fetchall()
-                
-                msg = "**Last 5 Log Entries:**\n```\n"
-                for r in recent:
-                    msg += f"[{r[3]}] {r[0]}: {r[1]} -> {r[2]}\n"
-                msg += "```"
-                await ctx.send(msg)
-                
-                # Count logs in last 24h
-                utc_now = datetime.now(ZoneInfo("UTC"))
-                game_day_end = utc_now.replace(hour=4, minute=0, second=0, microsecond=0)
-                game_day_start = game_day_end - timedelta(days=1)
-                
-                cursor.execute("""
-                    SELECT COUNT(*) FROM logs 
-                    WHERE datetime(ts) >= datetime(?)
-                    AND datetime(ts) < datetime(?)
-                """, (game_day_start.isoformat(), game_day_end.isoformat()))
-                count_24h = cursor.fetchone()[0]
-                await ctx.send(f"Logs in last game day: **{count_24h}**")
-                
-                conn_logs.close()
-            else:
-                await ctx.send("Logs V2 DB not accessible")
+            # Test V2 database connections
+            await ctx.send("\n🔌 Testing V2 databases...")
             
-            # ===== CHECK MEMBERS V2 DATABASE =====
-            await ctx.send("\n**MEMBERS V2 DATABASE:**")
             conn_members = aggregator._get_db_connection("members_v2")
             if conn_members:
-                cursor = conn_members.cursor()
-                
-                # Total members
-                cursor.execute("SELECT COUNT(DISTINCT member_id) FROM members WHERE timestamp = (SELECT MAX(timestamp) FROM members)")
-                total = cursor.fetchone()[0]
-                await ctx.send(f"Current members: **{total}**")
-                
-                # Recent timestamp
-                cursor.execute("SELECT MAX(timestamp) FROM members")
-                last_scrape = cursor.fetchone()[0]
-                await ctx.send(f"Last scrape: {last_scrape}")
-                
+                await ctx.send("✅ Members V2 DB connected")
                 conn_members.close()
             else:
-                await ctx.send("Members V2 DB not accessible")
+                await ctx.send("❌ Members V2 DB connection failed!")
             
-            # ===== CHECK BUILDINGS V2 DATABASE =====
-            await ctx.send("\n**BUILDINGS V2 DATABASE:**")
+            conn_logs = aggregator._get_db_connection("logs_v2")
+            if conn_logs:
+                await ctx.send("✅ Logs V2 DB connected")
+                conn_logs.close()
+            else:
+                await ctx.send("❌ Logs V2 DB connection failed!")
+            
+            conn_income = aggregator._get_db_connection("income_v2")
+            if conn_income:
+                await ctx.send("✅ Income V2 DB connected")
+                conn_income.close()
+            else:
+                await ctx.send("❌ Income V2 DB connection failed!")
+            
             conn_buildings = aggregator._get_db_connection("buildings_v2")
             if conn_buildings:
-                cursor = conn_buildings.cursor()
-                
-                # Total buildings
-                cursor.execute("SELECT COUNT(DISTINCT building_id) FROM buildings WHERE timestamp = (SELECT MAX(timestamp) FROM buildings)")
-                total = cursor.fetchone()[0]
-                await ctx.send(f"Total buildings: **{total}**")
-                
-                # Recent timestamp
-                cursor.execute("SELECT MAX(timestamp) FROM buildings")
-                last_scrape = cursor.fetchone()[0]
-                await ctx.send(f"Last scrape: {last_scrape}")
-                
+                await ctx.send("✅ Buildings V2 DB connected")
                 conn_buildings.close()
             else:
-                await ctx.send("Buildings V2 DB not accessible")
+                await ctx.send("❌ Buildings V2 DB connection failed!")
             
-            # ===== TEST ACTUAL DATA AGGREGATION =====
-            await ctx.send("\n**TESTING DATA AGGREGATION:**")
-            await ctx.send("Running `get_daily_data()`...")
+            # Test legacy databases
+            await ctx.send("\n🔌 Testing legacy databases...")
             
-            data = await aggregator.get_daily_data()
+            conn_alliance = aggregator._get_db_connection("alliance")
+            if conn_alliance:
+                await ctx.send("✅ Alliance DB (treasury) connected")
+                conn_alliance.close()
+            else:
+                await ctx.send("⚠️ Alliance DB connection failed")
             
-            # Show membership data
-            membership = data.get("membership", {})
-            msg = "**Membership Data:**\n```json\n"
-            msg += json.dumps(membership, indent=2, default=str)[:800]
-            msg += "\n```"
-            await ctx.send(msg)
-            
-            # Show training data
-            training = data.get("training", {})
-            msg = "**Training Data:**\n```json\n"
-            msg += json.dumps(training, indent=2, default=str)[:800]
-            msg += "\n```"
-            await ctx.send(msg)
-            
-            # Show buildings data
-            buildings = data.get("buildings", {})
-            msg = "**Buildings Data:**\n```json\n"
-            msg += json.dumps(buildings, indent=2, default=str)[:800]
-            msg += "\n```"
-            await ctx.send(msg)
-            
-            await ctx.send("\nDebug complete! Check the data above to see what's being returned.")
+            await ctx.send("\n✅ Database connection test complete!")
             
         except Exception as e:
             log.exception(f"Error in debug: {e}")
-            await ctx.send(f"Error: {str(e)}\n```\n{e.__class__.__name__}\n```")
+            await ctx.send(f"❌ Error: {str(e)}")
 
 
 async def setup(bot: Red):
