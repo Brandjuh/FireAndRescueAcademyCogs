@@ -11,7 +11,7 @@ import discord
 from redbot.core import commands, checks, Config
 from redbot.core.data_manager import cog_data_path
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"
 
 log = logging.getLogger("red.FARA.AllianceLogsPub")
 
@@ -510,6 +510,71 @@ class AllianceLogsPub(commands.Cog):
             "```",
         ]
         await ctx.send("\n".join(lines))
+
+    @alog_group.command(name="testfetch")
+    async def test_fetch(self, ctx: commands.Context, last_id: int = None, limit: int = 10):
+        """Test what get_logs_after returns from LogsScraper - DIAGNOSTIC TOOL"""
+        if last_id is None:
+            last_id = await self._get_last_id()
+        
+        sc = self.bot.get_cog("LogsScraper")
+        if not sc:
+            await ctx.send("❌ LogsScraper not loaded!")
+            return
+        
+        if not hasattr(sc, "get_logs_after"):
+            await ctx.send("❌ LogsScraper doesn't have get_logs_after method!")
+            return
+        
+        await ctx.send(f"🔍 Testing get_logs_after({last_id}, limit={limit})...")
+        
+        try:
+            rows = await sc.get_logs_after(int(last_id), limit=limit)
+            
+            if not rows:
+                await ctx.send(f"⚠️ get_logs_after returned EMPTY list!")
+                
+                # Check if LogsScraper has ANY logs at all
+                import sqlite3
+                conn = sqlite3.connect(sc.db_path)
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*), MIN(id), MAX(id) FROM logs")
+                count, min_id, max_id = cursor.fetchone()
+                conn.close()
+                
+                await ctx.send(f"📊 LogsScraper DB has {count} logs (ID range: {min_id} to {max_id})")
+                await ctx.send(f"🔍 You're asking for logs > {last_id}")
+                
+                if max_id and last_id >= max_id:
+                    await ctx.send(f"❌ **PROBLEM**: last_id ({last_id}) >= max_id ({max_id})!")
+                    await ctx.send(f"💡 Try: `!alog setlastid {min_id}` to reprocess all logs")
+                
+                return
+            
+            await ctx.send(f"✅ Got {len(rows)} rows!")
+            
+            # Show first 3 logs details
+            for i, row in enumerate(rows[:3]):
+                details = f"**Log ID {row['id']}:**\n"
+                details += f"  Action: {row.get('action_key', 'N/A')}\n"
+                details += f"  By: {row.get('executed_name', 'N/A')}\n"
+                details += f"  Affected: {row.get('affected_name', 'N/A')}\n"
+                details += f"  Timestamp: {row.get('ts', 'N/A')}"
+                await ctx.send(details)
+            
+            if len(rows) > 3:
+                await ctx.send(f"... and {len(rows) - 3} more logs")
+                
+        except Exception as e:
+            await ctx.send(f"❌ Exception: {e}")
+            import traceback
+            tb = traceback.format_exc()
+            # Split long tracebacks
+            if len(tb) > 1900:
+                for chunk in [tb[i:i+1900] for i in range(0, len(tb), 1900)]:
+                    await ctx.send(f"```\n{chunk}\n```")
+            else:
+                await ctx.send(f"```\n{tb}\n```")
 
     @alog_group.command(name="setlastid")
     async def setlastid(self, ctx: commands.Context, new_id: int):
