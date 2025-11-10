@@ -11,7 +11,7 @@ import discord
 from redbot.core import commands, checks, Config
 from redbot.core.data_manager import cog_data_path
 
-__version__ = "0.8.2"
+__version__ = "0.8.3"
 
 log = logging.getLogger("red.FARA.AllianceLogsPub")
 
@@ -662,6 +662,108 @@ class AllianceLogsPub(commands.Cog):
                     await ctx.send(f"```\n{chunk}\n```")
             else:
                 await ctx.send(f"```\n{tb}\n```")
+
+    @alog_group.command(name="debugrun")
+    async def debug_run(self, ctx: commands.Context):
+        """Debug version of run - shows exactly what happens in _tick_once"""
+        await ctx.send("🔍 **Debug Run Starting...**")
+        
+        # Step 1: Check lock
+        if self._posting_lock.locked():
+            await ctx.send("❌ STOP: Posting lock is already locked!")
+            return
+        await ctx.send("✅ Lock available")
+        
+        # Step 2: Check LogsScraper
+        sc = self.bot.get_cog("LogsScraper")
+        if not sc:
+            await ctx.send("❌ STOP: LogsScraper cog not found!")
+            return
+        if not hasattr(sc, "get_logs_after"):
+            await ctx.send("❌ STOP: LogsScraper has no get_logs_after method!")
+            return
+        await ctx.send("✅ LogsScraper available")
+        
+        # Step 3: Get settings
+        last_id = await self._get_last_id()
+        max_posts = await self.config.max_posts_per_run()
+        await ctx.send(f"✅ last_id={last_id}, max_posts={max_posts}")
+        
+        # Step 4: Check guild
+        guild = self.bot.guilds[0] if self.bot.guilds else None
+        if not guild:
+            await ctx.send("❌ STOP: No guild available!")
+            return
+        await ctx.send(f"✅ Guild: {guild.name}")
+        
+        # Step 5: Check channel
+        ch_id = await self.config.main_channel_id()
+        if not ch_id:
+            await ctx.send("❌ STOP: No main channel configured!")
+            return
+        
+        main_ch = guild.get_channel(int(ch_id))
+        if not isinstance(main_ch, discord.TextChannel):
+            await ctx.send(f"❌ STOP: Channel {ch_id} not found or not a text channel!")
+            return
+        await ctx.send(f"✅ Channel: {main_ch.mention}")
+        
+        # Step 6: Get style settings
+        mirrors = await self.config.mirrors()
+        style = (await self.config.style()).lower()
+        emoji_titles = bool(await self.config.emoji_titles())
+        await ctx.send(f"✅ Style: {style}, Emoji: {emoji_titles}, Mirrors: {len(mirrors)}")
+        
+        # Step 7: Fetch logs
+        await ctx.send(f"📡 Fetching logs after ID {last_id}...")
+        try:
+            rows = await sc.get_logs_after(int(last_id), limit=max_posts)
+        except Exception as e:
+            await ctx.send(f"❌ EXCEPTION during fetch: {e}")
+            import traceback
+            tb = traceback.format_exc()
+            if len(tb) > 1900:
+                await ctx.send(f"```\n{tb[:1900]}\n```")
+            else:
+                await ctx.send(f"```\n{tb}\n```")
+            return
+        
+        # Step 8: Check if rows returned
+        if not rows:
+            await ctx.send("❌ STOP: get_logs_after returned EMPTY LIST!")
+            await ctx.send(f"🔍 Called: sc.get_logs_after({last_id}, limit={max_posts})")
+            await ctx.send("This should have returned data based on testfetch!")
+            return
+        
+        await ctx.send(f"✅ Fetched {len(rows)} logs (IDs: {rows[0]['id']} to {rows[-1]['id']})")
+        
+        # Step 9: Post logs
+        await ctx.send(f"🚀 Starting to post {len(rows)} logs...")
+        
+        posted = 0
+        failed = 0
+        
+        for idx, row in enumerate(rows):
+            success = await self._publish_single_log(row, main_ch, mirrors, style, emoji_titles)
+            
+            if success:
+                posted += 1
+                if posted <= 3:
+                    await ctx.send(f"  ✅ Posted log {row['id']}")
+                elif posted % 10 == 0:
+                    await ctx.send(f"  📊 Progress: {posted}/{len(rows)}")
+                
+                if (posted % 5) == 0:
+                    await asyncio.sleep(1)
+            else:
+                failed += 1
+                await ctx.send(f"  ❌ FAILED to post log {row['id']}")
+                await ctx.send(f"  🛑 Stopping batch (posted {posted}, failed {failed})")
+                break
+        
+        await ctx.send(f"✅ **COMPLETE**: Posted {posted}/{len(rows)} logs successfully")
+        if failed > 0:
+            await ctx.send(f"⚠️ {failed} logs failed to post")
 
     @alog_group.command(name="setlastid")
     async def setlastid(self, ctx: commands.Context, new_id: int):
