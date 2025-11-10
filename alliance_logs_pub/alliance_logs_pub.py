@@ -11,7 +11,7 @@ import discord
 from redbot.core import commands, checks, Config
 from redbot.core.data_manager import cog_data_path
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"
 
 log = logging.getLogger("red.FARA.AllianceLogsPub")
 
@@ -570,6 +570,93 @@ class AllianceLogsPub(commands.Cog):
             import traceback
             tb = traceback.format_exc()
             # Split long tracebacks
+            if len(tb) > 1900:
+                for chunk in [tb[i:i+1900] for i in range(0, len(tb), 1900)]:
+                    await ctx.send(f"```\n{chunk}\n```")
+            else:
+                await ctx.send(f"```\n{tb}\n```")
+
+    @alog_group.command(name="testpost")
+    async def test_post(self, ctx: commands.Context, log_id: int = None):
+        """Test posting a single log - FULL DEBUG"""
+        if log_id is None:
+            # Get first pending log
+            last_id = await self._get_last_id()
+            sc = self.bot.get_cog("LogsScraper")
+            if not sc:
+                await ctx.send("❌ LogsScraper not loaded!")
+                return
+            
+            rows = await sc.get_logs_after(int(last_id), limit=1)
+            if not rows:
+                await ctx.send("❌ No pending logs found!")
+                return
+            
+            log_id = rows[0]["id"]
+            await ctx.send(f"🔍 Testing with first pending log: ID {log_id}")
+        
+        # Get the specific log
+        sc = self.bot.get_cog("LogsScraper")
+        if not sc:
+            await ctx.send("❌ LogsScraper not loaded!")
+            return
+        
+        rows = await sc.get_logs_after(int(log_id - 1), limit=1)
+        if not rows or rows[0]["id"] != log_id:
+            await ctx.send(f"❌ Log ID {log_id} not found!")
+            return
+        
+        row = rows[0]
+        await ctx.send(f"✅ Found log {log_id}: {row.get('action_key')}")
+        
+        # Get channel
+        ch_id = await self.config.main_channel_id()
+        if not ch_id:
+            await ctx.send("❌ No main channel configured!")
+            return
+        
+        guild = ctx.guild or self.bot.guilds[0]
+        main_ch = guild.get_channel(int(ch_id))
+        if not isinstance(main_ch, discord.TextChannel):
+            await ctx.send(f"❌ Channel {ch_id} not found or not a text channel!")
+            return
+        
+        await ctx.send(f"✅ Target channel: {main_ch.mention}")
+        
+        # Test permissions
+        perms = main_ch.permissions_for(guild.me)
+        if not perms.send_messages:
+            await ctx.send(f"❌ Bot cannot send messages in {main_ch.mention}!")
+            return
+        if not perms.embed_links:
+            await ctx.send(f"⚠️ Bot cannot embed links in {main_ch.mention}!")
+        
+        await ctx.send("✅ Bot has send permissions")
+        
+        # Get settings
+        mirrors = await self.config.mirrors()
+        style = (await self.config.style()).lower()
+        emoji_titles = bool(await self.config.emoji_titles())
+        
+        await ctx.send(f"⚙️ Style: {style}, Emoji: {emoji_titles}")
+        
+        # Try to post
+        await ctx.send("🚀 Attempting to post...")
+        
+        try:
+            success = await self._publish_single_log(row, main_ch, mirrors, style, emoji_titles)
+            
+            if success:
+                await ctx.send(f"✅ Successfully posted log {log_id} to {main_ch.mention}!")
+                await ctx.send(f"💾 last_id should now be: {log_id}")
+            else:
+                await ctx.send(f"❌ _publish_single_log returned False for log {log_id}")
+                await ctx.send("Check console/logs for error details")
+        
+        except Exception as e:
+            await ctx.send(f"💥 Exception during posting: {e}")
+            import traceback
+            tb = traceback.format_exc()
             if len(tb) > 1900:
                 for chunk in [tb[i:i+1900] for i in range(0, len(tb), 1900)]:
                     await ctx.send(f"```\n{chunk}\n```")
