@@ -255,7 +255,7 @@ class ForumThreadMover(commands.Cog):
         
         # Check permissions
         bot_permissions = forum_channel.permissions_for(ctx.guild.me)
-        required_perms = ["create_posts", "send_messages", "attach_files", "embed_links", "manage_threads"]
+        required_perms = ["create_public_threads", "send_messages", "attach_files", "embed_links", "manage_threads"]
         missing_perms = [perm for perm in required_perms if not getattr(bot_permissions, perm, False)]
         
         if missing_perms:
