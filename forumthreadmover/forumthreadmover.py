@@ -43,6 +43,14 @@ class ForumThreadMover(commands.Cog):
         """Check if member has the admin role."""
         return any(role.id == self.admin_role_id for role in member.roles)
 
+    def _find_forum_tag(self, forum: discord.ForumChannel, tag_name: str) -> Optional[discord.ForumTag]:
+        """Find a forum tag by name (case-insensitive)."""
+        tag_name_lower = tag_name.lower()
+        for tag in forum.available_tags:
+            if tag.name.lower() == tag_name_lower:
+                return tag
+        return None
+
     async def _fetch_messages_safely(self, channel: discord.TextChannel, start_message_id: int, count: int) -> List[discord.Message]:
         """Fetch messages with retry logic."""
         for attempt in range(self.max_retries):
@@ -219,8 +227,13 @@ class ForumThreadMover(commands.Cog):
         - `forum_channel`: The target forum channel (mention or ID)
         - `title`: Optional title for the forum post (default: first 80 chars of question)
         
-        **Example:**
+        **Flags:**
+        - `--tag "Tag Name"`: Apply a forum tag to the post (use quotes if tag has spaces)
+        
+        **Examples:**
         `[p]movequestion 1437763879160647740 10 #helpdesk Purpose of Own Vehicle Class`
+        `[p]movequestion 1437763879160647740 10 #helpdesk --tag "Bug Report" Purpose of Own Vehicle Class`
+        `[p]movequestion 1437763879160647740 10 #helpdesk Title Here --tag Question`
         """
         # Permission check
         if not self._has_admin_role(ctx.author):
@@ -260,6 +273,48 @@ class ForumThreadMover(commands.Cog):
         
         if missing_perms:
             await ctx.send(f"❌ I'm missing these permissions in {forum_channel.mention}: {humanize_list(missing_perms)}")
+            return
+        
+        # Parse tag from title if --tag flag is present
+        tag_to_apply = None
+        if title and "--tag" in title:
+            parts = title.split("--tag", 1)
+            title = parts[0].strip()
+            
+            if len(parts) > 1:
+                tag_part = parts[1].strip()
+                # Handle quoted tag names
+                if tag_part.startswith('"'):
+                    # Find closing quote
+                    end_quote = tag_part.find('"', 1)
+                    if end_quote != -1:
+                        tag_name = tag_part[1:end_quote]
+                        # Rest after the tag becomes part of title
+                        remainder = tag_part[end_quote+1:].strip()
+                        if remainder:
+                            title = (title + " " + remainder).strip() if title else remainder
+                    else:
+                        # No closing quote, treat everything as tag name
+                        tag_name = tag_part[1:]
+                else:
+                    # No quotes, take first word as tag name, rest as title
+                    tag_parts = tag_part.split(None, 1)
+                    tag_name = tag_parts[0]
+                    if len(tag_parts) > 1:
+                        remainder = tag_parts[1]
+                        title = (title + " " + remainder).strip() if title else remainder
+                
+                # Find the tag in forum
+                tag_to_apply = self._find_forum_tag(forum_channel, tag_name)
+                if not tag_to_apply:
+                    available_tags = [f"`{tag.name}`" for tag in forum_channel.available_tags]
+                    await ctx.send(f"⚠️ Tag `{tag_name}` not found in {forum_channel.mention}.\nAvailable tags: {humanize_list(available_tags) if available_tags else 'None'}")
+                    return
+        
+        # Check if forum requires tags but none was provided
+        if forum_channel.requires_tag and not tag_to_apply:
+            available_tags = [f"`{tag.name}`" for tag in forum_channel.available_tags]
+            await ctx.send(f"❌ This forum requires a tag. Use `--tag \"Tag Name\"` to specify one.\nAvailable tags: {humanize_list(available_tags)}")
             return
         
         # Create progress embed
@@ -305,7 +360,8 @@ class ForumThreadMover(commands.Cog):
                 content=first_content,
                 files=first_files,
                 embeds=first_embeds,
-                allowed_mentions=discord.AllowedMentions.none()
+                allowed_mentions=discord.AllowedMentions.none(),
+                applied_tags=[tag_to_apply] if tag_to_apply else []
             )
             
             # Post remaining messages
@@ -341,20 +397,24 @@ class ForumThreadMover(commands.Cog):
                 color=discord.Color.green()
             )
             success_embed.add_field(name="Messages Moved", value=str(total_messages), inline=True)
+            if tag_to_apply:
+                success_embed.add_field(name="Tag Applied", value=tag_to_apply.name, inline=True)
             success_embed.add_field(name="Forum Post", value=f"[{title}]({thread.jump_url})", inline=False)
             await progress_msg.edit(embed=success_embed)
             
             # Log the action
-            await self._log_action(
-                ctx.guild,
+            log_message = (
                 f"**Conversation Moved**\n"
                 f"Moderator: {ctx.author.mention}\n"
                 f"From: {ctx.channel.mention}\n"
                 f"To: {forum_channel.mention}\n"
                 f"Thread: [{title}]({thread.jump_url})\n"
-                f"Messages: {total_messages}",
-                discord.Color.green()
+                f"Messages: {total_messages}"
             )
+            if tag_to_apply:
+                log_message += f"\nTag: {tag_to_apply.name}"
+            
+            await self._log_action(ctx.guild, log_message, discord.Color.green())
             
         except discord.Forbidden:
             await progress_msg.edit(content="❌ I don't have permission to perform this action.")
