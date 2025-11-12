@@ -312,7 +312,12 @@ class ForumThreadMover(commands.Cog):
                     return
         
         # Check if forum requires tags but none was provided
-        if forum_channel.requires_tag and not tag_to_apply:
+        try:
+            requires_tag = forum_channel.flags.require_tag if hasattr(forum_channel, 'flags') else False
+        except AttributeError:
+            requires_tag = False
+        
+        if requires_tag and not tag_to_apply:
             available_tags = [f"`{tag.name}`" for tag in forum_channel.available_tags]
             await ctx.send(f"❌ This forum requires a tag. Use `--tag \"Tag Name\"` to specify one.\nAvailable tags: {humanize_list(available_tags)}")
             return
