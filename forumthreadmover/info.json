@@ -1,0 +1,9 @@
+{
+    "author": ["Brandjuh"],
+    "description": "Move text channel conversations to forum channels while preserving message order, attachments, and embeds.",
+    "install_msg": "Thanks for installing ForumThreadMover! Use `[p]movequestion` to move conversations to forum channels. Make sure the bot has proper permissions in both source and target channels.",
+    "short": "Move conversations to forum channels",
+    "tags": ["forum", "moderation", "threads", "utility"],
+    "type": "COG",
+    "end_user_data_statement": "This cog does not store any end user data."
+}
