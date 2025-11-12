@@ -9,6 +9,7 @@ Een Red-DiscordBot V3 cog om conversaties van text channels naar forum channels 
 - ✅ Re-upload attachments (met fallback voor grote bestanden)
 - ✅ Recreëer embeds waar mogelijk
 - ✅ Reply context wordt behouden
+- ✅ Forum tags support (optioneel en verplicht)
 - ✅ Progress tracking met real-time updates
 - ✅ Automatische retry logic bij API errors
 - ✅ Comprehensive logging
@@ -51,7 +52,7 @@ Verplaats een conversatie van een text channel naar een forum channel.
 
 **Syntax:**
 ```
-[p]movequestion <message_id> <count> <forum_channel> [title...]
+[p]movequestion <message_id> <count> <forum_channel> [title...] [--tag "Tag Name"]
 ```
 
 **Arguments:**
@@ -59,11 +60,20 @@ Verplaats een conversatie van een text channel naar een forum channel.
 - `count`: Aantal berichten na het start bericht om te verplaatsen
 - `forum_channel`: Het doel forum channel (mention of ID)
 - `title`: Optionele titel voor het forum topic (default: eerste 80 chars van de vraag)
+- `--tag`: Optionele forum tag om toe te passen (gebruik quotes bij spaties)
 
-**Voorbeeld:**
+**Voorbeelden:**
 ```
 [p]movequestion 1437763879160647740 10 #helpdesk Purpose of Own Vehicle Class
+[p]movequestion 1437763879160647740 10 #helpdesk --tag "Bug Report" Purpose of Own Vehicle Class
+[p]movequestion 1437763879160647740 10 #helpdesk Title Here --tag Question
 ```
+
+**Forum Tags:**
+- Als een forum verplichte tags heeft, moet je `--tag` gebruiken
+- De bot toont beschikbare tags als je een ongeldige tag opgeeft
+- Tag names zijn case-insensitive
+- Gebruik quotes rondom tag names met spaties
 
 **Wat er gebeurt:**
 1. Bot fetcht het originele bericht en de volgende X berichten
@@ -119,7 +129,7 @@ De bot heeft de volgende permissions nodig:
 - Read Message History
 
 **In target forum channel:**
-- Create Posts
+- Create Public Threads (voor forum posts)
 - Send Messages
 - Attach Files
 - Embed Links
@@ -212,6 +222,12 @@ Messages: X
 - Bot moet owner zijn van forum post voor full thread management
 
 ## Changelog
+
+### v1.1.0
+- Added forum tag support with `--tag` flag
+- Automatic detection of required tags
+- Tag name validation with available tags list
+- Case-insensitive tag matching
 
 ### v1.0.0
 - Initial release
