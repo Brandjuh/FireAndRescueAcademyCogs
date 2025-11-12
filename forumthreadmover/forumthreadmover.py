@@ -72,12 +72,13 @@ class ForumThreadMover(commands.Cog):
                 else:
                     raise
 
-    async def _create_forum_post_safely(self, forum: discord.ForumChannel, title: str, content: str, **kwargs) -> discord.Thread:
-        """Create forum post with retry logic."""
+    async def _create_forum_post_safely(self, forum: discord.ForumChannel, title: str, content: str, **kwargs):
+        """Create forum post with retry logic. Returns ThreadWithMessage object."""
         for attempt in range(self.max_retries):
             try:
-                thread = await forum.create_thread(name=title, content=content, **kwargs)
-                return thread
+                # forum.create_thread returns ThreadWithMessage, not Thread
+                thread_with_message = await forum.create_thread(name=title, content=content, **kwargs)
+                return thread_with_message
             except discord.HTTPException as e:
                 if attempt < self.max_retries - 1:
                     await asyncio.sleep(self.retry_delay)
@@ -359,7 +360,7 @@ class ForumThreadMover(commands.Cog):
             first_content, first_embeds, first_files = await self._format_message_content(messages[0], ctx.channel)
             
             # Create the forum thread
-            thread = await self._create_forum_post_safely(
+            thread_with_message = await self._create_forum_post_safely(
                 forum_channel,
                 title=title,
                 content=first_content,
@@ -368,6 +369,9 @@ class ForumThreadMover(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
                 applied_tags=[tag_to_apply] if tag_to_apply else []
             )
+            
+            # Extract the actual thread from ThreadWithMessage
+            thread = thread_with_message.thread if hasattr(thread_with_message, 'thread') else thread_with_message
             
             # Post remaining messages
             total_messages = len(messages)
