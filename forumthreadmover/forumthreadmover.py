@@ -152,15 +152,15 @@ class ForumThreadMover(commands.Cog):
 
     async def _format_message_content(self, message: discord.Message, source_channel: discord.TextChannel) -> tuple[str, List[discord.Embed], List[discord.File]]:
         """Format a message for posting in forum thread."""
-        # Build header with author and timestamp
-        header = f"**@{message.author.name}** • <t:{int(message.created_at.timestamp())}:f>\n"
+        # Build header with author and timestamp (use display_name for server nickname)
+        header = f"**@{message.author.display_name}** • <t:{int(message.created_at.timestamp())}:f>\n"
         
         # Check if this was a reply
         reply_context = ""
         if message.reference and message.reference.resolved:
             replied_msg = message.reference.resolved
             replied_content = replied_msg.content[:80] + "..." if len(replied_msg.content) > 80 else replied_msg.content
-            reply_context = f"↪️ In reply to @{replied_msg.author.name}: \"{replied_content}\"\n\n"
+            reply_context = f"↪️ In reply to @{replied_msg.author.display_name}: \"{replied_content}\"\n\n"
         
         # Main content
         content = message.content if message.content else ""
@@ -250,22 +250,33 @@ class ForumThreadMover(commands.Cog):
             await ctx.send("❌ Maximum count is 100 messages to avoid rate limits.")
             return
         
-        # Check if source is a text channel
-        if not isinstance(ctx.channel, discord.TextChannel):
-            await ctx.send("❌ This command can only be used in text channels.")
+        # First, fetch the message to find which channel it's in
+        source_channel = None
+        original_msg = None
+        
+        # Try to find the message in the guild
+        for channel in ctx.guild.text_channels:
+            try:
+                original_msg = await channel.fetch_message(message_id)
+                source_channel = channel
+                break
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                continue
+        
+        if not original_msg or not source_channel:
+            await ctx.send(f"❌ Message with ID `{message_id}` not found in any accessible channel in this server.")
+            return
+        
+        # Check if we can send messages in the source channel (for progress updates)
+        source_permissions = source_channel.permissions_for(ctx.guild.me)
+        if not source_permissions.send_messages or not source_permissions.embed_links:
+            await ctx.send(f"❌ I need 'Send Messages' and 'Embed Links' permissions in {source_channel.mention} to post progress updates.")
             return
         
         # Check if message is in a thread
-        try:
-            original_msg = await ctx.channel.fetch_message(message_id)
-            if isinstance(original_msg.channel, discord.Thread):
-                await ctx.send("⚠️ Warning: The message appears to be in a thread. This might cause unexpected behavior.")
-        except discord.NotFound:
-            await ctx.send(f"❌ Message with ID `{message_id}` not found in this channel.")
-            return
-        except discord.HTTPException as e:
-            await ctx.send(f"❌ Error fetching message: {e}")
-            return
+        if isinstance(original_msg.channel, discord.Thread):
+            await ctx.send("⚠️ Warning: The message appears to be in a thread. This might cause unexpected behavior.")
+            # Continue anyway, but warn the user
         
         # Check permissions
         bot_permissions = forum_channel.permissions_for(ctx.guild.me)
@@ -323,21 +334,25 @@ class ForumThreadMover(commands.Cog):
             await ctx.send(f"❌ This forum requires a tag. Use `--tag \"Tag Name\"` to specify one.\nAvailable tags: {humanize_list(available_tags)}")
             return
         
-        # Create progress embed
+        # Create progress embed in the source channel (where the original message is)
         progress_embed = discord.Embed(
             title="📦 Moving Conversation",
             description="Preparing to move messages...",
             color=discord.Color.blue()
         )
         progress_embed.add_field(name="Status", value="🔄 Fetching messages...", inline=False)
-        progress_msg = await ctx.send(embed=progress_embed)
+        progress_msg = await source_channel.send(embed=progress_embed)
+        
+        # If command was used in a different channel, acknowledge there too
+        if ctx.channel.id != source_channel.id:
+            await ctx.send(f"✅ Moving conversation from {source_channel.mention}. Progress updates will be posted there.")
         
         try:
             # Fetch messages
             progress_embed.set_field_at(0, name="Status", value="🔄 Fetching messages...", inline=False)
             await progress_msg.edit(embed=progress_embed)
             
-            messages = await self._fetch_messages_safely(ctx.channel, message_id, count)
+            messages = await self._fetch_messages_safely(source_channel, message_id, count)
             
             if not messages:
                 await progress_msg.edit(content="❌ No messages found.")
@@ -357,7 +372,7 @@ class ForumThreadMover(commands.Cog):
             await progress_msg.edit(embed=progress_embed)
             
             # Format first message (the question)
-            first_content, first_embeds, first_files = await self._format_message_content(messages[0], ctx.channel)
+            first_content, first_embeds, first_files = await self._format_message_content(messages[0], source_channel)
             
             # Create the forum thread
             thread_with_message = await self._create_forum_post_safely(
@@ -385,7 +400,7 @@ class ForumThreadMover(commands.Cog):
                 await progress_msg.edit(embed=progress_embed)
                 
                 # Format message
-                msg_content, msg_embeds, msg_files = await self._format_message_content(message, ctx.channel)
+                msg_content, msg_embeds, msg_files = await self._format_message_content(message, source_channel)
                 
                 # Post to thread
                 await self._send_message_safely(
@@ -415,7 +430,7 @@ class ForumThreadMover(commands.Cog):
             log_message = (
                 f"**Conversation Moved**\n"
                 f"Moderator: {ctx.author.mention}\n"
-                f"From: {ctx.channel.mention}\n"
+                f"From: {source_channel.mention}\n"
                 f"To: {forum_channel.mention}\n"
                 f"Thread: [{title}]({thread.jump_url})\n"
                 f"Messages: {total_messages}"
@@ -530,18 +545,45 @@ class ForumThreadMover(commands.Cog):
             await ctx.send(f"❌ I'm missing these permissions in {thread.mention}: {humanize_list(missing_perms)}")
             return
         
-        # Create progress embed
+        # First, fetch the message to find which channel it's in
+        source_channel = None
+        original_msg = None
+        
+        # Try to find the message in the guild
+        for channel in ctx.guild.text_channels:
+            try:
+                original_msg = await channel.fetch_message(message_id)
+                source_channel = channel
+                break
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                continue
+        
+        if not original_msg or not source_channel:
+            await ctx.send(f"❌ Message with ID `{message_id}` not found in any accessible channel in this server.")
+            return
+        
+        # Check if we can send messages in the source channel (for progress updates)
+        source_permissions = source_channel.permissions_for(ctx.guild.me)
+        if not source_permissions.send_messages or not source_permissions.embed_links:
+            await ctx.send(f"❌ I need 'Send Messages' and 'Embed Links' permissions in {source_channel.mention} to post progress updates.")
+            return
+        
+        # Create progress embed in the source channel
         progress_embed = discord.Embed(
             title="📦 Moving Messages",
             description=f"Moving messages to {thread.mention}...",
             color=discord.Color.blue()
         )
         progress_embed.add_field(name="Status", value="🔄 Fetching messages...", inline=False)
-        progress_msg = await ctx.send(embed=progress_embed)
+        progress_msg = await source_channel.send(embed=progress_embed)
+        
+        # If command was used in a different channel, acknowledge there too
+        if ctx.channel.id != source_channel.id:
+            await ctx.send(f"✅ Moving messages from {source_channel.mention} to {thread.mention}. Progress updates will be posted in {source_channel.mention}.")
         
         try:
-            # Fetch messages
-            messages = await self._fetch_messages_safely(ctx.channel, message_id, count)
+            # Fetch messages from source channel
+            messages = await self._fetch_messages_safely(source_channel, message_id, count)
             
             if not messages:
                 await progress_msg.edit(content="❌ No messages found.")
@@ -559,7 +601,7 @@ class ForumThreadMover(commands.Cog):
                 await progress_msg.edit(embed=progress_embed)
                 
                 # Format message
-                msg_content, msg_embeds, msg_files = await self._format_message_content(message, ctx.channel)
+                msg_content, msg_embeds, msg_files = await self._format_message_content(message, source_channel)
                 
                 # Post to thread
                 await self._send_message_safely(
@@ -587,7 +629,7 @@ class ForumThreadMover(commands.Cog):
                 ctx.guild,
                 f"**Messages Added to Thread**\n"
                 f"Moderator: {ctx.author.mention}\n"
-                f"From: {ctx.channel.mention}\n"
+                f"From: {source_channel.mention}\n"
                 f"To: [{thread.name}]({thread.jump_url})\n"
                 f"Messages: {total_messages}",
                 discord.Color.green()
