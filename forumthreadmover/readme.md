@@ -9,6 +9,8 @@ Een Red-DiscordBot V3 cog om conversaties van text channels naar forum channels 
 - ✅ Re-upload attachments (met fallback voor grote bestanden)
 - ✅ Recreëer embeds waar mogelijk
 - ✅ Reply context wordt behouden
+- ✅ Server nicknames worden gebruikt (niet account namen)
+- ✅ Command kan overal worden uitgevoerd (progress in origineel kanaal)
 - ✅ Forum tags support (optioneel en verplicht)
 - ✅ Progress tracking met real-time updates
 - ✅ Automatische retry logic bij API errors
@@ -76,12 +78,15 @@ Verplaats een conversatie van een text channel naar een forum channel.
 - Gebruik quotes rondom tag names met spaties
 
 **Wat er gebeurt:**
-1. Bot fetcht het originele bericht en de volgende X berichten
-2. Creëert een nieuw forum topic met de gegeven titel
-3. Post het eerste bericht als main post
-4. Post alle volgende berichten als replies (met throttling)
-5. Toont progress updates in het originele kanaal
-6. Bij succes: "This discussion was moved to [channel]"
+1. Bot zoekt het bericht in alle kanalen van de server
+2. Bot checkt permissions in het originele kanaal en forum
+3. Creëert een nieuw forum topic met de gegeven titel
+4. Post het eerste bericht als main post
+5. Post alle volgende berichten als replies (met throttling)
+6. Toont progress updates in het originele kanaal (waar het bericht staat)
+7. Bij succes: "This discussion was moved to [channel]"
+
+**Note:** Het command kan vanuit elk kanaal worden uitgevoerd. Progress updates verschijnen altijd in het kanaal waar het originele bericht staat. Als je het command in een ander kanaal uitvoert, krijg je daar een acknowledgement bericht.
 
 ### `[p]topictitle`
 
@@ -141,6 +146,7 @@ De bot heeft de volgende permissions nodig:
 - Volledige message text wordt 1:1 gekopieerd
 - Mentions worden disabled (geen pings)
 - Elk bericht begint met `**@username** • <timestamp>`
+- Server nicknames worden gebruikt (niet Discord account namen)
 
 ### Attachments
 - Bestanden worden opnieuw geüpload
@@ -222,6 +228,17 @@ Messages: X
 - Bot moet owner zijn van forum post voor full thread management
 
 ## Changelog
+
+### v1.2.0
+- Server nicknames now used instead of Discord account names
+- Command can be executed from any channel (progress shows in original channel)
+- Automatic channel discovery for message ID
+- Acknowledgement message when command used in different channel
+
+### v1.1.1
+- Fixed ThreadWithMessage object handling
+- Forum thread creation now properly extracts thread object
+- Fixed requires_tag attribute check
 
 ### v1.1.0
 - Added forum tag support with `--tag` flag
