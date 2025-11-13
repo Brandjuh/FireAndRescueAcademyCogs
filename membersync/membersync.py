@@ -1261,28 +1261,3 @@ class MemberSync(commands.Cog):
         if removed:
             log.info("Auto-prune removed %s roles", removed)
             await self._debug_log(f"Auto-prune completed: {removed} roles removed")
-```
-
----
-
-## 🚀 Na het installeren:
-
-**1. Herlaad de cog:**
-```
-!reload membersync
-```
-
-**2. BELANGRIJK - Stel de guild in (in je FARA server):**
-```
-!membersync config setguild
-```
-
-**3. Check status:**
-```
-!membersync status
-```
-Moet nu "Configured Guild: Fire & Rescue Academy" tonen!
-
-**4. Zet debug aan om te monitoren:**
-```
-!membersync debug true
