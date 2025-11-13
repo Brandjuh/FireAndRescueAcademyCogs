@@ -26,6 +26,7 @@ DEFAULTS = {
     "queue": {},
     "debug_mode": False,
     "debug_channel_id": None,
+    "auto_approve": True,  # NEW: Auto-approve toggle
 }
 
 def utcnow_iso() -> str:
@@ -43,7 +44,7 @@ def _mc_profile_url(mc_id: str) -> str:
 class MemberSync(commands.Cog):
     """Synchronises Missionchief members with Discord and handles verification workflow."""
 
-    __version__ = "1.1.0"
+    __version__ = "2.0.0"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -322,6 +323,7 @@ class MemberSync(commands.Cog):
                     member,
                     str(mc_id) if mc_id else "",
                     approver=interaction.user if isinstance(interaction.user, discord.Member) else None,
+                    manual=True  # Manual approval from button
                 )
             
                 try:
@@ -378,10 +380,19 @@ class MemberSync(commands.Cog):
             log.exception("Error sending review embed")
             return None
 
-    async def _approve_link(self, guild: discord.Guild, user: discord.Member, mc_id: str, approver: Optional[discord.Member]=None) -> Tuple[bool, str]:
-        """Approve a verification link"""
+    async def _approve_link(self, guild: discord.Guild, user: discord.Member, mc_id: str, approver: Optional[discord.Member]=None, manual: bool = False) -> Tuple[bool, str]:
+        """
+        Approve a verification link
+        
+        Args:
+            guild: Discord guild
+            user: Member to approve
+            mc_id: MissionChief user ID
+            approver: Member who approved (None for auto-approve)
+            manual: True if manual approval, False if auto-approve
+        """
         try:
-            await self._debug_log(f"Approving link: Discord {user.id} -> MC {mc_id}")
+            await self._debug_log(f"{'Manual' if manual else 'Auto'} approval: Discord {user.id} -> MC {mc_id}")
             
             verified_role_id = await self.config.verified_role_id()
             role = guild.get_role(int(verified_role_id)) if verified_role_id else None
@@ -406,23 +417,24 @@ class MemberSync(commands.Cog):
             # Grant role
             if role and role not in user.roles:
                 try:
-                    await user.add_roles(role, reason="MemberSync verified")
+                    await user.add_roles(role, reason=f"MemberSync {'manual' if manual else 'auto'} verified")
                     await self._debug_log(f"✅ Granted {role.name} to {user.name}")
                 except Exception as e:
                     await self._debug_log(f"Failed to grant role: {e}", "error")
 
             # DM user
             try:
-                await user.send(f"✅ Your Missionchief account `{mc_id}` has been approved and linked!")
+                await user.send(f"✅ Your MissionChief account `{mc_id}` has been verified and linked to your Discord account!")
             except Exception as e:
                 await self._debug_log(f"Could not DM user: {e}", "warning")
 
-            # Log to log channel
-            log_ch_id = await self.config.log_channel_id()
-            ch = guild.get_channel(int(log_ch_id)) if log_ch_id else None
-            if isinstance(ch, discord.TextChannel):
-                url = _mc_profile_url(mc_id)
-                await ch.send(f"✅ Linked {user.mention} to MC [{mc_id}]({url})")
+            # Log to log channel ONLY for manual approvals
+            if manual:
+                log_ch_id = await self.config.log_channel_id()
+                ch = guild.get_channel(int(log_ch_id)) if log_ch_id else None
+                if isinstance(ch, discord.TextChannel):
+                    url = _mc_profile_url(mc_id)
+                    await ch.send(f"✅ Linked {user.mention} to MC [{mc_id}]({url}) (Manual approval by {approver.mention if approver else 'System'})")
 
             await self._debug_log(f"✅ Link approved successfully")
             return True, "Approved, linked and role granted."
@@ -498,7 +510,9 @@ class MemberSync(commands.Cog):
             await self._debug_log("No guild available", "warning")
             return
 
+        auto_approve_enabled = await self.config.auto_approve()
         done = []
+        
         for user_id, data in queue.items():
             try:
                 attempts = int(data.get("attempts", 0))
@@ -516,34 +530,50 @@ class MemberSync(commands.Cog):
                 cand = await self._find_member_in_db(discord_user.nick or discord_user.name, mc_id)
                 
                 if cand and cand.get("mc_id"):
-                    # Found! Send review embed
+                    # Found!
                     await self._debug_log(f"✅ Found {discord_user.name} in database")
                     
-                    msg_id = await self._send_review_embed(
-                        guild, 
-                        discord_user, 
-                        str(cand["mc_id"]), 
-                        str(cand.get("name") or discord_user.display_name)
-                    )
-                    
-                    if msg_id:
-                        # Successfully sent review embed
-                        try:
-                            await discord_user.send(
-                                "✅ Your verification request has been found and queued for review! "
-                                "An administrator will approve or deny it shortly."
-                            )
-                        except Exception as e:
-                            await self._debug_log(f"Could not DM user: {e}", "warning")
+                    if auto_approve_enabled:
+                        # AUTO-APPROVE: Grant role immediately
+                        ok, msg = await self._approve_link(
+                            guild,
+                            discord_user,
+                            str(cand["mc_id"]),
+                            approver=None,  # No approver for auto-approve
+                            manual=False    # This is auto-approve
+                        )
+                        
+                        if ok:
+                            await self._debug_log(f"✅ Auto-approved verification for {discord_user.name}")
+                        else:
+                            await self._debug_log(f"Failed to auto-approve {discord_user.name}: {msg}", "error")
                         
                         done.append(user_id)
-                        await self._debug_log(f"✅ Queued verification for {discord_user.name}")
                     else:
-                        # Failed to send review embed - will retry
-                        await self._debug_log(f"Failed to send review embed for {discord_user.name}, will retry", "warning")
-                        attempts += 1
-                        data["attempts"] = attempts
-                        queue[user_id] = data
+                        # MANUAL MODE: Send review embed
+                        msg_id = await self._send_review_embed(
+                            guild, 
+                            discord_user, 
+                            str(cand["mc_id"]), 
+                            str(cand.get("name") or discord_user.display_name)
+                        )
+                        
+                        if msg_id:
+                            try:
+                                await discord_user.send(
+                                    "✅ Your verification request has been found and queued for review! "
+                                    "An administrator will approve or deny it shortly."
+                                )
+                            except Exception as e:
+                                await self._debug_log(f"Could not DM user: {e}", "warning")
+                            
+                            done.append(user_id)
+                            await self._debug_log(f"✅ Queued verification for {discord_user.name}")
+                        else:
+                            await self._debug_log(f"Failed to send review embed for {discord_user.name}, will retry", "warning")
+                            attempts += 1
+                            data["attempts"] = attempts
+                            queue[user_id] = data
                     
                     continue
 
@@ -557,15 +587,23 @@ class MemberSync(commands.Cog):
                 # Give up after 30 attempts (1 hour)
                 if attempts >= 30:
                     try:
+                        # Send improved failure message in English
                         await discord_user.send(
-                            "❌ Verification queue expired. We couldn't find your account in the alliance roster. "
-                            "Please make sure your Discord nickname matches your MissionChief name exactly, "
-                            "or provide your MC User ID when verifying."
+                            "❌ **Verification Failed**\n\n"
+                            "We couldn't find your account in the alliance roster after 1 hour of attempts.\n\n"
+                            "**To fix this:**\n"
+                            "1. Make sure your **Discord server nickname** matches your **MissionChief name exactly** (including capitalization)\n"
+                            "2. If you just joined the alliance, wait a few minutes for the roster to update\n"
+                            "3. Run the command `!verify` again to restart the verification process\n"
+                            "4. If you still have issues, you can provide your MC User ID: `!verify <your_mc_user_id>`\n\n"
+                            "**Need help?** Contact an administrator if you continue to have issues."
                         )
-                    except Exception:
-                        pass
+                        await self._debug_log(f"Sent failure notification to {discord_user.name}")
+                    except Exception as e:
+                        await self._debug_log(f"Could not DM user failure notification: {e}", "warning")
+                    
                     done.append(user_id)
-                    await self._debug_log(f"Queue expired for {discord_user.name}")
+                    await self._debug_log(f"Queue expired for {discord_user.name} - removed from queue")
             
             except Exception as e:
                 await self._debug_log(f"Error processing queue item {user_id}: {e}", "error")
@@ -612,6 +650,11 @@ class MemberSync(commands.Cog):
                 reviewer_roles.append(r.mention)
         embed.add_field(name="Reviewer Roles", value=", ".join(reviewer_roles) if reviewer_roles else "None", inline=False)
         
+        # Auto-approve status
+        auto_approve = cfg.get('auto_approve', True)
+        auto_status = "✅ **Enabled** (Automatic verification)" if auto_approve else "❌ **Disabled** (Manual review required)"
+        embed.add_field(name="Auto-Approve", value=auto_status, inline=False)
+        
         # Queue
         queue_size = len(cfg.get('queue', {}))
         embed.add_field(name="Queue Size", value=f"{queue_size} pending", inline=True)
@@ -643,6 +686,35 @@ class MemberSync(commands.Cog):
         embed.set_footer(text=f"MemberSync v{self.__version__}")
         
         await ctx.send(embed=embed)
+
+    @membersync_group.command(name="autoapprove")
+    async def autoapprove_toggle(self, ctx: commands.Context, enabled: bool):
+        """
+        Toggle automatic approval of verifications.
+        
+        When enabled (default): Members are automatically verified when found in the roster.
+        When disabled: Manual review is required for all verifications.
+        
+        Examples:
+        [p]membersync autoapprove true  - Enable auto-approve
+        [p]membersync autoapprove false - Require manual review
+        """
+        await self.config.auto_approve.set(enabled)
+        
+        if enabled:
+            await ctx.send(
+                "✅ **Auto-approve ENABLED**\n"
+                "Members will now be automatically verified when found in the alliance roster. "
+                "They will receive their Verified role immediately without manual review."
+            )
+            await self._debug_log(f"Auto-approve enabled by {ctx.author.name}")
+        else:
+            await ctx.send(
+                "⚠️ **Auto-approve DISABLED**\n"
+                "Manual review is now required for all verifications. "
+                "Review requests will be sent to the review channel for approval."
+            )
+            await self._debug_log(f"Auto-approve disabled by {ctx.author.name}")
 
     @membersync_group.group(name="queue")
     async def queue_group(self, ctx: commands.Context):
@@ -831,14 +903,34 @@ class MemberSync(commands.Cog):
 
         # Try to find immediately
         cand = await self._find_member_in_db(name, mc_id)
+        auto_approve_enabled = await self.config.auto_approve()
+        
         if cand and cand.get("mc_id"):
-            rid = await self._send_review_embed(ctx.guild, ctx.author, str(cand["mc_id"]), str(cand.get("name") or name))
-            if rid:
-                await ctx.send("✅ Found you! A reviewer will approve or deny your verification shortly.")
-                await self._debug_log(f"✅ Immediate match for {ctx.author.name}")
+            if auto_approve_enabled:
+                # AUTO-APPROVE: Grant role immediately
+                ok, msg = await self._approve_link(
+                    ctx.guild,
+                    ctx.author,
+                    str(cand["mc_id"]),
+                    approver=None,  # No approver for auto-approve
+                    manual=False    # This is auto-approve
+                )
+                
+                if ok:
+                    await ctx.send(f"✅ **Verified!** Your account has been linked and you've been granted the Verified role.")
+                    await self._debug_log(f"✅ Immediate auto-approval for {ctx.author.name}")
+                else:
+                    await ctx.send(f"⚠️ Found you, but failed to complete verification: {msg}")
+                return
             else:
-                await ctx.send("⚠️ Found you, but failed to send review request. Please contact an administrator.")
-            return
+                # MANUAL MODE: Send review embed
+                rid = await self._send_review_embed(ctx.guild, ctx.author, str(cand["mc_id"]), str(cand.get("name") or name))
+                if rid:
+                    await ctx.send("✅ Found you! A reviewer will approve or deny your verification shortly.")
+                    await self._debug_log(f"✅ Immediate match for {ctx.author.name}, sent for review")
+                else:
+                    await ctx.send("⚠️ Found you, but failed to send review request. Please contact an administrator.")
+                return
 
         # Not found, add to queue
         q = await self.config.queue()
@@ -851,15 +943,17 @@ class MemberSync(commands.Cog):
         }
         await self.config.queue.set(q)
         
+        mode_text = "automatically verified" if auto_approve_enabled else "queued for review"
+        
         try:
             await ctx.author.send(
                 "⏳ We couldn't find you in the roster yet.\n\n"
-                "I've queued your verification request and will automatically retry every 2 minutes for up to 1 hour. "
-                "You'll receive another message once you're found!\n\n"
+                f"I've queued your verification request and will automatically retry every 2 minutes for up to 1 hour. "
+                f"Once found, you'll be {mode_text}!\n\n"
                 "**Tips:**\n"
                 "• Make sure your Discord nickname matches your MissionChief name exactly\n"
                 "• If you just joined the alliance, wait a few minutes for the roster to update\n"
-                "• You can provide your MC User ID by running `/verify <your_mc_id>`"
+                "• You can provide your MC User ID by running `!verify <your_mc_id>`"
             )
         except Exception:
             pass
@@ -928,7 +1022,7 @@ class MemberSync(commands.Cog):
             if not hit:
                 continue
             name, mcid = hit
-            await self._approve_link(ctx.guild, m, mcid, approver=ctx.author if isinstance(ctx.author, discord.Member) else None)
+            await self._approve_link(ctx.guild, m, mcid, approver=ctx.author if isinstance(ctx.author, discord.Member) else None, manual=True)
             count += 1
         
         await ctx.send(f"✅ Retro applied: **{count}** link(s).")
@@ -939,7 +1033,7 @@ class MemberSync(commands.Cog):
         if not await self._user_is_reviewer(ctx.author):
             await ctx.send("❌ You are not allowed to do this.")
             return
-        await self._approve_link(ctx.guild, member, mc_id, approver=ctx.author if isinstance(ctx.author, discord.Member) else None)
+        await self._approve_link(ctx.guild, member, mc_id, approver=ctx.author if isinstance(ctx.author, discord.Member) else None, manual=True)
         await ctx.send(f"✅ Linked {member.mention} to MC `{mc_id}`.")
 
     @membersync_group.command(name="approve")
@@ -996,7 +1090,7 @@ class MemberSync(commands.Cog):
             await ctx.send("❌ Could not identify member and MC-ID")
             return
         
-        await self._approve_link(ctx.guild, member, target_mc_id, approver=ctx.author if isinstance(ctx.author, discord.Member) else None)
+        await self._approve_link(ctx.guild, member, target_mc_id, approver=ctx.author if isinstance(ctx.author, discord.Member) else None, manual=True)
         await ctx.send(f"✅ Approved: {member.mention} linked to MC `{target_mc_id}`")
 
     @membersync_group.command(name="deny")
@@ -1122,3 +1216,30 @@ class MemberSync(commands.Cog):
         if removed:
             log.info("Auto-prune removed %s roles", removed)
             await self._debug_log(f"Auto-prune completed: {removed} roles removed")
+```
+
+## 📋 Belangrijkste wijzigingen:
+
+### 1. **Auto-approve toggle** ✅
+- Nieuwe config optie `auto_approve` (standaard `True`)
+- Command: `[p]membersync autoapprove true/false`
+- Wordt getoond in `[p]membersync status`
+
+### 2. **Automatische verificatie** 🤖
+- Bij match + auto-approve enabled: **directe rol toekenning**
+- Alleen DM naar user (geen log message bij auto-approve)
+- Log messages alleen bij **manual approvals**
+
+### 3. **Betere failure message na 1 uur** 📧
+```
+❌ Verification Failed
+
+We couldn't find your account in the alliance roster after 1 hour of attempts.
+
+To fix this:
+1. Make sure your Discord server nickname matches your MissionChief name exactly
+2. If you just joined, wait a few minutes for roster update
+3. Run !verify again
+4. Or provide your MC User ID: !verify <your_mc_user_id>
+
+Need help? Contact an administrator
