@@ -26,7 +26,8 @@ DEFAULTS = {
     "queue": {},
     "debug_mode": False,
     "debug_channel_id": None,
-    "auto_approve": True,  # NEW: Auto-approve toggle
+    "auto_approve": True,
+    "guild_id": None,  # NEW: Store which guild to use for multi-server bots
 }
 
 def utcnow_iso() -> str:
@@ -44,7 +45,7 @@ def _mc_profile_url(mc_id: str) -> str:
 class MemberSync(commands.Cog):
     """Synchronises Missionchief members with Discord and handles verification workflow."""
 
-    __version__ = "2.0.0"
+    __version__ = "2.1.0"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -505,7 +506,18 @@ class MemberSync(commands.Cog):
         
         await self._debug_log(f"Processing queue ({len(queue)} items)")
         
-        guild = self.bot.guilds[0] if self.bot.guilds else None
+        # Get the configured guild
+        guild_id = await self.config.guild_id()
+        if not guild_id:
+            # Fallback: use first guild if not configured
+            guild = self.bot.guilds[0] if self.bot.guilds else None
+            if guild:
+                await self.config.guild_id.set(guild.id)
+                guild_id = guild.id
+                await self._debug_log(f"Auto-configured guild to {guild.name} ({guild.id})")
+        else:
+            guild = self.bot.get_guild(int(guild_id))
+        
         if not guild:
             await self._debug_log("No guild available", "warning")
             return
@@ -517,6 +529,14 @@ class MemberSync(commands.Cog):
             try:
                 attempts = int(data.get("attempts", 0))
                 mc_id = data.get("mc_id")
+                
+                # Use guild_id from queue data if available, otherwise use configured guild
+                queue_guild_id = data.get("guild_id")
+                if queue_guild_id:
+                    user_guild = self.bot.get_guild(int(queue_guild_id))
+                    if user_guild:
+                        guild = user_guild
+                
                 discord_user = guild.get_member(int(user_id))
                 
                 if not discord_user:
@@ -628,6 +648,15 @@ class MemberSync(commands.Cog):
         cfg = await self.config.all()
         
         embed = discord.Embed(title="MemberSync Status", color=discord.Color.blue())
+        
+        # Guild info
+        guild_id = cfg.get('guild_id')
+        if guild_id:
+            guild = self.bot.get_guild(int(guild_id))
+            guild_name = guild.name if guild else f"Unknown ({guild_id})"
+        else:
+            guild_name = "⚠️ Not configured (will use first guild)"
+        embed.add_field(name="Configured Guild", value=guild_name, inline=False)
         
         # Database info
         db_path = cfg['alliance_db_path']
@@ -833,6 +862,13 @@ class MemberSync(commands.Cog):
     async def config_group(self, ctx: commands.Context):
         """Configure channels, roles and DB path."""
         pass
+
+    @config_group.command(name="setguild")
+    async def setguild(self, ctx: commands.Context):
+        """Set this server as the guild for MemberSync operations (IMPORTANT for multi-server bots)."""
+        await self.config.guild_id.set(ctx.guild.id)
+        await ctx.send(f"✅ MemberSync will now operate in **{ctx.guild.name}**\n\n**Note:** This is critical for bots in multiple servers!")
+        await self._debug_log(f"Guild set to {ctx.guild.name} ({ctx.guild.id})")
 
     @config_group.command(name="setreviewchannel")
     async def setreviewchannel(self, ctx: commands.Context, channel: discord.TextChannel):
@@ -1159,7 +1195,15 @@ class MemberSync(commands.Cog):
 
     async def _prune_once(self):
         """Remove verified role from members who are no longer in the alliance"""
-        guild = self.bot.guilds[0] if self.bot.guilds else None
+        # Get the configured guild
+        guild_id = await self.config.guild_id()
+        if not guild_id:
+            guild = self.bot.guilds[0] if self.bot.guilds else None
+            if guild:
+                await self.config.guild_id.set(guild.id)
+        else:
+            guild = self.bot.get_guild(int(guild_id))
+        
         if not guild:
             return
         
@@ -1217,3 +1261,28 @@ class MemberSync(commands.Cog):
         if removed:
             log.info("Auto-prune removed %s roles", removed)
             await self._debug_log(f"Auto-prune completed: {removed} roles removed")
+```
+
+---
+
+## 🚀 Na het installeren:
+
+**1. Herlaad de cog:**
+```
+!reload membersync
+```
+
+**2. BELANGRIJK - Stel de guild in (in je FARA server):**
+```
+!membersync config setguild
+```
+
+**3. Check status:**
+```
+!membersync status
+```
+Moet nu "Configured Guild: Fire & Rescue Academy" tonen!
+
+**4. Zet debug aan om te monitoren:**
+```
+!membersync debug true
