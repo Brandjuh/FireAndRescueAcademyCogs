@@ -912,10 +912,10 @@ class MemberSync(commands.Cog):
     @commands.cooldown(1, 30, commands.BucketType.user)
     @commands.guild_only()
     @app_commands.describe(
-        mc_id="Your Missionchief User ID (optional, helps if your nickname doesn't match exactly)"
+        mc_id="Your MC User ID (optional)"
     )
     async def verify(self, ctx: commands.Context, mc_id: Optional[str] = None):
-        """Verify yourself as a member of the alliance. Match your server nickname to your MC name or provide your MC-ID."""
+        """Link your Discord to your MissionChief account. Use your server nickname or provide MC User ID."""
         if not isinstance(ctx.author, discord.Member) or not ctx.guild:
             await ctx.send("❌ This can only be used in a server.")
             return
