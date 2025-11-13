@@ -587,8 +587,7 @@ class MemberSync(commands.Cog):
                 # Give up after 30 attempts (1 hour)
                 if attempts >= 30:
                     try:
-                        # Send improved failure message in English
-                        await discord_user.send(
+                        failure_msg = (
                             "❌ **Verification Failed**\n\n"
                             "We couldn't find your account in the alliance roster after 1 hour of attempts.\n\n"
                             "**To fix this:**\n"
@@ -598,6 +597,7 @@ class MemberSync(commands.Cog):
                             "4. If you still have issues, you can provide your MC User ID: `!verify <your_mc_user_id>`\n\n"
                             "**Need help?** Contact an administrator if you continue to have issues."
                         )
+                        await discord_user.send(failure_msg)
                         await self._debug_log(f"Sent failure notification to {discord_user.name}")
                     except Exception as e:
                         await self._debug_log(f"Could not DM user failure notification: {e}", "warning")
@@ -946,7 +946,7 @@ class MemberSync(commands.Cog):
         mode_text = "automatically verified" if auto_approve_enabled else "queued for review"
         
         try:
-            await ctx.author.send(
+            queue_msg = (
                 "⏳ We couldn't find you in the roster yet.\n\n"
                 f"I've queued your verification request and will automatically retry every 2 minutes for up to 1 hour. "
                 f"Once found, you'll be {mode_text}!\n\n"
@@ -955,6 +955,7 @@ class MemberSync(commands.Cog):
                 "• If you just joined the alliance, wait a few minutes for the roster to update\n"
                 "• You can provide your MC User ID by running `!verify <your_mc_id>`"
             )
+            await ctx.author.send(queue_msg)
         except Exception:
             pass
         
@@ -1216,30 +1217,3 @@ class MemberSync(commands.Cog):
         if removed:
             log.info("Auto-prune removed %s roles", removed)
             await self._debug_log(f"Auto-prune completed: {removed} roles removed")
-```
-
-## 📋 Belangrijkste wijzigingen:
-
-### 1. **Auto-approve toggle** ✅
-- Nieuwe config optie `auto_approve` (standaard `True`)
-- Command: `[p]membersync autoapprove true/false`
-- Wordt getoond in `[p]membersync status`
-
-### 2. **Automatische verificatie** 🤖
-- Bij match + auto-approve enabled: **directe rol toekenning**
-- Alleen DM naar user (geen log message bij auto-approve)
-- Log messages alleen bij **manual approvals**
-
-### 3. **Betere failure message na 1 uur** 📧
-```
-❌ Verification Failed
-
-We couldn't find your account in the alliance roster after 1 hour of attempts.
-
-To fix this:
-1. Make sure your Discord server nickname matches your MissionChief name exactly
-2. If you just joined, wait a few minutes for roster update
-3. Run !verify again
-4. Or provide your MC User ID: !verify <your_mc_user_id>
-
-Need help? Contact an administrator
