@@ -77,7 +77,7 @@ class IconGenerator:
         text: str,
         color: str,
         emergency: bool = False,
-        emergency_style: Literal["glow", "border", "both"] = "glow",
+        emergency_style: Literal["glow", "border", "both", "flash"] = "glow",
         case_style: str = "upper",
         preview: bool = False
     ) -> io.BytesIO:
@@ -88,7 +88,7 @@ class IconGenerator:
             text: Text to display on icon
             color: Hex color code (e.g., '#DC2626')
             emergency: Whether to apply emergency styling
-            emergency_style: Type of emergency effect ('glow', 'border', or 'both')
+            emergency_style: Type of emergency effect ('glow', 'border', 'both', or 'flash')
             case_style: Text case ('upper', 'lower', or 'normal')
             preview: Generate larger preview version
         
@@ -113,6 +113,11 @@ class IconGenerator:
         # Parse color
         bg_color = hex_to_rgb(color)
         
+        # For flash effect, lighten the background color significantly
+        if emergency and emergency_style == "flash":
+            # Brighten the color by 60% and increase saturation
+            bg_color = tuple(min(255, int(c * 1.6)) for c in bg_color)
+        
         # Create image with transparency
         img = Image.new('RGBA', (hr_width, hr_height), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
@@ -126,41 +131,72 @@ class IconGenerator:
         
         # Add emergency effects if needed
         if emergency:
-            if emergency_style in ["border", "both"]:
-                # Draw border
-                border_width = 3 * self.SCALE_FACTOR
+            if emergency_style in ["border", "both", "flash"]:
+                # Draw MUCH thicker border
+                border_width = 8 * self.SCALE_FACTOR if emergency_style == "flash" else 6 * self.SCALE_FACTOR
+                
+                # Use high-contrast emergency colors (red/blue alternating effect)
+                emergency_border_color = (255, 50, 50, 255)  # Bright red
+                
                 for i in range(border_width):
-                    border_color = (*bg_color, 180 - i * 20)  # Fade out
+                    opacity = 255 - (i * 15)
+                    border_color = (*emergency_border_color[:3], max(100, opacity))
                     draw.rounded_rectangle(
                         [i, i, hr_width - 1 - i, hr_height - 1 - i],
                         radius=border_radius - i,
                         outline=border_color,
-                        width=1
+                        width=2
                     )
             
-            if emergency_style in ["glow", "both"]:
-                # Apply glow effect using blur
-                glow_img = Image.new('RGBA', (hr_width + 40, hr_height + 40), (0, 0, 0, 0))
+            if emergency_style in ["glow", "both", "flash"]:
+                # Apply MUCH stronger glow effect
+                glow_size = 120 if emergency_style == "flash" else 80
+                glow_img = Image.new('RGBA', (hr_width + glow_size, hr_height + glow_size), (0, 0, 0, 0))
                 glow_draw = ImageDraw.Draw(glow_img)
                 
-                # Draw glow layers
-                glow_color = (*bg_color, 100)
-                for offset in range(5, 20, 5):
+                # Multiple glow layers with different colors for flash effect
+                if emergency_style == "flash":
+                    # Alternating red and blue glow for emergency light effect
+                    glow_colors = [
+                        (255, 50, 50, 180),   # Bright red
+                        (50, 100, 255, 160),  # Bright blue
+                        (255, 100, 100, 140), # Light red
+                        (100, 150, 255, 120), # Light blue
+                    ]
+                else:
+                    # Single color glow (much stronger than before)
+                    glow_colors = [
+                        (*bg_color, 200),
+                        (*bg_color, 160),
+                        (*bg_color, 120),
+                    ]
+                
+                # Draw multiple glow layers
+                offset_center = glow_size // 2
+                for idx, glow_color in enumerate(glow_colors):
+                    offset = 10 + (idx * 15)
                     glow_draw.rounded_rectangle(
-                        [20 - offset, 20 - offset, hr_width + 20 + offset, hr_height + 20 + offset],
+                        [offset_center - offset, offset_center - offset, 
+                         hr_width + offset_center + offset, hr_height + offset_center + offset],
                         radius=border_radius + offset,
                         fill=glow_color
                     )
                 
-                # Blur the glow
-                glow_img = glow_img.filter(ImageFilter.GaussianBlur(radius=10))
+                # Apply strong blur
+                blur_radius = 30 if emergency_style == "flash" else 20
+                glow_img = glow_img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
                 
                 # Composite glow with main image
                 final_img = Image.new('RGBA', (hr_width, hr_height), (0, 0, 0, 0))
-                final_img.paste(glow_img, (-20, -20), glow_img)
+                final_img.paste(glow_img, (-glow_size // 2, -glow_size // 2), glow_img)
                 final_img.paste(img, (0, 0), img)
                 img = final_img
                 draw = ImageDraw.Draw(img)
+            
+            # For flash variant, add text outline for extra visibility
+            if emergency_style == "flash":
+                # We'll add the outline when drawing text below
+                pass
         
         # Calculate font size that fits
         font_size = hr_height // 2
@@ -183,7 +219,17 @@ class IconGenerator:
         text_x = (hr_width - text_width) // 2 - bbox[0]
         text_y = (hr_height - text_height) // 2 - bbox[1]
         
-        # Draw text (white)
+        # For flash variant, draw text outline for extra visibility
+        if emergency and emergency_style == "flash":
+            # Draw thick outline
+            outline_width = 3
+            for adj_x in range(-outline_width, outline_width + 1):
+                for adj_y in range(-outline_width, outline_width + 1):
+                    if adj_x != 0 or adj_y != 0:
+                        draw.text((text_x + adj_x, text_y + adj_y), display_text, 
+                                fill=(0, 0, 0, 255), font=font)
+        
+        # Draw main text (white)
         draw.text((text_x, text_y), display_text, fill=(255, 255, 255, 255), font=font)
         
         # Downscale for anti-aliasing
