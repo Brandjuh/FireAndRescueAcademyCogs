@@ -8,6 +8,6 @@
     "type": "COG",
     "end_user_data_statement": "This cog stores user configuration preferences (default text case, emergency style). No personal data is collected.",
     "required_cogs": {},
-    "requirements": ["Pillow>=10.0.0"],
+    "requirements": ["Pillow>=10.0.0", "apng>=0.3.4"],
     "min_bot_version": "3.5.0"
 }
