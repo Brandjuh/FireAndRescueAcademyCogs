@@ -54,61 +54,123 @@ class IconPreviewView(discord.ui.View):
         )
         await interaction.followup.send("✅ Generated normal icon!", ephemeral=True)
     
-    @discord.ui.button(label="Static Glow", style=discord.ButtonStyle.secondary, emoji="🔴", row=0)
-    async def generate_emergency_glow(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Static Glow", style=discord.ButtonStyle.secondary, emoji="🔆", row=0)
+    async def generate_static_glow(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await self.cog._generate_and_send(
             self.ctx, self.text, self.color, True, "glow", self.case_style
         )
-        await interaction.followup.send("✅ Generated static emergency icon with glow!", ephemeral=True)
+        await interaction.followup.send("✅ Generated static glow icon!", ephemeral=True)
     
-    @discord.ui.button(label="Static Border", style=discord.ButtonStyle.secondary, emoji="🔵", row=0)
-    async def generate_emergency_border(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Static Border", style=discord.ButtonStyle.secondary, emoji="⭕", row=0)
+    async def generate_static_border(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await self.cog._generate_and_send(
             self.ctx, self.text, self.color, True, "border", self.case_style
         )
-        await interaction.followup.send("✅ Generated static emergency icon with border!", ephemeral=True)
+        await interaction.followup.send("✅ Generated static border icon!", ephemeral=True)
     
-    @discord.ui.button(label="Flash", style=discord.ButtonStyle.danger, emoji="⚡", row=1)
-    async def generate_flash(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Static Both", style=discord.ButtonStyle.secondary, emoji="💫", row=0)
+    async def generate_static_both(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await self.cog._generate_and_send(
-            self.ctx, self.text, self.color, True, "flash", self.case_style
+            self.ctx, self.text, self.color, True, "both", self.case_style
         )
-        await interaction.followup.send("✅ Generated APNG with flash animation!", ephemeral=True)
+        await interaction.followup.send("✅ Generated static glow + border icon!", ephemeral=True)
     
-    @discord.ui.button(label="Pulse", style=discord.ButtonStyle.danger, emoji="💓", row=1)
-    async def generate_pulse(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.select(
+        placeholder="🚨 Choose Emergency Animation...",
+        min_values=1,
+        max_values=1,
+        row=1,
+        options=[
+            discord.SelectOption(
+                label="Classic Flash (L-R)",
+                description="Alternating left-right police lights",
+                value="classic_flash",
+                emoji="🚔"
+            ),
+            discord.SelectOption(
+                label="Quad Flash",
+                description="Four-burst pattern (2L, 2R)",
+                value="quad_flash",
+                emoji="⚡"
+            ),
+            discord.SelectOption(
+                label="Strobe Pulse",
+                description="Rapid police strobe",
+                value="strobe_pulse",
+                emoji="⚠️"
+            ),
+            discord.SelectOption(
+                label="Slow Fade",
+                description="Smooth paramedic fade",
+                value="slow_fade",
+                emoji="🚑"
+            ),
+            discord.SelectOption(
+                label="Dual Color",
+                description="Red/blue split flash",
+                value="dual_color",
+                emoji="🔴"
+            ),
+            discord.SelectOption(
+                label="Rotating Beacon",
+                description="Classic rotating light",
+                value="rotating_beacon",
+                emoji="🔄"
+            ),
+            discord.SelectOption(
+                label="Wig-Wag",
+                description="Headlight alternating",
+                value="wig_wag",
+                emoji="💡"
+            ),
+            discord.SelectOption(
+                label="Triple Flash",
+                description="3 flashes + pause",
+                value="triple_flash",
+                emoji="⚡"
+            ),
+            discord.SelectOption(
+                label="Arrow Flash",
+                description="Directional traffic advisor",
+                value="arrow_flash",
+                emoji="➡️"
+            ),
+            discord.SelectOption(
+                label="Halo Pulse",
+                description="Expanding halo effect",
+                value="halo_pulse",
+                emoji="⭕"
+            ),
+        ]
+    )
+    async def select_animation(self, interaction: discord.Interaction, select: discord.ui.Select):
         await interaction.response.defer()
+        animation_style = select.values[0]
+        
         await self.cog._generate_and_send(
-            self.ctx, self.text, self.color, True, "pulse", self.case_style
+            self.ctx, self.text, self.color, True, animation_style, self.case_style
         )
-        await interaction.followup.send("✅ Generated APNG with pulse animation!", ephemeral=True)
-    
-    @discord.ui.button(label="Strobe", style=discord.ButtonStyle.danger, emoji="⚠️", row=1)
-    async def generate_strobe(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        await self.cog._generate_and_send(
-            self.ctx, self.text, self.color, True, "strobe", self.case_style
+        
+        animation_names = {
+            "classic_flash": "Classic Flash (L-R)",
+            "quad_flash": "Quad Flash",
+            "strobe_pulse": "Strobe Pulse",
+            "slow_fade": "Slow Fade",
+            "dual_color": "Dual Color",
+            "rotating_beacon": "Rotating Beacon",
+            "wig_wag": "Wig-Wag",
+            "triple_flash": "Triple Flash",
+            "arrow_flash": "Arrow Flash",
+            "halo_pulse": "Halo Pulse"
+        }
+        
+        await interaction.followup.send(
+            f"✅ Generated **{animation_names[animation_style]}** animation (APNG in ZIP)!",
+            ephemeral=True
         )
-        await interaction.followup.send("✅ Generated APNG with strobe animation!", ephemeral=True)
-    
-    @discord.ui.button(label="Rotate", style=discord.ButtonStyle.danger, emoji="🌈", row=2)
-    async def generate_rotate(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        await self.cog._generate_and_send(
-            self.ctx, self.text, self.color, True, "rotate", self.case_style
-        )
-        await interaction.followup.send("✅ Generated APNG with rotate animation!", ephemeral=True)
-    
-    @discord.ui.button(label="Combo", style=discord.ButtonStyle.danger, emoji="💥", row=2)
-    async def generate_combo(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        await self.cog._generate_and_send(
-            self.ctx, self.text, self.color, True, "combo", self.case_style
-        )
-        await interaction.followup.send("✅ Generated APNG with combo animation!", ephemeral=True)
     
     @discord.ui.button(label="Generate All", style=discord.ButtonStyle.success, emoji="📦", row=2)
     async def generate_all(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -121,14 +183,20 @@ class IconPreviewView(discord.ui.View):
             ("normal", False, "glow"),
             ("static_glow", True, "glow"),
             ("static_border", True, "border"),
+            ("static_both", True, "both"),
         ]
         
         animated_variants = [
-            ("anim_flash", True, "flash"),
-            ("anim_pulse", True, "pulse"),
-            ("anim_strobe", True, "strobe"),
-            ("anim_rotate", True, "rotate"),
-            ("anim_combo", True, "combo")
+            ("classic_flash", True, "classic_flash"),
+            ("quad_flash", True, "quad_flash"),
+            ("strobe_pulse", True, "strobe_pulse"),
+            ("slow_fade", True, "slow_fade"),
+            ("dual_color", True, "dual_color"),
+            ("rotating_beacon", True, "rotating_beacon"),
+            ("wig_wag", True, "wig_wag"),
+            ("triple_flash", True, "triple_flash"),
+            ("arrow_flash", True, "arrow_flash"),
+            ("halo_pulse", True, "halo_pulse"),
         ]
         
         # Generate static files
@@ -169,19 +237,19 @@ class IconPreviewView(discord.ui.View):
         
         # Send animated files as ZIP
         await self.ctx.send(
-            f"**Animated icons for `{self.text}` (APNG):**\n"
-            f"⚠️ Download the ZIP and extract! Discord comprimeert PNGs.",
+            f"**Animated icons for `{self.text}` (10 realistic emergency patterns):**\n"
+            f"⚠️ Download the ZIP and extract! Discord compresses PNGs.",
             file=animated_zip
         )
         
         await interaction.followup.send(
-            "✅ Generated all 8 variants!\n"
-            "- 3 static PNGs\n"
-            "- 5 animated APNGs (in ZIP)",
+            "✅ Generated all 14 variants!\n"
+            "- 4 static PNGs\n"
+            "- 10 animated APNGs (in ZIP)",
             ephemeral=True
         )
     
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌", row=3)
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌", row=2)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         for item in self.children:
@@ -250,7 +318,11 @@ class IconGen(commands.Cog):
         )
         
         # Check if it's an animated style
-        animated_styles = ["flash", "pulse", "strobe", "rotate", "combo"]
+        animated_styles = [
+            "classic_flash", "quad_flash", "strobe_pulse", "slow_fade",
+            "dual_color", "rotating_beacon", "wig_wag", "triple_flash",
+            "arrow_flash", "halo_pulse"
+        ]
         is_animated = emergency and emergency_style in animated_styles
         
         # Create filename
@@ -294,7 +366,12 @@ class IconGen(commands.Cog):
         text: str,
         color: str,
         emergency: Optional[bool] = False,
-        emergency_style: Optional[Literal["glow", "border", "both", "flash", "pulse", "strobe", "rotate", "combo"]] = None,
+        emergency_style: Optional[Literal[
+            "glow", "border", "both",
+            "classic_flash", "quad_flash", "strobe_pulse", "slow_fade",
+            "dual_color", "rotating_beacon", "wig_wag", "triple_flash",
+            "arrow_flash", "halo_pulse"
+        ]] = None,
         case: Optional[Literal["upper", "lower", "normal"]] = None
     ):
         """
@@ -306,14 +383,24 @@ class IconGen(commands.Cog):
         - `emergency`: Whether to generate emergency variant (default: False)
         - `emergency_style`: Effect style (default: glow)
           **Static:** glow, border, both
-          **Animated (APNG):** flash, pulse, strobe, rotate, combo
+          **Animated (Realistic Emergency Patterns):**
+          - classic_flash: Alternating left-right police lights
+          - quad_flash: Four-burst pattern (2 left, 2 right)
+          - strobe_pulse: Rapid police strobe
+          - slow_fade: Smooth paramedic fade
+          - dual_color: Red/blue split flash
+          - rotating_beacon: Classic rotating light
+          - wig_wag: Headlight alternating
+          - triple_flash: 3 flashes + pause
+          - arrow_flash: Directional traffic advisor
+          - halo_pulse: Expanding halo effect
         - `case`: Text case - upper/lower/normal (default: upper)
         
         **Examples:**
         - `[p]icon gen "ENGINE" fire` - Normal icon
         - `[p]icon gen "TRUCK" fire true glow` - Static emergency
-        - `[p]icon gen "CHIEF" fire true flash` - Animated flash (APNG)
-        - `[p]icon gen "RESCUE" fire true pulse` - Animated pulse (APNG)
+        - `[p]icon gen "PATROL" police true classic_flash` - Animated (APNG)
+        - `[p]icon gen "MEDIC" ems true slow_fade` - Animated fade (APNG)
         """
         # Parse color
         hex_color, preset_name = self._parse_color(color)
@@ -520,7 +607,11 @@ class IconGen(commands.Cog):
         # Separate static and animated icons
         static_files = []
         animated_files = {}
-        animated_styles = ["flash", "pulse", "strobe", "rotate", "combo"]
+        animated_styles = [
+            "classic_flash", "quad_flash", "strobe_pulse", "slow_fade",
+            "dual_color", "rotating_beacon", "wig_wag", "triple_flash",
+            "arrow_flash", "halo_pulse"
+        ]
         
         for name, buffer in results.items():
             # Check if filename contains animated style
@@ -637,14 +728,23 @@ class IconGen(commands.Cog):
             await ctx.send(f"✅ Default text case set to: `{value}`")
         
         elif setting == "emergency_style":
-            valid_styles = ["glow", "border", "both", "flash", "pulse", "strobe", "rotate", "combo"]
+            valid_styles = [
+                "glow", "border", "both",
+                "classic_flash", "quad_flash", "strobe_pulse", "slow_fade",
+                "dual_color", "rotating_beacon", "wig_wag", "triple_flash",
+                "arrow_flash", "halo_pulse"
+            ]
             if value not in valid_styles:
-                await ctx.send(f"❌ Invalid value! Use one of: {', '.join(f'`{s}`' for s in valid_styles)}")
+                await ctx.send(f"❌ Invalid value! Use one of: {', '.join(f'`{s}`' for s in valid_styles[:5])}... (see `{ctx.prefix}icon help` for all)")
                 return
             
             await self.config.guild(ctx.guild).default_emergency_style.set(value)
             
-            animated = value in ["flash", "pulse", "strobe", "rotate", "combo"]
+            animated = value in [
+                "classic_flash", "quad_flash", "strobe_pulse", "slow_fade",
+                "dual_color", "rotating_beacon", "wig_wag", "triple_flash",
+                "arrow_flash", "halo_pulse"
+            ]
             style_type = "animated (APNG)" if animated else "static"
             await ctx.send(f"✅ Default emergency style set to: `{value}` ({style_type})")
     
@@ -710,15 +810,18 @@ class IconGen(commands.Cog):
             name="⚡ Emergency Styles",
             value=(
                 "**Static (PNG):**\n"
-                "`glow` - Strong glow effect\n"
-                "`border` - Thick colored border\n"
-                "`both` - Glow + border\n\n"
-                "**Animated (APNG):**\n"
-                "`flash` - Red-blue alternating (like police lights!)\n"
-                "`pulse` - Breathing glow effect\n"
-                "`strobe` - Hard strobe flash\n"
-                "`rotate` - Rainbow color rotation\n"
-                "`combo` - Strobe + pulse combined"
+                "`glow`, `border`, `both`\n\n"
+                "**Animated (APNG) - Realistic Emergency Patterns:**\n"
+                "🚔 `classic_flash` - L-R alternating police lights\n"
+                "⚡ `quad_flash` - Four-burst pattern (2L, 2R)\n"
+                "⚠️ `strobe_pulse` - Rapid police strobe\n"
+                "🚑 `slow_fade` - Smooth paramedic fade\n"
+                "🔴 `dual_color` - Red/blue split flash\n"
+                "🔄 `rotating_beacon` - Classic rotating light\n"
+                "💡 `wig_wag` - Headlight alternating\n"
+                "⚡ `triple_flash` - 3 flashes + pause\n"
+                "➡️ `arrow_flash` - Directional traffic advisor\n"
+                "⭕ `halo_pulse` - Expanding halo effect"
             ),
             inline=False
         )
@@ -727,8 +830,8 @@ class IconGen(commands.Cog):
             name="🎬 Animation Info",
             value=(
                 "MissionChief supports APNG (animated PNG)!\n"
-                "Emergency icons can now have **real animations**.\n"
-                "Preview shows all options - pick the one you like!"
+                "Emergency icons can now have **realistic animations**.\n"
+                "Use preview dropdown to see all options!"
             ),
             inline=False
         )

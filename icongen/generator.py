@@ -82,7 +82,12 @@ class IconGenerator:
         text: str,
         color: str,
         emergency: bool = False,
-        emergency_style: Literal["glow", "border", "both", "flash", "pulse", "strobe", "rotate", "combo"] = "glow",
+        emergency_style: Literal[
+            "glow", "border", "both",  # Static styles
+            "classic_flash", "quad_flash", "strobe_pulse", "slow_fade",  # Realistic patterns
+            "dual_color", "rotating_beacon", "wig_wag", "triple_flash",
+            "arrow_flash", "halo_pulse"
+        ] = "glow",
         case_style: str = "upper",
         preview: bool = False
     ) -> io.BytesIO:
@@ -95,7 +100,17 @@ class IconGenerator:
             emergency: Whether to apply emergency styling
             emergency_style: Type of emergency effect:
                 - Static: 'glow', 'border', 'both'
-                - Animated: 'flash', 'pulse', 'strobe', 'rotate', 'combo'
+                - Animated (Realistic Emergency Patterns):
+                  * 'classic_flash' - Alternating left-right flash
+                  * 'quad_flash' - Four-burst pattern (2 left, 2 right)
+                  * 'strobe_pulse' - Rapid police strobe
+                  * 'slow_fade' - Paramedic smooth fade
+                  * 'dual_color' - Red/blue split flash
+                  * 'rotating_beacon' - Classic rotating light
+                  * 'wig_wag' - Headlight alternating flash
+                  * 'triple_flash' - Three rapid flashes + pause
+                  * 'arrow_flash' - Directional traffic advisor
+                  * 'halo_pulse' - Pulsing halo effect
             case_style: Text case ('upper', 'lower', or 'normal')
             preview: Generate larger preview version
         
@@ -103,12 +118,16 @@ class IconGenerator:
             BytesIO buffer containing PNG or APNG image
         """
         # Animated styles
-        animated_styles = ["flash", "pulse", "strobe", "rotate", "combo"]
+        animated_styles = [
+            "classic_flash", "quad_flash", "strobe_pulse", "slow_fade",
+            "dual_color", "rotating_beacon", "wig_wag", "triple_flash",
+            "arrow_flash", "halo_pulse"
+        ]
         
         if emergency and emergency_style in animated_styles:
             if not APNG_AVAILABLE:
                 # Fallback to static flash effect if APNG not available
-                return self._generate_static_frame(text, color, True, "flash", case_style, preview)
+                return self._generate_static_frame(text, color, True, "glow", case_style, preview)
             
             # Generate animated APNG
             return self._generate_animated_icon(text, color, emergency_style, case_style, preview)
@@ -277,27 +296,46 @@ class IconGenerator:
         self,
         text: str,
         color: str,
-        animation_type: Literal["flash", "pulse", "strobe", "rotate", "combo"],
+        animation_type: Literal[
+            "classic_flash", "quad_flash", "strobe_pulse", "slow_fade",
+            "dual_color", "rotating_beacon", "wig_wag", "triple_flash",
+            "arrow_flash", "halo_pulse"
+        ],
         case_style: str = "upper",
         preview: bool = False
     ) -> io.BytesIO:
-        """Generate an animated APNG icon"""
+        """Generate an animated APNG icon with realistic emergency patterns"""
         # Generate frames based on animation type
-        if animation_type == "flash":
-            frames = self._generate_flash_frames(text, color, case_style, preview)
-            delays = [500, 500]  # 500ms per frame
-        elif animation_type == "pulse":
-            frames = self._generate_pulse_frames(text, color, case_style, preview)
-            delays = [150] * 6  # 150ms per frame (smooth)
-        elif animation_type == "strobe":
-            frames = self._generate_strobe_frames(text, color, case_style, preview)
-            delays = [200, 200]  # 200ms per frame (fast)
-        elif animation_type == "rotate":
-            frames = self._generate_rotate_frames(text, color, case_style, preview)
-            delays = [125] * 8  # 125ms per frame
-        elif animation_type == "combo":
-            frames = self._generate_combo_frames(text, color, case_style, preview)
-            delays = [250] * 4  # 250ms per frame
+        if animation_type == "classic_flash":
+            frames = self._generate_classic_flash_frames(text, color, case_style, preview)
+            delays = [400, 400]  # Left, Right alternating
+        elif animation_type == "quad_flash":
+            frames = self._generate_quad_flash_frames(text, color, case_style, preview)
+            delays = [150, 150, 150, 150]  # 2 left, 2 right bursts
+        elif animation_type == "strobe_pulse":
+            frames = self._generate_strobe_pulse_frames(text, color, case_style, preview)
+            delays = [100, 100]  # Very fast police strobe
+        elif animation_type == "slow_fade":
+            frames = self._generate_slow_fade_frames(text, color, case_style, preview)
+            delays = [200] * 8  # Smooth fade in/out
+        elif animation_type == "dual_color":
+            frames = self._generate_dual_color_frames(text, color, case_style, preview)
+            delays = [400, 400]  # Red left, Blue right
+        elif animation_type == "rotating_beacon":
+            frames = self._generate_rotating_beacon_frames(text, color, case_style, preview)
+            delays = [100] * 8  # Smooth rotation
+        elif animation_type == "wig_wag":
+            frames = self._generate_wig_wag_frames(text, color, case_style, preview)
+            delays = [350, 350]  # Headlight alternating
+        elif animation_type == "triple_flash":
+            frames = self._generate_triple_flash_frames(text, color, case_style, preview)
+            delays = [150, 150, 150, 500]  # 3 flashes + pause
+        elif animation_type == "arrow_flash":
+            frames = self._generate_arrow_flash_frames(text, color, case_style, preview)
+            delays = [150] * 6  # Sequential left to right
+        elif animation_type == "halo_pulse":
+            frames = self._generate_halo_pulse_frames(text, color, case_style, preview)
+            delays = [150] * 10  # Smooth expanding halo
         else:
             # Fallback
             frames = [self._generate_frame_with_params(text, color, case_style, preview)]
@@ -424,120 +462,396 @@ class IconGenerator:
         final_img = final_img.resize((width, height), Image.Resampling.LANCZOS)
         return final_img
     
-    def _generate_flash_frames(self, text: str, color: str, case_style: str, preview: bool) -> List[Image.Image]:
-        """Generate alternating red-blue flash frames (2 frames)"""
+    def _generate_classic_flash_frames(self, text: str, color: str, case_style: str, preview: bool) -> List[Image.Image]:
+        """Classic alternating left-right flash (2 frames)"""
         frames = []
         
-        # Frame 1: Red glow
-        frame1 = self._generate_frame_with_params(
+        # Frame 1: Left side glow (red)
+        frame1 = self._generate_frame_with_side_glow(
             text, color, case_style, preview,
-            glow_intensity=1.5,
-            glow_color_override=(255, 50, 50),
-            border_thickness=6,
-            brightness_multiplier=1.2
+            side="left",
+            glow_color=(255, 50, 50),
+            glow_intensity=1.8
         )
         frames.append(frame1)
         
-        # Frame 2: Blue glow
-        frame2 = self._generate_frame_with_params(
+        # Frame 2: Right side glow (blue)
+        frame2 = self._generate_frame_with_side_glow(
             text, color, case_style, preview,
-            glow_intensity=1.5,
-            glow_color_override=(50, 100, 255),
-            border_thickness=6,
-            brightness_multiplier=1.2
+            side="right",
+            glow_color=(50, 100, 255),
+            glow_intensity=1.8
         )
         frames.append(frame2)
         
         return frames
     
-    def _generate_pulse_frames(self, text: str, color: str, case_style: str, preview: bool) -> List[Image.Image]:
-        """Generate pulsating glow frames (6 frames)"""
+    def _generate_quad_flash_frames(self, text: str, color: str, case_style: str, preview: bool) -> List[Image.Image]:
+        """Four-burst pattern: 2 left, 2 right (4 frames)"""
         frames = []
-        intensities = [0.8, 1.0, 1.3, 1.6, 1.3, 1.0]  # Smooth pulse
+        
+        # 2 left flashes
+        for _ in range(2):
+            frames.append(self._generate_frame_with_side_glow(
+                text, color, case_style, preview,
+                side="left",
+                glow_color=(255, 50, 50),
+                glow_intensity=2.0
+            ))
+        
+        # 2 right flashes
+        for _ in range(2):
+            frames.append(self._generate_frame_with_side_glow(
+                text, color, case_style, preview,
+                side="right",
+                glow_color=(50, 100, 255),
+                glow_intensity=2.0
+            ))
+        
+        return frames
+    
+    def _generate_strobe_pulse_frames(self, text: str, color: str, case_style: str, preview: bool) -> List[Image.Image]:
+        """Very fast police strobe (2 frames)"""
+        frames = []
+        
+        # Frame 1: OFF/dim
+        frame1 = self._generate_frame_with_params(
+            text, color, case_style, preview,
+            glow_intensity=0.3,
+            border_thickness=2,
+            brightness_multiplier=0.9
+        )
+        frames.append(frame1)
+        
+        # Frame 2: SUPER BRIGHT strobe
+        frame2 = self._generate_frame_with_params(
+            text, color, case_style, preview,
+            glow_intensity=2.5,
+            border_thickness=10,
+            brightness_multiplier=1.8,
+            glow_color_override=(255, 255, 255)  # White strobe
+        )
+        frames.append(frame2)
+        
+        return frames
+    
+    def _generate_slow_fade_frames(self, text: str, color: str, case_style: str, preview: bool) -> List[Image.Image]:
+        """Smooth paramedic-style fade in/out (8 frames)"""
+        frames = []
+        
+        # Fade in: 0.5 → 1.0 → 1.5 → 2.0
+        # Fade out: 2.0 → 1.5 → 1.0 → 0.5
+        intensities = [0.5, 1.0, 1.5, 2.0, 2.0, 1.5, 1.0, 0.5]
         
         for intensity in intensities:
             frame = self._generate_frame_with_params(
                 text, color, case_style, preview,
                 glow_intensity=intensity,
                 border_thickness=int(4 + intensity * 2),
-                brightness_multiplier=1.0 + (intensity - 1.0) * 0.3
+                brightness_multiplier=1.0 + (intensity - 1.0) * 0.2
             )
             frames.append(frame)
         
         return frames
     
-    def _generate_strobe_frames(self, text: str, color: str, case_style: str, preview: bool) -> List[Image.Image]:
-        """Generate hard strobe frames (2 frames)"""
+    def _generate_dual_color_frames(self, text: str, color: str, case_style: str, preview: bool) -> List[Image.Image]:
+        """Red left, blue right alternating (2 frames)"""
         frames = []
         
-        # Frame 1: Normal emergency
-        frame1 = self._generate_frame_with_params(
+        # Frame 1: Red on left
+        frame1 = self._generate_frame_with_side_glow(
             text, color, case_style, preview,
-            glow_intensity=1.2,
-            border_thickness=6,
-            brightness_multiplier=1.1
+            side="left",
+            glow_color=(255, 0, 0),  # Pure red
+            glow_intensity=1.8
         )
         frames.append(frame1)
         
-        # Frame 2: Super bright
-        frame2 = self._generate_frame_with_params(
+        # Frame 2: Blue on right
+        frame2 = self._generate_frame_with_side_glow(
             text, color, case_style, preview,
-            glow_intensity=2.0,
-            border_thickness=8,
-            brightness_multiplier=1.6
+            side="right",
+            glow_color=(0, 100, 255),  # Pure blue
+            glow_intensity=1.8
         )
         frames.append(frame2)
         
         return frames
     
-    def _generate_rotate_frames(self, text: str, color: str, case_style: str, preview: bool) -> List[Image.Image]:
-        """Generate rotating color frames (8 frames)"""
+    def _generate_rotating_beacon_frames(self, text: str, color: str, case_style: str, preview: bool) -> List[Image.Image]:
+        """Classic rotating beacon simulation (8 frames)"""
         frames = []
-        colors = [
-            (255, 50, 50),    # Red
-            (255, 120, 50),   # Orange
-            (255, 200, 50),   # Yellow
-            (50, 255, 120),   # Green
-            (50, 150, 255),   # Cyan
-            (100, 50, 255),   # Blue
-            (200, 50, 255),   # Purple
-            (255, 50, 150),   # Pink
-        ]
         
-        for glow_color in colors:
-            frame = self._generate_frame_with_params(
+        # Simulate rotation by moving glow position
+        positions = ["left", "top-left", "top", "top-right", "right", "bottom-right", "bottom", "bottom-left"]
+        
+        for position in positions:
+            frame = self._generate_frame_with_rotating_glow(
                 text, color, case_style, preview,
-                glow_intensity=1.4,
-                glow_color_override=glow_color,
-                border_thickness=6,
-                brightness_multiplier=1.2
+                position=position,
+                glow_color=(255, 150, 0),  # Orange rotating light
+                glow_intensity=1.6
             )
             frames.append(frame)
         
         return frames
     
-    def _generate_combo_frames(self, text: str, color: str, case_style: str, preview: bool) -> List[Image.Image]:
-        """Generate combo strobe + pulse frames (4 frames)"""
+    def _generate_wig_wag_frames(self, text: str, color: str, case_style: str, preview: bool) -> List[Image.Image]:
+        """Headlight wig-wag alternating (2 frames)"""
         frames = []
         
-        configs = [
-            (1.2, (255, 50, 50), 6, 1.2),    # Red bright
-            (1.8, (50, 100, 255), 8, 1.5),   # Blue super bright
-            (1.2, (255, 50, 50), 6, 1.2),    # Red bright
-            (1.8, (255, 150, 50), 8, 1.5),   # Orange super bright
-        ]
+        # Frame 1: Left headlight
+        frame1 = self._generate_frame_with_side_glow(
+            text, color, case_style, preview,
+            side="left",
+            glow_color=(255, 255, 200),  # Bright white-yellow
+            glow_intensity=1.5
+        )
+        frames.append(frame1)
         
-        for intensity, glow_color, border, brightness in configs:
-            frame = self._generate_frame_with_params(
+        # Frame 2: Right headlight
+        frame2 = self._generate_frame_with_side_glow(
+            text, color, case_style, preview,
+            side="right",
+            glow_color=(255, 255, 200),  # Bright white-yellow
+            glow_intensity=1.5
+        )
+        frames.append(frame2)
+        
+        return frames
+    
+    def _generate_triple_flash_frames(self, text: str, color: str, case_style: str, preview: bool) -> List[Image.Image]:
+        """Three rapid flashes + pause (4 frames)"""
+        frames = []
+        
+        # 3 bright flashes
+        for _ in range(3):
+            frames.append(self._generate_frame_with_params(
                 text, color, case_style, preview,
-                glow_intensity=intensity,
-                glow_color_override=glow_color,
-                border_thickness=border,
-                brightness_multiplier=brightness
+                glow_intensity=2.0,
+                border_thickness=8,
+                brightness_multiplier=1.4
+            ))
+        
+        # 1 dark pause
+        frames.append(self._generate_frame_with_params(
+            text, color, case_style, preview,
+            glow_intensity=0.4,
+            border_thickness=2,
+            brightness_multiplier=0.9
+        ))
+        
+        return frames
+    
+    def _generate_arrow_flash_frames(self, text: str, color: str, case_style: str, preview: bool) -> List[Image.Image]:
+        """Sequential directional flash left to right (6 frames)"""
+        frames = []
+        
+        # Positions: far-left → left → center-left → center-right → right → far-right
+        positions = ["far-left", "left", "center-left", "center-right", "right", "far-right"]
+        
+        for position in positions:
+            frame = self._generate_frame_with_directional_glow(
+                text, color, case_style, preview,
+                position=position,
+                glow_color=(255, 200, 0),  # Amber traffic advisor
+                glow_intensity=1.7
             )
             frames.append(frame)
         
         return frames
+    
+    def _generate_halo_pulse_frames(self, text: str, color: str, case_style: str, preview: bool) -> List[Image.Image]:
+        """Expanding and fading halo (10 frames)"""
+        frames = []
+        
+        # Halo expands: small → large → fade out
+        sizes = [0.8, 1.0, 1.3, 1.6, 1.9, 2.2, 2.5, 2.3, 1.8, 1.0]
+        opacities = [0.8, 1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2]
+        
+        for size, opacity in zip(sizes, opacities):
+            frame = self._generate_frame_with_params(
+                text, color, case_style, preview,
+                glow_intensity=size * opacity,
+                border_thickness=int(3 + size * 2),
+                brightness_multiplier=1.0 + (size - 1.0) * 0.15
+            )
+            frames.append(frame)
+        
+        return frames
+    
+    def _generate_frame_with_side_glow(
+        self,
+        text: str,
+        color: str,
+        case_style: str,
+        preview: bool,
+        side: str = "left",
+        glow_color: tuple = None,
+        glow_intensity: float = 1.5
+    ) -> Image.Image:
+        """Generate frame with glow positioned on specific side"""
+        display_text = self._apply_text_case(text, case_style)
+        
+        if preview:
+            width = self.PREVIEW_WIDTH
+            height = self.PREVIEW_HEIGHT
+        else:
+            width = self.WIDTH
+            height = self.HEIGHT
+        
+        hr_width = width * self.SCALE_FACTOR
+        hr_height = height * self.SCALE_FACTOR
+        
+        bg_color = hex_to_rgb(color)
+        
+        # Create base image
+        img = Image.new('RGBA', (hr_width, hr_height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        border_radius = hr_height // 2
+        
+        # Draw pill shape
+        pill_bbox = [0, 0, hr_width - 1, hr_height - 1]
+        draw.rounded_rectangle(pill_bbox, radius=border_radius, fill=bg_color)
+        
+        # Add positioned glow
+        glow_size = int(100 * glow_intensity)
+        glow_img = Image.new('RGBA', (hr_width + glow_size, hr_height + glow_size), (0, 0, 0, 0))
+        glow_draw = ImageDraw.Draw(glow_img)
+        
+        if glow_color is None:
+            glow_color = bg_color
+        
+        # Draw glow based on side
+        offset_center = glow_size // 2
+        
+        if side == "left":
+            # Glow on left side
+            for idx in range(3):
+                offset = 10 + (idx * 20)
+                opacity = int(200 * glow_intensity) - (idx * 50)
+                bbox = [
+                    offset_center - offset - hr_width // 3,
+                    offset_center - offset,
+                    hr_width // 2 + offset_center,
+                    hr_height + offset_center + offset
+                ]
+                glow_draw.ellipse(bbox, fill=(*glow_color, max(50, opacity)))
+        
+        elif side == "right":
+            # Glow on right side
+            for idx in range(3):
+                offset = 10 + (idx * 20)
+                opacity = int(200 * glow_intensity) - (idx * 50)
+                bbox = [
+                    hr_width // 2 + offset_center,
+                    offset_center - offset,
+                    hr_width + offset_center + offset + hr_width // 3,
+                    hr_height + offset_center + offset
+                ]
+                glow_draw.ellipse(bbox, fill=(*glow_color, max(50, opacity)))
+        
+        # Blur
+        blur_radius = int(25 * glow_intensity)
+        glow_img = glow_img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+        
+        # Composite
+        final_img = Image.new('RGBA', (hr_width, hr_height), (0, 0, 0, 0))
+        final_img.paste(glow_img, (-glow_size // 2, -glow_size // 2), glow_img)
+        final_img.paste(img, (0, 0), img)
+        
+        # Add text (simplified for performance)
+        draw = ImageDraw.Draw(final_img)
+        font_size = hr_height // 2
+        font = self._get_font(font_size, bold=True)
+        bbox = draw.textbbox((0, 0), display_text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        
+        while text_width > hr_width * 0.85 and font_size > 10:
+            font_size -= 2
+            font = self._get_font(font_size, bold=True)
+            bbox = draw.textbbox((0, 0), display_text, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+        
+        text_x = (hr_width - text_width) // 2 - bbox[0]
+        text_y = (hr_height - text_height) // 2 - bbox[1]
+        
+        # Text outline
+        outline_width = 2
+        for adj_x in range(-outline_width, outline_width + 1):
+            for adj_y in range(-outline_width, outline_width + 1):
+                if adj_x != 0 or adj_y != 0:
+                    draw.text((text_x + adj_x, text_y + adj_y), display_text,
+                            fill=(0, 0, 0, 255), font=font)
+        
+        draw.text((text_x, text_y), display_text, fill=(255, 255, 255, 255), font=font)
+        
+        # Downscale
+        final_img = final_img.resize((width, height), Image.Resampling.LANCZOS)
+        return final_img
+    
+    def _generate_frame_with_rotating_glow(
+        self,
+        text: str,
+        color: str,
+        case_style: str,
+        preview: bool,
+        position: str = "top",
+        glow_color: tuple = None,
+        glow_intensity: float = 1.6
+    ) -> Image.Image:
+        """Generate frame with glow at rotating position"""
+        # Use base frame generator with appropriate position mapping
+        # Map position to offset coordinates
+        position_map = {
+            "left": "left",
+            "top-left": "left",
+            "top": "left",
+            "top-right": "right",
+            "right": "right",
+            "bottom-right": "right",
+            "bottom": "left",
+            "bottom-left": "left"
+        }
+        
+        mapped_side = position_map.get(position, "left")
+        return self._generate_frame_with_side_glow(
+            text, color, case_style, preview,
+            side=mapped_side,
+            glow_color=glow_color,
+            glow_intensity=glow_intensity
+        )
+    
+    def _generate_frame_with_directional_glow(
+        self,
+        text: str,
+        color: str,
+        case_style: str,
+        preview: bool,
+        position: str = "center",
+        glow_color: tuple = None,
+        glow_intensity: float = 1.7
+    ) -> Image.Image:
+        """Generate frame with directional glow for traffic advisor"""
+        # Map directional positions
+        position_map = {
+            "far-left": "left",
+            "left": "left",
+            "center-left": "left",
+            "center-right": "right",
+            "right": "right",
+            "far-right": "right"
+        }
+        
+        mapped_side = position_map.get(position, "left")
+        return self._generate_frame_with_side_glow(
+            text, color, case_style, preview,
+            side=mapped_side,
+            glow_color=glow_color,
+            glow_intensity=glow_intensity
+        )
     
     def _create_apng(self, frames: List[Image.Image], delays: List[int]) -> io.BytesIO:
         """Create an APNG from frames"""
