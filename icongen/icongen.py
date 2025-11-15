@@ -76,11 +76,19 @@ class IconPreviewView(discord.ui.View):
         )
         await interaction.followup.send("✅ Generated emergency icon with glow + border!", ephemeral=True)
     
+    @discord.ui.button(label="Emergency (Flash)", style=discord.ButtonStyle.danger, emoji="💥")
+    async def generate_emergency_flash(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await self.cog._generate_and_send(
+            self.ctx, self.text, self.color, True, "flash", self.case_style
+        )
+        await interaction.followup.send("✅ Generated emergency icon with flash effect!", ephemeral=True)
+    
     @discord.ui.button(label="Generate All", style=discord.ButtonStyle.success, emoji="📦")
     async def generate_all(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         
-        # Generate all 4 variants
+        # Generate all 5 variants
         files = []
         generator = IconGenerator()
         
@@ -88,7 +96,8 @@ class IconPreviewView(discord.ui.View):
             ("normal", False, "glow"),
             ("emergency_glow", True, "glow"),
             ("emergency_border", True, "border"),
-            ("emergency_both", True, "both")
+            ("emergency_both", True, "both"),
+            ("emergency_flash", True, "flash")
         ]
         
         for variant_name, emergency, style in variants:
@@ -106,7 +115,7 @@ class IconPreviewView(discord.ui.View):
             f"**All variants for `{self.text}`:**",
             files=files
         )
-        await interaction.followup.send("✅ Generated all 4 variants!", ephemeral=True)
+        await interaction.followup.send("✅ Generated all 5 variants!", ephemeral=True)
     
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -197,7 +206,7 @@ class IconGen(commands.Cog):
         text: str,
         color: str,
         emergency: Optional[bool] = False,
-        emergency_style: Optional[Literal["glow", "border", "both"]] = None,
+        emergency_style: Optional[Literal["glow", "border", "both", "flash"]] = None,
         case: Optional[Literal["upper", "lower", "normal"]] = None
     ):
         """
@@ -207,12 +216,13 @@ class IconGen(commands.Cog):
         - `text`: Text to display on the icon
         - `color`: Color preset (fire/police/ems/etc.) or hex code (#DC2626)
         - `emergency`: Whether to generate emergency variant (default: False)
-        - `emergency_style`: Emergency effect style - glow/border/both (default: glow)
+        - `emergency_style`: Emergency effect style - glow/border/both/flash (default: glow)
         - `case`: Text case - upper/lower/normal (default: upper)
         
         **Examples:**
         - `[p]icon gen "ENGINE" fire`
         - `[p]icon gen "TRUCK" #DC2626 true glow`
+        - `[p]icon gen "CHIEF" fire true flash`
         - `[p]icon gen "patrol" police false glow lower`
         """
         # Parse color
@@ -481,11 +491,11 @@ class IconGen(commands.Cog):
         
         **Settings:**
         - `case`: Default text case (upper/lower/normal)
-        - `emergency_style`: Default emergency style (glow/border/both)
+        - `emergency_style`: Default emergency style (glow/border/both/flash)
         
         **Examples:**
         - `[p]icon config case upper`
-        - `[p]icon config emergency_style both`
+        - `[p]icon config emergency_style flash`
         """
         if setting == "case":
             if value not in ["upper", "lower", "normal"]:
@@ -496,8 +506,8 @@ class IconGen(commands.Cog):
             await ctx.send(f"✅ Default text case set to: `{value}`")
         
         elif setting == "emergency_style":
-            if value not in ["glow", "border", "both"]:
-                await ctx.send("❌ Invalid value! Use: `glow`, `border`, or `both`")
+            if value not in ["glow", "border", "both", "flash"]:
+                await ctx.send("❌ Invalid value! Use: `glow`, `border`, `both`, or `flash`")
                 return
             
             await self.config.guild(ctx.guild).default_emergency_style.set(value)
@@ -564,9 +574,10 @@ class IconGen(commands.Cog):
         embed.add_field(
             name="⚡ Emergency Styles",
             value=(
-                "`glow` - Subtle glow effect\n"
-                "`border` - Colored border\n"
-                "`both` - Glow + border"
+                "`glow` - Strong glow effect\n"
+                "`border` - Thick colored border\n"
+                "`both` - Glow + border\n"
+                "`flash` - **MAXIMUM visibility** - bright flash effect!"
             ),
             inline=False
         )
