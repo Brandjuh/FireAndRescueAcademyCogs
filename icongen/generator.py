@@ -4,8 +4,13 @@ Image generation module for IconGen
 
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import io
-from typing import Tuple, Literal
+from typing import Tuple, Literal, List
 from .presets import hex_to_rgb
+try:
+    from apng import APNG
+    APNG_AVAILABLE = True
+except ImportError:
+    APNG_AVAILABLE = False
 
 class IconGenerator:
     """Generate vehicle icons with modern pill-shaped design"""
@@ -77,24 +82,50 @@ class IconGenerator:
         text: str,
         color: str,
         emergency: bool = False,
-        emergency_style: Literal["glow", "border", "both", "flash"] = "glow",
+        emergency_style: Literal["glow", "border", "both", "flash", "pulse", "strobe", "rotate", "combo"] = "glow",
         case_style: str = "upper",
         preview: bool = False
     ) -> io.BytesIO:
         """
-        Generate a single icon
+        Generate a single icon (static PNG or animated APNG)
         
         Args:
             text: Text to display on icon
             color: Hex color code (e.g., '#DC2626')
             emergency: Whether to apply emergency styling
-            emergency_style: Type of emergency effect ('glow', 'border', 'both', or 'flash')
+            emergency_style: Type of emergency effect:
+                - Static: 'glow', 'border', 'both'
+                - Animated: 'flash', 'pulse', 'strobe', 'rotate', 'combo'
             case_style: Text case ('upper', 'lower', or 'normal')
             preview: Generate larger preview version
         
         Returns:
-            BytesIO buffer containing PNG image
+            BytesIO buffer containing PNG or APNG image
         """
+        # Animated styles
+        animated_styles = ["flash", "pulse", "strobe", "rotate", "combo"]
+        
+        if emergency and emergency_style in animated_styles:
+            if not APNG_AVAILABLE:
+                # Fallback to static flash effect if APNG not available
+                return self._generate_static_frame(text, color, True, "flash", case_style, preview)
+            
+            # Generate animated APNG
+            return self._generate_animated_icon(text, color, emergency_style, case_style, preview)
+        else:
+            # Generate static PNG
+            return self._generate_static_frame(text, color, emergency, emergency_style, case_style, preview)
+    
+    def _generate_static_frame(
+        self,
+        text: str,
+        color: str,
+        emergency: bool = False,
+        emergency_style: Literal["glow", "border", "both", "flash"] = "glow",
+        case_style: str = "upper",
+        preview: bool = False
+    ) -> io.BytesIO:
+        """Internal method to generate a single static frame"""
         # Apply text case
         display_text = self._apply_text_case(text, case_style)
         
@@ -241,6 +272,294 @@ class IconGenerator:
         buffer.seek(0)
         
         return buffer
+    
+    def _generate_animated_icon(
+        self,
+        text: str,
+        color: str,
+        animation_type: Literal["flash", "pulse", "strobe", "rotate", "combo"],
+        case_style: str = "upper",
+        preview: bool = False
+    ) -> io.BytesIO:
+        """Generate an animated APNG icon"""
+        # Generate frames based on animation type
+        if animation_type == "flash":
+            frames = self._generate_flash_frames(text, color, case_style, preview)
+            delays = [500, 500]  # 500ms per frame
+        elif animation_type == "pulse":
+            frames = self._generate_pulse_frames(text, color, case_style, preview)
+            delays = [150] * 6  # 150ms per frame (smooth)
+        elif animation_type == "strobe":
+            frames = self._generate_strobe_frames(text, color, case_style, preview)
+            delays = [200, 200]  # 200ms per frame (fast)
+        elif animation_type == "rotate":
+            frames = self._generate_rotate_frames(text, color, case_style, preview)
+            delays = [125] * 8  # 125ms per frame
+        elif animation_type == "combo":
+            frames = self._generate_combo_frames(text, color, case_style, preview)
+            delays = [250] * 4  # 250ms per frame
+        else:
+            # Fallback
+            frames = [self._generate_frame_with_params(text, color, case_style, preview)]
+            delays = [1000]
+        
+        # Create APNG
+        return self._create_apng(frames, delays)
+    
+    def _generate_frame_with_params(
+        self,
+        text: str,
+        color: str,
+        case_style: str,
+        preview: bool,
+        glow_intensity: float = 1.0,
+        glow_color_override: tuple = None,
+        border_thickness: int = 6,
+        brightness_multiplier: float = 1.0
+    ) -> Image.Image:
+        """Generate a single frame with custom parameters for animations"""
+        display_text = self._apply_text_case(text, case_style)
+        
+        if preview:
+            width = self.PREVIEW_WIDTH
+            height = self.PREVIEW_HEIGHT
+        else:
+            width = self.WIDTH
+            height = self.HEIGHT
+        
+        hr_width = width * self.SCALE_FACTOR
+        hr_height = height * self.SCALE_FACTOR
+        
+        # Parse and adjust color
+        bg_color = hex_to_rgb(color)
+        if brightness_multiplier != 1.0:
+            bg_color = tuple(min(255, int(c * brightness_multiplier)) for c in bg_color)
+        
+        # Create image
+        img = Image.new('RGBA', (hr_width, hr_height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        border_radius = hr_height // 2
+        
+        # Draw pill shape
+        pill_bbox = [0, 0, hr_width - 1, hr_height - 1]
+        draw.rounded_rectangle(pill_bbox, radius=border_radius, fill=bg_color)
+        
+        # Add glow effect
+        glow_size = int(80 * glow_intensity)
+        glow_img = Image.new('RGBA', (hr_width + glow_size, hr_height + glow_size), (0, 0, 0, 0))
+        glow_draw = ImageDraw.Draw(glow_img)
+        
+        # Use custom glow color if provided
+        if glow_color_override:
+            base_glow = glow_color_override
+        else:
+            base_glow = bg_color
+        
+        # Draw glow layers
+        offset_center = glow_size // 2
+        opacity_base = int(200 * glow_intensity)
+        for idx in range(3):
+            offset = 10 + (idx * 15)
+            opacity = max(100, opacity_base - (idx * 40))
+            glow_color = (*base_glow, opacity)
+            glow_draw.rounded_rectangle(
+                [offset_center - offset, offset_center - offset,
+                 hr_width + offset_center + offset, hr_height + offset_center + offset],
+                radius=border_radius + offset,
+                fill=glow_color
+            )
+        
+        # Blur the glow
+        blur_radius = int(20 * glow_intensity)
+        glow_img = glow_img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+        
+        # Composite
+        final_img = Image.new('RGBA', (hr_width, hr_height), (0, 0, 0, 0))
+        final_img.paste(glow_img, (-glow_size // 2, -glow_size // 2), glow_img)
+        final_img.paste(img, (0, 0), img)
+        
+        # Add border
+        draw = ImageDraw.Draw(final_img)
+        border_width = border_thickness * self.SCALE_FACTOR
+        emergency_border_color = (255, 50, 50)
+        
+        for i in range(border_width):
+            opacity = 255 - (i * 15)
+            border_color = (*emergency_border_color, max(100, opacity))
+            draw.rounded_rectangle(
+                [i, i, hr_width - 1 - i, hr_height - 1 - i],
+                radius=border_radius - i,
+                outline=border_color,
+                width=2
+            )
+        
+        # Add text
+        font_size = hr_height // 2
+        font = self._get_font(font_size, bold=True)
+        bbox = draw.textbbox((0, 0), display_text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        
+        while text_width > hr_width * 0.85 and font_size > 10:
+            font_size -= 2
+            font = self._get_font(font_size, bold=True)
+            bbox = draw.textbbox((0, 0), display_text, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+        
+        text_x = (hr_width - text_width) // 2 - bbox[0]
+        text_y = (hr_height - text_height) // 2 - bbox[1]
+        
+        # Text outline
+        outline_width = 3
+        for adj_x in range(-outline_width, outline_width + 1):
+            for adj_y in range(-outline_width, outline_width + 1):
+                if adj_x != 0 or adj_y != 0:
+                    draw.text((text_x + adj_x, text_y + adj_y), display_text,
+                            fill=(0, 0, 0, 255), font=font)
+        
+        draw.text((text_x, text_y), display_text, fill=(255, 255, 255, 255), font=font)
+        
+        # Downscale
+        final_img = final_img.resize((width, height), Image.Resampling.LANCZOS)
+        return final_img
+    
+    def _generate_flash_frames(self, text: str, color: str, case_style: str, preview: bool) -> List[Image.Image]:
+        """Generate alternating red-blue flash frames (2 frames)"""
+        frames = []
+        
+        # Frame 1: Red glow
+        frame1 = self._generate_frame_with_params(
+            text, color, case_style, preview,
+            glow_intensity=1.5,
+            glow_color_override=(255, 50, 50),
+            border_thickness=6,
+            brightness_multiplier=1.2
+        )
+        frames.append(frame1)
+        
+        # Frame 2: Blue glow
+        frame2 = self._generate_frame_with_params(
+            text, color, case_style, preview,
+            glow_intensity=1.5,
+            glow_color_override=(50, 100, 255),
+            border_thickness=6,
+            brightness_multiplier=1.2
+        )
+        frames.append(frame2)
+        
+        return frames
+    
+    def _generate_pulse_frames(self, text: str, color: str, case_style: str, preview: bool) -> List[Image.Image]:
+        """Generate pulsating glow frames (6 frames)"""
+        frames = []
+        intensities = [0.8, 1.0, 1.3, 1.6, 1.3, 1.0]  # Smooth pulse
+        
+        for intensity in intensities:
+            frame = self._generate_frame_with_params(
+                text, color, case_style, preview,
+                glow_intensity=intensity,
+                border_thickness=int(4 + intensity * 2),
+                brightness_multiplier=1.0 + (intensity - 1.0) * 0.3
+            )
+            frames.append(frame)
+        
+        return frames
+    
+    def _generate_strobe_frames(self, text: str, color: str, case_style: str, preview: bool) -> List[Image.Image]:
+        """Generate hard strobe frames (2 frames)"""
+        frames = []
+        
+        # Frame 1: Normal emergency
+        frame1 = self._generate_frame_with_params(
+            text, color, case_style, preview,
+            glow_intensity=1.2,
+            border_thickness=6,
+            brightness_multiplier=1.1
+        )
+        frames.append(frame1)
+        
+        # Frame 2: Super bright
+        frame2 = self._generate_frame_with_params(
+            text, color, case_style, preview,
+            glow_intensity=2.0,
+            border_thickness=8,
+            brightness_multiplier=1.6
+        )
+        frames.append(frame2)
+        
+        return frames
+    
+    def _generate_rotate_frames(self, text: str, color: str, case_style: str, preview: bool) -> List[Image.Image]:
+        """Generate rotating color frames (8 frames)"""
+        frames = []
+        colors = [
+            (255, 50, 50),    # Red
+            (255, 120, 50),   # Orange
+            (255, 200, 50),   # Yellow
+            (50, 255, 120),   # Green
+            (50, 150, 255),   # Cyan
+            (100, 50, 255),   # Blue
+            (200, 50, 255),   # Purple
+            (255, 50, 150),   # Pink
+        ]
+        
+        for glow_color in colors:
+            frame = self._generate_frame_with_params(
+                text, color, case_style, preview,
+                glow_intensity=1.4,
+                glow_color_override=glow_color,
+                border_thickness=6,
+                brightness_multiplier=1.2
+            )
+            frames.append(frame)
+        
+        return frames
+    
+    def _generate_combo_frames(self, text: str, color: str, case_style: str, preview: bool) -> List[Image.Image]:
+        """Generate combo strobe + pulse frames (4 frames)"""
+        frames = []
+        
+        configs = [
+            (1.2, (255, 50, 50), 6, 1.2),    # Red bright
+            (1.8, (50, 100, 255), 8, 1.5),   # Blue super bright
+            (1.2, (255, 50, 50), 6, 1.2),    # Red bright
+            (1.8, (255, 150, 50), 8, 1.5),   # Orange super bright
+        ]
+        
+        for intensity, glow_color, border, brightness in configs:
+            frame = self._generate_frame_with_params(
+                text, color, case_style, preview,
+                glow_intensity=intensity,
+                glow_color_override=glow_color,
+                border_thickness=border,
+                brightness_multiplier=brightness
+            )
+            frames.append(frame)
+        
+        return frames
+    
+    def _create_apng(self, frames: List[Image.Image], delays: List[int]) -> io.BytesIO:
+        """Create an APNG from frames"""
+        # Save frames as temporary PNGs
+        frame_buffers = []
+        for frame in frames:
+            buffer = io.BytesIO()
+            frame.save(buffer, format='PNG')
+            buffer.seek(0)
+            frame_buffers.append(buffer)
+        
+        # Create APNG
+        apng = APNG()
+        for buffer, delay in zip(frame_buffers, delays):
+            apng.append_file(buffer, delay=delay)
+        
+        # Save to BytesIO
+        output = io.BytesIO()
+        apng.save(output)
+        output.seek(0)
+        
+        return output
     
     def generate_batch(
         self,
