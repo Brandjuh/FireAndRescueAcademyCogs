@@ -44,7 +44,7 @@ class IconPreviewView(discord.ui.View):
             except:
                 pass
     
-    @discord.ui.button(label="Normal", style=discord.ButtonStyle.secondary, emoji="📋")
+    @discord.ui.button(label="Normal", style=discord.ButtonStyle.secondary, emoji="📋", row=0)
     async def generate_normal(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await self.cog._generate_and_send(
@@ -52,52 +52,79 @@ class IconPreviewView(discord.ui.View):
         )
         await interaction.followup.send("✅ Generated normal icon!", ephemeral=True)
     
-    @discord.ui.button(label="Emergency (Glow)", style=discord.ButtonStyle.danger, emoji="🔴")
+    @discord.ui.button(label="Static Glow", style=discord.ButtonStyle.secondary, emoji="🔴", row=0)
     async def generate_emergency_glow(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await self.cog._generate_and_send(
             self.ctx, self.text, self.color, True, "glow", self.case_style
         )
-        await interaction.followup.send("✅ Generated emergency icon with glow!", ephemeral=True)
+        await interaction.followup.send("✅ Generated static emergency icon with glow!", ephemeral=True)
     
-    @discord.ui.button(label="Emergency (Border)", style=discord.ButtonStyle.danger, emoji="🔵")
+    @discord.ui.button(label="Static Border", style=discord.ButtonStyle.secondary, emoji="🔵", row=0)
     async def generate_emergency_border(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await self.cog._generate_and_send(
             self.ctx, self.text, self.color, True, "border", self.case_style
         )
-        await interaction.followup.send("✅ Generated emergency icon with border!", ephemeral=True)
+        await interaction.followup.send("✅ Generated static emergency icon with border!", ephemeral=True)
     
-    @discord.ui.button(label="Emergency (Both)", style=discord.ButtonStyle.danger, emoji="⚡")
-    async def generate_emergency_both(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        await self.cog._generate_and_send(
-            self.ctx, self.text, self.color, True, "both", self.case_style
-        )
-        await interaction.followup.send("✅ Generated emergency icon with glow + border!", ephemeral=True)
-    
-    @discord.ui.button(label="Emergency (Flash)", style=discord.ButtonStyle.danger, emoji="💥")
-    async def generate_emergency_flash(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Flash", style=discord.ButtonStyle.danger, emoji="⚡", row=1)
+    async def generate_flash(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         await self.cog._generate_and_send(
             self.ctx, self.text, self.color, True, "flash", self.case_style
         )
-        await interaction.followup.send("✅ Generated emergency icon with flash effect!", ephemeral=True)
+        await interaction.followup.send("✅ Generated APNG with flash animation!", ephemeral=True)
     
-    @discord.ui.button(label="Generate All", style=discord.ButtonStyle.success, emoji="📦")
+    @discord.ui.button(label="Pulse", style=discord.ButtonStyle.danger, emoji="💓", row=1)
+    async def generate_pulse(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await self.cog._generate_and_send(
+            self.ctx, self.text, self.color, True, "pulse", self.case_style
+        )
+        await interaction.followup.send("✅ Generated APNG with pulse animation!", ephemeral=True)
+    
+    @discord.ui.button(label="Strobe", style=discord.ButtonStyle.danger, emoji="⚠️", row=1)
+    async def generate_strobe(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await self.cog._generate_and_send(
+            self.ctx, self.text, self.color, True, "strobe", self.case_style
+        )
+        await interaction.followup.send("✅ Generated APNG with strobe animation!", ephemeral=True)
+    
+    @discord.ui.button(label="Rotate", style=discord.ButtonStyle.danger, emoji="🌈", row=2)
+    async def generate_rotate(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await self.cog._generate_and_send(
+            self.ctx, self.text, self.color, True, "rotate", self.case_style
+        )
+        await interaction.followup.send("✅ Generated APNG with rotate animation!", ephemeral=True)
+    
+    @discord.ui.button(label="Combo", style=discord.ButtonStyle.danger, emoji="💥", row=2)
+    async def generate_combo(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await self.cog._generate_and_send(
+            self.ctx, self.text, self.color, True, "combo", self.case_style
+        )
+        await interaction.followup.send("✅ Generated APNG with combo animation!", ephemeral=True)
+    
+    @discord.ui.button(label="Generate All", style=discord.ButtonStyle.success, emoji="📦", row=2)
     async def generate_all(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         
-        # Generate all 5 variants
+        # Generate all variants (static + animated)
         files = []
         generator = IconGenerator()
         
         variants = [
             ("normal", False, "glow"),
-            ("emergency_glow", True, "glow"),
-            ("emergency_border", True, "border"),
-            ("emergency_both", True, "both"),
-            ("emergency_flash", True, "flash")
+            ("static_glow", True, "glow"),
+            ("static_border", True, "border"),
+            ("anim_flash", True, "flash"),
+            ("anim_pulse", True, "pulse"),
+            ("anim_strobe", True, "strobe"),
+            ("anim_rotate", True, "rotate"),
+            ("anim_combo", True, "combo")
         ]
         
         for variant_name, emergency, style in variants:
@@ -108,16 +135,16 @@ class IconPreviewView(discord.ui.View):
                 emergency_style=style,
                 case_style=self.case_style
             )
+            # Use .png extension for all (APNG is still .png)
             filename = f"{self.text}_{variant_name}.png"
             files.append(discord.File(buffer, filename=filename))
         
-        await self.ctx.send(
-            f"**All variants for `{self.text}`:**",
-            files=files
-        )
-        await interaction.followup.send("✅ Generated all 5 variants!", ephemeral=True)
+        # Send in batches (Discord limit: 10 files per message)
+        await self.ctx.send(f"**All variants for `{self.text}` (Part 1/1):**", files=files[:8])
+        
+        await interaction.followup.send("✅ Generated all 8 variants (3 static + 5 animated)!", ephemeral=True)
     
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌", row=3)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         for item in self.children:
@@ -206,24 +233,26 @@ class IconGen(commands.Cog):
         text: str,
         color: str,
         emergency: Optional[bool] = False,
-        emergency_style: Optional[Literal["glow", "border", "both", "flash"]] = None,
+        emergency_style: Optional[Literal["glow", "border", "both", "flash", "pulse", "strobe", "rotate", "combo"]] = None,
         case: Optional[Literal["upper", "lower", "normal"]] = None
     ):
         """
-        Generate a single icon
+        Generate a single icon (static PNG or animated APNG)
         
         **Arguments:**
         - `text`: Text to display on the icon
         - `color`: Color preset (fire/police/ems/etc.) or hex code (#DC2626)
         - `emergency`: Whether to generate emergency variant (default: False)
-        - `emergency_style`: Emergency effect style - glow/border/both/flash (default: glow)
+        - `emergency_style`: Effect style (default: glow)
+          **Static:** glow, border, both
+          **Animated (APNG):** flash, pulse, strobe, rotate, combo
         - `case`: Text case - upper/lower/normal (default: upper)
         
         **Examples:**
-        - `[p]icon gen "ENGINE" fire`
-        - `[p]icon gen "TRUCK" #DC2626 true glow`
-        - `[p]icon gen "CHIEF" fire true flash`
-        - `[p]icon gen "patrol" police false glow lower`
+        - `[p]icon gen "ENGINE" fire` - Normal icon
+        - `[p]icon gen "TRUCK" fire true glow` - Static emergency
+        - `[p]icon gen "CHIEF" fire true flash` - Animated flash (APNG)
+        - `[p]icon gen "RESCUE" fire true pulse` - Animated pulse (APNG)
         """
         # Parse color
         hex_color, preset_name = self._parse_color(color)
@@ -245,9 +274,13 @@ class IconGen(commands.Cog):
         async with ctx.typing():
             await self._generate_and_send(ctx, text, hex_color, emergency, emergency_style, case)
         
-        variant = "emergency" if emergency else "normal"
+        # Determine output type
+        animated_styles = ["flash", "pulse", "strobe", "rotate", "combo"]
+        is_animated = emergency and emergency_style in animated_styles
+        
+        variant = "emergency (animated APNG)" if is_animated else ("emergency" if emergency else "normal")
         color_name = preset_name if preset_name else hex_color
-        await ctx.send(f"✅ Generated **{variant}** icon for `{text}` with color `{color_name}`")
+        await ctx.send(f"✅ Generated **{variant}** icon for `{text}` with color `{color_name}` and style `{emergency_style}`")
     
     @icon_group.command(name="preview")
     async def icon_preview(
@@ -491,11 +524,14 @@ class IconGen(commands.Cog):
         
         **Settings:**
         - `case`: Default text case (upper/lower/normal)
-        - `emergency_style`: Default emergency style (glow/border/both/flash)
+        - `emergency_style`: Default emergency style
+          Static: glow/border/both
+          Animated: flash/pulse/strobe/rotate/combo
         
         **Examples:**
         - `[p]icon config case upper`
         - `[p]icon config emergency_style flash`
+        - `[p]icon config emergency_style pulse`
         """
         if setting == "case":
             if value not in ["upper", "lower", "normal"]:
@@ -506,12 +542,16 @@ class IconGen(commands.Cog):
             await ctx.send(f"✅ Default text case set to: `{value}`")
         
         elif setting == "emergency_style":
-            if value not in ["glow", "border", "both", "flash"]:
-                await ctx.send("❌ Invalid value! Use: `glow`, `border`, `both`, or `flash`")
+            valid_styles = ["glow", "border", "both", "flash", "pulse", "strobe", "rotate", "combo"]
+            if value not in valid_styles:
+                await ctx.send(f"❌ Invalid value! Use one of: {', '.join(f'`{s}`' for s in valid_styles)}")
                 return
             
             await self.config.guild(ctx.guild).default_emergency_style.set(value)
-            await ctx.send(f"✅ Default emergency style set to: `{value}`")
+            
+            animated = value in ["flash", "pulse", "strobe", "rotate", "combo"]
+            style_type = "animated (APNG)" if animated else "static"
+            await ctx.send(f"✅ Default emergency style set to: `{value}` ({style_type})")
     
     @icon_group.command(name="settings")
     @commands.guild_only()
@@ -574,10 +614,26 @@ class IconGen(commands.Cog):
         embed.add_field(
             name="⚡ Emergency Styles",
             value=(
+                "**Static (PNG):**\n"
                 "`glow` - Strong glow effect\n"
                 "`border` - Thick colored border\n"
-                "`both` - Glow + border\n"
-                "`flash` - **MAXIMUM visibility** - bright flash effect!"
+                "`both` - Glow + border\n\n"
+                "**Animated (APNG):**\n"
+                "`flash` - Red-blue alternating (like police lights!)\n"
+                "`pulse` - Breathing glow effect\n"
+                "`strobe` - Hard strobe flash\n"
+                "`rotate` - Rainbow color rotation\n"
+                "`combo` - Strobe + pulse combined"
+            ),
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🎬 Animation Info",
+            value=(
+                "MissionChief supports APNG (animated PNG)!\n"
+                "Emergency icons can now have **real animations**.\n"
+                "Preview shows all options - pick the one you like!"
             ),
             inline=False
         )
