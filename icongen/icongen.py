@@ -109,34 +109,10 @@ class IconPreviewView(discord.ui.View):
                 emoji="🚑"
             ),
             discord.SelectOption(
-                label="Dual Color",
-                description="Red/blue split flash",
-                value="dual_color",
-                emoji="🔴"
-            ),
-            discord.SelectOption(
-                label="Rotating Beacon",
-                description="Classic rotating light",
-                value="rotating_beacon",
-                emoji="🔄"
-            ),
-            discord.SelectOption(
-                label="Wig-Wag",
-                description="Headlight alternating",
-                value="wig_wag",
-                emoji="💡"
-            ),
-            discord.SelectOption(
                 label="Triple Flash",
-                description="3 flashes + pause",
+                description="3 flashes + pause (priority)",
                 value="triple_flash",
                 emoji="⚡"
-            ),
-            discord.SelectOption(
-                label="Arrow Flash",
-                description="Directional traffic advisor",
-                value="arrow_flash",
-                emoji="➡️"
             ),
             discord.SelectOption(
                 label="Halo Pulse",
@@ -159,11 +135,7 @@ class IconPreviewView(discord.ui.View):
             "quad_flash": "Quad Flash",
             "strobe_pulse": "Strobe Pulse",
             "slow_fade": "Slow Fade",
-            "dual_color": "Dual Color",
-            "rotating_beacon": "Rotating Beacon",
-            "wig_wag": "Wig-Wag",
             "triple_flash": "Triple Flash",
-            "arrow_flash": "Arrow Flash",
             "halo_pulse": "Halo Pulse"
         }
         
@@ -191,11 +163,7 @@ class IconPreviewView(discord.ui.View):
             ("quad_flash", True, "quad_flash"),
             ("strobe_pulse", True, "strobe_pulse"),
             ("slow_fade", True, "slow_fade"),
-            ("dual_color", True, "dual_color"),
-            ("rotating_beacon", True, "rotating_beacon"),
-            ("wig_wag", True, "wig_wag"),
             ("triple_flash", True, "triple_flash"),
-            ("arrow_flash", True, "arrow_flash"),
             ("halo_pulse", True, "halo_pulse"),
         ]
         
@@ -237,15 +205,15 @@ class IconPreviewView(discord.ui.View):
         
         # Send animated files as ZIP
         await self.ctx.send(
-            f"**Animated icons for `{self.text}` (10 realistic emergency patterns):**\n"
+            f"**Animated icons for `{self.text}` (6 realistic emergency patterns):**\n"
             f"⚠️ Download the ZIP and extract! Discord compresses PNGs.",
             file=animated_zip
         )
         
         await interaction.followup.send(
-            "✅ Generated all 14 variants!\n"
+            "✅ Generated all 10 variants!\n"
             "- 4 static PNGs\n"
-            "- 10 animated APNGs (in ZIP)",
+            "- 6 animated APNGs (in ZIP)",
             ephemeral=True
         )
     
@@ -320,8 +288,7 @@ class IconGen(commands.Cog):
         # Check if it's an animated style
         animated_styles = [
             "classic_flash", "quad_flash", "strobe_pulse", "slow_fade",
-            "dual_color", "rotating_beacon", "wig_wag", "triple_flash",
-            "arrow_flash", "halo_pulse"
+            "triple_flash", "halo_pulse"
         ]
         is_animated = emergency and emergency_style in animated_styles
         
@@ -369,8 +336,7 @@ class IconGen(commands.Cog):
         emergency_style: Optional[Literal[
             "glow", "border", "both",
             "classic_flash", "quad_flash", "strobe_pulse", "slow_fade",
-            "dual_color", "rotating_beacon", "wig_wag", "triple_flash",
-            "arrow_flash", "halo_pulse"
+            "triple_flash", "halo_pulse"
         ]] = None,
         case: Optional[Literal["upper", "lower", "normal"]] = None
     ):
@@ -388,11 +354,7 @@ class IconGen(commands.Cog):
           - quad_flash: Four-burst pattern (2 left, 2 right)
           - strobe_pulse: Rapid police strobe
           - slow_fade: Smooth paramedic fade
-          - dual_color: Red/blue split flash
-          - rotating_beacon: Classic rotating light
-          - wig_wag: Headlight alternating
-          - triple_flash: 3 flashes + pause
-          - arrow_flash: Directional traffic advisor
+          - triple_flash: 3 flashes + pause (priority)
           - halo_pulse: Expanding halo effect
         - `case`: Text case - upper/lower/normal (default: upper)
         
@@ -609,8 +571,7 @@ class IconGen(commands.Cog):
         animated_files = {}
         animated_styles = [
             "classic_flash", "quad_flash", "strobe_pulse", "slow_fade",
-            "dual_color", "rotating_beacon", "wig_wag", "triple_flash",
-            "arrow_flash", "halo_pulse"
+            "triple_flash", "halo_pulse"
         ]
         
         for name, buffer in results.items():
@@ -731,8 +692,7 @@ class IconGen(commands.Cog):
             valid_styles = [
                 "glow", "border", "both",
                 "classic_flash", "quad_flash", "strobe_pulse", "slow_fade",
-                "dual_color", "rotating_beacon", "wig_wag", "triple_flash",
-                "arrow_flash", "halo_pulse"
+                "triple_flash", "halo_pulse"
             ]
             if value not in valid_styles:
                 await ctx.send(f"❌ Invalid value! Use one of: {', '.join(f'`{s}`' for s in valid_styles[:5])}... (see `{ctx.prefix}icon help` for all)")
@@ -742,8 +702,7 @@ class IconGen(commands.Cog):
             
             animated = value in [
                 "classic_flash", "quad_flash", "strobe_pulse", "slow_fade",
-                "dual_color", "rotating_beacon", "wig_wag", "triple_flash",
-                "arrow_flash", "halo_pulse"
+                "triple_flash", "halo_pulse"
             ]
             style_type = "animated (APNG)" if animated else "static"
             await ctx.send(f"✅ Default emergency style set to: `{value}` ({style_type})")
@@ -816,11 +775,7 @@ class IconGen(commands.Cog):
                 "⚡ `quad_flash` - Four-burst pattern (2L, 2R)\n"
                 "⚠️ `strobe_pulse` - Rapid police strobe\n"
                 "🚑 `slow_fade` - Smooth paramedic fade\n"
-                "🔴 `dual_color` - Red/blue split flash\n"
-                "🔄 `rotating_beacon` - Classic rotating light\n"
-                "💡 `wig_wag` - Headlight alternating\n"
-                "⚡ `triple_flash` - 3 flashes + pause\n"
-                "➡️ `arrow_flash` - Directional traffic advisor\n"
+                "⚡ `triple_flash` - 3 flashes + pause (priority)\n"
                 "⭕ `halo_pulse` - Expanding halo effect"
             ),
             inline=False
@@ -831,7 +786,7 @@ class IconGen(commands.Cog):
             value=(
                 "MissionChief supports APNG (animated PNG)!\n"
                 "Emergency icons can now have **realistic animations**.\n"
-                "Use preview dropdown to see all options!"
+                "Use preview dropdown to see all 6 options!"
             ),
             inline=False
         )
