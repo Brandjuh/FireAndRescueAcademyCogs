@@ -27,7 +27,7 @@ DEFAULTS = {
     "debug_mode": False,
     "debug_channel_id": None,
     "auto_approve": True,
-    "guild_id": None,  # NEW: Store which guild to use for multi-server bots
+    "guild_id": None,
 }
 
 def utcnow_iso() -> str:
@@ -45,7 +45,7 @@ def _mc_profile_url(mc_id: str) -> str:
 class MemberSync(commands.Cog):
     """Synchronises Missionchief members with Discord and handles verification workflow."""
 
-    __version__ = "2.1.0"
+    __version__ = "2.1.1"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -75,7 +75,6 @@ class MemberSync(commands.Cog):
 
     async def _debug_log(self, message: str, level: str = "info") -> None:
         """Log debug messages to both console and Discord if debug mode is enabled"""
-        # Always log to console
         if level == "error":
             log.error(message)
         elif level == "warning":
@@ -83,7 +82,6 @@ class MemberSync(commands.Cog):
         else:
             log.info(message)
         
-        # Send to Discord if debug mode enabled
         if await self.config.debug_mode():
             debug_ch_id = await self.config.debug_channel_id()
             if debug_ch_id:
@@ -123,7 +121,6 @@ class MemberSync(commands.Cog):
         """Try to find the alliance database automatically"""
         base = pathlib.Path.home() / ".local" / "share" / "Red-DiscordBot" / "data"
         
-        # First try V2 database
         for inst in base.iterdir():
             if not inst.is_dir():
                 continue
@@ -132,7 +129,6 @@ class MemberSync(commands.Cog):
                 log.info(f"Found V2 database: {p}")
                 return p
         
-        # Fall back to legacy database
         for inst in base.iterdir():
             if not inst.is_dir():
                 continue
@@ -208,9 +204,7 @@ class MemberSync(commands.Cog):
 
         await self._debug_log(f"Searching for member: name='{candidate_name}', mc_id='{mcid}'")
 
-        # Try by MC ID first (most reliable)
         if mcid:
-            # Try user_id column
             rows = await self._query_alliance("SELECT * FROM members_current WHERE user_id=?", (mcid,))
             if rows:
                 r = dict(rows[0])
@@ -218,7 +212,6 @@ class MemberSync(commands.Cog):
                 await self._debug_log(f"Found by user_id: {r.get('name', 'Unknown')}")
                 return r
             
-            # Try mc_user_id column
             rows = await self._query_alliance("SELECT * FROM members_current WHERE mc_user_id=?", (mcid,))
             if rows:
                 r = dict(rows[0])
@@ -226,7 +219,6 @@ class MemberSync(commands.Cog):
                 await self._debug_log(f"Found by mc_user_id: {r.get('name', 'Unknown')}")
                 return r
             
-            # Try profile_href
             rows = await self._query_alliance("SELECT * FROM members_current WHERE profile_href LIKE ?", (f"%/users/{mcid}",))
             if rows:
                 r = dict(rows[0])
@@ -236,12 +228,10 @@ class MemberSync(commands.Cog):
             
             await self._debug_log(f"MC ID {mcid} not found in database", "warning")
 
-        # Try by name (less reliable, but useful for auto-match)
         if name:
             rows = await self._query_alliance("SELECT * FROM members_current WHERE lower(name)=?", (name,))
             if rows:
                 r = dict(rows[0])
-                # Extract MC ID from row
                 mc = r.get("user_id") or r.get("mc_user_id")
                 if not mc:
                     href = r.get("profile_href") or ""
@@ -324,7 +314,7 @@ class MemberSync(commands.Cog):
                     member,
                     str(mc_id) if mc_id else "",
                     approver=interaction.user if isinstance(interaction.user, discord.Member) else None,
-                    manual=True  # Manual approval from button
+                    manual=True
                 )
             
                 try:
@@ -382,16 +372,7 @@ class MemberSync(commands.Cog):
             return None
 
     async def _approve_link(self, guild: discord.Guild, user: discord.Member, mc_id: str, approver: Optional[discord.Member]=None, manual: bool = False) -> Tuple[bool, str]:
-        """
-        Approve a verification link
-        
-        Args:
-            guild: Discord guild
-            user: Member to approve
-            mc_id: MissionChief user ID
-            approver: Member who approved (None for auto-approve)
-            manual: True if manual approval, False if auto-approve
-        """
+        """Approve a verification link"""
         try:
             await self._debug_log(f"{'Manual' if manual else 'Auto'} approval: Discord {user.id} -> MC {mc_id}")
             
@@ -415,7 +396,6 @@ class MemberSync(commands.Cog):
                     con.close()
             await asyncio.get_running_loop().run_in_executor(None, _run)
 
-            # Grant role
             if role and role not in user.roles:
                 try:
                     await user.add_roles(role, reason=f"MemberSync {'manual' if manual else 'auto'} verified")
@@ -423,13 +403,11 @@ class MemberSync(commands.Cog):
                 except Exception as e:
                     await self._debug_log(f"Failed to grant role: {e}", "error")
 
-            # DM user
             try:
                 await user.send(f"✅ Your MissionChief account `{mc_id}` has been verified and linked to your Discord account!")
             except Exception as e:
                 await self._debug_log(f"Could not DM user: {e}", "warning")
 
-            # Log to log channel ONLY for manual approvals
             if manual:
                 log_ch_id = await self.config.log_channel_id()
                 ch = guild.get_channel(int(log_ch_id)) if log_ch_id else None
@@ -467,13 +445,11 @@ class MemberSync(commands.Cog):
                     con.close()
             await asyncio.get_running_loop().run_in_executor(None, _run)
 
-            # DM user
             try:
                 await user.send(f"❌ Your verification for MC `{mc_id}` was denied. Reason: {reason}")
             except Exception:
                 pass
 
-            # Log
             log_ch_id = await self.config.log_channel_id()
             ch = guild.get_channel(int(log_ch_id)) if log_ch_id else None
             if isinstance(ch, discord.TextChannel):
@@ -496,7 +472,7 @@ class MemberSync(commands.Cog):
             except Exception as e:
                 log.exception("Queue loop error: %s", e)
                 await self._debug_log(f"Queue loop error: {e}", "error")
-            await asyncio.sleep(120)  # Check every 2 minutes
+            await asyncio.sleep(120)
 
     async def _process_queue_once(self):
         """Process verification queue once"""
@@ -506,10 +482,8 @@ class MemberSync(commands.Cog):
         
         await self._debug_log(f"Processing queue ({len(queue)} items)")
         
-        # Get the configured guild
         guild_id = await self.config.guild_id()
         if not guild_id:
-            # Fallback: use first guild if not configured
             guild = self.bot.guilds[0] if self.bot.guilds else None
             if guild:
                 await self.config.guild_id.set(guild.id)
@@ -530,7 +504,6 @@ class MemberSync(commands.Cog):
                 attempts = int(data.get("attempts", 0))
                 mc_id = data.get("mc_id")
                 
-                # Use guild_id from queue data if available, otherwise use configured guild
                 queue_guild_id = data.get("guild_id")
                 if queue_guild_id:
                     user_guild = self.bot.get_guild(int(queue_guild_id))
@@ -546,21 +519,18 @@ class MemberSync(commands.Cog):
 
                 await self._debug_log(f"Processing queue item: {discord_user.name} (attempt {attempts + 1})")
 
-                # Try to find member
                 cand = await self._find_member_in_db(discord_user.nick or discord_user.name, mc_id)
                 
                 if cand and cand.get("mc_id"):
-                    # Found!
                     await self._debug_log(f"✅ Found {discord_user.name} in database")
                     
                     if auto_approve_enabled:
-                        # AUTO-APPROVE: Grant role immediately
                         ok, msg = await self._approve_link(
                             guild,
                             discord_user,
                             str(cand["mc_id"]),
-                            approver=None,  # No approver for auto-approve
-                            manual=False    # This is auto-approve
+                            approver=None,
+                            manual=False
                         )
                         
                         if ok:
@@ -570,7 +540,6 @@ class MemberSync(commands.Cog):
                         
                         done.append(user_id)
                     else:
-                        # MANUAL MODE: Send review embed
                         msg_id = await self._send_review_embed(
                             guild, 
                             discord_user, 
@@ -597,14 +566,12 @@ class MemberSync(commands.Cog):
                     
                     continue
 
-                # Not found yet, increment attempts
                 attempts += 1
                 data["attempts"] = attempts
                 queue[user_id] = data
                 
                 await self._debug_log(f"Member not found yet, attempt {attempts}/30")
 
-                # Give up after 30 attempts (1 hour)
                 if attempts >= 30:
                     try:
                         failure_msg = (
@@ -629,7 +596,6 @@ class MemberSync(commands.Cog):
                 await self._debug_log(f"Error processing queue item {user_id}: {e}", "error")
                 log.exception(f"Error processing queue item {user_id}")
 
-        # Remove completed items from queue
         if done:
             for uid in done:
                 queue.pop(uid, None)
@@ -649,7 +615,6 @@ class MemberSync(commands.Cog):
         
         embed = discord.Embed(title="MemberSync Status", color=discord.Color.blue())
         
-        # Guild info
         guild_id = cfg.get('guild_id')
         if guild_id:
             guild = self.bot.get_guild(int(guild_id))
@@ -658,17 +623,14 @@ class MemberSync(commands.Cog):
             guild_name = "⚠️ Not configured (will use first guild)"
         embed.add_field(name="Configured Guild", value=guild_name, inline=False)
         
-        # Database info
         db_path = cfg['alliance_db_path']
         embed.add_field(name="Alliance DB", value=f"`{db_path}`" if db_path else "❌ Not configured", inline=False)
         
-        # Channels
         review_ch = ctx.guild.get_channel(int(cfg['review_channel_id'])) if cfg['review_channel_id'] else None
         log_ch = ctx.guild.get_channel(int(cfg['log_channel_id'])) if cfg['log_channel_id'] else None
         embed.add_field(name="Review Channel", value=review_ch.mention if review_ch else f"❌ {cfg['review_channel_id']}", inline=True)
         embed.add_field(name="Log Channel", value=log_ch.mention if log_ch else f"❌ {cfg['log_channel_id']}", inline=True)
         
-        # Roles
         verified_role = ctx.guild.get_role(int(cfg['verified_role_id'])) if cfg['verified_role_id'] else None
         embed.add_field(name="Verified Role", value=verified_role.mention if verified_role else f"❌ {cfg['verified_role_id']}", inline=True)
         
@@ -679,21 +641,17 @@ class MemberSync(commands.Cog):
                 reviewer_roles.append(r.mention)
         embed.add_field(name="Reviewer Roles", value=", ".join(reviewer_roles) if reviewer_roles else "None", inline=False)
         
-        # Auto-approve status
         auto_approve = cfg.get('auto_approve', True)
         auto_status = "✅ **Enabled** (Automatic verification)" if auto_approve else "❌ **Disabled** (Manual review required)"
         embed.add_field(name="Auto-Approve", value=auto_status, inline=False)
         
-        # Queue
         queue_size = len(cfg.get('queue', {}))
         embed.add_field(name="Queue Size", value=f"{queue_size} pending", inline=True)
         embed.add_field(name="Cooldown", value=f"{cfg['cooldown_seconds']}s", inline=True)
         
-        # Debug mode
         debug_status = "✅ Enabled" if cfg.get('debug_mode', False) else "❌ Disabled"
         embed.add_field(name="Debug Mode", value=debug_status, inline=True)
         
-        # Link stats
         def _get_stats():
             con = sqlite3.connect(self.links_db)
             try:
@@ -718,16 +676,7 @@ class MemberSync(commands.Cog):
 
     @membersync_group.command(name="autoapprove")
     async def autoapprove_toggle(self, ctx: commands.Context, enabled: bool):
-        """
-        Toggle automatic approval of verifications.
-        
-        When enabled (default): Members are automatically verified when found in the roster.
-        When disabled: Manual review is required for all verifications.
-        
-        Examples:
-        [p]membersync autoapprove true  - Enable auto-approve
-        [p]membersync autoapprove false - Require manual review
-        """
+        """Toggle automatic approval of verifications."""
         await self.config.auto_approve.set(enabled)
         
         if enabled:
@@ -744,6 +693,54 @@ class MemberSync(commands.Cog):
                 "Review requests will be sent to the review channel for approval."
             )
             await self._debug_log(f"Auto-approve disabled by {ctx.author.name}")
+
+    @membersync_group.command(name="prune")
+    async def manual_prune(self, ctx: commands.Context):
+        """Manually run the prune check to remove Verified role from members who left the alliance."""
+        msg = await ctx.send("🔄 Running prune check...")
+        
+        try:
+            await self._prune_once()
+            await msg.edit(content="✅ Prune check completed! Check the log channel for details.")
+        except Exception as e:
+            await msg.edit(content=f"❌ Prune check failed: {e}")
+            log.exception("Manual prune error")
+
+    @membersync_group.command(name="checkprune")
+    async def check_prune(self, ctx: commands.Context, member: discord.Member):
+        """Check if a specific member should be pruned (are they still in the alliance?)."""
+        link = await self.get_link_for_discord(member.id)
+        if not link:
+            await ctx.send(f"❌ {member.mention} is not linked to any MC account.")
+            return
+        
+        mc_id = link['mc_user_id']
+        
+        rows = await self._query_alliance(
+            "SELECT * FROM members_current WHERE user_id=? OR mc_user_id=? OR profile_href LIKE ?", 
+            (mc_id, mc_id, f"%/users/{mc_id}")
+        )
+        
+        if rows:
+            embed = discord.Embed(
+                title="✅ Member is in alliance",
+                description=f"{member.mention} is still in the alliance roster.",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="MC ID", value=mc_id, inline=True)
+            embed.add_field(name="MC Name", value=rows[0]['name'], inline=True)
+            embed.add_field(name="Status", value="Should keep Verified role", inline=False)
+        else:
+            embed = discord.Embed(
+                title="⚠️ Member NOT in alliance",
+                description=f"{member.mention} is NOT in the current alliance roster.",
+                color=discord.Color.orange()
+            )
+            embed.add_field(name="MC ID", value=mc_id, inline=True)
+            embed.add_field(name="Status", value="Should be pruned", inline=False)
+            embed.add_field(name="Action", value="Run `!membersync prune` to remove the role", inline=False)
+        
+        await ctx.send(embed=embed)
 
     @membersync_group.group(name="queue")
     async def queue_group(self, ctx: commands.Context):
@@ -765,7 +762,7 @@ class MemberSync(commands.Cog):
             timestamp=datetime.utcnow()
         )
         
-        for user_id, data in list(queue.items())[:25]:  # Max 25 fields
+        for user_id, data in list(queue.items())[:25]:
             member = ctx.guild.get_member(int(user_id))
             if member:
                 name = f"{member.name} ({member.nick or 'No nickname'})"
@@ -865,9 +862,13 @@ class MemberSync(commands.Cog):
 
     @config_group.command(name="setguild")
     async def setguild(self, ctx: commands.Context):
-        """Set this server as the guild for MemberSync operations (IMPORTANT for multi-server bots)."""
+        """Set this server as the guild for MemberSync operations (CRITICAL for multi-server bots)."""
         await self.config.guild_id.set(ctx.guild.id)
-        await ctx.send(f"✅ MemberSync will now operate in **{ctx.guild.name}**\n\n**Note:** This is critical for bots in multiple servers!")
+        await ctx.send(
+            f"✅ **MemberSync guild set to {ctx.guild.name}**\n\n"
+            f"**IMPORTANT:** All verification and prune operations will now only affect this server.\n"
+            f"This is critical for bots in multiple Discord servers!"
+        )
         await self._debug_log(f"Guild set to {ctx.guild.name} ({ctx.guild.id})")
 
     @config_group.command(name="setreviewchannel")
@@ -920,7 +921,6 @@ class MemberSync(commands.Cog):
             await ctx.send("❌ This can only be used in a server.")
             return
 
-        # Check if already verified
         link = await self.get_link_for_discord(ctx.author.id)
         if link:
             role_id = await self.config.verified_role_id()
@@ -937,19 +937,17 @@ class MemberSync(commands.Cog):
         await ctx.send("🔍 Looking you up in the roster... this may take a moment.")
         await self._debug_log(f"Verification request from {ctx.author.name} (nick: {name}, MC ID: {mc_id})")
 
-        # Try to find immediately
         cand = await self._find_member_in_db(name, mc_id)
         auto_approve_enabled = await self.config.auto_approve()
         
         if cand and cand.get("mc_id"):
             if auto_approve_enabled:
-                # AUTO-APPROVE: Grant role immediately
                 ok, msg = await self._approve_link(
                     ctx.guild,
                     ctx.author,
                     str(cand["mc_id"]),
-                    approver=None,  # No approver for auto-approve
-                    manual=False    # This is auto-approve
+                    approver=None,
+                    manual=False
                 )
                 
                 if ok:
@@ -959,7 +957,6 @@ class MemberSync(commands.Cog):
                     await ctx.send(f"⚠️ Found you, but failed to complete verification: {msg}")
                 return
             else:
-                # MANUAL MODE: Send review embed
                 rid = await self._send_review_embed(ctx.guild, ctx.author, str(cand["mc_id"]), str(cand.get("name") or name))
                 if rid:
                     await ctx.send("✅ Found you! A reviewer will approve or deny your verification shortly.")
@@ -968,7 +965,6 @@ class MemberSync(commands.Cog):
                     await ctx.send("⚠️ Found you, but failed to send review request. Please contact an administrator.")
                 return
 
-        # Not found, add to queue
         q = await self.config.queue()
         q[str(ctx.author.id)] = {
             "attempts": 0,
@@ -1075,26 +1071,14 @@ class MemberSync(commands.Cog):
 
     @membersync_group.command(name="approve")
     async def cmd_approve(self, ctx: commands.Context, target: str, mc_id: Optional[str] = None):
-        """
-        Manually approve a verification request.
-        
-        target: Discord user mention, ID, or MC-ID
-        mc_id: MC-ID (optional if target is a Discord user)
-        
-        Examples:
-        [p]membersync approve @User 318565
-        [p]membersync approve 123456789012345678 318565
-        [p]membersync approve 318565 (approves by MC-ID if link exists)
-        """
+        """Manually approve a verification request."""
         if not await self._user_is_reviewer(ctx.author):
             await ctx.send("❌ You are not allowed to approve verifications.")
             return
         
-        # Try to parse target as Discord user
         member = None
         target_mc_id = mc_id
         
-        # Check if target is a mention or ID
         if target.startswith("<@") and target.endswith(">"):
             user_id = int(target.strip("<@!>"))
             member = ctx.guild.get_member(user_id)
@@ -1132,17 +1116,7 @@ class MemberSync(commands.Cog):
 
     @membersync_group.command(name="deny")
     async def cmd_deny(self, ctx: commands.Context, target: str, *, reason: str = "No reason provided"):
-        """
-        Manually deny a verification request.
-        
-        target: Discord user mention, ID, or MC-ID  
-        reason: Reason for denial
-        
-        Examples:
-        [p]membersync deny @User Not in alliance
-        [p]membersync deny 123456789012345678 Account mismatch
-        [p]membersync deny 318565 Duplicate account
-        """
+        """Manually deny a verification request."""
         if not await self._user_is_reviewer(ctx.author):
             await ctx.send("❌ You are not allowed to deny verifications.")
             return
@@ -1195,24 +1169,25 @@ class MemberSync(commands.Cog):
 
     async def _prune_once(self):
         """Remove verified role from members who are no longer in the alliance"""
-        # Get the configured guild
         guild_id = await self.config.guild_id()
         if not guild_id:
             guild = self.bot.guilds[0] if self.bot.guilds else None
             if guild:
                 await self.config.guild_id.set(guild.id)
+                await self._debug_log(f"Auto-configured guild for prune: {guild.name} ({guild.id})")
         else:
             guild = self.bot.get_guild(int(guild_id))
         
         if not guild:
+            await self._debug_log("No guild available for prune", "warning")
             return
         
         role_id = await self.config.verified_role_id()
         role = guild.get_role(int(role_id)) if role_id else None
         if not role:
+            await self._debug_log("Verified role not found for prune", "warning")
             return
 
-        # Get current alliance member IDs
         rows = await self._query_alliance("SELECT user_id, mc_user_id, profile_href FROM members_current")
         current_ids: set[str] = set()
         for r in rows:
@@ -1226,7 +1201,6 @@ class MemberSync(commands.Cog):
             if mc:
                 current_ids.add(str(mc))
 
-        # Get all approved links
         def _run():
             con = sqlite3.connect(self.links_db)
             con.row_factory = sqlite3.Row
