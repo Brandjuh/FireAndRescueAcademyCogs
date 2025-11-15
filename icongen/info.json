@@ -1,0 +1,13 @@
+{
+    "author": ["Brandjuhnl"],
+    "description": "Generate custom vehicle icons for MissionChief with emergency variants",
+    "install_msg": "Thanks for installing IconGen! Use `[p]iconhelp` to get started.",
+    "short": "Generate MissionChief vehicle icons",
+    "name": "IconGen",
+    "tags": ["missionchief", "icons", "images", "generator"],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores user configuration preferences (default text case, emergency style). No personal data is collected.",
+    "required_cogs": {},
+    "requirements": ["Pillow>=10.0.0"],
+    "min_bot_version": "3.5.0"
+}
