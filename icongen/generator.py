@@ -7,7 +7,7 @@ import io
 from typing import Tuple, Literal, List
 from .presets import hex_to_rgb
 try:
-    from apng import APNG
+    from apng import APNG, PNG
     APNG_AVAILABLE = True
 except ImportError:
     APNG_AVAILABLE = False
@@ -541,22 +541,27 @@ class IconGenerator:
     
     def _create_apng(self, frames: List[Image.Image], delays: List[int]) -> io.BytesIO:
         """Create an APNG from frames"""
-        # Save frames as temporary PNGs
-        frame_buffers = []
+        # Convert PIL Images to PNG objects
+        png_frames = []
         for frame in frames:
+            # Save frame to bytes
             buffer = io.BytesIO()
             frame.save(buffer, format='PNG')
-            buffer.seek(0)
-            frame_buffers.append(buffer)
+            png_data = buffer.getvalue()
+            
+            # Create PNG object from bytes
+            png = PNG.from_bytes(png_data)
+            png_frames.append(png)
         
-        # Create APNG
+        # Create APNG with frames
         apng = APNG()
-        for buffer, delay in zip(frame_buffers, delays):
-            apng.append_file(buffer, delay=delay)
+        for png, delay in zip(png_frames, delays):
+            apng.append(png, delay=delay)
         
         # Save to BytesIO
         output = io.BytesIO()
-        apng.save(output)
+        apng_bytes = apng.to_bytes()
+        output.write(apng_bytes)
         output.seek(0)
         
         return output
