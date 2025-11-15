@@ -7,6 +7,8 @@ from redbot.core import commands, Config
 from redbot.core.utils.chat_formatting import box, pagify
 from typing import Literal, Optional
 import re
+import io
+import zipfile
 
 from .generator import IconGenerator
 from .presets import get_preset, get_all_presets, is_valid_preset, hex_to_rgb
@@ -113,13 +115,15 @@ class IconPreviewView(discord.ui.View):
         await interaction.response.defer()
         
         # Generate all variants (static + animated)
-        files = []
         generator = IconGenerator()
         
-        variants = [
+        static_variants = [
             ("normal", False, "glow"),
             ("static_glow", True, "glow"),
             ("static_border", True, "border"),
+        ]
+        
+        animated_variants = [
             ("anim_flash", True, "flash"),
             ("anim_pulse", True, "pulse"),
             ("anim_strobe", True, "strobe"),
@@ -127,7 +131,9 @@ class IconPreviewView(discord.ui.View):
             ("anim_combo", True, "combo")
         ]
         
-        for variant_name, emergency, style in variants:
+        # Generate static files
+        static_files = []
+        for variant_name, emergency, style in static_variants:
             buffer = generator.generate_icon(
                 text=self.text,
                 color=self.color,
@@ -135,14 +141,45 @@ class IconPreviewView(discord.ui.View):
                 emergency_style=style,
                 case_style=self.case_style
             )
-            # Use .png extension for all (APNG is still .png)
             filename = f"{self.text}_{variant_name}.png"
-            files.append(discord.File(buffer, filename=filename))
+            static_files.append(discord.File(buffer, filename=filename))
         
-        # Send in batches (Discord limit: 10 files per message)
-        await self.ctx.send(f"**All variants for `{self.text}` (Part 1/1):**", files=files[:8])
+        # Generate animated files and ZIP them
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for variant_name, emergency, style in animated_variants:
+                buffer = generator.generate_icon(
+                    text=self.text,
+                    color=self.color,
+                    emergency=emergency,
+                    emergency_style=style,
+                    case_style=self.case_style
+                )
+                filename = f"{self.text}_{variant_name}.png"
+                zip_file.writestr(filename, buffer.read())
         
-        await interaction.followup.send("✅ Generated all 8 variants (3 static + 5 animated)!", ephemeral=True)
+        zip_buffer.seek(0)
+        animated_zip = discord.File(zip_buffer, filename=f"{self.text}_animated.zip")
+        
+        # Send static files
+        await self.ctx.send(
+            f"**Static icons for `{self.text}`:**",
+            files=static_files
+        )
+        
+        # Send animated files as ZIP
+        await self.ctx.send(
+            f"**Animated icons for `{self.text}` (APNG):**\n"
+            f"⚠️ Download the ZIP and extract! Discord comprimeert PNGs.",
+            file=animated_zip
+        )
+        
+        await interaction.followup.send(
+            "✅ Generated all 8 variants!\n"
+            "- 3 static PNGs\n"
+            "- 5 animated APNGs (in ZIP)",
+            ephemeral=True
+        )
     
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌", row=3)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -212,13 +249,37 @@ class IconGen(commands.Cog):
             case_style=case_style
         )
         
+        # Check if it's an animated style
+        animated_styles = ["flash", "pulse", "strobe", "rotate", "combo"]
+        is_animated = emergency and emergency_style in animated_styles
+        
         # Create filename
         emergency_suffix = "emergency" if emergency else "normal"
         style_suffix = f"_{emergency_style}" if emergency else ""
-        filename = f"{text}_{emergency_suffix}{style_suffix}.png"
+        base_filename = f"{text}_{emergency_suffix}{style_suffix}"
         
-        file = discord.File(buffer, filename=filename)
-        await ctx.send(file=file)
+        if is_animated:
+            # ZIP animated files so Discord doesn't compress/convert them
+            import zipfile
+            import tempfile
+            
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                zip_file.writestr(f"{base_filename}.png", buffer.read())
+            
+            zip_buffer.seek(0)
+            file = discord.File(zip_buffer, filename=f"{base_filename}.zip")
+            
+            await ctx.send(
+                f"⚠️ **APNG Animatie** - Download de ZIP en pak uit! "
+                f"(Discord comprimeert PNGs en vernietigt de animatie)",
+                file=file
+            )
+        else:
+            # Static images can be sent directly
+            filename = f"{base_filename}.png"
+            file = discord.File(buffer, filename=filename)
+            await ctx.send(file=file)
     
     @commands.group(name="icon", aliases=["icongen"])
     async def icon_group(self, ctx: commands.Context):
@@ -456,15 +517,49 @@ class IconGen(commands.Cog):
             case_style = await self.config.guild(ctx.guild).default_case() if ctx.guild else "upper"
             results = self.generator.generate_batch(icons, case_style=case_style)
         
-        # Send icons in batches (Discord limit: 10 files per message)
-        files = [discord.File(buffer, filename=name) for name, buffer in results.items()]
+        # Separate static and animated icons
+        static_files = []
+        animated_files = {}
+        animated_styles = ["flash", "pulse", "strobe", "rotate", "combo"]
         
-        batch_size = 10
-        for i in range(0, len(files), batch_size):
-            batch = files[i:i + batch_size]
-            await ctx.send(files=batch)
+        for name, buffer in results.items():
+            # Check if filename contains animated style
+            is_animated = any(style in name.lower() for style in animated_styles)
+            
+            if is_animated:
+                animated_files[name] = buffer
+            else:
+                static_files.append(discord.File(buffer, filename=name))
         
-        await ctx.send(f"✅ Generated **{len(results)}** icons successfully!")
+        # Send static icons in batches (Discord limit: 10 files per message)
+        if static_files:
+            batch_size = 10
+            for i in range(0, len(static_files), batch_size):
+                batch = static_files[i:i + batch_size]
+                await ctx.send(f"**Static icons (batch {i//batch_size + 1}):**", files=batch)
+        
+        # Send animated icons as ZIP
+        if animated_files:
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                for name, buffer in animated_files.items():
+                    zip_file.writestr(name, buffer.read())
+            
+            zip_buffer.seek(0)
+            zip_file_obj = discord.File(zip_buffer, filename="animated_icons.zip")
+            
+            await ctx.send(
+                f"**Animated icons ({len(animated_files)} APNGs):**\n"
+                f"⚠️ Download the ZIP and extract! Discord comprimeert PNGs en vernietigt animaties.",
+                file=zip_file_obj
+            )
+        
+        total_count = len(static_files) + len(animated_files)
+        await ctx.send(
+            f"✅ Generated **{total_count}** icons successfully!\n"
+            f"- {len(static_files)} static PNGs\n"
+            f"- {len(animated_files)} animated APNGs (in ZIP)"
+        )
         
         if errors:
             error_msg = "\n".join(errors[:10])
