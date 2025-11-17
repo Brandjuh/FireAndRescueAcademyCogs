@@ -9,6 +9,8 @@ UPDATED: Enhanced contribution monitoring with:
 - 4 consecutive checks requirement
 - Automatic note creation
 - Alert channel notifications
+
+🔧 FIXED: Now uses format_historical_trend() for list of rates
 """
 
 import asyncio
@@ -19,7 +21,7 @@ from typing import Optional, Dict, Any, List
 import discord
 import aiosqlite
 
-from .utils import calculate_contribution_trend, format_contribution_trend
+from .utils import calculate_contribution_trend, format_historical_trend  # 🔧 FIXED IMPORT
 
 log = logging.getLogger("red.FARA.MemberManager.automation")
 
@@ -329,8 +331,8 @@ class ContributionMonitor:
             log.error(f"Alert channel {alert_channel_id} not found")
             return False
         
-        # Calculate trend
-        trend_info = format_contribution_trend(historical_rates) if historical_rates else "Unknown"
+        # 🔧 FIXED: Use format_historical_trend() for list of rates
+        trend_info = format_historical_trend(historical_rates) if historical_rates else "Unknown"
         
         # Build alert embed
         embed = discord.Embed(
