@@ -7,8 +7,9 @@ Integrates with:
 - AllianceScraper: MC member data, contributions, logs
 - Red's modlog: Discord infractions
 
-VERSION: 2.2.0
-NEW: Contribution check debug command with dry-run mode
+VERSION: 2.2.1
+FIXED: Grace period fallback to first scrape date
+FIXED: Historical rates now correctly query members_v2.db
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ from .config_commands import ConfigCommands
 
 log = logging.getLogger("red.FARA.MemberManager")
 
-__version__ = "2.2.0"
+__version__ = "2.2.1"
 
 DEFAULTS = {
     "contribution_threshold": 5.0,
@@ -569,7 +570,7 @@ class MemberManager(ConfigCommands, commands.Cog):
         
         await ctx.typing()
         
-        # Check if AllianceScraper is available
+        # Check if MembersScraper is available
         if not self.members_scraper:
             await ctx.send(
                 "❌ **MembersScraper not available**\n"
@@ -665,19 +666,42 @@ class MemberManager(ConfigCommands, commands.Cog):
         check1_pass = current_rate < threshold
         checks.append(f"{'✅' if check1_pass else '❌'} **Below threshold** ({current_rate:.1f}% < {threshold}%)")
         
-        # Check 2: Grace period
+        # Check 2: Grace period (🔧 FIXED: Now with fallback)
         join_date = await self._get_join_date_for_member(mc_id, mc_name, logs_scraper)
         check2_pass = True
+        grace_source = "unknown"
         
         if join_date:
             days_in_alliance = (datetime.now(timezone.utc) - join_date).days
             check2_pass = days_in_alliance >= 7
+            
+            # Determine source
+            if logs_scraper:
+                # Try to verify it came from LogsScraper
+                try:
+                    import aiosqlite
+                    db_path = logs_scraper.db_path
+                    if db_path.exists():
+                        async with aiosqlite.connect(db_path) as db:
+                            cursor = await db.execute(
+                                "SELECT COUNT(*) FROM logs WHERE (affected_mc_id = ? OR affected_name = ?) AND action_key = 'added_to_alliance'",
+                                (mc_id, mc_name)
+                            )
+                            count = (await cursor.fetchone())[0]
+                            grace_source = "LogsScraper" if count > 0 else "first scrape (fallback)"
+                except:
+                    grace_source = "first scrape (fallback)"
+            else:
+                grace_source = "first scrape (fallback)"
+            
             checks.append(
                 f"{'✅' if check2_pass else '❌'} **Grace period** "
-                f"({days_in_alliance} days in alliance, need 7+)"
+                f"({days_in_alliance} days in alliance, need 7+)\n"
+                f"  *Source: {grace_source}*"
             )
         else:
-            checks.append("⚠️ **Grace period** (join date unknown, assuming pass)")
+            checks.append("⚠️ **Grace period** (no data found, FAILING check)")
+            check2_pass = False
         
         # Check 3: Cooldown
         last_alert_time = self.contribution_monitor._last_alerts.get(mc_id, 0) if self.contribution_monitor else 0
@@ -693,7 +717,7 @@ class MemberManager(ConfigCommands, commands.Cog):
                 f"({days_since_alert:.1f} days since last alert, need 7+)"
             )
         
-        # Check 4: Historical consistency
+        # Check 4: Historical consistency (🔧 FIXED: Now queries members_v2.db)
         historical_rates = await self._get_historical_rates_for_member(mc_id)
         check4_pass = False
         
@@ -736,10 +760,27 @@ class MemberManager(ConfigCommands, commands.Cog):
         if historical_rates:
             trend_str = " → ".join(f"{r:.1f}%" for r in historical_rates[:8])
             embed.add_field(
-                name="📈 Historical Trend (last 8 checks)",
+                name=f"📈 Historical Trend (last {len(historical_rates[:8])} checks)",
                 value=trend_str,
                 inline=False
             )
+        
+        # Debug info
+        debug_info = [
+            f"**MembersScraper DB:** `{self.members_scraper.db_path}`",
+            f"**Historical checks found:** {len(historical_rates)}"
+        ]
+        
+        if logs_scraper:
+            debug_info.append(f"**LogsScraper DB:** `{logs_scraper.db_path}`")
+        else:
+            debug_info.append("**LogsScraper:** ❌ Not available")
+        
+        embed.add_field(
+            name="🔧 Debug Info",
+            value="\n".join(debug_info),
+            inline=False
+        )
         
         # Force alert option
         if force_alert and all_pass:
@@ -846,7 +887,7 @@ class MemberManager(ConfigCommands, commands.Cog):
                 })
                 continue
             
-            # Check 2: Grace period
+            # Check 2: Grace period (🔧 FIXED)
             join_date = await self._get_join_date_for_member(mc_id, mc_name, logs_scraper)
             if join_date:
                 days_in_alliance = (datetime.now(timezone.utc) - join_date).days
@@ -858,6 +899,16 @@ class MemberManager(ConfigCommands, commands.Cog):
                         "days": days_in_alliance
                     })
                     continue
+            else:
+                # No join date found - skip this member
+                skipped_grace.append({
+                    "mc_id": mc_id,
+                    "mc_name": mc_name,
+                    "rate": current_rate,
+                    "days": 0,
+                    "no_data": True
+                })
+                continue
             
             # Check 3: Cooldown
             last_alert_time = self.contribution_monitor._last_alerts.get(mc_id, 0) if self.contribution_monitor else 0
@@ -873,7 +924,7 @@ class MemberManager(ConfigCommands, commands.Cog):
                 })
                 continue
             
-            # Check 4: Historical consistency
+            # Check 4: Historical consistency (🔧 FIXED)
             historical_rates = await self._get_historical_rates_for_member(mc_id)
             
             if len(historical_rates) < 4:
@@ -959,10 +1010,16 @@ class MemberManager(ConfigCommands, commands.Cog):
             if skipped_grace:
                 grace_lines = []
                 for member in skipped_grace[:5]:
-                    grace_lines.append(
-                        f"• {member['mc_name']} (`{member['mc_id']}`) - "
-                        f"{member['rate']:.1f}% | {member['days']} days"
-                    )
+                    if member.get("no_data"):
+                        grace_lines.append(
+                            f"• {member['mc_name']} (`{member['mc_id']}`) - "
+                            f"{member['rate']:.1f}% | ⚠️ No join date found"
+                        )
+                    else:
+                        grace_lines.append(
+                            f"• {member['mc_name']} (`{member['mc_id']}`) - "
+                            f"{member['rate']:.1f}% | {member['days']} days"
+                        )
                 if len(skipped_grace) > 5:
                     grace_lines.append(f"*...and {len(skipped_grace) - 5} more*")
                 
@@ -1040,39 +1097,82 @@ class MemberManager(ConfigCommands, commands.Cog):
         mc_name: Optional[str],
         logs_scraper
     ) -> Optional[datetime]:
-        """Get join date for a member from LogsScraper."""
-        if not logs_scraper:
-            return None
+        """
+        Get when member joined the alliance.
         
-        try:
-            import aiosqlite
-            
-            db_path = logs_scraper.db_path
-            
-            if not db_path.exists():
-                return None
-            
-            async with aiosqlite.connect(db_path) as db:
-                cursor = await db.execute(
-                    """
-                    SELECT MIN(ts) as join_date 
-                    FROM logs 
-                    WHERE (affected_mc_id = ? OR affected_name = ?)
-                    AND action_key = 'added_to_alliance'
-                    """,
-                    (mc_id, mc_name)
-                )
-                result = await cursor.fetchone()
+        🔧 FIXED: Now with fallback to first scrape date!
+        
+        Priority:
+        1. LogsScraper: 'added_to_alliance' event
+        2. Fallback: First scrape date from members_v2.db
+        
+        Returns None only if both methods fail.
+        """
+        # Try LogsScraper first
+        if logs_scraper:
+            try:
+                import aiosqlite
                 
-                if result and result[0]:
-                    join_date_str = result[0]
-                    if join_date_str.endswith('Z'):
-                        join_date_str = join_date_str.replace('Z', '+00:00')
-                    
-                    return datetime.fromisoformat(join_date_str)
+                db_path = logs_scraper.db_path
+                
+                if db_path.exists():
+                    async with aiosqlite.connect(db_path) as db:
+                        cursor = await db.execute(
+                            """
+                            SELECT MIN(ts) as join_date 
+                            FROM logs 
+                            WHERE (affected_mc_id = ? OR affected_name = ?)
+                            AND action_key = 'added_to_alliance'
+                            """,
+                            (mc_id, mc_name)
+                        )
+                        result = await cursor.fetchone()
+                        
+                        if result and result[0]:
+                            join_date_str = result[0]
+                            if join_date_str.endswith('Z'):
+                                join_date_str = join_date_str.replace('Z', '+00:00')
+                            
+                            join_date = datetime.fromisoformat(join_date_str)
+                            log.debug(f"Found join date for {mc_name} ({mc_id}) in LogsScraper: {join_date}")
+                            return join_date
+            
+            except Exception as e:
+                log.error(f"Failed to get join date from LogsScraper for {mc_id}: {e}")
         
-        except Exception as e:
-            log.error(f"Failed to get join date for {mc_id}: {e}")
+        # 🔧 FALLBACK: Use first scrape date from members_v2.db
+        if self.members_scraper:
+            try:
+                import sqlite3
+                
+                db_path = self.members_scraper.db_path
+                
+                if db_path.exists():
+                    conn = sqlite3.connect(str(db_path))
+                    conn.row_factory = sqlite3.Row
+                    cursor = conn.cursor()
+                    
+                    cursor.execute("""
+                        SELECT MIN(timestamp) as first_seen
+                        FROM members
+                        WHERE member_id = ?
+                    """, (mc_id,))
+                    
+                    result = cursor.fetchone()
+                    conn.close()
+                    
+                    if result and result["first_seen"]:
+                        first_seen_str = result["first_seen"]
+                        # Parse ISO timestamp
+                        if first_seen_str.endswith('Z'):
+                            first_seen_str = first_seen_str.replace('Z', '+00:00')
+                        
+                        first_seen = datetime.fromisoformat(first_seen_str)
+                        log.debug(f"Using first scrape date for {mc_name} ({mc_id}): {first_seen} (fallback)")
+                        return first_seen
+            
+            except Exception as e:
+                log.error(f"Failed to get first scrape date for {mc_id}: {e}")
         
         return None
     
@@ -1080,27 +1180,49 @@ class MemberManager(ConfigCommands, commands.Cog):
         self,
         mc_id: str
     ) -> List[float]:
-        """Get historical contribution rates for a member."""
-        if not self.alliance_scraper:
+        """
+        Get historical contribution rates for a member.
+        
+        🔧 FIXED: Now correctly queries members_v2.db instead of AllianceScraper!
+        
+        Returns list of rates (most recent first).
+        """
+        if not self.members_scraper:
+            log.warning("MembersScraper not available for historical rates")
             return []
         
         try:
-            rows = await self.alliance_scraper._query_alliance(
-                """
-                SELECT contribution_rate, scraped_at 
-                FROM members_history 
-                WHERE user_id=? OR mc_user_id=? 
-                ORDER BY scraped_at DESC 
+            import sqlite3
+            
+            db_path = self.members_scraper.db_path
+            
+            if not db_path.exists():
+                log.error(f"Database not found: {db_path}")
+                return []
+            
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            # Query members table for historical rates
+            cursor.execute("""
+                SELECT contribution_rate, timestamp
+                FROM members
+                WHERE member_id = ?
+                ORDER BY timestamp DESC
                 LIMIT 12
-                """,
-                (mc_id, mc_id)
-            )
+            """, (mc_id,))
+            
+            rows = cursor.fetchall()
+            conn.close()
             
             rates = [row["contribution_rate"] for row in rows if row["contribution_rate"] is not None]
+            
+            log.debug(f"Found {len(rates)} historical rates for {mc_id}")
             return rates
         
         except Exception as e:
-            log.error(f"Failed to get historical rates for {mc_id}: {e}")
+            log.error(f"Failed to get historical rates for {mc_id}: {e}", exc_info=True)
             return []
     
     # ==================== DEBUG COMMAND ====================
@@ -1142,6 +1264,10 @@ class MemberManager(ConfigCommands, commands.Cog):
             db_info.append(f"Path: `{self.db_path}`")
         else:
             db_info.append("❌ Database not connected")
+        
+        # MembersScraper database
+        if self.members_scraper:
+            db_info.append(f"MembersScraper DB: `{self.members_scraper.db_path}`")
         
         embed.add_field(
             name="💾 Database",
