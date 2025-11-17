@@ -4,6 +4,8 @@ Fuzzy search, formatting, and helper functions
 
 COMPLETE VERSION - No sanctions-specific changes needed
 All sanction utilities are in SanctionManager
+
+🔧 FIXED: Added format_historical_trend() for list of rates
 """
 
 import re
@@ -172,6 +174,33 @@ def format_contribution_trend(
     else:
         trend_word = "stable" if abs(change) < 0.5 else ("rising" if change > 0 else "falling")
         return f"{current_str} ({trend_word}, {change_str})"
+
+
+def format_historical_trend(historical_rates: List[float], max_display: int = 4) -> str:
+    """
+    Format historical contribution rates as a trend string.
+    
+    🔧 NEW FUNCTION: For displaying lists of historical rates.
+    
+    Args:
+        historical_rates: List of rates (most recent first)
+        max_display: Maximum number of rates to display
+    
+    Returns:
+        Formatted string like "8.5% → 7.2% → 6.8% → 5.5%"
+    
+    Examples:
+        >>> format_historical_trend([8.5, 7.2, 6.8, 5.5])
+        "8.5% → 7.2% → 6.8% → 5.5%"
+        
+        >>> format_historical_trend([])
+        "No data"
+    """
+    if not historical_rates:
+        return "No data"
+    
+    rates_to_show = historical_rates[:max_display]
+    return " → ".join(f"{rate:.1f}%" for rate in rates_to_show)
 
 
 def format_timestamp(timestamp: int, style: str = "F") -> str:
