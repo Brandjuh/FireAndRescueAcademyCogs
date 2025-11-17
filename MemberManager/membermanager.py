@@ -7,9 +7,10 @@ Integrates with:
 - AllianceScraper: MC member data, contributions, logs
 - Red's modlog: Discord infractions
 
-VERSION: 2.2.1
+VERSION: 2.2.2
+FIXED: Async/sync sqlite3 conflicts - now uses asyncio.to_thread()
 FIXED: Grace period fallback to first scrape date
-FIXED: Historical rates now correctly query members_v2.db
+FIXED: Historical rates correctly query members_v2.db
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ from .config_commands import ConfigCommands
 
 log = logging.getLogger("red.FARA.MemberManager")
 
-__version__ = "2.2.1"
+__version__ = "2.2.2"
 
 DEFAULTS = {
     "contribution_threshold": 5.0,
@@ -233,9 +234,6 @@ class MemberManager(ConfigCommands, commands.Cog):
                     event_data={"username": str(member)},
                     triggered_by="system"
                 )
-                
-                # Check for coordinated MC + Discord departure (within 72h)
-                # This will be implemented in automation.py
     
     @commands.Cog.listener()
     async def on_modlog_case_create(self, case):
@@ -666,33 +664,13 @@ class MemberManager(ConfigCommands, commands.Cog):
         check1_pass = current_rate < threshold
         checks.append(f"{'✅' if check1_pass else '❌'} **Below threshold** ({current_rate:.1f}% < {threshold}%)")
         
-        # Check 2: Grace period (🔧 FIXED: Now with fallback)
-        join_date = await self._get_join_date_for_member(mc_id, mc_name, logs_scraper)
+        # Check 2: Grace period (🔧 FIXED WITH FALLBACK)
+        join_date, grace_source = await self._get_join_date_for_member(mc_id, mc_name, logs_scraper)
         check2_pass = True
-        grace_source = "unknown"
         
         if join_date:
             days_in_alliance = (datetime.now(timezone.utc) - join_date).days
             check2_pass = days_in_alliance >= 7
-            
-            # Determine source
-            if logs_scraper:
-                # Try to verify it came from LogsScraper
-                try:
-                    import aiosqlite
-                    db_path = logs_scraper.db_path
-                    if db_path.exists():
-                        async with aiosqlite.connect(db_path) as db:
-                            cursor = await db.execute(
-                                "SELECT COUNT(*) FROM logs WHERE (affected_mc_id = ? OR affected_name = ?) AND action_key = 'added_to_alliance'",
-                                (mc_id, mc_name)
-                            )
-                            count = (await cursor.fetchone())[0]
-                            grace_source = "LogsScraper" if count > 0 else "first scrape (fallback)"
-                except:
-                    grace_source = "first scrape (fallback)"
-            else:
-                grace_source = "first scrape (fallback)"
             
             checks.append(
                 f"{'✅' if check2_pass else '❌'} **Grace period** "
@@ -717,7 +695,7 @@ class MemberManager(ConfigCommands, commands.Cog):
                 f"({days_since_alert:.1f} days since last alert, need 7+)"
             )
         
-        # Check 4: Historical consistency (🔧 FIXED: Now queries members_v2.db)
+        # Check 4: Historical consistency (🔧 FIXED WITH ASYNC WRAPPER)
         historical_rates = await self._get_historical_rates_for_member(mc_id)
         check4_pass = False
         
@@ -783,8 +761,10 @@ class MemberManager(ConfigCommands, commands.Cog):
         )
         
         # Force alert option
-        if force_alert and all_pass:
-            embed.set_footer(text="⚠️ Use --force-alert to send a real test alert")
+        if force_alert and not all_pass:
+            embed.set_footer(text="⚠️ Cannot send alert - member does not qualify")
+        elif force_alert and all_pass:
+            embed.set_footer(text="⚠️ Ready to send test alert")
         
         await ctx.send(embed=embed)
         
@@ -887,8 +867,8 @@ class MemberManager(ConfigCommands, commands.Cog):
                 })
                 continue
             
-            # Check 2: Grace period (🔧 FIXED)
-            join_date = await self._get_join_date_for_member(mc_id, mc_name, logs_scraper)
+            # Check 2: Grace period
+            join_date, _ = await self._get_join_date_for_member(mc_id, mc_name, logs_scraper)
             if join_date:
                 days_in_alliance = (datetime.now(timezone.utc) - join_date).days
                 if days_in_alliance < 7:
@@ -924,7 +904,7 @@ class MemberManager(ConfigCommands, commands.Cog):
                 })
                 continue
             
-            # Check 4: Historical consistency (🔧 FIXED)
+            # Check 4: Historical consistency
             historical_rates = await self._get_historical_rates_for_member(mc_id)
             
             if len(historical_rates) < 4:
@@ -1091,111 +1071,73 @@ class MemberManager(ConfigCommands, commands.Cog):
         
         await ctx.send(embed=embed)
     
-    async def _get_join_date_for_member(
-        self,
-        mc_id: str,
-        mc_name: Optional[str],
-        logs_scraper
-    ) -> Optional[datetime]:
-        """
-        Get when member joined the alliance.
+    # 🔧 FIXED: Async wrapper for sync sqlite3 calls
+    def _query_join_date_sync(self, db_path: Path, mc_id: str, mc_name: Optional[str]) -> Optional[str]:
+        """Synchronous database query for join date."""
+        import aiosqlite
+        import sqlite3
         
-        🔧 FIXED: Now with fallback to first scrape date!
-        
-        Priority:
-        1. LogsScraper: 'added_to_alliance' event
-        2. Fallback: First scrape date from members_v2.db
-        
-        Returns None only if both methods fail.
-        """
-        # Try LogsScraper first
-        if logs_scraper:
-            try:
-                import aiosqlite
-                
-                db_path = logs_scraper.db_path
-                
-                if db_path.exists():
-                    async with aiosqlite.connect(db_path) as db:
-                        cursor = await db.execute(
-                            """
-                            SELECT MIN(ts) as join_date 
-                            FROM logs 
-                            WHERE (affected_mc_id = ? OR affected_name = ?)
-                            AND action_key = 'added_to_alliance'
-                            """,
-                            (mc_id, mc_name)
-                        )
-                        result = await cursor.fetchone()
-                        
-                        if result and result[0]:
-                            join_date_str = result[0]
-                            if join_date_str.endswith('Z'):
-                                join_date_str = join_date_str.replace('Z', '+00:00')
-                            
-                            join_date = datetime.fromisoformat(join_date_str)
-                            log.debug(f"Found join date for {mc_name} ({mc_id}) in LogsScraper: {join_date}")
-                            return join_date
+        try:
+            if not db_path.exists():
+                return None
             
-            except Exception as e:
-                log.error(f"Failed to get join date from LogsScraper for {mc_id}: {e}")
-        
-        # 🔧 FALLBACK: Use first scrape date from members_v2.db
-        if self.members_scraper:
-            try:
-                import sqlite3
-                
-                db_path = self.members_scraper.db_path
-                
-                if db_path.exists():
-                    conn = sqlite3.connect(str(db_path))
-                    conn.row_factory = sqlite3.Row
-                    cursor = conn.cursor()
-                    
-                    cursor.execute("""
-                        SELECT MIN(timestamp) as first_seen
-                        FROM members
-                        WHERE member_id = ?
-                    """, (mc_id,))
-                    
-                    result = cursor.fetchone()
-                    conn.close()
-                    
-                    if result and result["first_seen"]:
-                        first_seen_str = result["first_seen"]
-                        # Parse ISO timestamp
-                        if first_seen_str.endswith('Z'):
-                            first_seen_str = first_seen_str.replace('Z', '+00:00')
-                        
-                        first_seen = datetime.fromisoformat(first_seen_str)
-                        log.debug(f"Using first scrape date for {mc_name} ({mc_id}): {first_seen} (fallback)")
-                        return first_seen
+            conn = sqlite3.connect(str(db_path))
+            cursor = conn.cursor()
             
-            except Exception as e:
-                log.error(f"Failed to get first scrape date for {mc_id}: {e}")
+            cursor.execute(
+                """
+                SELECT MIN(ts) as join_date 
+                FROM logs 
+                WHERE (affected_mc_id = ? OR affected_name = ?)
+                AND action_key = 'added_to_alliance'
+                """,
+                (mc_id, mc_name)
+            )
+            result = cursor.fetchone()
+            conn.close()
+            
+            if result and result[0]:
+                return result[0]
+        
+        except Exception as e:
+            log.error(f"Failed to query join date: {e}")
         
         return None
     
-    async def _get_historical_rates_for_member(
-        self,
-        mc_id: str
-    ) -> List[float]:
-        """
-        Get historical contribution rates for a member.
-        
-        🔧 FIXED: Now correctly queries members_v2.db instead of AllianceScraper!
-        
-        Returns list of rates (most recent first).
-        """
-        if not self.members_scraper:
-            log.warning("MembersScraper not available for historical rates")
-            return []
+    def _query_first_scrape_sync(self, db_path: Path, mc_id: str) -> Optional[str]:
+        """Synchronous database query for first scrape date."""
+        import sqlite3
         
         try:
-            import sqlite3
+            if not db_path.exists():
+                return None
             
-            db_path = self.members_scraper.db_path
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
             
+            cursor.execute("""
+                SELECT MIN(timestamp) as first_seen
+                FROM members
+                WHERE member_id = ?
+            """, (mc_id,))
+            
+            result = cursor.fetchone()
+            conn.close()
+            
+            if result and result["first_seen"]:
+                return result["first_seen"]
+        
+        except Exception as e:
+            log.error(f"Failed to query first scrape: {e}")
+        
+        return None
+    
+    def _query_historical_rates_sync(self, db_path: Path, mc_id: str) -> List[float]:
+        """Synchronous database query for historical rates."""
+        import sqlite3
+        
+        try:
             if not db_path.exists():
                 log.error(f"Database not found: {db_path}")
                 return []
@@ -1204,7 +1146,6 @@ class MemberManager(ConfigCommands, commands.Cog):
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             
-            # Query members table for historical rates
             cursor.execute("""
                 SELECT contribution_rate, timestamp
                 FROM members
@@ -1219,6 +1160,94 @@ class MemberManager(ConfigCommands, commands.Cog):
             rates = [row["contribution_rate"] for row in rows if row["contribution_rate"] is not None]
             
             log.debug(f"Found {len(rates)} historical rates for {mc_id}")
+            return rates
+        
+        except Exception as e:
+            log.error(f"Failed to query historical rates: {e}", exc_info=True)
+            return []
+    
+    async def _get_join_date_for_member(
+        self,
+        mc_id: str,
+        mc_name: Optional[str],
+        logs_scraper
+    ) -> tuple[Optional[datetime], str]:
+        """
+        Get when member joined the alliance.
+        
+        🔧 FIXED: Uses asyncio.to_thread() for blocking sqlite3 calls
+        
+        Returns: (join_date, source)
+        """
+        # Try LogsScraper first
+        if logs_scraper:
+            try:
+                db_path = logs_scraper.db_path
+                
+                join_date_str = await asyncio.to_thread(
+                    self._query_join_date_sync,
+                    db_path,
+                    mc_id,
+                    mc_name
+                )
+                
+                if join_date_str:
+                    if join_date_str.endswith('Z'):
+                        join_date_str = join_date_str.replace('Z', '+00:00')
+                    
+                    join_date = datetime.fromisoformat(join_date_str)
+                    log.debug(f"Found join date for {mc_name} ({mc_id}) in LogsScraper: {join_date}")
+                    return join_date, "LogsScraper"
+            
+            except Exception as e:
+                log.error(f"Failed to get join date from LogsScraper for {mc_id}: {e}")
+        
+        # 🔧 FALLBACK: Use first scrape date
+        if self.members_scraper:
+            try:
+                db_path = self.members_scraper.db_path
+                
+                first_seen_str = await asyncio.to_thread(
+                    self._query_first_scrape_sync,
+                    db_path,
+                    mc_id
+                )
+                
+                if first_seen_str:
+                    if first_seen_str.endswith('Z'):
+                        first_seen_str = first_seen_str.replace('Z', '+00:00')
+                    
+                    first_seen = datetime.fromisoformat(first_seen_str)
+                    log.debug(f"Using first scrape date for {mc_name} ({mc_id}): {first_seen} (fallback)")
+                    return first_seen, "first scrape (fallback)"
+            
+            except Exception as e:
+                log.error(f"Failed to get first scrape date for {mc_id}: {e}")
+        
+        return None, "unknown"
+    
+    async def _get_historical_rates_for_member(
+        self,
+        mc_id: str
+    ) -> List[float]:
+        """
+        Get historical contribution rates for a member.
+        
+        🔧 FIXED: Uses asyncio.to_thread() for blocking sqlite3 calls
+        """
+        if not self.members_scraper:
+            log.warning("MembersScraper not available for historical rates")
+            return []
+        
+        try:
+            db_path = self.members_scraper.db_path
+            
+            rates = await asyncio.to_thread(
+                self._query_historical_rates_sync,
+                db_path,
+                mc_id
+            )
+            
             return rates
         
         except Exception as e:
@@ -1531,21 +1560,11 @@ class MemberManager(ConfigCommands, commands.Cog):
         
         return data
     
-    async def _get_mc_data(self, mc_user_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Get MC member data from MembersScraper (members_v2.db).
-        """
-        if not self.members_scraper:
-            log.warning("MembersScraper not available")
-            return None
+    def _query_mc_data_sync(self, db_path: Path, mc_user_id: str) -> Optional[Dict[str, Any]]:
+        """Synchronous database query for MC data."""
+        import sqlite3
         
         try:
-            import sqlite3
-            from pathlib import Path
-            
-            # Get database path from MembersScraper
-            db_path = Path(self.members_scraper.db_path)
-            
             if not db_path.exists():
                 log.error(f"Database not found: {db_path}")
                 return None
@@ -1554,7 +1573,6 @@ class MemberManager(ConfigCommands, commands.Cog):
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             
-            # Get most recent record INCLUDING contribution_rate
             cursor.execute("""
                 SELECT member_id, username, rank, earned_credits, contribution_rate, online_status, timestamp
                 FROM members
@@ -1567,16 +1585,40 @@ class MemberManager(ConfigCommands, commands.Cog):
             conn.close()
             
             if row:
-                result = {
+                return {
                     "user_id": row["member_id"],
                     "name": row["username"],
                     "role": row["rank"],
                     "earned_credits": row["earned_credits"],
                     "contribution_rate": row["contribution_rate"]
                 }
-                return result
             else:
                 return None
+                
+        except Exception as e:
+            log.error(f"Failed to get MC data for {mc_user_id}: {e}", exc_info=True)
+            return None
+    
+    async def _get_mc_data(self, mc_user_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get MC member data from MembersScraper (members_v2.db).
+        
+        🔧 FIXED: Uses asyncio.to_thread() for blocking sqlite3 calls
+        """
+        if not self.members_scraper:
+            log.warning("MembersScraper not available")
+            return None
+        
+        try:
+            db_path = Path(self.members_scraper.db_path)
+            
+            result = await asyncio.to_thread(
+                self._query_mc_data_sync,
+                db_path,
+                mc_user_id
+            )
+            
+            return result
                 
         except Exception as e:
             log.error(f"Failed to get MC data for {mc_user_id}: {e}", exc_info=True)
