@@ -3,9 +3,12 @@ MemberManager - Comprehensive member tracking and management
 Fire & Rescue Academy Alliance
 
 Integrates with:
-- MemberSync: Discord â†” MC linking
+- MemberSync: Discord ↔ MC linking
 - AllianceScraper: MC member data, contributions, logs
 - Red's modlog: Discord infractions
+
+VERSION: 2.2.0
+NEW: Contribution check debug command with dry-run mode
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ from .config_commands import ConfigCommands
 
 log = logging.getLogger("red.FARA.MemberManager")
 
-__version__ = "2.1.4"
+__version__ = "2.2.0"
 
 DEFAULTS = {
     "contribution_threshold": 5.0,
@@ -331,7 +334,7 @@ class MemberManager(ConfigCommands, commands.Cog):
         """
         # Check permissions
         if not await self._is_moderator(ctx.author):
-            await ctx.send("âŒ You need moderator permissions to use this command.")
+            await ctx.send("❌ You need moderator permissions to use this command.")
             return
         
         await ctx.typing()
@@ -341,7 +344,7 @@ class MemberManager(ConfigCommands, commands.Cog):
         
         if not member_data:
             await ctx.send(
-                f"âŒ Could not find member matching `{target}`.\n"
+                f"❌ Could not find member matching `{target}`.\n"
                 "Try using: @mention, MC ID, MC username, or Discord username."
             )
             return
@@ -524,6 +527,582 @@ class MemberManager(ConfigCommands, commands.Cog):
         
         await ctx.send(embed=embed)
     
+    # ==================== 🆕 CONTRIBUTION CHECK COMMAND ====================
+    
+    @member.command(name="checkcontributions", aliases=["checkcontrib", "contribcheck"])
+    @commands.guild_only()
+    async def check_contributions(
+        self,
+        ctx: commands.Context,
+        target: Optional[str] = None,
+        *,
+        flags: str = ""
+    ):
+        """
+        🔍 Debug tool: Check who qualifies for low contribution alerts.
+        
+        **DOES NOT SEND ALERTS** - This is a dry-run to test the monitoring system.
+        
+        **Usage:**
+        - `[p]member checkcontrib` - Show summary of who qualifies
+        - `[p]member checkcontrib --verbose` - Show ALL members with details
+        - `[p]member checkcontrib @user` - Check specific member
+        - `[p]member checkcontrib 123456` - Check by MC ID
+        - `[p]member checkcontrib @user --force-alert` - Send real test alert
+        
+        **Examples:**
+        ```
+        [p]member checkcontrib
+        [p]member checkcontrib --verbose
+        [p]member checkcontrib @JohnDoe
+        [p]member checkcontrib 384563 --force-alert
+        ```
+        """
+        # Check permissions
+        if not await self._is_admin(ctx.author):
+            await ctx.send("❌ You need admin permissions to use this command.")
+            return
+        
+        # Parse flags
+        verbose = "--verbose" in flags or "-v" in flags
+        force_alert = "--force-alert" in flags or "--force" in flags
+        
+        await ctx.typing()
+        
+        # Check if AllianceScraper is available
+        if not self.members_scraper:
+            await ctx.send(
+                "❌ **MembersScraper not available**\n"
+                "Make sure MembersScraper is loaded: `[p]load membersscraper`"
+            )
+            return
+        
+        # Get LogsScraper for join date checking
+        logs_scraper = self.logs_scraper
+        
+        # Get configuration
+        threshold = await self.config.contribution_threshold()
+        
+        # If target specified, check single member
+        if target and not target.startswith("--"):
+            await self._check_single_member(
+                ctx, 
+                target, 
+                threshold, 
+                logs_scraper,
+                force_alert
+            )
+            return
+        
+        # Otherwise, check all members
+        await self._check_all_members(
+            ctx,
+            threshold,
+            logs_scraper,
+            verbose,
+            force_alert
+        )
+    
+    async def _check_single_member(
+        self,
+        ctx: commands.Context,
+        target: str,
+        threshold: float,
+        logs_scraper,
+        force_alert: bool
+    ):
+        """Check contribution status for a single member."""
+        # Try to resolve target
+        member_data = await self._resolve_target(ctx.guild, target)
+        
+        if not member_data or not member_data.mc_user_id:
+            await ctx.send(
+                f"❌ Could not find member with MC account: `{target}`\n"
+                "Make sure they have a linked MC account."
+            )
+            return
+        
+        mc_id = member_data.mc_user_id
+        mc_name = member_data.mc_username or "Unknown"
+        
+        # Get current MC data
+        mc_data = await self._get_mc_data(mc_id)
+        
+        if not mc_data:
+            await ctx.send(
+                f"❌ Member `{mc_name}` ({mc_id}) not found in alliance.\n"
+                "They may have left the alliance."
+            )
+            return
+        
+        current_rate = mc_data.get("contribution_rate", 0.0)
+        
+        # Build detailed embed
+        embed = discord.Embed(
+            title=f"🔍 Contribution Check: {mc_name}",
+            color=discord.Color.blue()
+        )
+        
+        # Basic info
+        info_lines = [
+            f"**MC ID:** `{mc_id}`",
+            f"**Current Rate:** {current_rate:.1f}%",
+            f"**Threshold:** {threshold}%",
+            f"**Status:** {'🔴 Below' if current_rate < threshold else '🟢 Above'} threshold"
+        ]
+        
+        if member_data.discord_id:
+            info_lines.insert(0, f"**Discord:** <@{member_data.discord_id}>")
+        
+        embed.add_field(
+            name="📊 Basic Info",
+            value="\n".join(info_lines),
+            inline=False
+        )
+        
+        # Check 1: Below threshold?
+        checks = []
+        check1_pass = current_rate < threshold
+        checks.append(f"{'✅' if check1_pass else '❌'} **Below threshold** ({current_rate:.1f}% < {threshold}%)")
+        
+        # Check 2: Grace period
+        join_date = await self._get_join_date_for_member(mc_id, mc_name, logs_scraper)
+        check2_pass = True
+        
+        if join_date:
+            days_in_alliance = (datetime.now(timezone.utc) - join_date).days
+            check2_pass = days_in_alliance >= 7
+            checks.append(
+                f"{'✅' if check2_pass else '❌'} **Grace period** "
+                f"({days_in_alliance} days in alliance, need 7+)"
+            )
+        else:
+            checks.append("⚠️ **Grace period** (join date unknown, assuming pass)")
+        
+        # Check 3: Cooldown
+        last_alert_time = self.contribution_monitor._last_alerts.get(mc_id, 0) if self.contribution_monitor else 0
+        now = int(datetime.now(timezone.utc).timestamp())
+        days_since_alert = (now - last_alert_time) / 86400
+        check3_pass = (now - last_alert_time) >= (7 * 86400)
+        
+        if last_alert_time == 0:
+            checks.append("✅ **Cooldown** (no previous alerts)")
+        else:
+            checks.append(
+                f"{'✅' if check3_pass else '❌'} **Cooldown** "
+                f"({days_since_alert:.1f} days since last alert, need 7+)"
+            )
+        
+        # Check 4: Historical consistency
+        historical_rates = await self._get_historical_rates_for_member(mc_id)
+        check4_pass = False
+        
+        if len(historical_rates) >= 4:
+            recent_4 = historical_rates[:4]
+            check4_pass = all(rate < threshold for rate in recent_4)
+            checks.append(
+                f"{'✅' if check4_pass else '❌'} **Consistency** "
+                f"(last 4 checks: {', '.join(f'{r:.1f}%' for r in recent_4)})"
+            )
+        else:
+            checks.append(
+                f"❌ **Consistency** "
+                f"(only {len(historical_rates)} checks, need 4+)"
+            )
+        
+        embed.add_field(
+            name="🔍 Qualification Checks",
+            value="\n".join(checks),
+            inline=False
+        )
+        
+        # Final verdict
+        all_pass = check1_pass and check2_pass and check3_pass and check4_pass
+        
+        if all_pass:
+            verdict = "✅ **QUALIFIES FOR ALERT**"
+            embed.color = discord.Color.red()
+        else:
+            verdict = "❌ **DOES NOT QUALIFY**"
+            embed.color = discord.Color.green()
+        
+        embed.add_field(
+            name="📋 Result",
+            value=verdict,
+            inline=False
+        )
+        
+        # Historical trend
+        if historical_rates:
+            trend_str = " → ".join(f"{r:.1f}%" for r in historical_rates[:8])
+            embed.add_field(
+                name="📈 Historical Trend (last 8 checks)",
+                value=trend_str,
+                inline=False
+            )
+        
+        # Force alert option
+        if force_alert and all_pass:
+            embed.set_footer(text="⚠️ Use --force-alert to send a real test alert")
+        
+        await ctx.send(embed=embed)
+        
+        # Send test alert if requested
+        if force_alert and all_pass:
+            confirm_msg = await ctx.send(
+                f"⚠️ **Confirm Test Alert**\n"
+                f"This will send a REAL alert for {mc_name} to the admin channel.\n"
+                f"React with ✅ to confirm or ❌ to cancel."
+            )
+            
+            await confirm_msg.add_reaction("✅")
+            await confirm_msg.add_reaction("❌")
+            
+            def check(reaction, user):
+                return (
+                    user == ctx.author 
+                    and str(reaction.emoji) in ["✅", "❌"]
+                    and reaction.message.id == confirm_msg.id
+                )
+            
+            try:
+                reaction, user = await self.bot.wait_for("reaction_add", timeout=30.0, check=check)
+                
+                if str(reaction.emoji) == "✅":
+                    # Send real alert
+                    if self.contribution_monitor:
+                        success = await self.contribution_monitor._send_contribution_alert(
+                            mc_id=mc_id,
+                            mc_member=mc_data,
+                            current_rate=current_rate,
+                            historical_rates=historical_rates
+                        )
+                        
+                        if success:
+                            await ctx.send("✅ Test alert sent successfully!")
+                        else:
+                            await ctx.send("❌ Failed to send test alert. Check logs for details.")
+                    else:
+                        await ctx.send("❌ Contribution monitor not initialized.")
+                else:
+                    await ctx.send("❌ Test alert cancelled.")
+            
+            except asyncio.TimeoutError:
+                await ctx.send("❌ Test alert cancelled (timeout).")
+    
+    async def _check_all_members(
+        self,
+        ctx: commands.Context,
+        threshold: float,
+        logs_scraper,
+        verbose: bool,
+        force_alert: bool
+    ):
+        """Check contribution status for all members."""
+        try:
+            mc_members = await self.alliance_scraper.get_members()
+        except Exception as e:
+            await ctx.send(f"❌ Failed to get alliance members: {str(e)}")
+            return
+        
+        if not mc_members:
+            await ctx.send("❌ No alliance members found.")
+            return
+        
+        # Initialize tracking
+        would_alert = []
+        skipped_grace = []
+        skipped_cooldown = []
+        skipped_insufficient = []
+        skipped_inconsistent = []
+        above_threshold = []
+        
+        status_msg = await ctx.send(f"🔍 Checking {len(mc_members)} alliance members...")
+        
+        # Check each member
+        for i, mc_member in enumerate(mc_members):
+            mc_id = mc_member.get("user_id") or mc_member.get("mc_user_id")
+            if not mc_id:
+                continue
+            
+            mc_name = mc_member.get("name", "Unknown")
+            current_rate = mc_member.get("contribution_rate", 0.0)
+            
+            # Update status every 20 members
+            if i % 20 == 0:
+                try:
+                    await status_msg.edit(
+                        content=f"🔍 Checking members... ({i}/{len(mc_members)})"
+                    )
+                except:
+                    pass
+            
+            # Check 1: Below threshold?
+            if current_rate >= threshold:
+                above_threshold.append({
+                    "mc_id": mc_id,
+                    "mc_name": mc_name,
+                    "rate": current_rate
+                })
+                continue
+            
+            # Check 2: Grace period
+            join_date = await self._get_join_date_for_member(mc_id, mc_name, logs_scraper)
+            if join_date:
+                days_in_alliance = (datetime.now(timezone.utc) - join_date).days
+                if days_in_alliance < 7:
+                    skipped_grace.append({
+                        "mc_id": mc_id,
+                        "mc_name": mc_name,
+                        "rate": current_rate,
+                        "days": days_in_alliance
+                    })
+                    continue
+            
+            # Check 3: Cooldown
+            last_alert_time = self.contribution_monitor._last_alerts.get(mc_id, 0) if self.contribution_monitor else 0
+            now = int(datetime.now(timezone.utc).timestamp())
+            
+            if now - last_alert_time < (7 * 86400) and last_alert_time > 0:
+                days_since = (now - last_alert_time) / 86400
+                skipped_cooldown.append({
+                    "mc_id": mc_id,
+                    "mc_name": mc_name,
+                    "rate": current_rate,
+                    "days_since": days_since
+                })
+                continue
+            
+            # Check 4: Historical consistency
+            historical_rates = await self._get_historical_rates_for_member(mc_id)
+            
+            if len(historical_rates) < 4:
+                skipped_insufficient.append({
+                    "mc_id": mc_id,
+                    "mc_name": mc_name,
+                    "rate": current_rate,
+                    "checks": len(historical_rates)
+                })
+                continue
+            
+            recent_4 = historical_rates[:4]
+            if not all(rate < threshold for rate in recent_4):
+                skipped_inconsistent.append({
+                    "mc_id": mc_id,
+                    "mc_name": mc_name,
+                    "rate": current_rate,
+                    "history": recent_4
+                })
+                continue
+            
+            # ALL CHECKS PASSED
+            would_alert.append({
+                "mc_id": mc_id,
+                "mc_name": mc_name,
+                "rate": current_rate,
+                "history": historical_rates[:4],
+                "days_in_alliance": (datetime.now(timezone.utc) - join_date).days if join_date else None
+            })
+        
+        # Update status
+        try:
+            await status_msg.delete()
+        except:
+            pass
+        
+        # Build summary embed
+        embed = discord.Embed(
+            title="🔍 Contribution Check Results (Dry Run)",
+            description=f"**Threshold:** {threshold}% | **Total members:** {len(mc_members)}",
+            color=discord.Color.blue()
+        )
+        
+        # Summary stats
+        stats = [
+            f"✅ **Would trigger alert:** {len(would_alert)}",
+            f"❌ **Skipped (total):** {len(skipped_grace) + len(skipped_cooldown) + len(skipped_insufficient) + len(skipped_inconsistent)}",
+            f"   └─ Grace period: {len(skipped_grace)}",
+            f"   └─ Cooldown: {len(skipped_cooldown)}",
+            f"   └─ Insufficient data: {len(skipped_insufficient)}",
+            f"   └─ Inconsistent: {len(skipped_inconsistent)}",
+            f"🟢 **Above threshold:** {len(above_threshold)}"
+        ]
+        
+        embed.add_field(
+            name="📊 Summary",
+            value="\n".join(stats),
+            inline=False
+        )
+        
+        # Show members who would get alerts
+        if would_alert:
+            alert_lines = []
+            for member in would_alert[:10]:  # Show max 10
+                history_str = " → ".join(f"{r:.1f}%" for r in member["history"])
+                alert_lines.append(
+                    f"• **{member['mc_name']}** (`{member['mc_id']}`)\n"
+                    f"  Current: {member['rate']:.1f}% | History: {history_str}"
+                )
+            
+            if len(would_alert) > 10:
+                alert_lines.append(f"*...and {len(would_alert) - 10} more*")
+            
+            embed.add_field(
+                name="🚨 Would Trigger Alert",
+                value="\n".join(alert_lines) if alert_lines else "*None*",
+                inline=False
+            )
+        
+        # Verbose mode: show skipped members
+        if verbose:
+            # Grace period
+            if skipped_grace:
+                grace_lines = []
+                for member in skipped_grace[:5]:
+                    grace_lines.append(
+                        f"• {member['mc_name']} (`{member['mc_id']}`) - "
+                        f"{member['rate']:.1f}% | {member['days']} days"
+                    )
+                if len(skipped_grace) > 5:
+                    grace_lines.append(f"*...and {len(skipped_grace) - 5} more*")
+                
+                embed.add_field(
+                    name="⏳ Skipped: Grace Period",
+                    value="\n".join(grace_lines),
+                    inline=False
+                )
+            
+            # Cooldown
+            if skipped_cooldown:
+                cooldown_lines = []
+                for member in skipped_cooldown[:5]:
+                    cooldown_lines.append(
+                        f"• {member['mc_name']} (`{member['mc_id']}`) - "
+                        f"{member['rate']:.1f}% | Alert {member['days_since']:.1f} days ago"
+                    )
+                if len(skipped_cooldown) > 5:
+                    cooldown_lines.append(f"*...and {len(skipped_cooldown) - 5} more*")
+                
+                embed.add_field(
+                    name="🔕 Skipped: Cooldown",
+                    value="\n".join(cooldown_lines),
+                    inline=False
+                )
+            
+            # Insufficient data
+            if skipped_insufficient:
+                insuf_lines = []
+                for member in skipped_insufficient[:5]:
+                    insuf_lines.append(
+                        f"• {member['mc_name']} (`{member['mc_id']}`) - "
+                        f"{member['rate']:.1f}% | Only {member['checks']} checks"
+                    )
+                if len(skipped_insufficient) > 5:
+                    insuf_lines.append(f"*...and {len(skipped_insufficient) - 5} more*")
+                
+                embed.add_field(
+                    name="📊 Skipped: Insufficient Data",
+                    value="\n".join(insuf_lines),
+                    inline=False
+                )
+            
+            # Inconsistent
+            if skipped_inconsistent:
+                incon_lines = []
+                for member in skipped_inconsistent[:5]:
+                    history_str = ", ".join(f"{r:.1f}%" for r in member["history"])
+                    incon_lines.append(
+                        f"• {member['mc_name']} (`{member['mc_id']}`) - "
+                        f"History: {history_str}"
+                    )
+                if len(skipped_inconsistent) > 5:
+                    incon_lines.append(f"*...and {len(skipped_inconsistent) - 5} more*")
+                
+                embed.add_field(
+                    name="📈 Skipped: Inconsistent",
+                    value="\n".join(incon_lines),
+                    inline=False
+                )
+        
+        embed.set_footer(
+            text=(
+                "This is a DRY RUN - no alerts were sent. "
+                "Use --verbose for detailed breakdown. "
+                "Use [p]member checkcontrib @user --force-alert to test."
+            )
+        )
+        
+        await ctx.send(embed=embed)
+    
+    async def _get_join_date_for_member(
+        self,
+        mc_id: str,
+        mc_name: Optional[str],
+        logs_scraper
+    ) -> Optional[datetime]:
+        """Get join date for a member from LogsScraper."""
+        if not logs_scraper:
+            return None
+        
+        try:
+            import aiosqlite
+            
+            db_path = logs_scraper.db_path
+            
+            if not db_path.exists():
+                return None
+            
+            async with aiosqlite.connect(db_path) as db:
+                cursor = await db.execute(
+                    """
+                    SELECT MIN(ts) as join_date 
+                    FROM logs 
+                    WHERE (affected_mc_id = ? OR affected_name = ?)
+                    AND action_key = 'added_to_alliance'
+                    """,
+                    (mc_id, mc_name)
+                )
+                result = await cursor.fetchone()
+                
+                if result and result[0]:
+                    join_date_str = result[0]
+                    if join_date_str.endswith('Z'):
+                        join_date_str = join_date_str.replace('Z', '+00:00')
+                    
+                    return datetime.fromisoformat(join_date_str)
+        
+        except Exception as e:
+            log.error(f"Failed to get join date for {mc_id}: {e}")
+        
+        return None
+    
+    async def _get_historical_rates_for_member(
+        self,
+        mc_id: str
+    ) -> List[float]:
+        """Get historical contribution rates for a member."""
+        if not self.alliance_scraper:
+            return []
+        
+        try:
+            rows = await self.alliance_scraper._query_alliance(
+                """
+                SELECT contribution_rate, scraped_at 
+                FROM members_history 
+                WHERE user_id=? OR mc_user_id=? 
+                ORDER BY scraped_at DESC 
+                LIMIT 12
+                """,
+                (mc_id, mc_id)
+            )
+            
+            rates = [row["contribution_rate"] for row in rows if row["contribution_rate"] is not None]
+            return rates
+        
+        except Exception as e:
+            log.error(f"Failed to get historical rates for {mc_id}: {e}")
+            return []
+    
     # ==================== DEBUG COMMAND ====================
     
     @member.command(name="debug", aliases=["status"])
@@ -547,6 +1126,7 @@ class MemberManager(ConfigCommands, commands.Cog):
         integrations.append(f"**MemberSync:** {'✅ Connected' if self.membersync else '❌ Not found'}")
         integrations.append(f"**AllianceScraper:** {'✅ Connected' if self.alliance_scraper else '❌ Not found'}")
         integrations.append(f"**MembersScraper:** {'✅ Connected' if self.members_scraper else '❌ Not found'}")
+        integrations.append(f"**LogsScraper:** {'✅ Connected' if self.logs_scraper else '❌ Not found'}")
         integrations.append(f"**SanctionManager:** {'✅ Connected' if self.sanction_manager else '❌ Not found'}")
         
         embed.add_field(
@@ -566,6 +1146,21 @@ class MemberManager(ConfigCommands, commands.Cog):
         embed.add_field(
             name="💾 Database",
             value="\n".join(db_info),
+            inline=False
+        )
+        
+        # Monitoring status
+        monitor_info = []
+        if self.contribution_monitor:
+            monitor_info.append("✅ Contribution monitor active")
+            monitor_info.append(f"Threshold: {await self.config.contribution_threshold()}%")
+            monitor_info.append(f"Tracked alerts: {len(self.contribution_monitor._last_alerts)}")
+        else:
+            monitor_info.append("❌ Contribution monitor not active")
+        
+        embed.add_field(
+            name="🔍 Monitoring",
+            value="\n".join(monitor_info),
             inline=False
         )
         
