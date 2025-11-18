@@ -40,6 +40,10 @@ class MissionFormatter:
         mission_id = MissionFormatter._format_mission_id(mission_data)
         avg_credits = mission_data.get('average_credits', 0)
         
+        # Handle None values safely
+        if avg_credits is None:
+            avg_credits = 0
+        
         sections.append(f"**ID:** {mission_id} • **Avg. Credits:** {avg_credits:,}")
         
         # Categories (bold header)
@@ -116,6 +120,9 @@ class MissionFormatter:
         
         for field, name in personnel_fields.items():
             count = additional.get(field, 0)
+            # Handle None values
+            if count is None:
+                count = 0
             if count > 0:
                 personnel.append(f"- {count} {name}")
         
@@ -130,8 +137,13 @@ class MissionFormatter:
         overlay = mission_data.get('additive_overlays', '')
         mission_id = mission_data.get('id', '')
         
+        # Handle None values
         if base_id is not None and overlay:
             return f"{base_id}/{overlay.upper()}"
+        
+        # Ensure we always return a string
+        if mission_id is None or mission_id == '':
+            return "Unknown"
         
         return str(mission_id)
     
@@ -169,8 +181,16 @@ class MissionFormatter:
             if isinstance(req_value, dict):
                 # This is personnel education/training
                 for training_key, training_count in req_value.items():
-                    training_name = TRAININGS.get(training_key, format_field_name(training_key))
-                    trainings.append(f"- {training_count} {training_name}")
+                    # Handle None counts
+                    if training_count is None:
+                        training_count = 0
+                    if training_count > 0:
+                        training_name = TRAININGS.get(training_key, format_field_name(training_key))
+                        trainings.append(f"- {training_count} {training_name}")
+                continue
+            
+            # Skip if req_value is None
+            if req_value is None or req_value == 0:
                 continue
             
             req_name = get_vehicle_name(req_key)
@@ -269,6 +289,10 @@ class MissionFormatter:
         additional = mission_data.get('additional', {})
         
         possible_patients = additional.get('possible_patient', 0)
+        # Handle None
+        if possible_patients is None:
+            possible_patients = 0
+            
         if possible_patients == 0:
             return ""
         
@@ -345,7 +369,7 @@ class MissionFormatter:
     def _format_prisoners(mission_data: Dict) -> str:
         """
         Format prisoner information.
-        FIXED: Use correct field names!
+        FIXED: Use correct field names and handle None values!
         """
         additional = mission_data.get('additional', {})
         
@@ -353,6 +377,14 @@ class MissionFormatter:
         possible_prisoners_min = additional.get('min_possible_prisoners', 0)
         possible_prisoners_max = additional.get('max_possible_prisoners', 0)
         possible_prisoners = additional.get('possible_prisoner_count', 0)
+        
+        # Handle None values
+        if possible_prisoners_min is None:
+            possible_prisoners_min = 0
+        if possible_prisoners_max is None:
+            possible_prisoners_max = 0
+        if possible_prisoners is None:
+            possible_prisoners = 0
         
         # Use whichever field has data
         if possible_prisoners_min > 0 or possible_prisoners_max > 0:
@@ -384,6 +416,9 @@ class MissionFormatter:
         }
         
         for chance_key, chance_value in chances.items():
+            # Handle None values
+            if chance_value is None:
+                chance_value = 0
             label = chance_labels.get(chance_key, format_field_name(chance_key).lower())
             lines.append(f"- {chance_value}% chance of {label}")
         
@@ -412,6 +447,10 @@ class MissionFormatter:
         for prereq_key, prereq_value in prerequisites.items():
             if prereq_key == 'main_building':
                 continue  # Already handled
+            
+            # Skip None or 0 values
+            if prereq_value is None or prereq_value == 0:
+                continue
             
             # Skip trainings/educations (they're shown in requirements section)
             if isinstance(prereq_value, dict) and any(k in TRAININGS for k in prereq_value.keys()):
