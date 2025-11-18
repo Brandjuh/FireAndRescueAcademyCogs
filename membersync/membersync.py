@@ -548,7 +548,7 @@ class MemberSync(commands.Cog):
 
                     await self._debug_log(f"Processing queue item: {discord_user.name} (attempt {attempts + 1})")
 
-                    cand = await self._find_member_in_db(discord_user.nick or discord_user.name, mc_id)
+                    cand = await self._find_member_in_db(discord_user.display_name, mc_id)
                     
                     if cand and cand.get("mc_id"):
                         await self._debug_log(f"✅ Found {discord_user.name} in database")
@@ -1192,7 +1192,7 @@ class MemberSync(commands.Cog):
             await ctx.send("✅ You are already verified.")
             return
 
-        name = ctx.author.nick or ctx.author.name
+        name = ctx.author.display_name
         await ctx.send("🔍 Looking you up in the roster... this may take a moment.")
         await self._debug_log(f"Verification request from {ctx.author.name} (nick: {name}, MC ID: {mc_id})")
 
