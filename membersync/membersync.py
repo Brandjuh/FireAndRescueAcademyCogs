@@ -45,7 +45,7 @@ def _mc_profile_url(mc_id: str) -> str:
 class MemberSync(commands.Cog):
     """Synchronises Missionchief members with Discord and handles verification workflow."""
 
-    __version__ = "2.1.1"
+    __version__ = "2.2.0"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -55,6 +55,7 @@ class MemberSync(commands.Cog):
         self.db_path = self.data_path / "membersync.db"
         self.links_db = self.data_path / "membersync.db"
         self._bg_task: Optional[asyncio.Task] = None
+        self._prune_task: Optional[asyncio.Task] = None
 
     async def cog_load(self) -> None:
         await self._init_db()
@@ -63,15 +64,26 @@ class MemberSync(commands.Cog):
             if guess:
                 await self.config.alliance_db_path.set(str(guess))
                 log.info(f"Auto-detected alliance DB: {guess}")
-        if self._bg_task is None:
-            self._bg_task = asyncio.create_task(self._queue_loop())
+        
+        # Start background tasks with error recovery
+        if self._bg_task is None or self._bg_task.done():
+            self._bg_task = asyncio.create_task(self._queue_loop_wrapper())
             log.info("MemberSync queue loop started")
+        
+        if self._prune_task is None or self._prune_task.done():
+            self._prune_task = asyncio.create_task(self._prune_loop_wrapper())
+            log.info("MemberSync prune loop started")
 
     async def cog_unload(self) -> None:
         if self._bg_task:
             self._bg_task.cancel()
             self._bg_task = None
             log.info("MemberSync queue loop stopped")
+        
+        if self._prune_task:
+            self._prune_task.cancel()
+            self._prune_task = None
+            log.info("MemberSync prune loop stopped")
 
     async def _debug_log(self, message: str, level: str = "info") -> None:
         """Log debug messages to both console and Discord if debug mode is enabled"""
@@ -82,16 +94,16 @@ class MemberSync(commands.Cog):
         else:
             log.info(message)
         
-        if await self.config.debug_mode():
-            debug_ch_id = await self.config.debug_channel_id()
-            if debug_ch_id:
-                ch = self.bot.get_channel(int(debug_ch_id))
-                if isinstance(ch, discord.TextChannel):
-                    try:
+        try:
+            if await self.config.debug_mode():
+                debug_ch_id = await self.config.debug_channel_id()
+                if debug_ch_id:
+                    ch = self.bot.get_channel(int(debug_ch_id))
+                    if isinstance(ch, discord.TextChannel):
                         emoji = "🐛" if level == "info" else "⚠️" if level == "warning" else "❌"
                         await ch.send(f"{emoji} `[MemberSync]` {message}")
-                    except Exception as e:
-                        log.error(f"Failed to send debug message to Discord: {e}")
+        except Exception as e:
+            log.error(f"Failed to send debug message to Discord: {e}")
 
     async def _init_db(self) -> None:
         """Initialize MemberSync local DB (async, no executor)."""
@@ -461,9 +473,25 @@ class MemberSync(commands.Cog):
             await self._debug_log(f"Error denying link: {e}", "error")
             log.exception("Error in _deny_link")
 
+    async def _queue_loop_wrapper(self):
+        """Wrapper for queue loop with auto-restart on error"""
+        await self.bot.wait_until_red_ready()
+        log.info("MemberSync queue loop wrapper started")
+        
+        while True:
+            try:
+                await self._queue_loop()
+            except asyncio.CancelledError:
+                log.info("Queue loop cancelled")
+                break
+            except Exception as e:
+                log.exception("CRITICAL: Queue loop crashed: %s", e)
+                await self._debug_log(f"CRITICAL: Queue loop crashed: {e}. Restarting in 60s...", "error")
+                await asyncio.sleep(60)
+                log.info("Restarting queue loop...")
+
     async def _queue_loop(self):
         """Background task that processes the verification queue"""
-        await self.bot.wait_until_red_ready()
         log.info("MemberSync queue loop started")
         
         while True:
@@ -476,137 +504,363 @@ class MemberSync(commands.Cog):
 
     async def _process_queue_once(self):
         """Process verification queue once"""
-        queue = await self.config.queue()
-        if not queue:
-            return
-        
-        await self._debug_log(f"Processing queue ({len(queue)} items)")
-        
-        guild_id = await self.config.guild_id()
-        if not guild_id:
-            guild = self.bot.guilds[0] if self.bot.guilds else None
-            if guild:
-                await self.config.guild_id.set(guild.id)
-                guild_id = guild.id
-                await self._debug_log(f"Auto-configured guild to {guild.name} ({guild.id})")
-        else:
-            guild = self.bot.get_guild(int(guild_id))
-        
-        if not guild:
-            await self._debug_log("No guild available", "warning")
-            return
+        try:
+            queue = await self.config.queue()
+            if not queue:
+                return
+            
+            await self._debug_log(f"Processing queue ({len(queue)} items)")
+            
+            guild_id = await self.config.guild_id()
+            if not guild_id:
+                guild = self.bot.guilds[0] if self.bot.guilds else None
+                if guild:
+                    await self.config.guild_id.set(guild.id)
+                    guild_id = guild.id
+                    await self._debug_log(f"Auto-configured guild to {guild.name} ({guild.id})")
+            else:
+                guild = self.bot.get_guild(int(guild_id))
+            
+            if not guild:
+                await self._debug_log("No guild available", "warning")
+                return
 
-        auto_approve_enabled = await self.config.auto_approve()
-        done = []
-        
-        for user_id, data in queue.items():
-            try:
-                attempts = int(data.get("attempts", 0))
-                mc_id = data.get("mc_id")
-                
-                queue_guild_id = data.get("guild_id")
-                if queue_guild_id:
-                    user_guild = self.bot.get_guild(int(queue_guild_id))
-                    if user_guild:
-                        guild = user_guild
-                
-                discord_user = guild.get_member(int(user_id))
-                
-                if not discord_user:
-                    await self._debug_log(f"User {user_id} no longer in guild, removing from queue")
-                    done.append(user_id)
-                    continue
-
-                await self._debug_log(f"Processing queue item: {discord_user.name} (attempt {attempts + 1})")
-
-                cand = await self._find_member_in_db(discord_user.nick or discord_user.name, mc_id)
-                
-                if cand and cand.get("mc_id"):
-                    await self._debug_log(f"✅ Found {discord_user.name} in database")
+            auto_approve_enabled = await self.config.auto_approve()
+            done = []
+            
+            for user_id, data in list(queue.items()):
+                try:
+                    attempts = int(data.get("attempts", 0))
+                    mc_id = data.get("mc_id")
                     
-                    if auto_approve_enabled:
-                        ok, msg = await self._approve_link(
-                            guild,
-                            discord_user,
-                            str(cand["mc_id"]),
-                            approver=None,
-                            manual=False
-                        )
-                        
-                        if ok:
-                            await self._debug_log(f"✅ Auto-approved verification for {discord_user.name}")
-                        else:
-                            await self._debug_log(f"Failed to auto-approve {discord_user.name}: {msg}", "error")
-                        
+                    queue_guild_id = data.get("guild_id")
+                    if queue_guild_id:
+                        user_guild = self.bot.get_guild(int(queue_guild_id))
+                        if user_guild:
+                            guild = user_guild
+                    
+                    discord_user = guild.get_member(int(user_id))
+                    
+                    if not discord_user:
+                        await self._debug_log(f"User {user_id} no longer in guild, removing from queue")
                         done.append(user_id)
-                    else:
-                        msg_id = await self._send_review_embed(
-                            guild, 
-                            discord_user, 
-                            str(cand["mc_id"]), 
-                            str(cand.get("name") or discord_user.display_name)
-                        )
+                        continue
+
+                    await self._debug_log(f"Processing queue item: {discord_user.name} (attempt {attempts + 1})")
+
+                    cand = await self._find_member_in_db(discord_user.nick or discord_user.name, mc_id)
+                    
+                    if cand and cand.get("mc_id"):
+                        await self._debug_log(f"✅ Found {discord_user.name} in database")
                         
-                        if msg_id:
-                            try:
-                                await discord_user.send(
-                                    "✅ Your verification request has been found and queued for review! "
-                                    "An administrator will approve or deny it shortly."
-                                )
-                            except Exception as e:
-                                await self._debug_log(f"Could not DM user: {e}", "warning")
+                        if auto_approve_enabled:
+                            ok, msg = await self._approve_link(
+                                guild,
+                                discord_user,
+                                str(cand["mc_id"]),
+                                approver=None,
+                                manual=False
+                            )
+                            
+                            if ok:
+                                await self._debug_log(f"✅ Auto-approved verification for {discord_user.name}")
+                            else:
+                                await self._debug_log(f"Failed to auto-approve {discord_user.name}: {msg}", "error")
                             
                             done.append(user_id)
-                            await self._debug_log(f"✅ Queued verification for {discord_user.name}")
                         else:
-                            await self._debug_log(f"Failed to send review embed for {discord_user.name}, will retry", "warning")
-                            attempts += 1
-                            data["attempts"] = attempts
-                            queue[user_id] = data
-                    
-                    continue
+                            msg_id = await self._send_review_embed(
+                                guild, 
+                                discord_user, 
+                                str(cand["mc_id"]), 
+                                str(cand.get("name") or discord_user.display_name)
+                            )
+                            
+                            if msg_id:
+                                try:
+                                    await discord_user.send(
+                                        "✅ Your verification request has been found and queued for review! "
+                                        "An administrator will approve or deny it shortly."
+                                    )
+                                except Exception as e:
+                                    await self._debug_log(f"Could not DM user: {e}", "warning")
+                                
+                                done.append(user_id)
+                                await self._debug_log(f"✅ Queued verification for {discord_user.name}")
+                            else:
+                                await self._debug_log(f"Failed to send review embed for {discord_user.name}, will retry", "warning")
+                                attempts += 1
+                                data["attempts"] = attempts
+                                queue[user_id] = data
+                        
+                        continue
 
-                attempts += 1
-                data["attempts"] = attempts
-                queue[user_id] = data
+                    attempts += 1
+                    data["attempts"] = attempts
+                    queue[user_id] = data
+                    
+                    await self._debug_log(f"Member not found yet, attempt {attempts}/30")
+
+                    if attempts >= 30:
+                        try:
+                            failure_msg = (
+                                "❌ **Verification Failed**\n\n"
+                                "We couldn't find your account in the alliance roster after 1 hour of attempts.\n\n"
+                                "**To fix this:**\n"
+                                "1. Make sure your **Discord server nickname** matches your **MissionChief name exactly** (including capitalization)\n"
+                                "2. If you just joined the alliance, wait a few minutes for the roster to update\n"
+                                "3. Run the command `!verify` again to restart the verification process\n"
+                                "4. If you still have issues, you can provide your MC User ID: `!verify <your_mc_user_id>`\n\n"
+                                "**Need help?** Contact an administrator if you continue to have issues."
+                            )
+                            await discord_user.send(failure_msg)
+                            await self._debug_log(f"Sent failure notification to {discord_user.name}")
+                        except Exception as e:
+                            await self._debug_log(f"Could not DM user failure notification: {e}", "warning")
+                        
+                        done.append(user_id)
+                        await self._debug_log(f"Queue expired for {discord_user.name} - removed from queue")
                 
-                await self._debug_log(f"Member not found yet, attempt {attempts}/30")
+                except Exception as e:
+                    await self._debug_log(f"Error processing queue item {user_id}: {e}", "error")
+                    log.exception(f"Error processing queue item {user_id}")
 
-                if attempts >= 30:
-                    try:
-                        failure_msg = (
-                            "❌ **Verification Failed**\n\n"
-                            "We couldn't find your account in the alliance roster after 1 hour of attempts.\n\n"
-                            "**To fix this:**\n"
-                            "1. Make sure your **Discord server nickname** matches your **MissionChief name exactly** (including capitalization)\n"
-                            "2. If you just joined the alliance, wait a few minutes for the roster to update\n"
-                            "3. Run the command `!verify` again to restart the verification process\n"
-                            "4. If you still have issues, you can provide your MC User ID: `!verify <your_mc_user_id>`\n\n"
-                            "**Need help?** Contact an administrator if you continue to have issues."
-                        )
-                        await discord_user.send(failure_msg)
-                        await self._debug_log(f"Sent failure notification to {discord_user.name}")
-                    except Exception as e:
-                        await self._debug_log(f"Could not DM user failure notification: {e}", "warning")
-                    
-                    done.append(user_id)
-                    await self._debug_log(f"Queue expired for {discord_user.name} - removed from queue")
-            
+            if done:
+                for uid in done:
+                    queue.pop(uid, None)
+                await self.config.queue.set(queue)
+                await self._debug_log(f"Removed {len(done)} items from queue")
+        
+        except Exception as e:
+            log.exception("Critical error in _process_queue_once: %s", e)
+            await self._debug_log(f"Critical error in queue processing: {e}", "error")
+
+    async def _prune_loop_wrapper(self):
+        """Wrapper for prune loop with auto-restart on error"""
+        await self.bot.wait_until_red_ready()
+        log.info("MemberSync prune loop wrapper started")
+        
+        while True:
+            try:
+                await self._prune_loop()
+            except asyncio.CancelledError:
+                log.info("Prune loop cancelled")
+                break
             except Exception as e:
-                await self._debug_log(f"Error processing queue item {user_id}: {e}", "error")
-                log.exception(f"Error processing queue item {user_id}")
+                log.exception("CRITICAL: Prune loop crashed: %s", e)
+                await self._debug_log(f"CRITICAL: Prune loop crashed: {e}. Restarting in 60s...", "error")
+                await asyncio.sleep(60)
+                log.info("Restarting prune loop...")
 
-        if done:
-            for uid in done:
-                queue.pop(uid, None)
-            await self.config.queue.set(queue)
-            await self._debug_log(f"Removed {len(done)} items from queue")
+    async def _prune_loop(self):
+        """Background prune loop"""
+        while True:
+            try:
+                await self._prune_once()
+            except Exception as e:
+                log.exception("prune loop error: %s", e)
+                await self._debug_log(f"Prune loop error: {e}", "error")
+            await asyncio.sleep(3600)
+
+    async def _prune_once(self):
+        """Remove verified role from members who are no longer in the alliance"""
+        try:
+            guild_id = await self.config.guild_id()
+            if not guild_id:
+                guild = self.bot.guilds[0] if self.bot.guilds else None
+                if guild:
+                    await self.config.guild_id.set(guild.id)
+                    await self._debug_log(f"Auto-configured guild for prune: {guild.name} ({guild.id})")
+            else:
+                guild = self.bot.get_guild(int(guild_id))
+            
+            if not guild:
+                await self._debug_log("No guild available for prune", "warning")
+                return
+            
+            role_id = await self.config.verified_role_id()
+            role = guild.get_role(int(role_id)) if role_id else None
+            if not role:
+                await self._debug_log("Verified role not found for prune", "warning")
+                return
+
+            rows = await self._query_alliance("SELECT user_id, mc_user_id, profile_href FROM members_current")
+            current_ids: set[str] = set()
+            for r in rows:
+                mc = r["user_id"] if "user_id" in r.keys() else None
+                if not mc and "mc_user_id" in r.keys():
+                    mc = r["mc_user_id"]
+                if not mc and "profile_href" in r.keys() and r["profile_href"]:
+                    m = re.search(r"/users/(\d+)", r["profile_href"])
+                    if m:
+                        mc = m.group(1)
+                if mc:
+                    current_ids.add(str(mc))
+
+            def _run():
+                con = sqlite3.connect(self.links_db)
+                con.row_factory = sqlite3.Row
+                try:
+                    return [dict(r) for r in con.execute("SELECT * FROM links WHERE status='approved'")]
+                finally:
+                    con.close()
+            links = await asyncio.get_running_loop().run_in_executor(None, _run)
+
+            log_ch_id = await self.config.log_channel_id()
+            ch = guild.get_channel(int(log_ch_id)) if log_ch_id else None
+
+            removed = 0
+            for link in links:
+                did = int(link["discord_id"])
+                mcid = str(link["mc_user_id"])
+                
+                if mcid not in current_ids:
+                    member = guild.get_member(did)
+                    if not member or not role or role not in member.roles:
+                        continue
+                    try:
+                        await member.remove_roles(role, reason="MemberSync auto-prune: not in alliance anymore")
+                        removed += 1
+                        await self._debug_log(f"Auto-pruned {member.name} (MC {mcid})")
+                    except Exception as e:
+                        await self._debug_log(f"Failed to prune {member.name}: {e}", "error")
+                    
+                    if isinstance(ch, discord.TextChannel):
+                        await ch.send(f"🔎 Auto-prune removed Verified from <@{did}> (MC `{mcid}` no longer found).")
+
+            if removed:
+                log.info("Auto-prune removed %s roles", removed)
+                await self._debug_log(f"Auto-prune completed: {removed} roles removed")
+        
+        except Exception as e:
+            log.exception("Critical error in _prune_once: %s", e)
+            await self._debug_log(f"Critical error in prune: {e}", "error")
 
     @commands.group(name="membersync")
     @checks.admin_or_permissions(manage_guild=True)
     async def membersync_group(self, ctx: commands.Context):
         """MemberSync administration."""
         pass
+
+    @membersync_group.command(name="health")
+    async def health_check(self, ctx: commands.Context):
+        """Check if all background loops are running properly."""
+        embed = discord.Embed(title="🏥 MemberSync Health Check", color=discord.Color.blue())
+        
+        # Check if queue loop is running
+        if self._bg_task and not self._bg_task.done():
+            embed.add_field(name="Queue Loop", value="✅ Running", inline=True)
+        else:
+            embed.add_field(name="Queue Loop", value="❌ STOPPED", inline=True)
+            if self._bg_task:
+                try:
+                    exc = self._bg_task.exception()
+                    embed.add_field(name="Queue Error", value=f"```{str(exc)[:1000]}```", inline=False)
+                except:
+                    pass
+        
+        # Check if prune loop is running
+        if self._prune_task and not self._prune_task.done():
+            embed.add_field(name="Prune Loop", value="✅ Running", inline=True)
+        else:
+            embed.add_field(name="Prune Loop", value="❌ STOPPED", inline=True)
+            if self._prune_task:
+                try:
+                    exc = self._prune_task.exception()
+                    embed.add_field(name="Prune Error", value=f"```{str(exc)[:1000]}```", inline=False)
+                except:
+                    pass
+        
+        # Check guild config
+        guild_id = await self.config.guild_id()
+        if guild_id:
+            guild = self.bot.get_guild(int(guild_id))
+            if guild:
+                embed.add_field(name="Configured Guild", value=f"✅ {guild.name}", inline=True)
+            else:
+                embed.add_field(name="Configured Guild", value=f"❌ Guild {guild_id} not found", inline=True)
+        else:
+            embed.add_field(name="Configured Guild", value="⚠️ Not configured", inline=True)
+        
+        # Check database
+        try:
+            rows = await self._query_alliance("SELECT COUNT(*) as cnt FROM members_current")
+            if rows:
+                embed.add_field(name="Alliance DB", value=f"✅ {rows[0]['cnt']} members", inline=True)
+            else:
+                embed.add_field(name="Alliance DB", value="❌ No data", inline=True)
+        except Exception as e:
+            embed.add_field(name="Alliance DB", value=f"❌ Error: {str(e)[:100]}", inline=True)
+        
+        # Check queue size
+        queue = await self.config.queue()
+        embed.add_field(name="Queue Size", value=f"{len(queue)} items", inline=True)
+        
+        # Restart button if loop is dead
+        if (not self._bg_task or self._bg_task.done()) or (not self._prune_task or self._prune_task.done()):
+            embed.add_field(name="⚠️ Action Required", value="Run `!membersync restart` to restart stopped loops", inline=False)
+        
+        embed.set_footer(text=f"MemberSync v{self.__version__}")
+        
+        await ctx.send(embed=embed)
+
+    @membersync_group.command(name="restart")
+    async def restart_loops(self, ctx: commands.Context):
+        """Restart the background queue and prune processing loops."""
+        restarted = []
+        
+        # Restart queue loop if needed
+        if not self._bg_task or self._bg_task.done():
+            if self._bg_task:
+                self._bg_task.cancel()
+            self._bg_task = asyncio.create_task(self._queue_loop_wrapper())
+            restarted.append("Queue loop")
+            await self._debug_log("Queue loop manually restarted")
+        
+        # Restart prune loop if needed
+        if not self._prune_task or self._prune_task.done():
+            if self._prune_task:
+                self._prune_task.cancel()
+            self._prune_task = asyncio.create_task(self._prune_loop_wrapper())
+            restarted.append("Prune loop")
+            await self._debug_log("Prune loop manually restarted")
+        
+        if restarted:
+            await ctx.send(f"✅ Restarted: {', '.join(restarted)}")
+        else:
+            await ctx.send("✅ All loops are already running!")
+
+    @membersync_group.command(name="queueinfo")
+    async def queue_info(self, ctx: commands.Context, member: discord.Member):
+        """Get detailed info about a member's queue status."""
+        queue = await self.config.queue()
+        user_id = str(member.id)
+        
+        if user_id not in queue:
+            await ctx.send(f"❌ {member.mention} is not in the queue.")
+            return
+        
+        data = queue[user_id]
+        embed = discord.Embed(
+            title=f"Queue Info: {member.display_name}",
+            color=discord.Color.blue()
+        )
+        
+        embed.add_field(name="Attempts", value=f"{data.get('attempts', 0)}/30", inline=True)
+        embed.add_field(name="Enqueued At", value=data.get('enqueued_at', 'Unknown')[:19], inline=True)
+        embed.add_field(name="MC ID Provided", value=data.get('mc_id') or "None", inline=True)
+        embed.add_field(name="Guild ID", value=data.get('guild_id', 'Not set'), inline=True)
+        embed.add_field(name="Searched As", value=data.get('by', 'Unknown'), inline=True)
+        
+        # Try to find them now
+        result = await self._find_member_in_db(member.nick or member.name, data.get('mc_id'))
+        if result and result.get('mc_id'):
+            embed.add_field(name="Current Status", value=f"✅ Found in DB as {result.get('name')} (MC: {result.get('mc_id')})", inline=False)
+            embed.add_field(name="Note", value="Will be processed in next queue cycle (max 2 minutes)", inline=False)
+        else:
+            embed.add_field(name="Current Status", value="❌ Not found in current roster", inline=False)
+        
+        await ctx.send(embed=embed)
 
     @membersync_group.command(name="status")
     async def status(self, ctx: commands.Context):
@@ -669,6 +923,11 @@ class MemberSync(commands.Cog):
         approved, pending, denied = await loop.run_in_executor(None, _get_stats)
         
         embed.add_field(name="Links", value=f"✅ {approved} | ⏳ {pending} | ❌ {denied}", inline=False)
+        
+        # Add health status
+        loops_ok = (self._bg_task and not self._bg_task.done()) and (self._prune_task and not self._prune_task.done())
+        health = "✅ Healthy" if loops_ok else "⚠️ Issues detected (run !membersync health)"
+        embed.add_field(name="System Health", value=health, inline=False)
         
         embed.set_footer(text=f"MemberSync v{self.__version__}")
         
@@ -965,6 +1224,7 @@ class MemberSync(commands.Cog):
                     await ctx.send("⚠️ Found you, but failed to send review request. Please contact an administrator.")
                 return
 
+        # Add to queue
         q = await self.config.queue()
         q[str(ctx.author.id)] = {
             "attempts": 0,
@@ -973,10 +1233,18 @@ class MemberSync(commands.Cog):
             "mc_id": mc_id or "",
             "guild_id": int(ctx.guild.id),
         }
-        await self.config.queue.set(q)
+        
+        try:
+            await self.config.queue.set(q)
+            await self._debug_log(f"Successfully added {ctx.author.name} to queue")
+        except Exception as e:
+            await self._debug_log(f"CRITICAL: Failed to save queue: {e}", "error")
+            await ctx.send("❌ Failed to queue your verification. Please contact an administrator.")
+            return
         
         mode_text = "automatically verified" if auto_approve_enabled else "queued for review"
         
+        dm_sent = False
         try:
             queue_msg = (
                 "⏳ We couldn't find you in the roster yet.\n\n"
@@ -988,14 +1256,27 @@ class MemberSync(commands.Cog):
                 "• You can provide your MC User ID by running `!verify <your_mc_id>`"
             )
             await ctx.author.send(queue_msg)
-        except Exception:
-            pass
+            dm_sent = True
+        except Exception as e:
+            await self._debug_log(f"Could not DM user {ctx.author.name}: {e}", "warning")
         
-        await ctx.send(
-            "⏳ I couldn't find you in the roster yet.\n"
-            "I've queued your verification and will retry automatically every **2 minutes for up to 1 hour**. "
-            "Check your DMs for more information!"
-        )
+        if dm_sent:
+            await ctx.send(
+                "⏳ I couldn't find you in the roster yet.\n"
+                "I've queued your verification and will retry automatically every **2 minutes for up to 1 hour**. "
+                "Check your DMs for more information!"
+            )
+        else:
+            await ctx.send(
+                "⏳ I couldn't find you in the roster yet.\n"
+                "**I've queued your verification** and will retry automatically every **2 minutes for up to 1 hour**.\n\n"
+                "**Tips:**\n"
+                "• Make sure your Discord nickname matches your MissionChief name exactly\n"
+                "• If you just joined the alliance, wait a few minutes for the roster to update\n"
+                "• You can provide your MC User ID by running `!verify <your_mc_id>`\n\n"
+                "⚠️ I couldn't send you a DM. Please enable DMs from server members to receive updates!"
+            )
+        
         await self._debug_log(f"Added {ctx.author.name} to queue (will retry for ~1 hour)")
 
     @membersync_group.group(name="retro")
@@ -1152,86 +1433,3 @@ class MemberSync(commands.Cog):
         
         await self._deny_link(ctx.guild, member, mc_id, reviewer=ctx.author if isinstance(ctx.author, discord.Member) else None, reason=reason)
         await ctx.send(f"❌ Denied: {member.mention} for MC `{mc_id}`. Reason: {reason}")
-
-    @commands.Cog.listener()
-    async def on_ready(self):
-        """Start prune loop on bot ready"""
-        async def _loop():
-            await self.bot.wait_until_red_ready()
-            while True:
-                try:
-                    await self._prune_once()
-                except Exception as e:
-                    log.exception("prune loop error: %s", e)
-                    await self._debug_log(f"Prune loop error: {e}", "error")
-                await asyncio.sleep(3600)
-        asyncio.create_task(_loop())
-
-    async def _prune_once(self):
-        """Remove verified role from members who are no longer in the alliance"""
-        guild_id = await self.config.guild_id()
-        if not guild_id:
-            guild = self.bot.guilds[0] if self.bot.guilds else None
-            if guild:
-                await self.config.guild_id.set(guild.id)
-                await self._debug_log(f"Auto-configured guild for prune: {guild.name} ({guild.id})")
-        else:
-            guild = self.bot.get_guild(int(guild_id))
-        
-        if not guild:
-            await self._debug_log("No guild available for prune", "warning")
-            return
-        
-        role_id = await self.config.verified_role_id()
-        role = guild.get_role(int(role_id)) if role_id else None
-        if not role:
-            await self._debug_log("Verified role not found for prune", "warning")
-            return
-
-        rows = await self._query_alliance("SELECT user_id, mc_user_id, profile_href FROM members_current")
-        current_ids: set[str] = set()
-        for r in rows:
-            mc = r["user_id"] if "user_id" in r.keys() else None
-            if not mc and "mc_user_id" in r.keys():
-                mc = r["mc_user_id"]
-            if not mc and "profile_href" in r.keys() and r["profile_href"]:
-                m = re.search(r"/users/(\d+)", r["profile_href"])
-                if m:
-                    mc = m.group(1)
-            if mc:
-                current_ids.add(str(mc))
-
-        def _run():
-            con = sqlite3.connect(self.links_db)
-            con.row_factory = sqlite3.Row
-            try:
-                return [dict(r) for r in con.execute("SELECT * FROM links WHERE status='approved'")]
-            finally:
-                con.close()
-        links = await asyncio.get_running_loop().run_in_executor(None, _run)
-
-        log_ch_id = await self.config.log_channel_id()
-        ch = guild.get_channel(int(log_ch_id)) if log_ch_id else None
-
-        removed = 0
-        for link in links:
-            did = int(link["discord_id"])
-            mcid = str(link["mc_user_id"])
-            
-            if mcid not in current_ids:
-                member = guild.get_member(did)
-                if not member or not role or role not in member.roles:
-                    continue
-                try:
-                    await member.remove_roles(role, reason="MemberSync auto-prune: not in alliance anymore")
-                    removed += 1
-                    await self._debug_log(f"Auto-pruned {member.name} (MC {mcid})")
-                except Exception as e:
-                    await self._debug_log(f"Failed to prune {member.name}: {e}", "error")
-                
-                if isinstance(ch, discord.TextChannel):
-                    await ch.send(f"🔎 Auto-prune removed Verified from <@{did}> (MC `{mcid}` no longer found).")
-
-        if removed:
-            log.info("Auto-prune removed %s roles", removed)
-            await self._debug_log(f"Auto-prune completed: {removed} roles removed")
