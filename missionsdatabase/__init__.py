@@ -1,6 +1,11 @@
-from .missions_database import MissionsDatabase
+"""
+MissionsDatabase cog for Red-DiscordBot
+"""
+
+from .missionsdatabase import MissionsDatabase
 
 
 async def setup(bot):
-    """Load MissionsDatabase cog."""
-    await bot.add_cog(MissionsDatabase(bot))
+    """Load the MissionsDatabase cog."""
+    cog = MissionsDatabase(bot)
+    await bot.add_cog(cog)
