@@ -45,7 +45,7 @@ def _mc_profile_url(mc_id: str) -> str:
 class MemberSync(commands.Cog):
     """Synchronises Missionchief members with Discord and handles verification workflow."""
 
-    __version__ = "2.2.0"
+    __version__ = "2.2.1"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -853,7 +853,7 @@ class MemberSync(commands.Cog):
         embed.add_field(name="Searched As", value=data.get('by', 'Unknown'), inline=True)
         
         # Try to find them now
-        result = await self._find_member_in_db(member.nick or member.name, data.get('mc_id'))
+        result = await self._find_member_in_db(member.display_name, data.get('mc_id'))
         if result and result.get('mc_id'):
             embed.add_field(name="Current Status", value=f"✅ Found in DB as {result.get('name')} (MC: {result.get('mc_id')})", inline=False)
             embed.add_field(name="Note", value="Will be processed in next queue cycle (max 2 minutes)", inline=False)
@@ -1024,7 +1024,7 @@ class MemberSync(commands.Cog):
         for user_id, data in list(queue.items())[:25]:
             member = ctx.guild.get_member(int(user_id))
             if member:
-                name = f"{member.name} ({member.nick or 'No nickname'})"
+                name = f"{member.display_name} (Username: {member.name})"
             else:
                 name = f"User ID: {user_id} (not in guild)"
             
@@ -1075,7 +1075,7 @@ class MemberSync(commands.Cog):
         await ctx.send(f"🔍 Testing lookup for {member.mention}...")
         await self._debug_log(f"Manual test lookup: {member.name} (MC ID: {mc_id})")
         
-        result = await self._find_member_in_db(member.nick or member.name, mc_id)
+        result = await self._find_member_in_db(member.display_name, mc_id)
         
         if result and result.get("mc_id"):
             embed = discord.Embed(
@@ -1087,6 +1087,7 @@ class MemberSync(commands.Cog):
             embed.add_field(name="MC ID", value=result.get("mc_id", "Unknown"), inline=True)
             embed.add_field(name="Rank", value=result.get("role", "Unknown"), inline=True)
             embed.add_field(name="Credits", value=f"{result.get('earned_credits', 0):,}", inline=True)
+            embed.add_field(name="Searched Name", value=member.display_name, inline=True)
             
             await ctx.send(embed=embed)
         else:
@@ -1095,7 +1096,7 @@ class MemberSync(commands.Cog):
                 color=discord.Color.red(),
                 description="This member could not be found in the alliance database."
             )
-            embed.add_field(name="Searched Name", value=member.nick or member.name, inline=True)
+            embed.add_field(name="Searched Name", value=member.display_name, inline=True)
             embed.add_field(name="Searched MC ID", value=mc_id or "Not provided", inline=True)
             embed.add_field(name="Suggestion", value="Make sure the Discord nickname matches the MC name exactly, or provide the correct MC User ID.", inline=False)
             
@@ -1194,7 +1195,7 @@ class MemberSync(commands.Cog):
 
         name = ctx.author.display_name
         await ctx.send("🔍 Looking you up in the roster... this may take a moment.")
-        await self._debug_log(f"Verification request from {ctx.author.name} (nick: {name}, MC ID: {mc_id})")
+        await self._debug_log(f"Verification request from {ctx.author.name} (display_name: {name}, MC ID: {mc_id})")
 
         cand = await self._find_member_in_db(name, mc_id)
         auto_approve_enabled = await self.config.auto_approve()
@@ -1236,7 +1237,7 @@ class MemberSync(commands.Cog):
         
         try:
             await self.config.queue.set(q)
-            await self._debug_log(f"Successfully added {ctx.author.name} to queue")
+            await self._debug_log(f"Successfully added {ctx.author.name} to queue (searching as: {name})")
         except Exception as e:
             await self._debug_log(f"CRITICAL: Failed to save queue: {e}", "error")
             await ctx.send("❌ Failed to queue your verification. Please contact an administrator.")
@@ -1251,7 +1252,8 @@ class MemberSync(commands.Cog):
                 f"I've queued your verification request and will automatically retry every 2 minutes for up to 1 hour. "
                 f"Once found, you'll be {mode_text}!\n\n"
                 "**Tips:**\n"
-                "• Make sure your Discord nickname matches your MissionChief name exactly\n"
+                f"• Your current display name is: **{name}**\n"
+                "• Make sure this matches your MissionChief name exactly (including capitalization)\n"
                 "• If you just joined the alliance, wait a few minutes for the roster to update\n"
                 "• You can provide your MC User ID by running `!verify <your_mc_id>`"
             )
@@ -1269,15 +1271,16 @@ class MemberSync(commands.Cog):
         else:
             await ctx.send(
                 "⏳ I couldn't find you in the roster yet.\n"
-                "**I've queued your verification** and will retry automatically every **2 minutes for up to 1 hour**.\n\n"
+                f"**I've queued your verification** and will retry automatically every **2 minutes for up to 1 hour**.\n\n"
                 "**Tips:**\n"
-                "• Make sure your Discord nickname matches your MissionChief name exactly\n"
+                f"• Your current display name is: **{name}**\n"
+                "• Make sure this matches your MissionChief name exactly (including capitalization)\n"
                 "• If you just joined the alliance, wait a few minutes for the roster to update\n"
                 "• You can provide your MC User ID by running `!verify <your_mc_id>`\n\n"
                 "⚠️ I couldn't send you a DM. Please enable DMs from server members to receive updates!"
             )
         
-        await self._debug_log(f"Added {ctx.author.name} to queue (will retry for ~1 hour)")
+        await self._debug_log(f"Added {ctx.author.name} to queue (will retry for ~1 hour, searching as: {name})")
 
     @membersync_group.group(name="retro")
     async def retro_group(self, ctx: commands.Context):
@@ -1313,7 +1316,7 @@ class MemberSync(commands.Cog):
         for m in role.members:
             if await self.get_link_for_discord(m.id):
                 continue
-            hit = await self._find_by_exact_name(m.nick or m.name)
+            hit = await self._find_by_exact_name(m.display_name)
             if hit:
                 todo += 1
         
@@ -1332,7 +1335,7 @@ class MemberSync(commands.Cog):
         for m in role.members:
             if await self.get_link_for_discord(m.id):
                 continue
-            hit = await self._find_by_exact_name(m.nick or m.name)
+            hit = await self._find_by_exact_name(m.display_name)
             if not hit:
                 continue
             name, mcid = hit
