@@ -200,7 +200,7 @@ class FireStationCommand(commands.Cog):
     """Fire Station Command – management game."""
 
     __author__ = "You + ChatGPT"
-    __version__ = "0.10.0"
+    __version__ = "0.11.0"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -230,6 +230,8 @@ class FireStationCommand(commands.Cog):
             "mutual_active": False,
             "mutual_helpers": [],
             "mutual_strength": 0,
+            "station_type": "volunteer",
+            "station_upgrade_job": {},
         }
 
         default_guild = {
@@ -266,7 +268,14 @@ class FireStationCommand(commands.Cog):
     def get_balance(self, key: str, default: Any = None) -> Any:
         return self.content.balance.data.get(key, default)
 
-    def simulate_volunteers(self, required_staff: int) -> Dict[str, Any]:
+    
+    def simulate_volunteers(self, required_staff: int, station_type: str = "volunteer") -> Dict[str, Any]:
+        """
+        Simulate crew turnout.
+
+        - volunteer: stochastic no-show and (optional) re-alert.
+        - career: full crew with fixed turnout time.
+        """
         if required_staff <= 0:
             return {
                 "required": 0,
@@ -277,6 +286,19 @@ class FireStationCommand(commands.Cog):
                 "turnout_seconds": 0,
             }
 
+        # Career station: everyone is on station, fast turnout and no re-alert logic.
+        if station_type == "career":
+            turnout = int(self.get_balance("career_turnout_seconds", 30))
+            return {
+                "required": required_staff,
+                "first_arrived": required_staff,
+                "second_arrived": 0,
+                "total_arrived": required_staff,
+                "used_realert": False,
+                "turnout_seconds": turnout,
+            }
+
+        # Volunteer logic (default)
         min_no_show = float(self.get_balance("volunteer_no_show_min", 0.05))
         max_no_show = float(self.get_balance("volunteer_no_show_max", 0.2))
         base_no_show = random.uniform(min_no_show, max_no_show)
@@ -318,7 +340,6 @@ class FireStationCommand(commands.Cog):
             "used_realert": used_realert,
             "turnout_seconds": turnout_seconds,
         }
-
     async def _process_training_jobs(self, user_conf, data) -> List[TrainingDef]:
         now = int(dt.datetime.utcnow().timestamp())
         jobs = list(data.get("training_jobs", []))
@@ -411,6 +432,27 @@ class FireStationCommand(commands.Cog):
             await user_conf.expansions.set(list(expansions_owned))
 
         return newly_completed
+
+    async def _process_station_upgrade(self, user_conf, data) -> Optional[str]:
+        """
+        Process a pending station upgrade job, if any.
+        Returns the new station_type if the upgrade just completed, otherwise None.
+        """
+        job = data.get("station_upgrade_job") or None
+        if not job or job.get("completed"):
+            return None
+
+        now = int(dt.datetime.utcnow().timestamp())
+        start_ts = job.get("start_ts", 0)
+        duration = job.get("duration", 0)
+        if now < start_ts + duration:
+            return None
+
+        new_type = job.get("target_type", "career")
+        await user_conf.station_type.set(new_type)
+        job["completed"] = True
+        await user_conf.station_upgrade_job.set(job)
+        return new_type
 
     def _has_workshop(self, expansions: List[str]) -> bool:
         return "workshop" in expansions
@@ -550,6 +592,7 @@ class FireStationCommand(commands.Cog):
             "Use `[p]fsc on` to go on duty and `[p]fsc mission` to request a mission."
         )
 
+    
     @fsc_group.command(name="status")
     async def fsc_status(self, ctx: commands.Context):
         """Show your duty status and basic station info."""
@@ -558,10 +601,12 @@ class FireStationCommand(commands.Cog):
         await self._process_training_jobs(user_conf, data)
         await self._process_repair_jobs(user_conf, data)
         await self._process_expansion_jobs(user_conf, data)
+        upgraded = await self._process_station_upgrade(user_conf, data)
 
         data = await user_conf.all()
         station_tier = self.calc_station_tier(data["xp"])
         is_active = data["is_active"]
+        station_type = data.get("station_type", "volunteer")
 
         funds = await self._get_funds(ctx.author)
 
@@ -571,6 +616,7 @@ class FireStationCommand(commands.Cog):
         )
         embed.add_field(name="Started", value="Yes" if data["started"] else "No", inline=True)
         embed.add_field(name="Station Tier", value=str(station_tier), inline=True)
+        embed.add_field(name="Station Type", value=station_type.capitalize(), inline=True)
         embed.add_field(
             name="On Duty",
             value="Yes" if is_active else "No",
@@ -620,6 +666,7 @@ class FireStationCommand(commands.Cog):
         target = member or ctx.author
         data = await self.config.user(target).all()
         station_tier = self.calc_station_tier(data["xp"])
+        station_type = data.get("station_type", "volunteer")
         funds = await self._get_funds(target)
 
         embed = discord.Embed(
@@ -628,6 +675,7 @@ class FireStationCommand(commands.Cog):
         )
         embed.add_field(name="Started", value="Yes" if data["started"] else "No", inline=True)
         embed.add_field(name="Station Tier", value=str(station_tier), inline=True)
+        embed.add_field(name="Station Type", value=station_type.capitalize(), inline=True)
         embed.add_field(name="XP", value=str(data["xp"]), inline=True)
         embed.add_field(name="Reputation", value=str(data["reputation"]), inline=True)
         embed.add_field(
@@ -660,7 +708,119 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Funds available", value=str(funds), inline=True)
         await ctx.send(embed=embed)
 
+    
     # ------------------------------
+    # STATION MANAGEMENT (VOLUNTEER → CAREER)
+    # ------------------------------
+
+    @fsc_group.group(name="station")
+    async def fsc_station(self, ctx: commands.Context):
+        """Manage your station type (volunteer vs career)."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+
+    @fsc_station.command(name="status")
+    async def station_status(self, ctx: commands.Context):
+        """Show your current station type and any upgrade in progress."""
+        user_conf = self.config.user(ctx.author)
+        data = await user_conf.all()
+        upgraded = await self._process_station_upgrade(user_conf, data)
+        if upgraded:
+            data = await user_conf.all()
+
+        station_type = data.get("station_type", "volunteer")
+        job = data.get("station_upgrade_job") or None
+
+        embed = discord.Embed(
+            title="Station Type Status",
+            color=discord.Color.teal(),
+        )
+        embed.add_field(name="Current type", value=station_type.capitalize(), inline=True)
+
+        if job and not job.get("completed"):
+            start_ts = job.get("start_ts", 0)
+            duration = job.get("duration", 0)
+            finish_ts = start_ts + duration
+            remaining = max(0, finish_ts - int(dt.datetime.utcnow().timestamp()))
+            remaining_min = remaining // 60
+            finish_str = dt.datetime.utcfromtimestamp(finish_ts).strftime("%Y-%m-%d %H:%M UTC")
+            target_type = job.get("target_type", "career").capitalize()
+            embed.add_field(
+                name="Upgrade in progress",
+                value=f"To **{target_type}**\n"
+                      f"ETA: `{finish_str}` (~{remaining_min} min)",
+                inline=False,
+            )
+        elif station_type == "volunteer":
+            cost = int(self.get_balance("career_upgrade_cost", 250000))
+            hours = float(self.get_balance("career_upgrade_hours", 8))
+            embed.add_field(
+                name="Upgrade available",
+                value=f"You can upgrade to a **career** station.\n"
+                      f"Cost: {cost} credits, build time: ~{hours} hours.\n"
+                      f"Use `[p]fsc station upgrade` to start.",
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Upgrade",
+                value="Already a **career** station.",
+                inline=False,
+            )
+
+        await ctx.send(embed=embed)
+
+    @fsc_station.command(name="upgrade")
+    async def station_upgrade(self, ctx: commands.Context):
+        """
+        Start upgrading your volunteer station to a career station.
+
+        This is expensive and takes time. Once completed, your crew will always
+        be on station with a fixed, short turnout time instead of volunteer paging.
+        """
+        user_conf = self.config.user(ctx.author)
+        data = await user_conf.all()
+
+        if not data["started"]:
+            await ctx.send("You have not started yet. Use `[p]fsc start` first.")
+            return
+
+        station_type = data.get("station_type", "volunteer")
+        if station_type == "career":
+            await ctx.send("Your station is already a **career** station.")
+            return
+
+        job = data.get("station_upgrade_job") or None
+        if job and not job.get("completed"):
+            await ctx.send("A station upgrade is already in progress. Check `[p]fsc station status`.")
+            return
+
+        cost = int(self.get_balance("career_upgrade_cost", 250000))
+        hours = float(self.get_balance("career_upgrade_hours", 8))
+        ok = await self._charge(ctx, ctx.author, cost, "Station upgrade: volunteer → career")
+        if not ok:
+            return
+
+        duration_seconds = int(hours * 3600)
+        now = int(dt.datetime.utcnow().timestamp())
+
+        job = {
+            "start_ts": now,
+            "duration": duration_seconds,
+            "target_type": "career",
+            "completed": False,
+        }
+        await user_conf.station_upgrade_job.set(job)
+
+        finish_time = dt.datetime.utcfromtimestamp(now + duration_seconds)
+        finish_str = finish_time.strftime("%Y-%m-%d %H:%M UTC")
+
+        await ctx.send(
+            f"Station upgrade started: **Volunteer → Career**.\n"
+            f"Cost paid: {cost} credits.\n"
+            f"Estimated completion: `{finish_str}`."
+        )
+# ------------------------------
     # GARAGE / VEHICLES
     # ------------------------------
 
@@ -1783,7 +1943,8 @@ class FireStationCommand(commands.Cog):
         if required_staff <= 0:
             required_staff = 4
 
-        vol_result = self.simulate_volunteers(required_staff)
+        station_type = data.get("station_type", "volunteer")
+        vol_result = self.simulate_volunteers(required_staff, station_type=station_type)
         arrived = vol_result["total_arrived"]
         used_realert = vol_result["used_realert"]
         turnout_seconds = vol_result["turnout_seconds"]

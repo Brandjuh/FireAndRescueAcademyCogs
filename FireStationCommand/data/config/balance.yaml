@@ -24,3 +24,8 @@ balance:
   reputation_gain_success: 2
   reputation_loss_fail: 3
   reputation_loss_skip: 1
+
+
+  career_upgrade_cost: 250000
+  career_upgrade_hours: 8
+  career_turnout_seconds: 30
