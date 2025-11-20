@@ -715,7 +715,7 @@ class RapidResponse(commands.Cog):
         """View game statistics"""
         import aiosqlite
         
-        async with aiosqlite.connect(self.db.db_path) as db:
+        async with aiosqlite.connect(str(self.db.db_path)) as db:
             # Total players
             cursor = await db.execute("SELECT COUNT(*) FROM players")
             total_players = (await cursor.fetchone())[0]

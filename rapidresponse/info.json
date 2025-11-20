@@ -1,5 +1,5 @@
 {
-  "author": ["Brandjuhnl"],
+  "author": ["Roel"],
   "install_msg": "Thank you for installing Rapid Response Dispatch! Use `[p]rr admin setchannel` to set up the mission channel, then players can use `[p]rr status on` to start playing. This cog requires the Red bank system to be configured.",
   "name": "RapidResponse",
   "short": "MissionChief-inspired emergency response simulation game",

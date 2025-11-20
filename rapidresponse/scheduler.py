@@ -71,7 +71,7 @@ class MissionScheduler:
             # Get all active players
             async with self.db.db_path.open() as _:
                 import aiosqlite
-                async with aiosqlite.connect(self.db.db_path) as db:
+                async with aiosqlite.connect(str(self.db.db_path)) as db:
                     db.row_factory = aiosqlite.Row
                     async with db.execute("""
                         SELECT * FROM players WHERE is_active = 1
@@ -283,7 +283,7 @@ class MissionScheduler:
         """Handle missions that expired (timeout)"""
         try:
             import aiosqlite
-            async with aiosqlite.connect(self.db.db_path) as db:
+            async with aiosqlite.connect(str(self.db.db_path)) as db:
                 db.row_factory = aiosqlite.Row
                 
                 # Get missions that just timed out
@@ -348,7 +348,7 @@ class MissionScheduler:
         """Check for completed trainings"""
         try:
             import aiosqlite
-            async with aiosqlite.connect(self.db.db_path) as db:
+            async with aiosqlite.connect(str(self.db.db_path)) as db:
                 db.row_factory = aiosqlite.Row
                 
                 now = datetime.utcnow().isoformat()
