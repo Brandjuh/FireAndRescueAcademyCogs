@@ -417,7 +417,7 @@ def create_outcome_embed(
     return embed
 
 
-def create_profile_embed(player: Dict[str, Any], user: discord.User) -> discord.Embed:
+def create_profile_embed(player: Dict[str, Any], user: discord.User, credits: int = 0) -> discord.Embed:
     """Create profile embed"""
     
     embed = discord.Embed(
@@ -443,7 +443,7 @@ def create_profile_embed(player: Dict[str, Any], user: discord.User) -> discord.
             f"**Level:** {level}\n"
             f"**Status:** {status}\n"
             f"**XP:** {xp_progress:,}/{xp_needed:,}\n"
-            f"**Credits:** {player['credits']:,} 💵"
+            f"**Credits:** {credits:,} 💵"
         ),
         inline=True
     )

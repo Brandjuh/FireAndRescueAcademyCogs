@@ -147,7 +147,7 @@ class RapidResponse(commands.Cog):
         except Exception as e:
             log.error(f"Error assigning first mission to {user_id}: {e}", exc_info=True)
     
-    @commands.group(name="rr", aliases=["rapidresponse"])
+    @commands.hybrid_group(name="rr", aliases=["rapidresponse"])
     async def rr(self, ctx: commands.Context):
         """Rapid Response Dispatch game commands"""
         if ctx.invoked_subcommand is None:
@@ -295,13 +295,20 @@ class RapidResponse(commands.Cog):
         
         if not player:
             if target_user == ctx.author:
-                await ctx.send("❌ You haven't started playing yet! Missions will be automatically assigned when you go on duty.")
+                await ctx.send("❌ You haven't started playing yet! Use `/rr status on` to start.")
                 return
             else:
                 await ctx.send(f"❌ {target_user.mention} hasn't started playing yet!")
                 return
         
-        embed = create_profile_embed(player, target_user)
+        # Get credits from Red bank
+        try:
+            credits = await bank.get_balance(target_user)
+        except Exception as e:
+            log.error(f"Error getting bank balance: {e}")
+            credits = 0
+        
+        embed = create_profile_embed(player, target_user, credits)
         await ctx.send(embed=embed)
     
     @rr.command(name="train")
@@ -318,7 +325,8 @@ class RapidResponse(commands.Cog):
             
             await ctx.send(
                 f"⏱️ You're already training **{training['stat_type'].title()}**!\n"
-                f"Training completes in **{minutes} minutes**."
+                f"Training completes in **{minutes} minutes**.\n\n"
+                f"⚠️ **Note:** You cannot receive missions while training!"
             )
             return
         
@@ -331,21 +339,62 @@ class RapidResponse(commands.Cog):
             )
             return
         
-        # Show training menu
+        # Show training menu with detailed info
         embed = discord.Embed(
             title="📚 Training Center",
             description=(
-                "Select a stat to train:\n\n"
-                "Each training session takes **1 hour** and grants **+10** to the chosen stat.\n\n"
-                "**Your Current Stats:**\n"
-                f"⚡ Response: {player['stat_response']}\n"
-                f"🎯 Tactics: {player['stat_tactics']}\n"
-                f"📦 Logistics: {player['stat_logistics']}\n"
-                f"🏥 Medical: {player['stat_medical']}\n"
-                f"⭐ Command: {player['stat_command']}"
+                "**Train your stats to improve mission success rates!**\n\n"
+                "⚠️ **IMPORTANT:** You will NOT receive missions during training!\n\n"
+                "**Training Details:**\n"
+                "• Duration: **1 hour**\n"
+                "• Stat Increase: **+10 points**\n"
+                "• Cost: Varies by current stat level\n\n"
+                "**Stat Effects:**\n"
+                "• **Response** - Faster reactions, general bonus\n"
+                "• **Tactics** - Better at fire/tactical missions\n"
+                "• **Logistics** - Reduced penalties, efficiency\n"
+                "• **Medical** - Improved medical mission outcomes\n"
+                "• **Command** - Better at complex/multi-stage missions\n\n"
+                "**Your Current Stats:**"
             ),
             color=config.COLOR_INFO
         )
+        
+        # Get training costs for each stat
+        stats = ['response', 'tactics', 'logistics', 'medical', 'command']
+        stats_text = []
+        
+        for stat in stats:
+            current = player[f'stat_{stat}']
+            cost = await self.game_logic.calculate_training_cost(player, stat)
+            
+            # Get bank balance to show affordability
+            try:
+                balance = await bank.get_balance(ctx.author)
+                can_afford = "✅" if balance >= cost else "❌"
+            except:
+                can_afford = "❓"
+            
+            emoji_map = {
+                'response': '⚡',
+                'tactics': '🎯',
+                'logistics': '📦',
+                'medical': '🏥',
+                'command': '⭐'
+            }
+            
+            stats_text.append(
+                f"{can_afford} {emoji_map[stat]} **{stat.title()}**: {current} "
+                f"(Cost: {cost:,} credits)"
+            )
+        
+        embed.add_field(
+            name="Select a Stat to Train",
+            value="\n".join(stats_text),
+            inline=False
+        )
+        
+        embed.set_footer(text="⚠️ Remember: No missions during training!")
         
         view = TrainView(self, ctx.author.id)
         await ctx.send(embed=embed, view=view)
@@ -390,10 +439,12 @@ class RapidResponse(commands.Cog):
             title="📚 Training Started!",
             description=(
                 f"You've started training **{stat_type.title()}**!\n\n"
-                f"**Cost:** {cost:,} credits\n"
+                f"**Cost:** {cost:,} credits ✅\n"
                 f"**Duration:** {config.TRAINING_DURATION_HOURS} hour(s)\n"
-                f"**Completes:** <t:{int(completes_at.timestamp())}:R>\n\n"
-                "You'll receive a notification when training is complete."
+                f"**Completes:** <t:{int(completes_at.timestamp())}:R>\n"
+                f"**Stat Gain:** +{config.TRAINING_STAT_GAIN}\n\n"
+                f"⚠️ **IMPORTANT:** You will NOT receive missions during training!\n"
+                f"You'll get a notification when training is complete."
             ),
             color=config.COLOR_SUCCESS
         )
@@ -675,50 +726,6 @@ class RapidResponse(commands.Cog):
         else:
             await ctx.send("❌ Failed to refresh missions. Check logs for details.")
     
-    @rr_admin.command(name="givexp")
-    async def give_xp(
-        self,
-        ctx: commands.Context,
-        user: discord.Member,
-        amount: int
-    ):
-        """Give XP to a player"""
-        player = await self.db.get_player(user.id)
-        if not player:
-            await ctx.send(f"❌ {user.mention} hasn't started playing yet!")
-            return
-        
-        level_info = await self.db.add_xp(user.id, amount)
-        
-        embed = discord.Embed(
-            title="✅ XP Granted",
-            description=f"Gave {amount:,} XP to {user.mention}",
-            color=config.COLOR_SUCCESS
-        )
-        
-        if level_info.get('leveled_up'):
-            embed.add_field(
-                name="🎉 Level Up!",
-                value=f"Level {level_info['old_level']} → {level_info['new_level']}",
-                inline=False
-            )
-        
-        await ctx.send(embed=embed)
-    
-    @rr_admin.command(name="givecredits")
-    async def give_credits(
-        self,
-        ctx: commands.Context,
-        user: discord.Member,
-        amount: int
-    ):
-        """Give credits to a player"""
-        try:
-            await bank.deposit_credits(user, amount)
-            await ctx.send(f"✅ Deposited {amount:,} credits to {user.mention}")
-        except Exception as e:
-            await ctx.send(f"❌ Error: {e}")
-    
     @rr_admin.command(name="setstat")
     async def set_stat(
         self,
@@ -919,11 +926,11 @@ class RapidResponse(commands.Cog):
             issues.append("❌ Mission channel not configured!")
         
         # Check eligibility with scheduler logic
-        is_eligible = await self.scheduler._is_eligible_for_mission(player)
+        is_eligible, reason = await self.scheduler._is_eligible_for_mission(player)
         
         embed.add_field(
             name="Eligible for Mission?",
-            value="✅ YES" if is_eligible else "❌ NO",
+            value=f"{'✅ YES' if is_eligible else '❌ NO'}\n**Reason:** {reason}",
             inline=False
         )
         

@@ -84,35 +84,40 @@ class MissionScheduler:
                 player = dict(player_row)
                 
                 # Check if player is eligible for a new mission
-                is_eligible = await self._is_eligible_for_mission(player)
+                is_eligible, reason = await self._is_eligible_for_mission(player)
                 
                 if is_eligible:
-                    log.info(f"Player {player['user_id']} is eligible for mission, assigning...")
+                    log.info(f"Player {player['user_id']} is eligible ({reason}), assigning mission...")
                     await self._assign_mission_to_player(player)
                 else:
-                    log.debug(f"Player {player['user_id']} not eligible for mission yet")
+                    log.debug(f"Player {player['user_id']} not eligible: {reason}")
         
         except Exception as e:
             log.error(f"Error assigning missions: {e}", exc_info=True)
     
-    async def _is_eligible_for_mission(self, player: dict) -> bool:
-        """Check if player is eligible for a new mission"""
+    async def _is_eligible_for_mission(self, player: dict) -> tuple[bool, str]:
+        """
+        Check if player is eligible for a new mission
+        Returns: (is_eligible, reason)
+        """
         
         # Check if player has an active mission
         active_mission = await self.db.get_active_mission(player['user_id'])
         if active_mission:
-            return False
+            return (False, "Has active mission")
         
         # Check if player has an active training
         training = await self.db.get_active_training(player['user_id'])
         if training:
-            return False
+            return (False, "Currently in training")
         
         # Check cooldown
         if player['current_cooldown_until']:
             cooldown_until = datetime.fromisoformat(player['current_cooldown_until'])
             if datetime.utcnow() < cooldown_until:
-                return False
+                time_left = cooldown_until - datetime.utcnow()
+                minutes = int(time_left.total_seconds() / 60)
+                return (False, f"Cooldown active ({minutes} min left)")
         
         # Check time since last mission
         if player['last_mission_time']:
@@ -131,17 +136,30 @@ class MissionScheduler:
             next_mission_time = last_mission + timedelta(minutes=cooldown_minutes)
             
             if datetime.utcnow() < next_mission_time:
-                return False
+                time_left = next_mission_time - datetime.utcnow()
+                minutes = int(time_left.total_seconds() / 60)
+                return (False, f"Mission cooldown ({minutes} min left)")
         else:
-            # First mission ever - just needs to wait FIRST_MISSION_DELAY
-            # Check when player went active (use updated_at as proxy)
+            # First mission ever - check if enough time passed since going active
+            # For first mission, we want it to happen quickly (30 seconds)
+            # But we need a timestamp to check against
+            
+            # If last_mission_time is None, they've never done a mission
+            # Check when they last updated (went active)
             if player.get('updated_at'):
                 went_active = datetime.fromisoformat(player['updated_at'])
                 wait_time = timedelta(minutes=config.FIRST_MISSION_DELAY)
-                if datetime.utcnow() < went_active + wait_time:
-                    return False
+                next_mission_time = went_active + wait_time
+                
+                if datetime.utcnow() < next_mission_time:
+                    time_left = next_mission_time - datetime.utcnow()
+                    seconds = int(time_left.total_seconds())
+                    return (False, f"First mission cooldown ({seconds}s left)")
+            
+            # If no updated_at or time has passed, they're eligible
+            return (True, "Ready for first mission")
         
-        return True
+        return (True, "Ready for mission")
     
     async def _assign_mission_to_player(self, player: dict):
         """Assign a mission to a player"""
@@ -429,7 +447,8 @@ class MissionScheduler:
                                     f"Your **{result['stat_type'].title()}** training has finished!\n\n"
                                     f"**{result['stat_type'].title()}:** "
                                     f"{result['old_value']} → {result['new_value']} "
-                                    f"(+{result['gain']})"
+                                    f"(+{result['gain']})\n\n"
+                                    f"🚨 **You can now receive missions again!**"
                                 ),
                                 color=config.COLOR_SUCCESS
                             )
