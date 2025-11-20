@@ -198,7 +198,7 @@ class FireStationCommand(commands.Cog):
     """Fire Station Command – management game."""
 
     __author__ = "You + ChatGPT"
-    __version__ = "0.7.0"
+    __version__ = "0.8.0"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -222,6 +222,7 @@ class FireStationCommand(commands.Cog):
             "personnel": [],
             "training_jobs": [],
             "repair_jobs": [],
+            "expansion_jobs": [],
             "completed_trainings": [],
             "mutual_active": False,
             "mutual_helpers": [],
@@ -370,8 +371,56 @@ class FireStationCommand(commands.Cog):
 
         return newly_completed
 
+    async def _process_expansion_jobs(self, user_conf, data) -> List[ExpansionDef]:
+        now = int(dt.datetime.utcnow().timestamp())
+        jobs = list(data.get("expansion_jobs", []))
+        expansions_owned = set(data.get("expansions", []))
+
+        updated_jobs = False
+        updated_expansions = False
+        newly_completed: List[ExpansionDef] = []
+
+        for job in jobs:
+            if job.get("completed"):
+                continue
+            start_ts = job.get("start_ts", 0)
+            duration = job.get("duration", 0)
+            if now >= start_ts + duration:
+                job["completed"] = True
+                updated_jobs = True
+                ex_id = job.get("expansion_id")
+                if ex_id and ex_id not in expansions_owned:
+                    expansions_owned.add(ex_id)
+                    ex_def = self.content.expansions.get(ex_id)
+                    if ex_def:
+                        newly_completed.append(ex_def)
+                    updated_expansions = True
+
+        if updated_jobs:
+            await user_conf.expansion_jobs.set(jobs)
+        if updated_expansions:
+            await user_conf.expansions.set(list(expansions_owned))
+
+        return newly_completed
+
     def _has_workshop(self, expansions: List[str]) -> bool:
         return "workshop" in expansions
+
+    def _apply_multiplier_with_expansions(self, base_key: str, expansions_ids: List[str], default: float = 1.0) -> float:
+        """Get a time/cost multiplier including expansion effects."""
+        base = float(self.get_balance(base_key, default))
+        factor = 1.0
+        for ex_id in expansions_ids:
+            ex_def = self.content.expansions.get(ex_id)
+            if not ex_def:
+                continue
+            eff_val = ex_def.effects.get(base_key)
+            if eff_val is not None:
+                try:
+                    factor *= float(eff_val)
+                except (TypeError, ValueError):
+                    continue
+        return base * factor
 
     # ------------------------------
     # Mission scheduler (stub)
@@ -432,6 +481,7 @@ class FireStationCommand(commands.Cog):
         data = await user_conf.all()
         await self._process_training_jobs(user_conf, data)
         await self._process_repair_jobs(user_conf, data)
+        await self._process_expansion_jobs(user_conf, data)
 
         data = await user_conf.all()
         station_tier = self.calc_station_tier(data["xp"])
@@ -456,6 +506,18 @@ class FireStationCommand(commands.Cog):
             embed.add_field(
                 name="Mutual aid buff",
                 value=f"Active with {len(helpers)} helper(s)",
+                inline=False,
+            )
+
+        ex_ids = data.get("expansions", [])
+        if ex_ids:
+            names = []
+            for ex_id in ex_ids:
+                ex_def = self.content.expansions.get(ex_id)
+                names.append(ex_def.name if ex_def else ex_id)
+            embed.add_field(
+                name="Expansions built",
+                value=", ".join(names),
                 inline=False,
             )
 
@@ -498,11 +560,23 @@ class FireStationCommand(commands.Cog):
             value=str(len(data["vehicles"])),
             inline=True,
         )
-        embed.add_field(
-            name="Expansions",
-            value=", ".join(data["expansions"]) if data["expansions"] else "None",
-            inline=False,
-        )
+        ex_ids = data.get("expansions", [])
+        if ex_ids:
+            names = []
+            for ex_id in ex_ids:
+                ex_def = self.content.expansions.get(ex_id)
+                names.append(ex_def.name if ex_def else ex_id)
+            embed.add_field(
+                name="Expansions",
+                value=", ".join(names),
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Expansions",
+                value="None",
+                inline=False,
+            )
         await ctx.send(embed=embed)
 
     # ------------------------------
@@ -535,6 +609,7 @@ class FireStationCommand(commands.Cog):
         user_conf = self.config.user(ctx.author)
         data = await user_conf.all()
         newly_completed = await self._process_training_jobs(user_conf, data)
+        await self._process_expansion_jobs(user_conf, data)
 
         if newly_completed:
             names = ", ".join(t.name for t in newly_completed)
@@ -617,7 +692,10 @@ class FireStationCommand(commands.Cog):
                 await ctx.send("You already have this training running.")
                 return
 
-        multiplier = float(self.get_balance("training_time_multiplier", 1.0))
+        expansions_ids = data.get("expansions", [])
+        multiplier = self._apply_multiplier_with_expansions(
+            "training_time_multiplier", expansions_ids, default=1.0
+        )
         duration_seconds = int(t_def.duration_hours * 3600 * multiplier)
         now = int(dt.datetime.utcnow().timestamp())
 
@@ -659,6 +737,7 @@ class FireStationCommand(commands.Cog):
         user_conf = self.config.user(ctx.author)
         data = await user_conf.all()
         await self._process_repair_jobs(user_conf, data)
+        await self._process_expansion_jobs(user_conf, data)
 
         data = await user_conf.all()
         vehicles = data.get("vehicles", [])
@@ -740,10 +819,11 @@ class FireStationCommand(commands.Cog):
         user_conf = self.config.user(ctx.author)
         data = await user_conf.all()
         await self._process_repair_jobs(user_conf, data)
+        await self._process_expansion_jobs(user_conf, data)
 
         data = await user_conf.all()
         vehicles = data.get("vehicles", [])
-        expansions = data.get("expansions", [])
+        expansions_ids = data.get("expansions", [])
         jobs = data.get("repair_jobs", [])
 
         v = next((x for x in vehicles if x.get("id") == vehicle_id), None)
@@ -761,7 +841,7 @@ class FireStationCommand(commands.Cog):
                 await ctx.send("This vehicle is already in repair.")
                 return
 
-        has_workshop = self._has_workshop(expansions)
+        has_workshop = self._has_workshop(expansions_ids)
         if inhouse and not has_workshop:
             await ctx.send(
                 "You do not have a workshop expansion. External repair will be used instead."
@@ -772,7 +852,9 @@ class FireStationCommand(commands.Cog):
         base_hours = max(1, damage / 20.0)
         duration_seconds = int(base_hours * 3600)
 
-        mult = float(self.get_balance("repair_time_multiplier", 1.0))
+        mult = self._apply_multiplier_with_expansions(
+            "repair_time_multiplier", expansions_ids, default=1.0
+        )
         duration_seconds = int(duration_seconds * mult)
 
         if inhouse:
@@ -801,6 +883,181 @@ class FireStationCommand(commands.Cog):
         method = "workshop (in-house)" if inhouse else "external repair"
         await ctx.send(
             f"Started repair job {new_id} for vehicle ID `{vehicle_id}` via **{method}**.\n"
+            f"Estimated completion: `{finish_str}`."
+        )
+
+    # ------------------------------
+    # EXPANSION MODULE
+    # ------------------------------
+
+    @fsc_group.group(name="expansion")
+    async def fsc_expansion(self, ctx: commands.Context):
+        """Build and manage station expansions."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+
+    @fsc_expansion.command(name="list")
+    async def expansion_list(self, ctx: commands.Context):
+        """List available expansions and your ownership status."""
+        user_conf = self.config.user(ctx.author)
+        data = await user_conf.all()
+        await self._process_expansion_jobs(user_conf, data)
+
+        data = await user_conf.all()
+        owned = set(data.get("expansions", []))
+        jobs = data.get("expansion_jobs", [])
+
+        running_for = {j.get("expansion_id") for j in jobs if not j.get("completed")}
+
+        if not self.content.expansions:
+            await ctx.send("No expansions configured.")
+            return
+
+        lines = []
+        now = int(dt.datetime.utcnow().timestamp())
+        for ex in self.content.expansions.values():
+            status = "Not built"
+            if ex.id in owned:
+                status = "Built"
+            elif ex.id in running_for:
+                # find job
+                job = next((j for j in jobs if j.get("expansion_id") == ex.id and not j.get("completed")), None)
+                if job:
+                    remaining = max(0, (job.get("start_ts", 0) + job.get("duration", 0)) - now)
+                    remaining_min = remaining // 60
+                    status = f"Building (~{remaining_min} min remaining)"
+                else:
+                    status = "Building"
+            lines.append(
+                f"- `{ex.id}`: **{ex.name}** – cost {ex.base_cost}, build {ex.build_time_hours}h – {status}"
+            )
+
+        await ctx.send("\n".join(lines))
+
+    @fsc_expansion.command(name="status")
+    async def expansion_status(self, ctx: commands.Context):
+        """Show your built and running expansions."""
+        user_conf = self.config.user(ctx.author)
+        data = await user_conf.all()
+        newly_completed = await self._process_expansion_jobs(user_conf, data)
+
+        if newly_completed:
+            names = ", ".join(ex.name for ex in newly_completed)
+            await ctx.send(f"The following expansions have just completed: {names}")
+
+        data = await user_conf.all()
+        owned = data.get("expansions", [])
+        jobs = data.get("expansion_jobs", [])
+
+        embed = discord.Embed(
+            title="Expansion Status",
+            color=discord.Color.blue(),
+        )
+
+        if owned:
+            names = []
+            for ex_id in owned:
+                ex_def = self.content.expansions.get(ex_id)
+                names.append(ex_def.name if ex_def else ex_id)
+            embed.add_field(
+                name="Built expansions",
+                value=", ".join(names),
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Built expansions",
+                value="None",
+                inline=False,
+            )
+
+        now = int(dt.datetime.utcnow().timestamp())
+        running_lines = []
+        for job in jobs:
+            if job.get("completed"):
+                continue
+            ex_id = job.get("expansion_id")
+            ex_def = self.content.expansions.get(ex_id)
+            name = ex_def.name if ex_def else ex_id
+            start_ts = job.get("start_ts", 0)
+            duration = job.get("duration", 0)
+            remaining = max(0, (start_ts + duration) - now)
+            remaining_min = remaining // 60
+            running_lines.append(
+                f"- Job {job.get('id')}: {name} (`{ex_id}`) – ~{remaining_min} minutes remaining"
+            )
+
+        if running_lines:
+            embed.add_field(
+                name="Running builds",
+                value="\n".join(running_lines),
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Running builds",
+                value="None",
+                inline=False,
+            )
+
+        await ctx.send(embed=embed)
+
+    @fsc_expansion.command(name="build")
+    async def expansion_build(self, ctx: commands.Context, expansion_id: str):
+        """Start building an expansion."""
+        user_conf = self.config.user(ctx.author)
+        data = await user_conf.all()
+
+        if not data["started"]:
+            await ctx.send("You have not started yet. Use `[p]fsc start` first.")
+            return
+
+        ex_def = self.content.expansions.get(expansion_id)
+        if not ex_def:
+            await ctx.send(f"Expansion `{expansion_id}` does not exist.")
+            return
+
+        await self._process_expansion_jobs(user_conf, data)
+        data = await user_conf.all()
+
+        owned = set(data.get("expansions", []))
+        jobs = data.get("expansion_jobs", [])
+
+        if expansion_id in owned:
+            await ctx.send("You already built this expansion.")
+            return
+
+        for job in jobs:
+            if not job.get("completed") and job.get("expansion_id") == expansion_id:
+                await ctx.send("This expansion is already being built.")
+                return
+
+        expansions_ids = list(owned)
+        multiplier = self._apply_multiplier_with_expansions(
+            "expansion_time_multiplier", expansions_ids, default=1.0
+        )
+        duration_seconds = int(ex_def.build_time_hours * 3600 * multiplier)
+        now = int(dt.datetime.utcnow().timestamp())
+
+        new_id = 1
+        if jobs:
+            new_id = max(j.get("id", 0) for j in jobs) + 1
+
+        job = {
+            "id": new_id,
+            "expansion_id": expansion_id,
+            "start_ts": now,
+            "duration": duration_seconds,
+            "completed": False,
+        }
+        jobs.append(job)
+        await user_conf.expansion_jobs.set(jobs)
+
+        finish_time = dt.datetime.utcfromtimestamp(now + duration_seconds)
+        finish_str = finish_time.strftime("%Y-%m-%d %H:%M UTC")
+
+        await ctx.send(
+            f"Started building expansion **{ex_def.name}** (`{expansion_id}`).\n"
             f"Estimated completion: `{finish_str}`."
         )
 
@@ -1062,7 +1319,7 @@ class FireStationCommand(commands.Cog):
         await ctx.send(f"Mutual aid request `#{request_id}` has been cancelled.")
 
     # ------------------------------
-    # Missions with volunteers, wear and mutual aid
+    # Missions with volunteers, wear, expansions and mutual aid
     # ------------------------------
 
     @fsc_group.command(name="mission")
@@ -1075,6 +1332,7 @@ class FireStationCommand(commands.Cog):
         data = await user_conf.all()
         await self._process_training_jobs(user_conf, data)
         await self._process_repair_jobs(user_conf, data)
+        await self._process_expansion_jobs(user_conf, data)
 
         data = await user_conf.all()
 
@@ -1098,6 +1356,7 @@ class FireStationCommand(commands.Cog):
         mission = random.choice(candidates)
 
         vehicles = list(data.get("vehicles", []))
+        expansions_ids = data.get("expansions", [])
 
         owned_defs = {v["def_id"] for v in vehicles}
         missing_vehicles = [vid for vid in mission.required_vehicles if vid not in owned_defs]
@@ -1171,7 +1430,6 @@ class FireStationCommand(commands.Cog):
         owner_credits = credits_gain_total
         helper_credits_each = 0
         helper_xp_each = 0
-        helpers_applied: List[discord.Member] = []
 
         if success and mutual_active and mutual_helpers_ids:
             share_fraction = 0.5
@@ -1180,11 +1438,6 @@ class FireStationCommand(commands.Cog):
             if shared_total > 0:
                 helper_credits_each = shared_total // len(mutual_helpers_ids)
             helper_xp_each = max(1, xp_gain // 4)
-
-            if ctx.guild is not None:
-                for hid in mutual_helpers_ids:
-                    member = ctx.guild.get_member(hid)
-                    helpers_applied.append(member if member else discord.Object(id=hid))  # type: ignore
 
             for hid in mutual_helpers_ids:
                 helper_conf = self.config.user_from_id(hid)
@@ -1270,23 +1523,17 @@ class FireStationCommand(commands.Cog):
 
         if success and mutual_active and mutual_helpers_ids:
             helper_lines = []
-            if ctx.guild:
-                for hid in mutual_helpers_ids:
-                    m = ctx.guild.get_member(hid)
-                    name = m.display_name if m else f"User {hid}"
-                    helper_lines.append(f"- {name}: +{helper_xp_each} XP, +{helper_credits_each} credits")
-            else:
-                for hid in mutual_helpers_ids:
-                    helper_lines.append(
-                        f"- User {hid}: +{helper_xp_each} XP, +{helper_credits_each} credits"
-                    )
+            for hid in mutual_helpers_ids:
+                helper_lines.append(
+                    f"- User {hid}: +{helper_xp_each} XP, +{helper_credits_each} credits"
+                )
             embed.add_field(
                 name="Mutual aid rewards",
                 value="\n".join(helper_lines),
                 inline=False,
             )
 
-        embed.set_footer(text="Mutual aid can boost your success and shares rewards for one mission.")
+        embed.set_footer(text="Expansions, repairs, trainings and mutual aid all influence your operations.")
 
         await ctx.send(embed=embed)
 
