@@ -754,10 +754,10 @@ class RapidResponse(commands.Cog):
     
     @rr_admin.command(name="forcemission")
     async def force_mission(self, ctx: commands.Context, user: discord.Member):
-        """Force assign a mission to a player"""
+        """Force assign a mission to a player (bypasses cooldowns)"""
         player = await self.db.get_player(user.id)
         if not player:
-            await ctx.send(f"❌ {user.mention} hasn't started playing yet!")
+            await ctx.send(f"❌ {user.mention} is not registered!")
             return
         
         if not player['is_active']:
@@ -770,11 +770,36 @@ class RapidResponse(commands.Cog):
             await ctx.send(f"❌ {user.mention} already has an active mission!")
             return
         
-        await ctx.send(f"🔄 Assigning mission to {user.mention}...")
+        await ctx.send(f"🔄 Force assigning mission to {user.mention}...\n**Watch for detailed logs below:**")
         
-        await self.scheduler._assign_mission_to_player(player)
-        
-        await ctx.send(f"✅ Mission assigned to {user.mention}!")
+        try:
+            # Log step by step
+            await ctx.send("📝 Step 1: Fetching player data... ✅")
+            
+            # Check missions cache
+            if len(self.mission_manager.missions) == 0:
+                await ctx.send("❌ **ERROR:** No missions in cache! Run `/rr admin refreshmissions` first!")
+                return
+            
+            await ctx.send(f"📝 Step 2: Missions in cache: {len(self.mission_manager.missions)} ✅")
+            
+            # Try to get thread
+            thread = await self.scheduler._get_or_create_player_thread(player)
+            if not thread:
+                await ctx.send("❌ **ERROR:** Could not create/get thread!")
+                return
+            
+            await ctx.send(f"📝 Step 3: Thread ready: {thread.mention} ✅")
+            
+            # Try to assign
+            await ctx.send("📝 Step 4: Assigning mission...")
+            await self.scheduler._assign_mission_to_player(player)
+            
+            await ctx.send(f"✅ **Mission assigned!** Check {thread.mention}")
+            
+        except Exception as e:
+            await ctx.send(f"❌ **ERROR during assignment:**\n```{str(e)}```")
+            log.error(f"Force mission error: {e}", exc_info=True)
     
     @rr_admin.command(name="stats")
     async def admin_stats(self, ctx: commands.Context):
@@ -961,15 +986,39 @@ class RapidResponse(commands.Cog):
     
     @rr_admin.command(name="testscheduler")
     async def test_scheduler(self, ctx: commands.Context):
-        """Manually trigger scheduler check"""
-        await ctx.send("🔄 Running scheduler check...")
+        """Manually trigger scheduler check with detailed output"""
+        
+        # Check if scheduler is running
+        if not self.scheduler.running:
+            await ctx.send("❌ **Scheduler is NOT running!**\n\nTrying to start it...")
+            self.scheduler.start()
+            await asyncio.sleep(2)
+            if self.scheduler.running:
+                await ctx.send("✅ Scheduler started!")
+            else:
+                await ctx.send("❌ Failed to start scheduler!")
+                return
+        
+        await ctx.send("🔄 Running manual scheduler check...")
         
         try:
+            # Get active players count
+            import aiosqlite
+            async with aiosqlite.connect(str(self.db.db_path)) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute("SELECT COUNT(*) FROM players WHERE is_active = 1") as cursor:
+                    row = await cursor.fetchone()
+                    active_count = row[0]
+            
+            await ctx.send(f"📊 Found {active_count} active player(s)")
+            
             # Run assignment check
             await self.scheduler._assign_missions()
-            await ctx.send("✅ Scheduler check complete! Check logs for details.")
+            
+            await ctx.send("✅ Scheduler check complete! Check logs and threads for any missions assigned.")
+            
         except Exception as e:
-            await ctx.send(f"❌ Error: {e}")
+            await ctx.send(f"❌ **Error during scheduler test:**\n```{str(e)}```")
             log.error(f"Manual scheduler test error: {e}", exc_info=True)
     
     @rr_admin.command(name="fixthread")
@@ -991,6 +1040,92 @@ class RapidResponse(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Error: {e}")
             log.error(f"Fix thread error: {e}", exc_info=True)
+    
+    @rr_admin.command(name="diagflow")
+    async def diag_flow(self, ctx: commands.Context, user: discord.Member):
+        """Diagnose entire mission assignment flow without actually assigning"""
+        await ctx.send(f"🔬 **Diagnostic Flow Test for {user.mention}**\n")
+        
+        results = []
+        
+        try:
+            # Step 1: Player exists?
+            player = await self.db.get_player(user.id)
+            if not player:
+                results.append("❌ Player not registered")
+                await ctx.send("\n".join(results))
+                return
+            results.append("✅ Player exists in database")
+            
+            # Step 2: Is active?
+            if not player['is_active']:
+                results.append("❌ Player is not on duty")
+            else:
+                results.append("✅ Player is on duty")
+            
+            # Step 3: Missions cached?
+            mission_count = len(self.mission_manager.missions)
+            if mission_count == 0:
+                results.append(f"❌ No missions in cache (count: {mission_count})")
+            else:
+                results.append(f"✅ Missions in cache: {mission_count}")
+            
+            # Step 4: Can select mission?
+            try:
+                test_mission = self.mission_manager.select_mission_for_player(player['station_level'])
+                if test_mission:
+                    results.append(f"✅ Can select mission (selected: {test_mission['name']})")
+                else:
+                    results.append("❌ Mission selection returned None")
+            except Exception as e:
+                results.append(f"❌ Error selecting mission: {e}")
+            
+            # Step 5: Thread accessible?
+            try:
+                thread = await self.scheduler._get_or_create_player_thread(player)
+                if thread:
+                    results.append(f"✅ Thread accessible: {thread.mention}")
+                else:
+                    results.append("❌ Could not get/create thread")
+            except Exception as e:
+                results.append(f"❌ Thread error: {e}")
+            
+            # Step 6: Mission channel configured?
+            channel_id = await self.db.get_config('mission_channel_id')
+            if channel_id:
+                channel = ctx.guild.get_channel(int(channel_id))
+                if channel:
+                    results.append(f"✅ Mission channel: {channel.mention}")
+                else:
+                    results.append(f"❌ Mission channel ID {channel_id} not found")
+            else:
+                results.append("❌ Mission channel not configured")
+            
+            # Step 7: Eligibility?
+            is_eligible, reason = await self.scheduler._is_eligible_for_mission(player)
+            if is_eligible:
+                results.append(f"✅ Eligible: {reason}")
+            else:
+                results.append(f"❌ Not eligible: {reason}")
+            
+            # Step 8: Scheduler running?
+            if self.scheduler.running:
+                results.append("✅ Scheduler is running")
+            else:
+                results.append("❌ Scheduler is NOT running")
+            
+            await ctx.send("\n".join(results))
+            
+            # Final verdict
+            errors = [r for r in results if r.startswith("❌")]
+            if not errors:
+                await ctx.send("\n✅ **ALL CHECKS PASSED!** Mission should be assigned within 30 seconds.")
+            else:
+                await ctx.send(f"\n⚠️ **Found {len(errors)} issue(s)** - fix these first!")
+            
+        except Exception as e:
+            await ctx.send(f"❌ **Diagnostic error:** {e}")
+            log.error(f"Diagnostic flow error: {e}", exc_info=True)
     
     @rr_admin.command(name="canceltraining")
     async def cancel_training(self, ctx: commands.Context, user: discord.Member):

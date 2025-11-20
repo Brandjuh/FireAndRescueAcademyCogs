@@ -42,28 +42,48 @@ class MissionScheduler:
         """Main scheduler loop"""
         await self.cog.bot.wait_until_ready()
         
+        log.info("🚀 Scheduler: Starting main loop (checks every 30 seconds)")
+        
         while self.running:
             try:
+                log.debug("Scheduler: Running cycle...")
+                
                 # Refresh mission cache if needed
-                await self.mission_manager.refresh_if_needed()
+                try:
+                    await self.mission_manager.refresh_if_needed()
+                except Exception as e:
+                    log.error(f"Scheduler: Error refreshing missions: {e}")
                 
                 # Clean up expired missions
-                expired_count = await self.db.clean_expired_missions()
-                if expired_count > 0:
-                    log.info(f"Cleaned {expired_count} expired missions")
-                    await self._handle_expired_missions()
+                try:
+                    expired_count = await self.db.clean_expired_missions()
+                    if expired_count > 0:
+                        log.info(f"Scheduler: Cleaned {expired_count} expired missions")
+                        await self._handle_expired_missions()
+                except Exception as e:
+                    log.error(f"Scheduler: Error cleaning expired missions: {e}")
                 
                 # Check for active players needing missions
-                await self._assign_missions()
+                try:
+                    await self._assign_missions()
+                except Exception as e:
+                    log.error(f"Scheduler: Error assigning missions: {e}", exc_info=True)
                 
                 # Check for completed trainings
-                await self._check_trainings()
+                try:
+                    await self._check_trainings()
+                except Exception as e:
+                    log.error(f"Scheduler: Error checking trainings: {e}")
+                
+                log.debug("Scheduler: Cycle complete")
                 
             except Exception as e:
-                log.error(f"Error in scheduler loop: {e}", exc_info=True)
+                log.error(f"Scheduler: Critical error in main loop: {e}", exc_info=True)
             
             # Wait for next check (convert minutes to seconds)
             await asyncio.sleep(config.MISSION_CHECK_INTERVAL * 60)
+        
+        log.info("Scheduler: Main loop stopped")
     
     async def _assign_missions(self):
         """Assign missions to eligible players"""
