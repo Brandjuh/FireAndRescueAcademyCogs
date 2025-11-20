@@ -198,7 +198,7 @@ class FireStationCommand(commands.Cog):
     """Fire Station Command – management game."""
 
     __author__ = "You + ChatGPT"
-    __version__ = "0.5.0"
+    __version__ = "0.7.0"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -223,9 +223,17 @@ class FireStationCommand(commands.Cog):
             "training_jobs": [],
             "repair_jobs": [],
             "completed_trainings": [],
+            "mutual_active": False,
+            "mutual_helpers": [],
+            "mutual_strength": 0,
+        }
+
+        default_guild = {
+            "mutual_requests": [],
         }
 
         self.config.register_user(**default_user)
+        self.config.register_guild(**default_guild)
 
         base_path = Path(__file__).parent / "data" / "config"
         self.content = GameContent.from_files(base_path)
@@ -302,7 +310,6 @@ class FireStationCommand(commands.Cog):
         }
 
     async def _process_training_jobs(self, user_conf, data) -> List[TrainingDef]:
-        """Check running training jobs and mark completed ones."""
         now = int(dt.datetime.utcnow().timestamp())
         jobs = list(data.get("training_jobs", []))
         completed_trainings = set(data.get("completed_trainings", []))
@@ -330,6 +337,41 @@ class FireStationCommand(commands.Cog):
             await user_conf.completed_trainings.set(list(completed_trainings))
 
         return newly_completed
+
+    async def _process_repair_jobs(self, user_conf, data) -> List[Dict[str, Any]]:
+        now = int(dt.datetime.utcnow().timestamp())
+        jobs = list(data.get("repair_jobs", []))
+        vehicles = list(data.get("vehicles", []))
+        vehicle_by_id = {v.get("id"): v for v in vehicles}
+
+        updated_jobs = False
+        updated_vehicles = False
+        newly_completed: List[Dict[str, Any]] = []
+
+        for job in jobs:
+            if job.get("completed"):
+                continue
+            start_ts = job.get("start_ts", 0)
+            duration = job.get("duration", 0)
+            if now >= start_ts + duration:
+                job["completed"] = True
+                updated_jobs = True
+                v_id = job.get("vehicle_uid")
+                v = vehicle_by_id.get(v_id)
+                if v:
+                    v["condition"] = min(100, job.get("target_condition", 100))
+                    updated_vehicles = True
+                    newly_completed.append(v)
+
+        if updated_jobs:
+            await user_conf.repair_jobs.set(jobs)
+        if updated_vehicles:
+            await user_conf.vehicles.set(vehicles)
+
+        return newly_completed
+
+    def _has_workshop(self, expansions: List[str]) -> bool:
+        return "workshop" in expansions
 
     # ------------------------------
     # Mission scheduler (stub)
@@ -389,7 +431,9 @@ class FireStationCommand(commands.Cog):
         user_conf = self.config.user(ctx.author)
         data = await user_conf.all()
         await self._process_training_jobs(user_conf, data)
+        await self._process_repair_jobs(user_conf, data)
 
+        data = await user_conf.all()
         station_tier = self.calc_station_tier(data["xp"])
         is_active = data["is_active"]
 
@@ -406,6 +450,15 @@ class FireStationCommand(commands.Cog):
         )
         embed.add_field(name="XP", value=str(data["xp"]), inline=True)
         embed.add_field(name="Reputation", value=str(data["reputation"]), inline=True)
+
+        if data.get("mutual_active"):
+            helpers = data.get("mutual_helpers", [])
+            embed.add_field(
+                name="Mutual aid buff",
+                value=f"Active with {len(helpers)} helper(s)",
+                inline=False,
+            )
+
         await ctx.send(embed=embed)
 
     @fsc_group.command(name="on")
@@ -487,7 +540,7 @@ class FireStationCommand(commands.Cog):
             names = ", ".join(t.name for t in newly_completed)
             await ctx.send(f"The following trainings have just completed: {names}")
 
-        data = await user_conf.all()  # refresh
+        data = await user_conf.all()
         jobs = data.get("training_jobs", [])
         completed_ids = set(data.get("completed_trainings", []))
 
@@ -591,17 +644,439 @@ class FireStationCommand(commands.Cog):
         )
 
     # ------------------------------
-    # Missions with volunteer simulation
+    # REPAIR / WORKSHOP MODULE
+    # ------------------------------
+
+    @fsc_group.group(name="repair")
+    async def fsc_repair(self, ctx: commands.Context):
+        """Vehicle repair and workshop commands."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+
+    @fsc_repair.command(name="status")
+    async def repair_status(self, ctx: commands.Context):
+        """Show the condition of your vehicles and running repair jobs."""
+        user_conf = self.config.user(ctx.author)
+        data = await user_conf.all()
+        await self._process_repair_jobs(user_conf, data)
+
+        data = await user_conf.all()
+        vehicles = data.get("vehicles", [])
+        jobs = data.get("repair_jobs", [])
+
+        embed = discord.Embed(
+            title="Vehicle Condition & Repairs",
+            color=discord.Color.gold(),
+        )
+
+        if vehicles:
+            v_lines = []
+            for v in vehicles:
+                vdef = self.content.vehicles.get(v.get("def_id"))
+                name = vdef.name if vdef else v.get("def_id")
+                cond = v.get("condition", 100)
+                v_lines.append(f"- ID {v.get('id')}: {name} – {cond}%")
+            embed.add_field(
+                name="Vehicles",
+                value="\n".join(v_lines),
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Vehicles",
+                value="None",
+                inline=False,
+            )
+
+        now = int(dt.datetime.utcnow().timestamp())
+        r_lines = []
+        for job in jobs:
+            v_id = job.get("vehicle_uid")
+            v = next((x for x in vehicles if x.get("id") == v_id), None)
+            if v:
+                vdef = self.content.vehicles.get(v.get("def_id"))
+                v_name = vdef.name if vdef else v.get("def_id")
+            else:
+                v_name = f"Vehicle {v_id}"
+            if not job.get("completed"):
+                start_ts = job.get("start_ts", 0)
+                duration = job.get("duration", 0)
+                remaining = max(0, (start_ts + duration) - now)
+                remaining_min = remaining // 60
+                r_lines.append(
+                    f"- Job {job.get('id')}: {v_name} → target {job.get('target_condition', 100)}% "
+                    f"({ 'workshop' if job.get('inhouse') else 'external' }), "
+                    f"~{remaining_min} minutes remaining"
+                )
+
+        if r_lines:
+            embed.add_field(
+                name="Running repairs",
+                value="\n".join(r_lines),
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Running repairs",
+                value="None",
+                inline=False,
+            )
+
+        await ctx.send(embed=embed)
+
+    @fsc_repair.command(name="start")
+    async def repair_start(
+        self,
+        ctx: commands.Context,
+        vehicle_id: int,
+        inhouse: Optional[bool] = True,
+    ):
+        """
+        Start a repair job on one of your vehicles.
+
+        `vehicle_id` is the internal ID shown in [p]fsc repair status.
+        `inhouse` True = workshop (if you have it), False = external repair.
+        """
+        user_conf = self.config.user(ctx.author)
+        data = await user_conf.all()
+        await self._process_repair_jobs(user_conf, data)
+
+        data = await user_conf.all()
+        vehicles = data.get("vehicles", [])
+        expansions = data.get("expansions", [])
+        jobs = data.get("repair_jobs", [])
+
+        v = next((x for x in vehicles if x.get("id") == vehicle_id), None)
+        if not v:
+            await ctx.send(f"Vehicle with ID `{vehicle_id}` not found.")
+            return
+
+        cond = v.get("condition", 100)
+        if cond >= 100:
+            await ctx.send("This vehicle is already at 100% condition.")
+            return
+
+        for job in jobs:
+            if not job.get("completed") and job.get("vehicle_uid") == vehicle_id:
+                await ctx.send("This vehicle is already in repair.")
+                return
+
+        has_workshop = self._has_workshop(expansions)
+        if inhouse and not has_workshop:
+            await ctx.send(
+                "You do not have a workshop expansion. External repair will be used instead."
+            )
+            inhouse = False
+
+        damage = 100 - cond
+        base_hours = max(1, damage / 20.0)
+        duration_seconds = int(base_hours * 3600)
+
+        mult = float(self.get_balance("repair_time_multiplier", 1.0))
+        duration_seconds = int(duration_seconds * mult)
+
+        if inhouse:
+            duration_seconds = int(duration_seconds * 0.7)
+
+        now = int(dt.datetime.utcnow().timestamp())
+        new_id = 1
+        if jobs:
+            new_id = max(j.get("id", 0) for j in jobs) + 1
+
+        job = {
+            "id": new_id,
+            "vehicle_uid": vehicle_id,
+            "start_ts": now,
+            "duration": duration_seconds,
+            "completed": False,
+            "inhouse": bool(inhouse),
+            "target_condition": 100,
+        }
+        jobs.append(job)
+        await user_conf.repair_jobs.set(jobs)
+
+        finish_time = dt.datetime.utcfromtimestamp(now + duration_seconds)
+        finish_str = finish_time.strftime("%Y-%m-%d %H:%M UTC")
+
+        method = "workshop (in-house)" if inhouse else "external repair"
+        await ctx.send(
+            f"Started repair job {new_id} for vehicle ID `{vehicle_id}` via **{method}**.\n"
+            f"Estimated completion: `{finish_str}`."
+        )
+
+    # ------------------------------
+    # MUTUAL AID MODULE
+    # ------------------------------
+
+    @fsc_group.group(name="mutual")
+    async def fsc_mutual(self, ctx: commands.Context):
+        """Mutual aid commands (requesting and sending help)."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+
+    @fsc_mutual.command(name="open")
+    async def mutual_open(self, ctx: commands.Context, help_required: int = 1):
+        """Open a mutual aid request to anyone in the server."""
+        if ctx.guild is None:
+            await ctx.send("Mutual aid can only be used in a server.")
+            return
+
+        user_conf = self.config.user(ctx.author)
+        udata = await user_conf.all()
+        if not udata["started"]:
+            await ctx.send("You have not started yet. Use `[p]fsc start` first.")
+            return
+
+        guild_conf = self.config.guild(ctx.guild)
+        gdata = await guild_conf.all()
+        requests = list(gdata.get("mutual_requests", []))
+
+        now = int(dt.datetime.utcnow().timestamp())
+        new_id = 1
+        if requests:
+            new_id = max(r.get("id", 0) for r in requests) + 1
+
+        req = {
+            "id": new_id,
+            "requester_id": ctx.author.id,
+            "target_id": None,
+            "open": True,
+            "help_required": max(1, help_required),
+            "helpers": [],
+            "active": True,
+            "created_ts": now,
+        }
+        requests.append(req)
+        await guild_conf.mutual_requests.set(requests)
+
+        await ctx.send(
+            f"Opened mutual aid request **#{new_id}**. "
+            f"Help required: {req['help_required']} helper(s).\n"
+            f"Other players can join with `[p]fsc mutual send {new_id}`."
+        )
+
+    @fsc_mutual.command(name="request")
+    async def mutual_request(self, ctx: commands.Context, member: discord.Member, help_required: int = 1):
+        """Send a mutual aid request to a specific member."""
+        if ctx.guild is None:
+            await ctx.send("Mutual aid can only be used in a server.")
+            return
+
+        if member.id == ctx.author.id:
+            await ctx.send("You cannot request mutual aid from yourself.")
+            return
+
+        user_conf = self.config.user(ctx.author)
+        udata = await user_conf.all()
+        if not udata["started"]:
+            await ctx.send("You have not started yet. Use `[p]fsc start` first.")
+            return
+
+        guild_conf = self.config.guild(ctx.guild)
+        gdata = await guild_conf.all()
+        requests = list(gdata.get("mutual_requests", []))
+
+        now = int(dt.datetime.utcnow().timestamp())
+        new_id = 1
+        if requests:
+            new_id = max(r.get("id", 0) for r in requests) + 1
+
+        req = {
+            "id": new_id,
+            "requester_id": ctx.author.id,
+            "target_id": member.id,
+            "open": False,
+            "help_required": max(1, help_required),
+            "helpers": [],
+            "active": True,
+            "created_ts": now,
+        }
+        requests.append(req)
+        await guild_conf.mutual_requests.set(requests)
+
+        await ctx.send(
+            f"Created mutual aid request **#{new_id}** to {member.mention} "
+            f"for {req['help_required']} helper(s).\n"
+            f"{member.mention} can join with `[p]fsc mutual send {new_id}`."
+        )
+
+    @fsc_mutual.command(name="list")
+    async def mutual_list(self, ctx: commands.Context):
+        """List active mutual aid requests in this server."""
+        if ctx.guild is None:
+            await ctx.send("Mutual aid can only be used in a server.")
+            return
+
+        guild_conf = self.config.guild(ctx.guild)
+        gdata = await guild_conf.all()
+        requests = [r for r in gdata.get("mutual_requests", []) if r.get("active")]
+
+        if not requests:
+            await ctx.send("There are no active mutual aid requests.")
+            return
+
+        lines = []
+        for r in requests:
+            req_user = ctx.guild.get_member(r["requester_id"])
+            req_name = req_user.display_name if req_user else f"User {r['requester_id']}"
+            target = r.get("target_id")
+            target_str = "open to all" if r.get("open") or not target else f"→ <@{target}>"
+            helpers = r.get("helpers", [])
+            lines.append(
+                f"- `#{r['id']}` by **{req_name}** ({target_str}) – "
+                f"{len(helpers)}/{r['help_required']} helper(s)"
+            )
+
+        await ctx.send("\n".join(lines))
+
+    @fsc_mutual.command(name="send")
+    async def mutual_send(self, ctx: commands.Context, request_id: int):
+        """Offer mutual aid to an existing request."""
+        if ctx.guild is None:
+            await ctx.send("Mutual aid can only be used in a server.")
+            return
+
+        guild_conf = self.config.guild(ctx.guild)
+        gdata = await guild_conf.all()
+        requests = list(gdata.get("mutual_requests", []))
+
+        req = next((r for r in requests if r.get("id") == request_id and r.get("active")), None)
+        if not req:
+            await ctx.send(f"Mutual aid request `#{request_id}` not found or not active.")
+            return
+
+        if req["requester_id"] == ctx.author.id:
+            await ctx.send("You cannot join your own mutual aid request.")
+            return
+
+        if not req.get("open") and req.get("target_id") != ctx.author.id:
+            await ctx.send("This mutual aid request is not addressed to you.")
+            return
+
+        helpers = req.get("helpers", [])
+        if any(h.get("helper_id") == ctx.author.id for h in helpers):
+            await ctx.send("You have already joined this mutual aid request.")
+            return
+
+        if len(helpers) >= req["help_required"]:
+            await ctx.send("This mutual aid request already has enough helpers.")
+            return
+
+        helpers.append(
+            {
+                "helper_id": ctx.author.id,
+                "joined_ts": int(dt.datetime.utcnow().timestamp()),
+            }
+        )
+        req["helpers"] = helpers
+
+        await guild_conf.mutual_requests.set(requests)
+
+        requester = ctx.guild.get_member(req["requester_id"])
+        req_name = requester.mention if requester else f"<@{req['requester_id']}>"
+
+        await ctx.send(
+            f"You have joined mutual aid request `#{request_id}` from {req_name}.\n"
+            f"Requester must run `[p]fsc mutual accept {request_id}` to activate the buff for their next mission."
+        )
+
+    @fsc_mutual.command(name="accept")
+    async def mutual_accept(self, ctx: commands.Context, request_id: int):
+        """
+        Accept and lock in mutual aid helpers for your next mission.
+        This will activate a temporary mission buff and reward sharing.
+        """
+        if ctx.guild is None:
+            await ctx.send("Mutual aid can only be used in a server.")
+            return
+
+        user_conf = self.config.user(ctx.author)
+        udata = await user_conf.all()
+        if not udata["started"]:
+            await ctx.send("You have not started yet. Use `[p]fsc start` first.")
+            return
+
+        guild_conf = self.config.guild(ctx.guild)
+        gdata = await guild_conf.all()
+        requests = list(gdata.get("mutual_requests", []))
+
+        req = next((r for r in requests if r.get("id") == request_id and r.get("active")), None)
+        if not req:
+            await ctx.send(f"Mutual aid request `#{request_id}` not found or not active.")
+            return
+
+        if req["requester_id"] != ctx.author.id:
+            await ctx.send("You are not the requester of this mutual aid request.")
+            return
+
+        helpers = req.get("helpers", [])
+        if not helpers:
+            await ctx.send("This mutual aid request has no helpers yet.")
+            return
+
+        mutual_strength = min(req["help_required"], len(helpers))
+        helper_ids = [h["helper_id"] for h in helpers]
+
+        await user_conf.mutual_active.set(True)
+        await user_conf.mutual_helpers.set(helper_ids)
+        await user_conf.mutual_strength.set(mutual_strength)
+
+        req["active"] = False
+        await guild_conf.mutual_requests.set(requests)
+
+        helper_mentions = []
+        if ctx.guild:
+            for hid in helper_ids:
+                m = ctx.guild.get_member(hid)
+                helper_mentions.append(m.mention if m else f"<@{hid}>")
+
+        await ctx.send(
+            f"Mutual aid request `#{request_id}` locked in with **{mutual_strength}** helper(s).\n"
+            f"Helpers: {', '.join(helper_mentions)}\n"
+            f"Your next `[p]fsc mission` will receive a success buff and share rewards."
+        )
+
+    @fsc_mutual.command(name="cancel")
+    async def mutual_cancel(self, ctx: commands.Context, request_id: int):
+        """Cancel one of your mutual aid requests."""
+        if ctx.guild is None:
+            await ctx.send("Mutual aid can only be used in a server.")
+            return
+
+        guild_conf = self.config.guild(ctx.guild)
+        gdata = await guild_conf.all()
+        requests = list(gdata.get("mutual_requests", []))
+
+        req = next((r for r in requests if r.get("id") == request_id and r.get("active")), None)
+        if not req:
+            await ctx.send(f"Mutual aid request `#{request_id}` not found or not active.")
+            return
+
+        if req["requester_id"] != ctx.author.id:
+            await ctx.send("You are not the requester of this mutual aid request.")
+            return
+
+        req["active"] = False
+        await guild_conf.mutual_requests.set(requests)
+
+        await ctx.send(f"Mutual aid request `#{request_id}` has been cancelled.")
+
+    # ------------------------------
+    # Missions with volunteers, wear and mutual aid
     # ------------------------------
 
     @fsc_group.command(name="mission")
     async def fsc_mission(self, ctx: commands.Context):
         """
-        Request a mission and resolve it, including volunteer turnout simulation.
+        Request a mission and resolve it, including volunteer turnout,
+        vehicle wear and optional mutual aid.
         """
         user_conf = self.config.user(ctx.author)
         data = await user_conf.all()
         await self._process_training_jobs(user_conf, data)
+        await self._process_repair_jobs(user_conf, data)
+
+        data = await user_conf.all()
 
         if not data["started"]:
             await ctx.send("You have not started yet. Use `[p]fsc start` first.")
@@ -622,7 +1097,9 @@ class FireStationCommand(commands.Cog):
 
         mission = random.choice(candidates)
 
-        owned_defs = {v["def_id"] for v in data["vehicles"]}
+        vehicles = list(data.get("vehicles", []))
+
+        owned_defs = {v["def_id"] for v in vehicles}
         missing_vehicles = [vid for vid in mission.required_vehicles if vid not in owned_defs]
 
         required_staff = 0
@@ -653,6 +1130,16 @@ class FireStationCommand(commands.Cog):
             staffing_penalty = 0.05
 
         success_chance = base_chance + xp_factor + tier_factor + missing_vehicle_penalty + staffing_penalty
+
+        mutual_bonus = 0.0
+        mutual_helpers_ids: List[int] = []
+        mutual_active = data.get("mutual_active", False)
+        mutual_strength = int(data.get("mutual_strength", 0))
+        if mutual_active and mutual_strength > 0:
+            mutual_bonus = min(0.15, 0.05 * mutual_strength)
+            success_chance += mutual_bonus
+            mutual_helpers_ids = list(data.get("mutual_helpers", []))
+
         success_chance = max(0.05, min(0.95, success_chance))
 
         roll = random.random()
@@ -660,16 +1147,63 @@ class FireStationCommand(commands.Cog):
 
         base_xp = mission.base_xp
         xp_gain = base_xp if success else max(5, base_xp // 4)
-        credits_gain = int(mission.base_credits * (1.0 if success else 0.25))
+        credits_gain_total = int(mission.base_credits * (1.0 if success else 0.25))
 
-        data = await user_conf.all()  # refresh after training job processing
+        used_vehicle_ids = []
+        for req_def in mission.required_vehicles:
+            cand = next(
+                (v for v in vehicles if v.get("def_id") == req_def and v.get("id") not in used_vehicle_ids),
+                None,
+            )
+            if cand:
+                used_vehicle_ids.append(cand.get("id"))
+
+        wear_min = 2
+        wear_max = 6
+        for v in vehicles:
+            if v.get("id") in used_vehicle_ids:
+                wear = random.randint(wear_min, wear_max)
+                v["condition"] = max(0, v.get("condition", 100) - wear)
+
+        await user_conf.vehicles.set(vehicles)
+
+        data = await user_conf.all()
+        owner_credits = credits_gain_total
+        helper_credits_each = 0
+        helper_xp_each = 0
+        helpers_applied: List[discord.Member] = []
+
+        if success and mutual_active and mutual_helpers_ids:
+            share_fraction = 0.5
+            shared_total = int(credits_gain_total * share_fraction)
+            owner_credits = credits_gain_total - shared_total
+            if shared_total > 0:
+                helper_credits_each = shared_total // len(mutual_helpers_ids)
+            helper_xp_each = max(1, xp_gain // 4)
+
+            if ctx.guild is not None:
+                for hid in mutual_helpers_ids:
+                    member = ctx.guild.get_member(hid)
+                    helpers_applied.append(member if member else discord.Object(id=hid))  # type: ignore
+
+            for hid in mutual_helpers_ids:
+                helper_conf = self.config.user_from_id(hid)
+                hdata = await helper_conf.all()
+                await helper_conf.credits_earned.set(hdata.get("credits_earned", 0) + helper_credits_each)
+                await helper_conf.xp.set(hdata.get("xp", 0) + helper_xp_each)
+
         new_xp = data["xp"] + xp_gain
         rep_change = 2 if success else -3
         new_rep = max(0, min(100, data["reputation"] + rep_change))
 
         await user_conf.xp.set(new_xp)
         await user_conf.reputation.set(new_rep)
-        await user_conf.credits_earned.set(data["credits_earned"] + credits_gain)
+        await user_conf.credits_earned.set(data["credits_earned"] + owner_credits)
+
+        if mutual_active:
+            await user_conf.mutual_active.set(False)
+            await user_conf.mutual_helpers.set([])
+            await user_conf.mutual_strength.set(0)
 
         title = f"Mission: {mission.name}"
         description = mission.description or "A new incident has been dispatched."
@@ -703,20 +1237,56 @@ class FireStationCommand(commands.Cog):
             inline=False,
         )
 
-        embed.add_field(name="Success chance", value=f"{int(success_chance * 100)}%", inline=True)
+        if used_vehicle_ids:
+            wear_lines = []
+            for v in vehicles:
+                if v.get("id") in used_vehicle_ids:
+                    vdef = self.content.vehicles.get(v.get("def_id"))
+                    name = vdef.name if vdef else v.get("def_id")
+                    wear_lines.append(f"- ID {v.get('id')}: {name} now at {v.get('condition', 100)}%")
+            embed.add_field(
+                name="Vehicle wear",
+                value="\n".join(wear_lines),
+                inline=False,
+            )
+
+        sc_line = f"{int(success_chance * 100)}%"
+        if mutual_bonus > 0 and mutual_active and mutual_helpers_ids:
+            sc_line += f" (incl. +{int(mutual_bonus * 100)}% mutual aid bonus)"
+        embed.add_field(name="Success chance", value=sc_line, inline=True)
         embed.add_field(name="Roll", value=f"{roll:.2f}", inline=True)
         if success:
             outcome = "✅ Mission **successful**!"
         else:
             outcome = "❌ Mission **failed**."
         embed.add_field(name="Outcome", value=outcome, inline=False)
-        embed.add_field(name="XP gained", value=str(xp_gain), inline=True)
+
+        embed.add_field(name="XP gained (you)", value=str(xp_gain), inline=True)
         embed.add_field(
-            name="Credits gained (internal stat)",
-            value=str(credits_gain),
+            name="Credits gained (you)",
+            value=str(owner_credits),
             inline=True,
         )
-        embed.set_footer(text="Volunteer turnout, trainings and difficulty are simplified for this module.")
+
+        if success and mutual_active and mutual_helpers_ids:
+            helper_lines = []
+            if ctx.guild:
+                for hid in mutual_helpers_ids:
+                    m = ctx.guild.get_member(hid)
+                    name = m.display_name if m else f"User {hid}"
+                    helper_lines.append(f"- {name}: +{helper_xp_each} XP, +{helper_credits_each} credits")
+            else:
+                for hid in mutual_helpers_ids:
+                    helper_lines.append(
+                        f"- User {hid}: +{helper_xp_each} XP, +{helper_credits_each} credits"
+                    )
+            embed.add_field(
+                name="Mutual aid rewards",
+                value="\n".join(helper_lines),
+                inline=False,
+            )
+
+        embed.set_footer(text="Mutual aid can boost your success and shares rewards for one mission.")
 
         await ctx.send(embed=embed)
 
