@@ -186,7 +186,7 @@ class FireStationCommand(commands.Cog):
         await self._give(ctx.author, 100_000)
         await user_conf.vehicles.set([starter_vehicle])
         await user_conf.next_vehicle_id.set(2)
-        await user_conf.active_mission.set(None)
+        await user_conf.active_mission.clear()
 
         await ctx.send(
             "You are now the commander of a small volunteer station.\n"
@@ -423,7 +423,7 @@ class FireStationCommand(commands.Cog):
         user: discord.abc.User,
     ):
         user_conf = self.config.user(user)
-        await user_conf.active_mission.set(None)
+        await user_conf.active_mission.clear()
         await interaction.response.send_message("Incident cancelled.", ephemeral=False)
 
     async def handle_vehicle_selection(
@@ -523,7 +523,7 @@ class FireStationCommand(commands.Cog):
 
         await self._give(user, reward)
         total_credits = await self._get_credits(user)
-        await user_conf.active_mission.set(None)
+        await user_conf.active_mission.clear()
 
         lines = [
             f"Incident: **{mission.get('title', 'Unknown')}**",
