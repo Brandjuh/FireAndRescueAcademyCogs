@@ -984,6 +984,24 @@ class RapidResponse(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Error: {e}")
             log.error(f"Fix thread error: {e}", exc_info=True)
+    
+    @rr_admin.command(name="canceltraining")
+    async def cancel_training(self, ctx: commands.Context, user: discord.Member):
+        """Cancel active training for a player"""
+        training = await self.db.get_active_training(user.id)
+        
+        if not training:
+            await ctx.send(f"❌ {user.mention} has no active training!")
+            return
+        
+        # Complete the training (mark as done)
+        await self.db.complete_training(training['id'])
+        
+        await ctx.send(
+            f"✅ Cancelled training for {user.mention}\n"
+            f"**Stat:** {training['stat_type'].title()}\n"
+            "They can now receive missions!"
+        )
 
 
 # Required for Red-DiscordBot

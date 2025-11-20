@@ -257,15 +257,34 @@ class MissionScheduler:
             # Check if player already has a thread
             if player['thread_id']:
                 try:
+                    # Try to get the thread
                     thread = guild.get_thread(player['thread_id'])
-                    if thread and not thread.archived:
+                    if thread:
+                        # Thread exists
+                        if thread.archived:
+                            # Unarchive it
+                            log.info(f"Unarchiving thread {thread.id} for player {player['user_id']}")
+                            await thread.edit(archived=False)
                         return thread
-                    elif thread and thread.archived:
-                        # Unarchive
-                        await thread.edit(archived=False)
-                        return thread
-                except:
-                    pass
+                    else:
+                        # Thread not found in cache, try fetching
+                        log.warning(f"Thread {player['thread_id']} not in cache for player {player['user_id']}, trying to fetch")
+                        try:
+                            thread = await guild.fetch_channel(player['thread_id'])
+                            if thread and isinstance(thread, discord.Thread):
+                                if thread.archived:
+                                    await thread.edit(archived=False)
+                                return thread
+                        except discord.NotFound:
+                            log.warning(f"Thread {player['thread_id']} not found, will create new one")
+                        except Exception as e:
+                            log.error(f"Error fetching thread: {e}")
+                except Exception as e:
+                    log.error(f"Error getting thread {player['thread_id']}: {e}")
+                
+                # If we get here, thread doesn't exist anymore, reset it
+                log.info(f"Resetting thread_id for player {player['user_id']}")
+                await self.db.update_player(player['user_id'], thread_id=None)
             
             # Create new thread
             user = guild.get_member(player['user_id'])
@@ -274,6 +293,8 @@ class MissionScheduler:
                 return None
             
             thread_name = f"🚨 {user.display_name}'s Dispatch"
+            
+            log.info(f"Creating new thread for player {player['user_id']}")
             
             # Create thread
             thread = await channel.create_thread(
