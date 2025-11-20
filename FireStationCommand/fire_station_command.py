@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import random
+import datetime as dt
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -197,11 +198,10 @@ class FireStationCommand(commands.Cog):
     """Fire Station Command – management game."""
 
     __author__ = "You + ChatGPT"
-    __version__ = "0.4.1"
+    __version__ = "0.5.0"
 
     def __init__(self, bot: Red):
         self.bot = bot
-        # FIX: identifier must be a valid integer literal
         self.config = Config.get_conf(
             self,
             identifier=1234567890123,
@@ -222,6 +222,7 @@ class FireStationCommand(commands.Cog):
             "personnel": [],
             "training_jobs": [],
             "repair_jobs": [],
+            "completed_trainings": [],
         }
 
         self.config.register_user(**default_user)
@@ -236,6 +237,10 @@ class FireStationCommand(commands.Cog):
     async def cog_unload(self):
         if self.mission_task:
             self.mission_task.cancel()
+
+    # ------------------------------
+    # Helpers
+    # ------------------------------
 
     def calc_station_tier(self, xp: int) -> int:
         return max(1, min(3, xp // 1000 + 1))
@@ -296,6 +301,40 @@ class FireStationCommand(commands.Cog):
             "turnout_seconds": turnout_seconds,
         }
 
+    async def _process_training_jobs(self, user_conf, data) -> List[TrainingDef]:
+        """Check running training jobs and mark completed ones."""
+        now = int(dt.datetime.utcnow().timestamp())
+        jobs = list(data.get("training_jobs", []))
+        completed_trainings = set(data.get("completed_trainings", []))
+
+        updated = False
+        newly_completed: List[TrainingDef] = []
+
+        for job in jobs:
+            if job.get("completed"):
+                continue
+            start_ts = job.get("start_ts", 0)
+            duration = job.get("duration", 0)
+            if now >= start_ts + duration:
+                job["completed"] = True
+                updated = True
+                t_id = job.get("training_id")
+                t_def = self.content.trainings.get(t_id)
+                if t_def:
+                    newly_completed.append(t_def)
+                if t_id and t_id not in completed_trainings:
+                    completed_trainings.add(t_id)
+
+        if updated:
+            await user_conf.training_jobs.set(jobs)
+            await user_conf.completed_trainings.set(list(completed_trainings))
+
+        return newly_completed
+
+    # ------------------------------
+    # Mission scheduler (stub)
+    # ------------------------------
+
     async def mission_scheduler(self):
         await self.bot.wait_until_ready()
         while True:
@@ -304,6 +343,10 @@ class FireStationCommand(commands.Cog):
             except Exception:
                 log.exception("Error in mission scheduler")
             await asyncio.sleep(300)
+
+    # ------------------------------
+    # Core commands
+    # ------------------------------
 
     @commands.group(name="fsc")
     async def fsc_group(self, ctx: commands.Context):
@@ -345,6 +388,7 @@ class FireStationCommand(commands.Cog):
         """Show your duty status and basic station info."""
         user_conf = self.config.user(ctx.author)
         data = await user_conf.all()
+        await self._process_training_jobs(user_conf, data)
 
         station_tier = self.calc_station_tier(data["xp"])
         is_active = data["is_active"]
@@ -362,7 +406,6 @@ class FireStationCommand(commands.Cog):
         )
         embed.add_field(name="XP", value=str(data["xp"]), inline=True)
         embed.add_field(name="Reputation", value=str(data["reputation"]), inline=True)
-        embed.set_footer(text="Use `[p]fsc start` to begin, then `[p]fsc on` to go on duty.")
         await ctx.send(embed=embed)
 
     @fsc_group.command(name="on")
@@ -409,6 +452,148 @@ class FireStationCommand(commands.Cog):
         )
         await ctx.send(embed=embed)
 
+    # ------------------------------
+    # TRAINING MODULE
+    # ------------------------------
+
+    @fsc_group.group(name="training")
+    async def fsc_training(self, ctx: commands.Context):
+        """Training commands for Fire Station Command."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+
+    @fsc_training.command(name="list")
+    async def training_list(self, ctx: commands.Context):
+        """List available trainings from config."""
+        if not self.content.trainings:
+            await ctx.send("No trainings configured.")
+            return
+
+        lines = []
+        for t in self.content.trainings.values():
+            lines.append(
+                f"- `{t.id}`: **{t.name}** – {t.duration_hours}h, cost {t.cost}"
+            )
+        await ctx.send("\n".join(lines))
+
+    @fsc_training.command(name="status")
+    async def training_status(self, ctx: commands.Context):
+        """Show your running and completed trainings."""
+        user_conf = self.config.user(ctx.author)
+        data = await user_conf.all()
+        newly_completed = await self._process_training_jobs(user_conf, data)
+
+        if newly_completed:
+            names = ", ".join(t.name for t in newly_completed)
+            await ctx.send(f"The following trainings have just completed: {names}")
+
+        data = await user_conf.all()  # refresh
+        jobs = data.get("training_jobs", [])
+        completed_ids = set(data.get("completed_trainings", []))
+
+        embed = discord.Embed(
+            title="Training Status",
+            color=discord.Color.green(),
+        )
+
+        running_lines = []
+        now = int(dt.datetime.utcnow().timestamp())
+        for job in jobs:
+            t_id = job.get("training_id")
+            t_def = self.content.trainings.get(t_id)
+            name = t_def.name if t_def else t_id
+            if not job.get("completed"):
+                start_ts = job.get("start_ts", 0)
+                duration = job.get("duration", 0)
+                remaining = max(0, (start_ts + duration) - now)
+                remaining_min = remaining // 60
+                running_lines.append(
+                    f"- {name} (`{t_id}`): ~{remaining_min} minutes remaining"
+                )
+
+        if running_lines:
+            embed.add_field(
+                name="Running trainings",
+                value="\n".join(running_lines),
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Running trainings",
+                value="None",
+                inline=False,
+            )
+
+        if completed_ids:
+            comp_names = []
+            for t_id in completed_ids:
+                t_def = self.content.trainings.get(t_id)
+                comp_names.append(t_def.name if t_def else t_id)
+            embed.add_field(
+                name="Completed trainings",
+                value=", ".join(comp_names),
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Completed trainings",
+                value="None",
+                inline=False,
+            )
+
+        await ctx.send(embed=embed)
+
+    @fsc_training.command(name="start")
+    async def training_start(self, ctx: commands.Context, training_id: str):
+        """Start a training (abstract: trains part of your crew)."""
+        user_conf = self.config.user(ctx.author)
+        data = await user_conf.all()
+
+        if not data["started"]:
+            await ctx.send("You have not started yet. Use `[p]fsc start` first.")
+            return
+
+        t_def = self.content.trainings.get(training_id)
+        if not t_def:
+            await ctx.send(f"Training `{training_id}` does not exist.")
+            return
+
+        jobs = data.get("training_jobs", [])
+        for job in jobs:
+            if not job.get("completed") and job.get("training_id") == training_id:
+                await ctx.send("You already have this training running.")
+                return
+
+        multiplier = float(self.get_balance("training_time_multiplier", 1.0))
+        duration_seconds = int(t_def.duration_hours * 3600 * multiplier)
+        now = int(dt.datetime.utcnow().timestamp())
+
+        new_id = 1
+        if jobs:
+            new_id = max(j.get("id", 0) for j in jobs) + 1
+
+        job = {
+            "id": new_id,
+            "training_id": training_id,
+            "start_ts": now,
+            "duration": duration_seconds,
+            "completed": False,
+        }
+        jobs.append(job)
+        await user_conf.training_jobs.set(jobs)
+
+        finish_time = dt.datetime.utcfromtimestamp(now + duration_seconds)
+        finish_str = finish_time.strftime("%Y-%m-%d %H:%M UTC")
+
+        await ctx.send(
+            f"Started training **{t_def.name}** (`{training_id}`).\n"
+            f"Estimated completion: `{finish_str}`."
+        )
+
+    # ------------------------------
+    # Missions with volunteer simulation
+    # ------------------------------
+
     @fsc_group.command(name="mission")
     async def fsc_mission(self, ctx: commands.Context):
         """
@@ -416,6 +601,7 @@ class FireStationCommand(commands.Cog):
         """
         user_conf = self.config.user(ctx.author)
         data = await user_conf.all()
+        await self._process_training_jobs(user_conf, data)
 
         if not data["started"]:
             await ctx.send("You have not started yet. Use `[p]fsc start` first.")
@@ -476,6 +662,7 @@ class FireStationCommand(commands.Cog):
         xp_gain = base_xp if success else max(5, base_xp // 4)
         credits_gain = int(mission.base_credits * (1.0 if success else 0.25))
 
+        data = await user_conf.all()  # refresh after training job processing
         new_xp = data["xp"] + xp_gain
         rep_change = 2 if success else -3
         new_rep = max(0, min(100, data["reputation"] + rep_change))
@@ -529,9 +716,13 @@ class FireStationCommand(commands.Cog):
             value=str(credits_gain),
             inline=True,
         )
-        embed.set_footer(text="Volunteer turnout, vehicle requirements and difficulty are simplified for this module.")
+        embed.set_footer(text="Volunteer turnout, trainings and difficulty are simplified for this module.")
 
         await ctx.send(embed=embed)
+
+    # ------------------------------
+    # Admin / owner tools
+    # ------------------------------
 
     @fsc_group.group(name="admin")
     @checks.is_owner()
