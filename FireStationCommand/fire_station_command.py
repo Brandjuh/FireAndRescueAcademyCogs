@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import datetime as dt
 import random
 from typing import Any, Dict, List
 
@@ -11,21 +10,27 @@ from redbot.core import commands, Config, bank
 
 
 class FireStationCommand(commands.Cog):
-    """Fire station incident workflow mini-game."""
+    """Fire station management & incident mini-game."""
 
-    __version__ = "0.2.0"
+    __version__ = "1.0.0"
 
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xF15702, force_registration=True)
+        # New, clean identifier so we don't fight with old schemas
+        self.config = Config.get_conf(self, identifier=0xF15703, force_registration=True)
 
         default_global: Dict[str, Any] = {
-            "normal_turnout_minutes": 15.0,
-            "emergency_turnout_minutes": 5.0,
+            "volunteer_normal_minutes": 15.0,
+            "volunteer_emergency_minutes": 5.0,
+            "career_turnout_minutes": 0.0,   # effectively instant
             "realert_minutes_min": 1.0,
             "realert_minutes_max": 3.0,
             "travel_minutes_min": 3.0,
             "travel_minutes_max": 8.0,
+            "staff_cost": 2000,              # per recruit
+            "upgrade_base_cost": 50000,      # multiplied by current level
+            "career_convert_cost": 250000,
+            "max_station_level": 5,
         }
 
         default_user: Dict[str, Any] = {
@@ -33,13 +38,17 @@ class FireStationCommand(commands.Cog):
             "credits": 0,              # local fallback economy
             "vehicles": [],            # [{id, name, crew_capacity}]
             "next_vehicle_id": 1,
-            "active_mission": {},      # mission state dict
+            "station_level": 1,
+            "station_type": "volunteer",  # volunteer | career
+            "staff_total": 6,
+            "staff_trained": 0,
+            "active_mission": {},      # dict; empty = no active
         }
 
         self.config.register_global(**default_global)
         self.config.register_user(**default_user)
 
-        # simple inline incident list; later you can bind this to MC JSON
+        # A tiny incident pool; later you can wire this to MC JSON
         self.INCIDENTS: List[Dict[str, Any]] = [
             {
                 "id": "house_fire",
@@ -75,80 +84,12 @@ class FireStationCommand(commands.Cog):
             return False
         return True
 
-    def _make_timestamp_pair(self, minutes: float) -> Dict[str, Any]:
-        # Use plain relative text to avoid any dependency on server/Discord timezones.
-        mins = int(round(minutes))
-        if mins <= 0:
-            rel = "now"
-        elif mins == 1:
-            rel = "in 1 minute"
-        else:
-            rel = f"in {mins} minutes"
-        return {
-            "relative": rel,
-            "absolute": "",
-            "raw": mins,
-        }
-
-    def _pick_random_incident(self) -> Dict[str, Any]:
-        return random.choice(self.INCIDENTS)
-
-    def _simulate_emergency_turnout(self, required: int) -> Dict[str, Any]:
-        if required <= 0:
-            return {"required": 0, "first_arrived": 0, "total_arrived": 0}
-
-        base_no_show = random.uniform(0.10, 0.25)
-        first_arrived = 0
-        for _ in range(required):
-            if random.random() > base_no_show:
-                first_arrived += 1
-
-        return {"required": required, "first_arrived": first_arrived, "total_arrived": first_arrived}
-
-    def _simulate_realert(self, current_total: int, required: int) -> Dict[str, int]:
-        if current_total >= required:
-            return {"second_arrived": 0, "total_arrived": current_total}
-
-        remaining = required - current_total
-        no_show_second = random.uniform(0.0, 0.10)
-        second_arrived = 0
-        for _ in range(remaining):
-            if random.random() > no_show_second:
-                second_arrived += 1
-
-        return {"second_arrived": second_arrived, "total_arrived": current_total + second_arrived}
-
-    async def _get_user_vehicles(self, user: discord.abc.User) -> List[Dict[str, Any]]:
-        data = await self.config.user(user).all()
-        return data.get("vehicles", [])
-
     async def _get_credits(self, user: discord.abc.User) -> int:
         try:
             return int(await bank.get_balance(user))
         except Exception:
             data = await self.config.user(user).all()
             return int(data.get("credits", 0))
-
-    async def _spend(self, user: discord.abc.User, amount: int) -> bool:
-        if amount <= 0:
-            return True
-        # try Red bank first
-        try:
-            can = await bank.can_spend(user, amount)  # type: ignore[attr-defined]
-            if can:
-                await bank.withdraw_credits(user, amount)
-                return True
-        except Exception:
-            pass
-
-        # fallback: local credits
-        user_conf = self.config.user(user)
-        data = await user_conf.all()
-        local = int(data.get("credits", 0))
-        if local < amount:
-            return False
-        await user_conf.credits.set(local - amount)
-        return True
 
     async def _give(self, user: discord.abc.User, amount: int) -> None:
         if amount <= 0:
@@ -162,6 +103,82 @@ class FireStationCommand(commands.Cog):
         data = await user_conf.all()
         local = int(data.get("credits", 0))
         await user_conf.credits.set(local + amount)
+
+    async def _spend(self, user: discord.abc.User, amount: int) -> bool:
+        if amount <= 0:
+            return True
+        # try Red bank first
+        try:
+            can = await bank.can_spend(user, amount)  # type: ignore[attr-defined]
+            if can:
+                await bank.withdraw_credits(user, amount)
+                return True
+        except Exception:
+            pass
+        # fallback: local credits
+        user_conf = self.config.user(user)
+        data = await user_conf.all()
+        local = int(data.get("credits", 0))
+        if local < amount:
+            return False
+        await user_conf.credits.set(local - amount)
+        return True
+
+    async def _get_user_vehicles(self, user: discord.abc.User) -> List[Dict[str, Any]]:
+        data = await self.config.user(user).all()
+        return data.get("vehicles", [])
+
+    def _max_staff(self, level: int) -> int:
+        # Start at 6, +2 per level
+        if level < 1:
+            level = 1
+        return 6 + (level - 1) * 2
+
+    def _max_vehicles(self, level: int) -> int:
+        # Start at 1, +1 per level
+        if level < 1:
+            level = 1
+        return 1 + (level - 1)
+
+    def _pick_random_incident(self) -> Dict[str, Any]:
+        return random.choice(self.INCIDENTS)
+
+    def _make_relative_text(self, minutes: float) -> str:
+        mins = int(round(minutes))
+        if mins <= 0:
+            return "now"
+        if mins == 1:
+            return "in 1 minute"
+        return f"in {mins} minutes"
+
+    def _simulate_emergency_turnout(self, available: int, required: int) -> Dict[str, int]:
+        """Simulate emergency turnout: faster but more no-shows."""
+        if available <= 0:
+            return {"available": 0, "arrived": 0}
+
+        arrived = 0
+        # each available staff has a chance to respond
+        base_no_show = random.uniform(0.10, 0.25)
+        for _ in range(available):
+            if random.random() > base_no_show:
+                arrived += 1
+        return {"available": available, "arrived": arrived}
+
+    def _simulate_realert(self, current_total: int, available: int, required: int) -> Dict[str, int]:
+        """Second alert: better attendance among remaining staff."""
+        if current_total >= available:
+            return {"second_arrived": 0, "total_arrived": current_total}
+
+        remaining = available - current_total
+        no_show_second = random.uniform(0.0, 0.10)
+        second_arrived = 0
+        for _ in range(remaining):
+            if random.random() > no_show_second:
+                second_arrived += 1
+        return {
+            "second_arrived": second_arrived,
+            "total_arrived": current_total + second_arrived,
+        }
 
     # --------------------------------------------------
     # Commands
@@ -188,40 +205,293 @@ class FireStationCommand(commands.Cog):
             "crew_capacity": 6,
         }
         await user_conf.started.set(True)
-        # give starter credits via bank/fallback
-        await self._give(ctx.author, 100_000)
         await user_conf.vehicles.set([starter_vehicle])
         await user_conf.next_vehicle_id.set(2)
-        await user_conf.active_mission.clear()
+        await user_conf.station_level.set(1)
+        await user_conf.station_type.set("volunteer")
+        await user_conf.staff_total.set(6)
+        await user_conf.staff_trained.set(0)
+        await user_conf.active_mission.set({})
 
-        await ctx.send(
-            "You are now the commander of a small volunteer station.\n"
-            "You received one **Starter Fire Engine** with 6 crew capacity and 100,000 credits."
+        # give starter credits via bank/fallback
+        await self._give(ctx.author, 100_000)
+
+        credits = await self._get_credits(ctx.author)
+        embed = discord.Embed(
+            title="Station created",
+            description="You are now the commander of a small **volunteer** station.",
+            color=discord.Color.red(),
         )
+        embed.add_field(name="Starter vehicle", value="🚒 Starter Fire Engine (crew 6)", inline=False)
+        embed.add_field(name="Staff", value="6 volunteers (untrained)", inline=True)
+        embed.add_field(name="Credits", value=f"{credits:,}", inline=True)
+        await ctx.send(embed=embed)
 
     @fsc_group.command(name="status")
     async def fsc_status(self, ctx: commands.Context):
-        """Show your basic status and active mission stage."""
+        """Show station, staff, vehicles, and active mission."""
         if not await self._ensure_started(ctx):
             return
 
         user_conf = self.config.user(ctx.author)
         data = await user_conf.all()
         vehicles = data.get("vehicles", [])
-        active = data.get("active_mission")
         credits = await self._get_credits(ctx.author)
 
-        lines = [
-            f"Credits: **{credits}**",
-            f"Vehicles: **{len(vehicles)}**",
-        ]
+        lvl = int(data.get("station_level", 1))
+        stype = data.get("station_type", "volunteer")
+        staff_total = int(data.get("staff_total", 0))
+        staff_trained = int(data.get("staff_trained", 0))
+        active = data.get("active_mission", {}) or {}
+
+        max_staff = self._max_staff(lvl)
+        max_veh = self._max_vehicles(lvl)
+
+        embed = discord.Embed(
+            title="Fire Station Status",
+            color=discord.Color.red(),
+        )
+        embed.add_field(name="Credits", value=f"{credits:,}", inline=True)
+        embed.add_field(name="Station level", value=str(lvl), inline=True)
+        embed.add_field(name="Type", value=stype.capitalize(), inline=True)
+
+        embed.add_field(
+            name="Staff",
+            value=f"{staff_total} total ({staff_trained} trained) / max {max_staff}",
+            inline=False,
+        )
+        embed.add_field(
+            name="Vehicles",
+            value=f"{len(vehicles)} / max {max_veh}",
+            inline=False,
+        )
 
         if active:
-            lines.append(f"Active incident: **{active.get('title', 'Unknown')}** (stage: `{active.get('stage')}`)")
+            embed.add_field(
+                name="Active incident",
+                value=f"{active.get('title', 'Unknown')} (stage: `{active.get('stage', 'unknown')}`)",
+                inline=False,
+            )
         else:
-            lines.append("Active incident: **None**")
+            embed.add_field(name="Active incident", value="None", inline=False)
 
-        await ctx.send("\n".join(lines))
+        await ctx.send(embed=embed)
+
+    @fsc_group.command(name="station")
+    async def fsc_station(self, ctx: commands.Context):
+        """Detailed overview of your station."""
+        if not await self._ensure_started(ctx):
+            return
+
+        data = await self.config.user(ctx.author).all()
+        lvl = int(data.get("station_level", 1))
+        stype = data.get("station_type", "volunteer")
+        staff_total = int(data.get("staff_total", 0))
+        staff_trained = int(data.get("staff_trained", 0))
+        vehicles = data.get("vehicles", [])
+
+        max_staff = self._max_staff(lvl)
+        max_veh = self._max_vehicles(lvl)
+
+        embed = discord.Embed(
+            title="Station overview",
+            color=discord.Color.dark_red(),
+        )
+        embed.add_field(name="Level", value=str(lvl), inline=True)
+        embed.add_field(name="Type", value=stype.capitalize(), inline=True)
+        embed.add_field(name="Vehicle capacity", value=f"{len(vehicles)} / {max_veh}", inline=True)
+
+        embed.add_field(
+            name="Staff",
+            value=f"{staff_total} total ({staff_trained} trained) / max {max_staff}",
+            inline=False,
+        )
+
+        if stype == "volunteer":
+            embed.add_field(
+                name="Turnout profile",
+                value="Volunteer: slower turnout, chance of no-shows.",
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Turnout profile",
+                value="Career: instant turnout (in-game), full crew expected.",
+                inline=False,
+            )
+
+        await ctx.send(embed=embed)
+
+    @fsc_group.command(name="recruit")
+    async def fsc_recruit(self, ctx: commands.Context, amount: int):
+        """Recruit new staff (cost per person)."""
+        if not await self._ensure_started(ctx):
+            return
+        if amount <= 0:
+            await ctx.send("Amount must be positive.")
+            return
+
+        user_conf = self.config.user(ctx.author)
+        data = await user_conf.all()
+        lvl = int(data.get("station_level", 1))
+        staff_total = int(data.get("staff_total", 0))
+
+        max_staff = self._max_staff(lvl)
+        if staff_total >= max_staff:
+            await ctx.send("You are already at maximum staff for your current station level.")
+            return
+
+        if staff_total + amount > max_staff:
+            amount = max_staff - staff_total
+
+        glb = await self.config.all()
+        cost_per = int(glb.get("staff_cost", 2000))
+        total_cost = amount * cost_per
+
+        credits = await self._get_credits(ctx.author)
+        if credits < total_cost:
+            await ctx.send(
+                f"You do not have enough credits. Recruiting {amount} costs {total_cost:,}, "
+                f"but you only have {credits:,}."
+            )
+            return
+
+        ok = await self._spend(ctx.author, total_cost)
+        if not ok:
+            await ctx.send("You do not have enough credits to complete this recruitment.")
+            return
+
+        staff_total += amount
+        await user_conf.staff_total.set(staff_total)
+
+        embed = discord.Embed(
+            title="Recruitment complete",
+            description=f"Recruited **{amount}** new staff.",
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="Total staff", value=f"{staff_total} / {max_staff}", inline=True)
+        embed.add_field(name="Cost", value=f"{total_cost:,} credits", inline=True)
+        await ctx.send(embed=embed)
+
+    @fsc_group.command(name="upgrade")
+    async def fsc_upgrade(self, ctx: commands.Context):
+        """Upgrade your station level (increases capacity)."""
+        if not await self._ensure_started(ctx):
+            return
+
+        user_conf = self.config.user(ctx.author)
+        data = await user_conf.all()
+        lvl = int(data.get("station_level", 1))
+
+        glb = await self.config.all()
+        max_lvl = int(glb.get("max_station_level", 5))
+        if lvl >= max_lvl:
+            await ctx.send("Your station is already at the maximum level.")
+            return
+
+        base = int(glb.get("upgrade_base_cost", 50000))
+        cost = base * lvl
+
+        credits = await self._get_credits(ctx.author)
+        if credits < cost:
+            await ctx.send(
+                f"You do not have enough credits to upgrade. "
+                f"Level {lvl} → {lvl + 1} costs {cost:,}, you have {credits:,}."
+            )
+            return
+
+        ok = await self._spend(ctx.author, cost)
+        if not ok:
+            await ctx.send("You do not have enough credits to complete this upgrade.")
+            return
+
+        lvl += 1
+        await user_conf.station_level.set(lvl)
+
+        max_staff = self._max_staff(lvl)
+        max_veh = self._max_vehicles(lvl)
+
+        embed = discord.Embed(
+            title="Station upgraded",
+            description=f"Your station is now level **{lvl}**.",
+            color=discord.Color.blue(),
+        )
+        embed.add_field(name="New staff capacity", value=f"max {max_staff}", inline=True)
+        embed.add_field(name="New vehicle capacity", value=f"max {max_veh}", inline=True)
+        embed.add_field(name="Cost", value=f"{cost:,} credits", inline=True)
+        await ctx.send(embed=embed)
+
+    @fsc_group.command(name="career")
+    async def fsc_career(self, ctx: commands.Context):
+        """Convert your volunteer station to a career station (faster turnout)."""
+        if not await self._ensure_started(ctx):
+            return
+
+        user_conf = self.config.user(ctx.author)
+        data = await user_conf.all()
+        stype = data.get("station_type", "volunteer")
+        lvl = int(data.get("station_level", 1))
+
+        if stype == "career":
+            await ctx.send("Your station is already a career station.")
+            return
+
+        glb = await self.config.all()
+        required_lvl = 2
+        if lvl < required_lvl:
+            await ctx.send(f"You must be at least station level {required_lvl} to convert to a career station.")
+            return
+
+        cost = int(glb.get("career_convert_cost", 250000))
+        credits = await self._get_credits(ctx.author)
+        if credits < cost:
+            await ctx.send(
+                f"You do not have enough credits. Converting to a career station costs {cost:,}, "
+                f"but you only have {credits:,}."
+            )
+            return
+
+        ok = await self._spend(ctx.author, cost)
+        if not ok:
+            await ctx.send("You do not have enough credits to complete this conversion.")
+            return
+
+        await user_conf.station_type.set("career")
+
+        embed = discord.Embed(
+            title="Station converted",
+            description="Your station is now a **career** station. Turnout is effectively instant.",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(name="Cost", value=f"{cost:,} credits", inline=True)
+        await ctx.send(embed=embed)
+
+    @fsc_group.command(name="shop")
+    async def fsc_shop(self, ctx: commands.Context):
+        """Open the vehicle shop (dropdown)."""
+        if not await self._ensure_started(ctx):
+            return
+
+        data = await self.config.user(ctx.author).all()
+        lvl = int(data.get("station_level", 1))
+        vehicles = data.get("vehicles", [])
+        max_veh = self._max_vehicles(lvl)
+        if len(vehicles) >= max_veh:
+            await ctx.send("You are at maximum vehicle capacity. Upgrade your station to buy more vehicles.")
+            return
+
+        view = VehicleShopView(self, ctx.channel, ctx.author)
+        embed = discord.Embed(
+            title="Vehicle shop",
+            description="Select a vehicle to purchase from the menu below.",
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(
+            name="Capacity",
+            value=f"{len(vehicles)} / {max_veh} vehicles currently in your station.",
+            inline=False,
+        )
+        await ctx.send(embed=embed, view=view)
 
     @fsc_group.command(name="mission")
     async def fsc_mission(self, ctx: commands.Context):
@@ -231,9 +501,14 @@ class FireStationCommand(commands.Cog):
 
         user_conf = self.config.user(ctx.author)
         data = await user_conf.all()
-        active = data.get("active_mission")
+        active = data.get("active_mission", {}) or {}
         if active:
             await ctx.send("You already have an active incident. Finish or cancel it first.")
+            return
+
+        staff_total = int(data.get("staff_total", 0))
+        if staff_total <= 0:
+            await ctx.send("You have no staff at your station. Recruit staff before taking incidents.")
             return
 
         incident = self._pick_random_incident()
@@ -251,23 +526,15 @@ class FireStationCommand(commands.Cog):
         await user_conf.active_mission.set(mission)
 
         view = AlertChoiceView(self, ctx.channel, ctx.author)
-        await ctx.send(
-            content=(
-                f"🚨 New incident: **{incident['name']}**\n"
-                f"{incident['hint']}\n\n"
-                "Choose how to alert your crew:"
-            ),
-            view=view,
+
+        embed = discord.Embed(
+            title=f"🚨 New incident: {incident['name']}",
+            description=incident["hint"],
+            color=discord.Color.red(),
         )
-
-    @fsc_group.command(name="shop")
-    async def fsc_shop(self, ctx: commands.Context):
-        """Open the vehicle shop (dropdown)."""
-        if not await self._ensure_started(ctx):
-            return
-
-        view = VehicleShopView(self, ctx.channel, ctx.author)
-        await ctx.send("🚗 Vehicle shop – select a vehicle to purchase:", view=view)
+        embed.add_field(name="Required staff", value=str(incident["required_staff"]), inline=True)
+        embed.set_footer(text="Choose how to alert your crew below.")
+        await ctx.send(embed=embed, view=view)
 
     # --------------------------------------------------
     # Workflow handlers
@@ -282,75 +549,92 @@ class FireStationCommand(commands.Cog):
     ):
         user_conf = self.config.user(user)
         data = await user_conf.all()
-        mission = data.get("active_mission") or {}
+        mission = data.get("active_mission", {}) or {}
         if mission.get("stage") != "ALERT_CHOICE":
             await interaction.response.send_message("This incident is no longer in the alert stage.", ephemeral=True)
             return
 
         glb = await self.config.all()
+        stype = data.get("station_type", "volunteer")
         required = int(mission.get("required_staff", 6))
+        staff_total = int(data.get("staff_total", 0))
 
-        if mode == "normal":
-            minutes = float(glb.get("normal_turnout_minutes", 15.0))
-            first_arrived = required
-            total = required
+        if staff_total <= 0:
+            await interaction.response.send_message("You have no staff at your station.", ephemeral=True)
+            await user_conf.active_mission.set({})
+            return
+
+        available = staff_total
+
+        if stype == "career":
+            # Career: instant turnout, everyone comes
+            minutes = float(glb.get("career_turnout_minutes", 0.0))
+            first_arrived = min(available, required)
+            total = first_arrived
         else:
-            minutes = float(glb.get("emergency_turnout_minutes", 5.0))
-            res = self._simulate_emergency_turnout(required)
-            first_arrived = res["first_arrived"]
-            total = res["total_arrived"]
+            if mode == "normal":
+                minutes = float(glb.get("volunteer_normal_minutes", 15.0))
+                # normal: mostly everyone available shows
+                first_arrived = min(available, required)
+                total = first_arrived
+            else:
+                minutes = float(glb.get("volunteer_emergency_minutes", 5.0))
+                sim = self._simulate_emergency_turnout(available, required)
+                first_arrived = sim["arrived"]
+                total = first_arrived
 
-        ts = self._make_timestamp_pair(minutes)
+        rel = self._make_relative_text(minutes)
 
         mission.update(
             {
                 "stage": "STAFF_TURNOUT",
                 "alert_mode": mode,
                 "turnout_required": required,
+                "turnout_available": available,
                 "turnout_first_arrived": first_arrived,
                 "turnout_total_arrived": total,
-                "turnout_finish_ts": ts["raw"],
             }
         )
         await user_conf.active_mission.set(mission)
 
-        # immediate feedback in the same channel via interaction
         await interaction.response.send_message(
-            f"📟 Crew alerted with **{mode}** mode.\n"
-            f"Turnout expected {ts['relative']} ({ts['absolute']}).",
+            f"📟 Crew alerted with **{mode}** mode. Turnout expected {rel}.",
             ephemeral=False,
         )
 
         # wait for turnout time
-        await asyncio.sleep(int(minutes * 60))
+        if minutes > 0:
+            await asyncio.sleep(int(minutes * 60))
 
         await self._show_turnout_result(channel, user)
 
     async def _show_turnout_result(self, channel: discord.abc.Messageable, user: discord.abc.User):
         user_conf = self.config.user(user)
         data = await user_conf.all()
-        mission = data.get("active_mission") or {}
+        mission = data.get("active_mission", {}) or {}
         if mission.get("stage") != "STAFF_TURNOUT":
             return
 
-        required = mission.get("turnout_required", 0)
-        arrived = mission.get("turnout_total_arrived", 0)
+        required = int(mission.get("turnout_required", 0))
+        arrived = int(mission.get("turnout_total_arrived", 0))
+        available = int(mission.get("turnout_available", 0))
 
-        text = (
-            "👥 Turnout finished.\n"
-            f"Required staff: **{required}**\n"
-            f"Arrived: **{arrived}**\n\n"
-            "You can re-page for more, proceed with current crew, or cancel the call."
+        embed = discord.Embed(
+            title="Turnout result",
+            color=discord.Color.orange(),
         )
+        embed.add_field(name="Required staff", value=str(required), inline=True)
+        embed.add_field(name="Available staff", value=str(available), inline=True)
+        embed.add_field(name="Arrived staff", value=str(arrived), inline=True)
+        embed.set_footer(text="Re-alert for more crew, proceed with current crew, or cancel the call.")
 
         view = TurnoutDecisionView(self, channel, user)
 
         try:
-            await channel.send(text, view=view)
+            await channel.send(embed=embed, view=view)
         except Exception:
-            # optional fallback to DM
             try:
-                await user.send(text, view=view)
+                await user.send(embed=embed, view=view)
             except Exception:
                 pass
 
@@ -362,29 +646,29 @@ class FireStationCommand(commands.Cog):
     ):
         user_conf = self.config.user(user)
         data = await user_conf.all()
-        mission = data.get("active_mission") or {}
+        mission = data.get("active_mission", {}) or {}
         if mission.get("stage") != "STAFF_TURNOUT":
             await interaction.response.send_message("This incident is no longer in turnout stage.", ephemeral=True)
             return
 
         glb = await self.config.all()
         required = int(mission.get("turnout_required", 0))
+        available = int(mission.get("turnout_available", 0))
         current_total = int(mission.get("turnout_total_arrived", 0))
 
-        res = self._simulate_realert(current_total, required)
-        mission["turnout_total_arrived"] = res["total_arrived"]
-        mission["turnout_second_arrived"] = res["second_arrived"]
+        sim = self._simulate_realert(current_total, available, required)
+        mission["turnout_total_arrived"] = sim["total_arrived"]
+        mission["turnout_second_arrived"] = sim["second_arrived"]
 
         min_minutes = float(glb.get("realert_minutes_min", 1.0))
         max_minutes = float(glb.get("realert_minutes_max", 3.0))
         minutes = random.uniform(min_minutes, max_minutes)
-        ts = self._make_timestamp_pair(minutes)
-        mission["turnout_finish_ts"] = ts["raw"]
+        rel = self._make_relative_text(minutes)
 
         await user_conf.active_mission.set(mission)
 
         await interaction.response.send_message(
-            f"📟 Re-alert sent. Additional turnout expected {ts['relative']} ({ts['absolute']}).",
+            f"📟 Re-alert sent. Additional turnout expected {rel}.",
             ephemeral=False,
         )
 
@@ -399,7 +683,7 @@ class FireStationCommand(commands.Cog):
     ):
         user_conf = self.config.user(user)
         data = await user_conf.all()
-        mission = data.get("active_mission") or {}
+        mission = data.get("active_mission", {}) or {}
         if mission.get("stage") != "STAFF_TURNOUT":
             await interaction.response.send_message("This incident is no longer in turnout stage.", ephemeral=True)
             return
@@ -416,11 +700,13 @@ class FireStationCommand(commands.Cog):
 
         vehicles = await self._get_user_vehicles(user)
         view = VehicleSelectView(self, channel, user, vehicles)
-        await interaction.response.send_message(
-            f"🚒 {arrived} personnel available. Select vehicles to dispatch:",
-            view=view,
-            ephemeral=False,
+
+        embed = discord.Embed(
+            title="Vehicle selection",
+            description=f"{arrived} personnel available. Select vehicles to dispatch.",
+            color=discord.Color.blue(),
         )
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
 
     async def handle_cancel_incident(
         self,
@@ -429,7 +715,7 @@ class FireStationCommand(commands.Cog):
         user: discord.abc.User,
     ):
         user_conf = self.config.user(user)
-        await user_conf.active_mission.clear()
+        await user_conf.active_mission.set({})
         await interaction.response.send_message("Incident cancelled.", ephemeral=False)
 
     async def handle_vehicle_selection(
@@ -441,7 +727,7 @@ class FireStationCommand(commands.Cog):
     ):
         user_conf = self.config.user(user)
         data = await user_conf.all()
-        mission = data.get("active_mission") or {}
+        mission = data.get("active_mission", {}) or {}
         if mission.get("stage") != "VEHICLE_SELECT":
             await interaction.response.send_message("This incident is not in vehicle selection stage.", ephemeral=True)
             return
@@ -454,15 +740,14 @@ class FireStationCommand(commands.Cog):
         min_minutes = float(glb.get("travel_minutes_min", 3.0))
         max_minutes = float(glb.get("travel_minutes_max", 8.0))
         minutes = random.uniform(min_minutes, max_minutes)
-        ts = self._make_timestamp_pair(minutes)
+        rel = self._make_relative_text(minutes)
 
         mission["selected_vehicle_ids"] = [int(v) for v in values]
         mission["stage"] = "TRAVEL"
-        mission["travel_finish_ts"] = ts["raw"]
         await user_conf.active_mission.set(mission)
 
         await interaction.response.send_message(
-            f"🚨 Units are en route. ETA {ts['relative']} ({ts['absolute']}).",
+            f"🚨 Units are en route. ETA {rel}.",
             ephemeral=False,
         )
 
@@ -472,7 +757,7 @@ class FireStationCommand(commands.Cog):
     async def _send_travel_update(self, channel: discord.abc.Messageable, user: discord.abc.User):
         user_conf = self.config.user(user)
         data = await user_conf.all()
-        mission = data.get("active_mission") or {}
+        mission = data.get("active_mission", {}) or {}
         if mission.get("stage") != "TRAVEL":
             return
 
@@ -499,7 +784,7 @@ class FireStationCommand(commands.Cog):
     async def _resolve_incident(self, channel: discord.abc.Messageable, user: discord.abc.User):
         user_conf = self.config.user(user)
         data = await user_conf.all()
-        mission = data.get("active_mission") or {}
+        mission = data.get("active_mission", {}) or {}
         if mission.get("stage") not in {"TRAVEL", "VEHICLE_SELECT"}:
             return
 
@@ -529,27 +814,24 @@ class FireStationCommand(commands.Cog):
 
         await self._give(user, reward)
         total_credits = await self._get_credits(user)
-        await user_conf.active_mission.clear()
+        await user_conf.active_mission.set({})
 
-        lines = [
-            f"Incident: **{mission.get('title', 'Unknown')}**",
-            "",
-            f"Required staff: **{required}**",
-            f"Arrived staff: **{arrived}**",
-            f"Vehicles dispatched: **{len(selected)}** (cap {total_capacity})",
-            "",
-            outcome,
-            f"Reward: **{reward}** credits",
-            f"Total credits: **{total_credits}**",
-        ]
-
-        text = "\n".join(lines)
+        embed = discord.Embed(
+            title=f"Incident result – {mission.get('title', 'Unknown')}",
+            color=discord.Color.green() if success_score >= 1.0 else discord.Color.orange(),
+        )
+        embed.add_field(name="Required staff", value=str(required), inline=True)
+        embed.add_field(name="Arrived staff", value=str(arrived), inline=True)
+        embed.add_field(name="Vehicles dispatched", value=f"{len(selected)} (cap {total_capacity})", inline=True)
+        embed.add_field(name="Outcome", value=outcome, inline=False)
+        embed.add_field(name="Reward", value=f"{reward:,} credits", inline=True)
+        embed.add_field(name="Total credits", value=f"{total_credits:,}", inline=True)
 
         try:
-            await channel.send(text)
+            await channel.send(embed=embed)
         except Exception:
             try:
-                await user.send(text)
+                await user.send(embed=embed)
             except Exception:
                 pass
 
@@ -578,7 +860,7 @@ class FireStationCommand(commands.Cog):
         credits = await self._get_credits(user)
         if credits < price:
             await interaction.response.send_message(
-                f"You do not have enough credits. You need {price} but only have {credits}.",
+                f"You do not have enough credits. You need {price:,} but only have {credits:,}.",
                 ephemeral=True,
             )
             return
@@ -604,7 +886,7 @@ class FireStationCommand(commands.Cog):
         await user_conf.next_vehicle_id.set(next_id + 1)
 
         await interaction.response.send_message(
-            f"Purchased **{vdef['name']}** for {price} credits. It has been added to your fleet.",
+            f"Purchased **{vdef['name']}** for {price:,} credits. It has been added to your fleet.",
             ephemeral=True,
         )
 
@@ -619,12 +901,12 @@ class AlertChoiceView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user.id
 
-    @discord.ui.button(label="Normal turnout (15 min, full crew)", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Normal turnout (volunteer)", style=discord.ButtonStyle.secondary)
     async def normal(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.handle_alert_choice(interaction, self.channel, self.user, "normal")
         self.stop()
 
-    @discord.ui.button(label="Emergency turnout (fast, risk of shortage)", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Emergency turnout (volunteer)", style=discord.ButtonStyle.danger)
     async def emergency(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.handle_alert_choice(interaction, self.channel, self.user, "emergency")
         self.stop()
@@ -714,7 +996,7 @@ class VehicleShopSelect(discord.ui.Select):
 
         options: List[discord.SelectOption] = []
         for vid, v in self.CATALOG.items():
-            label = f"{v['name']} ({v['price']} cr, cap {v['crew_capacity']})"
+            label = f"{v['name']} ({v['price']:,} cr, cap {v['crew_capacity']})"
             options.append(discord.SelectOption(label=label, value=vid))
 
         super().__init__(
