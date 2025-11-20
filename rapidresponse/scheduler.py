@@ -62,7 +62,7 @@ class MissionScheduler:
             except Exception as e:
                 log.error(f"Error in scheduler loop: {e}", exc_info=True)
             
-            # Wait for next check
+            # Wait for next check (convert minutes to seconds)
             await asyncio.sleep(config.MISSION_CHECK_INTERVAL * 60)
     
     async def _assign_missions(self):
@@ -125,6 +125,14 @@ class MissionScheduler:
             
             if datetime.utcnow() < next_mission_time:
                 return False
+        else:
+            # First mission ever - just needs to wait FIRST_MISSION_DELAY
+            # Check when player went active (use updated_at as proxy)
+            if player.get('updated_at'):
+                went_active = datetime.fromisoformat(player['updated_at'])
+                wait_time = timedelta(minutes=config.FIRST_MISSION_DELAY)
+                if datetime.utcnow() < went_active + wait_time:
+                    return False
         
         return True
     

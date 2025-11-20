@@ -253,7 +253,7 @@ Can be accessed directly with SQLite for advanced queries.
 ---
 
 **Version**: 1.0.0  
-**Author**: Brandjuhnl  
+**Author**: Roel  
 **License**: Custom - For use with Fire & Rescue Academy Alliance
 
 🚒 Happy dispatching! 🚑

@@ -309,3 +309,8 @@ Check these if you have issues:
 3. Red logs - `[p]debuginfo`
 4. Cog logs - `[p]debug rapidresponse`
 
+---
+
+**Ready to deploy!** 🚒🚑🚓
+
+All files are in `/mnt/user-data/outputs/rapidresponse/`

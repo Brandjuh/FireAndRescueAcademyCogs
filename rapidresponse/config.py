@@ -7,14 +7,15 @@ GAME_SERVER_ID = 543935264234536960
 
 # MissionChief JSON endpoint
 MISSIONCHIEF_JSON_URL = "https://www.missionchief.com/einsaetze.json"
-MISSION_CACHE_REFRESH_HOURS = 24
+MISSION_CACHE_REFRESH_HOURS = 6
 
 # XP and Leveling
 XP_PER_LEVEL = 1000
 LEVEL_STAT_BONUS = 5  # Points to distribute per level
 
 # Mission assignment timing (in minutes)
-MISSION_CHECK_INTERVAL = 5  # How often to check for new missions
+MISSION_CHECK_INTERVAL = 0.5  # How often to check for new missions (30 seconds)
+FIRST_MISSION_DELAY = 0.5  # Delay before first mission (30 seconds)
 BASE_MISSION_COOLDOWN_MIN = 30  # Starting cooldown between missions
 BASE_MISSION_COOLDOWN_MAX = 45
 ADVANCED_MISSION_COOLDOWN_MIN = 15  # For high-level players

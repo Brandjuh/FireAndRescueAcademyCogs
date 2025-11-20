@@ -103,6 +103,29 @@ class RapidResponse(commands.Cog):
             log.info(f"Created new player profile for {user_id}")
         return player
     
+    async def _assign_first_mission_soon(self, user_id: int):
+        """Assign first mission to a new player after a short delay"""
+        try:
+            # Wait 30 seconds
+            await asyncio.sleep(30)
+            
+            # Get player and verify still active
+            player = await self.db.get_player(user_id)
+            if not player or not player['is_active']:
+                return
+            
+            # Double check they don't have a mission already
+            active_mission = await self.db.get_active_mission(user_id)
+            if active_mission:
+                return
+            
+            # Assign mission
+            await self.scheduler._assign_mission_to_player(player)
+            log.info(f"Assigned first mission to new player {user_id}")
+            
+        except Exception as e:
+            log.error(f"Error assigning first mission to {user_id}: {e}", exc_info=True)
+    
     @commands.group(name="rr", aliases=["rapidresponse"])
     async def rr(self, ctx: commands.Context):
         """Rapid Response Dispatch game commands"""
@@ -192,6 +215,9 @@ class RapidResponse(commands.Cog):
             
             await self.db.set_active(ctx.author.id, True)
             
+            # Check if this is their first time going on duty (no missions completed)
+            is_first_time = player['total_missions'] == 0 and not player['last_mission_time']
+            
             embed = discord.Embed(
                 title="🟢 On Duty!",
                 description=(
@@ -202,8 +228,20 @@ class RapidResponse(commands.Cog):
                 ),
                 color=config.COLOR_SUCCESS
             )
+            
+            if is_first_time:
+                embed.add_field(
+                    name="📻 First Mission",
+                    value="Your first mission will arrive within **30 seconds**!",
+                    inline=False
+                )
+            
             await ctx.send(embed=embed)
             log.info(f"Player {ctx.author.id} went on duty")
+            
+            # If first time, try to assign mission immediately (in background)
+            if is_first_time:
+                asyncio.create_task(self._assign_first_mission_soon(ctx.author.id))
         
         elif state.lower() in ['off', 'inactive', 'offline']:
             # Set inactive
