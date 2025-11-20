@@ -200,7 +200,7 @@ class FireStationCommand(commands.Cog):
     """Fire Station Command – management game."""
 
     __author__ = "You + ChatGPT"
-    __version__ = "0.11.0"
+    __version__ = "0.12.0"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -232,6 +232,9 @@ class FireStationCommand(commands.Cog):
             "mutual_strength": 0,
             "station_type": "volunteer",
             "station_upgrade_job": {},
+            "auto_enabled": False,
+            "auto_interval": 900,
+            "last_auto_mission_ts": None,
         }
 
         default_guild = {
@@ -241,6 +244,11 @@ class FireStationCommand(commands.Cog):
         default_global = {
             "use_bank_economy": False,
             "vehicle_sell_refund": 0.5,
+            "auto_enabled": True,
+            "auto_base_interval": 900,
+            "auto_min_interval": 300,
+            "auto_max_interval": 3600,
+            "auto_scheduler_tick": 60,
         }
 
         self.config.register_user(**default_user)
@@ -544,16 +552,95 @@ class FireStationCommand(commands.Cog):
     # Mission scheduler (stub)
     # ------------------------------
 
+    
     async def mission_scheduler(self):
         await self.bot.wait_until_ready()
         while True:
             try:
-                log.debug("Mission scheduler tick")
+                global_conf = await self.config.all()
+                auto_enabled = bool(global_conf.get("auto_enabled", True))
+                tick = int(global_conf.get("auto_scheduler_tick", 60))
+                if auto_enabled:
+                    await self._run_auto_missions_tick()
             except Exception:
                 log.exception("Error in mission scheduler")
-            await asyncio.sleep(300)
+            await asyncio.sleep(max(10, tick))
 
-    # ------------------------------
+    
+    async def _run_auto_missions_tick(self):
+        """
+        Periodically run auto-missions for users who enabled them.
+
+        - Respects per-user interval and global min/max.
+        - Sends results via DM to the player.
+        """
+        try:
+            global_conf = await self.config.all()
+            base_interval = int(global_conf.get("auto_base_interval", 900))
+            min_interval = int(global_conf.get("auto_min_interval", 300))
+            max_interval = int(global_conf.get("auto_max_interval", 3600))
+        except Exception:
+            log.exception("Failed to read global auto mission config")
+            return
+
+        try:
+            all_users = await self.config.all_users()
+        except Exception:
+            log.exception("Failed to fetch all_users for auto missions")
+            return
+
+        now = int(dt.datetime.utcnow().timestamp())
+
+        for user_id_str, data in all_users.items():
+            try:
+                if not data.get("started"):
+                    continue
+                if not data.get("is_active"):
+                    continue
+                if not data.get("auto_enabled", False):
+                    continue
+
+                interval = int(data.get("auto_interval", base_interval))
+                interval = max(min_interval, min(max_interval, interval))
+
+                last_ts = int(data.get("last_auto_mission_ts") or 0)
+                if now - last_ts < interval:
+                    continue
+
+                try:
+                    user_id = int(user_id_str)
+                except (TypeError, ValueError):
+                    continue
+
+                user = self.bot.get_user(user_id)
+                if user is None:
+                    continue
+
+                # Build a very small context-like object that DMs the user
+                class _AutoCtx:
+                    __slots__ = ("bot", "author", "guild")
+
+                    def __init__(self, bot, author):
+                        self.bot = bot
+                        self.author = author
+                        self.guild = None
+
+                    async def send(self, *args, **kwargs):
+                        try:
+                            return await self.author.send(*args, **kwargs)
+                        except Exception:
+                            log.exception("Failed to DM auto mission result to %s", self.author)
+
+                ctx = _AutoCtx(self.bot, user)
+
+                # Call the same mission logic as the manual command
+                await self.fsc_mission(ctx)  # type: ignore
+
+                # Update timestamp only if call didn't raise
+                await self.config.user_from_id(user_id).last_auto_mission_ts.set(now)
+            except Exception:
+                log.exception("Error while running auto mission for user %s", user_id_str)
+# ------------------------------
     # Core commands
     # ------------------------------
 
@@ -709,7 +796,125 @@ class FireStationCommand(commands.Cog):
         await ctx.send(embed=embed)
 
     
+    
     # ------------------------------
+    # AUTO MISSIONS – PER-USER CONTROL
+    # ------------------------------
+
+    @fsc_group.group(name="auto")
+    async def fsc_auto(self, ctx: commands.Context):
+        """Configure automatic missions."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+
+    @fsc_auto.command(name="status")
+    async def auto_status(self, ctx: commands.Context):
+        """Show your auto-mission settings."""
+        user_conf = self.config.user(ctx.author)
+        udata = await user_conf.all()
+        gdata = await self.config.all()
+
+        enabled = bool(udata.get("auto_enabled", False))
+        interval = int(udata.get("auto_interval", gdata.get("auto_base_interval", 900)))
+        last_ts = udata.get("last_auto_mission_ts")
+
+        min_interval = int(gdata.get("auto_min_interval", 300))
+        max_interval = int(gdata.get("auto_max_interval", 3600))
+
+        embed = discord.Embed(
+            title="Auto Missions – Status",
+            color=discord.Color.purple(),
+        )
+        embed.add_field(name="Enabled", value="Yes" if enabled else "No", inline=True)
+        embed.add_field(name="Interval (sec)", value=str(interval), inline=True)
+        embed.add_field(name="Global min/max (sec)", value=f"{min_interval}/{max_interval}", inline=True)
+
+        if last_ts:
+            last_dt = dt.datetime.utcfromtimestamp(int(last_ts))
+            embed.add_field(
+                name="Last auto mission",
+                value=last_dt.strftime("%Y-%m-%d %H:%M UTC"),
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Last auto mission",
+                value="Never",
+                inline=False,
+            )
+
+        await ctx.send(embed=embed)
+
+    @fsc_auto.command(name="on")
+    async def auto_on(self, ctx: commands.Context, interval: int = None):
+        """
+        Enable automatic missions for yourself.
+
+        Optional: custom interval in seconds. This will be clamped to the
+        globally allowed min/max range.
+        """
+        user_conf = self.config.user(ctx.author)
+        udata = await user_conf.all()
+        gdata = await self.config.all()
+
+        if not udata.get("started"):
+            await ctx.send("You have not started yet. Use `[p]fsc start` first.")
+            return
+
+        base_interval = int(gdata.get("auto_base_interval", 900))
+        min_interval = int(gdata.get("auto_min_interval", 300))
+        max_interval = int(gdata.get("auto_max_interval", 3600))
+
+        if interval is None:
+            interval = base_interval
+
+        interval = max(min_interval, min(max_interval, interval))
+
+        await user_conf.auto_enabled.set(True)
+        await user_conf.auto_interval.set(interval)
+        # set last_auto_mission_ts to now so you don't get spammed immediately
+        now = int(dt.datetime.utcnow().timestamp())
+        await user_conf.last_auto_mission_ts.set(now)
+
+        await ctx.send(
+            f"Auto missions **enabled**.\n"
+            f"Interval set to **{interval} seconds**.\n"
+            f"You will receive missions automatically via DM while you are on duty."
+        )
+
+    @fsc_auto.command(name="off")
+    async def auto_off(self, ctx: commands.Context):
+        """Disable automatic missions for yourself."""
+        user_conf = self.config.user(ctx.author)
+        await user_conf.auto_enabled.set(False)
+        await ctx.send("Auto missions **disabled** for your account.")
+
+    @fsc_auto.command(name="interval")
+    async def auto_interval(self, ctx: commands.Context, interval: int):
+        """
+        Change your auto-mission interval (in seconds).
+
+        The value will be clamped to the globally allowed min/max.
+        """
+        user_conf = self.config.user(ctx.author)
+        udata = await user_conf.all()
+        gdata = await self.config.all()
+
+        if not udata.get("started"):
+            await ctx.send("You have not started yet. Use `[p]fsc start` first.")
+            return
+
+        min_interval = int(gdata.get("auto_min_interval", 300))
+        max_interval = int(gdata.get("auto_max_interval", 3600))
+
+        interval = max(min_interval, min(max_interval, interval))
+
+        await user_conf.auto_interval.set(interval)
+        await ctx.send(
+            f"Your auto-mission interval is now **{interval} seconds**.\n"
+            f"This will apply the next time an auto mission is dispatched to you."
+        )
+# ------------------------------
     # STATION MANAGEMENT (VOLUNTEER → CAREER)
     # ------------------------------
 
