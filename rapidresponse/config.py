@@ -7,7 +7,7 @@ GAME_SERVER_ID = 543935264234536960
 
 # MissionChief JSON endpoint
 MISSIONCHIEF_JSON_URL = "https://www.missionchief.com/einsaetze.json"
-MISSION_CACHE_REFRESH_HOURS = 6
+MISSION_CACHE_REFRESH_HOURS = 24
 
 # XP and Leveling
 XP_PER_LEVEL = 1000
