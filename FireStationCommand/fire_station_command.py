@@ -33,7 +33,7 @@ class FireStationCommand(commands.Cog):
             "credits": 0,              # local fallback economy
             "vehicles": [],            # [{id, name, crew_capacity}]
             "next_vehicle_id": 1,
-            "active_mission": None,    # mission state dict
+            "active_mission": {},      # mission state dict
         }
 
         self.config.register_global(**default_global)
