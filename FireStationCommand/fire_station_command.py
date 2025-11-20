@@ -12,7 +12,7 @@ from redbot.core import commands, Config, bank
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.1.0"
+    __version__ = "1.1.1"
 
     def __init__(self, bot):
         self.bot = bot
@@ -214,7 +214,11 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Starter vehicle", value="🚒 Starter Fire Engine (crew 6)", inline=False)
         embed.add_field(name="Staff", value="6 volunteers (untrained)", inline=True)
         embed.add_field(name="Credits", value=f"{credits:,}", inline=True)
-        await ctx.send(embed=embed)
+        try:
+            await ctx.send(embed=embed)
+        except Exception:
+            # Fallback if Discord temporarily disconnects
+            await ctx.send("Station created. (Discord had trouble sending the embed.)")
 
     @fsc_group.command(name="status")
     async def fsc_status(self, ctx: commands.Context):
@@ -312,11 +316,11 @@ class FireStationCommand(commands.Cog):
         # Choose image by bay capacity (parking places)
         image_url = None
         if max_veh <= 1:
-            image_url = "https://example.com/fra_tier1_flag.png"
+            image_url = "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/main/FireStationCommand/Images/FDTT1B1.png"
         elif max_veh == 2:
-            image_url = "https://example.com/fra_tier1_bay2.png"
+            image_url = "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/main/FireStationCommand/Images/FDT1B2.png"
         elif max_veh >= 3:
-            image_url = "https://example.com/fra_tier1_bay3.png"
+            image_url = "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/main/FireStationCommand/Images/FDT1B3.png"
 
         if image_url:
             embed.set_image(url=image_url)
