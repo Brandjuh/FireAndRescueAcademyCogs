@@ -16,10 +16,10 @@ LEVEL_STAT_BONUS = 5  # Points to distribute per level
 # Mission assignment timing (in minutes)
 MISSION_CHECK_INTERVAL = 0.5  # How often to check for new missions (30 seconds)
 FIRST_MISSION_DELAY = 0.5  # Delay before first mission (30 seconds)
-BASE_MISSION_COOLDOWN_MIN = 30  # Starting cooldown between missions
-BASE_MISSION_COOLDOWN_MAX = 45
-ADVANCED_MISSION_COOLDOWN_MIN = 15  # For high-level players
-ADVANCED_MISSION_COOLDOWN_MAX = 25
+BASE_MISSION_COOLDOWN_MIN = 1  # Starting cooldown between missions (1 minute)
+BASE_MISSION_COOLDOWN_MAX = 1  # Starting cooldown between missions (1 minute)
+ADVANCED_MISSION_COOLDOWN_MIN = 1  # For high-level players (1 minute)
+ADVANCED_MISSION_COOLDOWN_MAX = 1  # For high-level players (1 minute)
 
 # Mission timeout (in seconds)
 MISSION_TIMEOUT_BASE = 120  # 2 minutes for beginners

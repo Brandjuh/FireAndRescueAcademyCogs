@@ -563,23 +563,27 @@ class RapidResponse(commands.Cog):
             # Create "dispatching" embed
             response_label = config.RESPONSE_TYPES[response_type]['label']
             
+            # Calculate delay based on tier (more complex = longer response)
+            # Tier 1: 20s, Tier 2: 30s, Tier 3: 45s, Tier 4: 60s
+            delay_map = {1: 20, 2: 30, 3: 45, 4: 60}
+            delay_seconds = delay_map.get(tier, 30)
+            
+            # Calculate arrival timestamp for Discord countdown
+            arrival_time = datetime.utcnow() + timedelta(seconds=delay_seconds)
+            arrival_timestamp = int(arrival_time.timestamp())
+            
             dispatch_embed = discord.Embed(
                 title=f"🚨 {mission_name}",
                 description=(
                     f"**{response_label}** dispatched!\n\n"
                     f"🚒 Units are en route to the scene...\n"
-                    f"⏱️ Estimated arrival time: {tier * 15}s"
+                    f"⏱️ Estimated arrival: <t:{arrival_timestamp}:R>"
                 ),
                 color=config.COLOR_INFO
             )
             
             # Send initial dispatch message
             await interaction.followup.send(embed=dispatch_embed)
-            
-            # Calculate delay based on tier (more complex = longer response)
-            # Tier 1: 20s, Tier 2: 30s, Tier 3: 45s, Tier 4: 60s
-            delay_map = {1: 20, 2: 30, 3: 45, 4: 60}
-            delay_seconds = delay_map.get(tier, 30)
             
             # Wait for "units to arrive"
             await asyncio.sleep(delay_seconds / 2)
