@@ -5,7 +5,7 @@ import asyncio
 import logging
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, List, Tuple
 
 import discord
@@ -45,7 +45,7 @@ def _mc_profile_url(mc_id: str) -> str:
 class MemberSync(commands.Cog):
     """Synchronises Missionchief members with Discord and handles verification workflow."""
 
-    __version__ = "2.2.1"
+    __version__ = "2.3.0"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -1193,6 +1193,32 @@ class MemberSync(commands.Cog):
             await ctx.send("✅ You are already verified.")
             return
 
+        # Check if user is already in queue
+        q = await self.config.queue()
+        if str(ctx.author.id) in q:
+            existing = q[str(ctx.author.id)]
+            attempts = existing.get("attempts", 0)
+            enqueued_at = existing.get("enqueued_at", "Unknown")
+            
+            # Parse the ISO timestamp for Discord timestamp
+            try:
+                enqueued_dt = datetime.fromisoformat(enqueued_at.replace('Z', '+00:00'))
+                enqueued_timestamp = int(enqueued_dt.timestamp())
+                time_display = f"<t:{enqueued_timestamp}:R>"
+            except:
+                time_display = enqueued_at[:19]
+            
+            queue_msg = (
+                f"⏳ **You're already in the verification queue!**\n\n"
+                f"Queued since: {time_display}\n"
+                f"Attempts so far: {attempts}/30\n\n"
+                f"**PLEASE BE PATIENT** - the system is working automatically.\n"
+                f"You don't need to run this command again. Just wait."
+            )
+            
+            await ctx.send(queue_msg)
+            return
+
         name = ctx.author.display_name
         await ctx.send("🔍 Looking you up in the roster... this may take a moment.")
         await self._debug_log(f"Verification request from {ctx.author.name} (display_name: {name}, MC ID: {mc_id})")
@@ -1225,8 +1251,11 @@ class MemberSync(commands.Cog):
                     await ctx.send("⚠️ Found you, but failed to send review request. Please contact an administrator.")
                 return
 
+        # Calculate expected completion time (1 hour 15 minutes from now)
+        expected_completion = datetime.utcnow() + timedelta(hours=1, minutes=15)
+        expected_timestamp = int(expected_completion.timestamp())
+        
         # Add to queue
-        q = await self.config.queue()
         q[str(ctx.author.id)] = {
             "attempts": 0,
             "enqueued_at": utcnow_iso(),
@@ -1245,39 +1274,54 @@ class MemberSync(commands.Cog):
         
         mode_text = "automatically verified" if auto_approve_enabled else "queued for review"
         
+        # Prepare DM message
+        dm_msg = (
+            f"⏳ **Not found in the roster yet.**\n\n"
+            f"You've been added to the verification queue.\n"
+            f"The system will automatically check every 2 minutes.\n\n"
+            f"**Expected completion:** <t:{expected_timestamp}:R> (in ~1 hour 15 minutes)\n\n"
+            f"**JUST WAIT** - you don't need to do anything else.\n"
+            f"Once found, you'll be {mode_text}.\n\n"
+            f"**Tips:**\n"
+            f"• Your current display name is: **{name}**\n"
+            f"• Make sure this matches your MissionChief name exactly (including capitalization)\n"
+            f"• If you just joined the alliance, wait a few minutes for the roster to update\n"
+            f"• You can provide your MC User ID by running `!verify <your_mc_id>`"
+        )
+        
         dm_sent = False
         try:
-            queue_msg = (
-                "⏳ We couldn't find you in the roster yet.\n\n"
-                f"I've queued your verification request and will automatically retry every 2 minutes for up to 1 hour. "
-                f"Once found, you'll be {mode_text}!\n\n"
-                "**Tips:**\n"
-                f"• Your current display name is: **{name}**\n"
-                "• Make sure this matches your MissionChief name exactly (including capitalization)\n"
-                "• If you just joined the alliance, wait a few minutes for the roster to update\n"
-                "• You can provide your MC User ID by running `!verify <your_mc_id>`"
-            )
-            await ctx.author.send(queue_msg)
+            await ctx.author.send(dm_msg)
             dm_sent = True
+            await self._debug_log(f"DM sent to {ctx.author.name}")
         except Exception as e:
             await self._debug_log(f"Could not DM user {ctx.author.name}: {e}", "warning")
         
+        # Public message
         if dm_sent:
             await ctx.send(
-                "⏳ I couldn't find you in the roster yet.\n"
-                "I've queued your verification and will retry automatically every **2 minutes for up to 1 hour**. "
-                "Check your DMs for more information!"
+                f"⏳ **Not found in the roster yet.**\n\n"
+                f"You've been added to the verification queue.\n"
+                f"The system will automatically check every 2 minutes.\n\n"
+                f"**Expected completion:** <t:{expected_timestamp}:R> (in ~1 hour 15 minutes)\n\n"
+                f"**JUST WAIT** - you don't need to do anything else.\n"
+                f"Check your DMs for more details."
             )
         else:
+            # Full message in public if DM failed
             await ctx.send(
-                "⏳ I couldn't find you in the roster yet.\n"
-                f"**I've queued your verification** and will retry automatically every **2 minutes for up to 1 hour**.\n\n"
-                "**Tips:**\n"
+                f"{ctx.author.mention} ⏳ **Not found in the roster yet.**\n\n"
+                f"You've been added to the verification queue.\n"
+                f"The system will automatically check every 2 minutes.\n\n"
+                f"**Expected completion:** <t:{expected_timestamp}:R> (in ~1 hour 15 minutes)\n\n"
+                f"**JUST WAIT** - you don't need to do anything else.\n"
+                f"Once found, you'll be {mode_text}.\n\n"
+                f"**Tips:**\n"
                 f"• Your current display name is: **{name}**\n"
-                "• Make sure this matches your MissionChief name exactly (including capitalization)\n"
-                "• If you just joined the alliance, wait a few minutes for the roster to update\n"
-                "• You can provide your MC User ID by running `!verify <your_mc_id>`\n\n"
-                "⚠️ I couldn't send you a DM. Please enable DMs from server members to receive updates!"
+                f"• Make sure this matches your MissionChief name exactly (including capitalization)\n"
+                f"• If you just joined the alliance, wait a few minutes for the roster to update\n"
+                f"• You can provide your MC User ID by running `!verify <your_mc_id>`\n\n"
+                f"⚠️ **Please enable DMs from server members** so I can send you updates!"
             )
         
         await self._debug_log(f"Added {ctx.author.name} to queue (will retry for ~1 hour, searching as: {name})")
