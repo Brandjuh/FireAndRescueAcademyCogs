@@ -484,7 +484,7 @@ class FireStationCommand(commands.Cog):
         return base_slots + extra
 
     async def _get_funds(self, user: discord.abc.User) -> int:
-        g = await self.config.global_.all()
+        g = await self.config.all()
         use_bank = g.get("use_bank_economy", False)
         if use_bank and await bank.is_bank_loaded():
             try:
@@ -500,7 +500,7 @@ class FireStationCommand(commands.Cog):
     async def _charge(self, ctx: commands.Context, user: discord.abc.User, amount: int, reason: str) -> bool:
         if amount <= 0:
             return True
-        g = await self.config.global_.all()
+        g = await self.config.all()
         use_bank = g.get("use_bank_economy", False)
         if use_bank and await bank.is_bank_loaded():
             try:
@@ -527,7 +527,7 @@ class FireStationCommand(commands.Cog):
     async def _payout(self, user: discord.abc.User, amount: int):
         if amount <= 0:
             return
-        g = await self.config.global_.all()
+        g = await self.config.all()
         use_bank = g.get("use_bank_economy", False)
         if use_bank and await bank.is_bank_loaded():
             try:
@@ -951,7 +951,7 @@ class FireStationCommand(commands.Cog):
             await ctx.send("This vehicle type is no longer defined; selling will grant no refund.")
             refund = 0
         else:
-            g = await self.config.global_.all()
+            g = await self.config.all()
             factor = float(g.get("vehicle_sell_refund", 0.5))
             refund = int(vdef.base_cost * factor)
 
@@ -2234,7 +2234,7 @@ class FireStationCommand(commands.Cog):
     @fsc_admin.command(name="usebank")
     async def admin_use_bank(self, ctx: commands.Context, use_bank: bool):
         """Toggle using Red's bank as economy backend."""
-        await self.config.global_.use_bank_economy.set(use_bank)
+        await self.config.use_bank_economy.set(use_bank)
         if use_bank:
             await ctx.send("Economy is now linked to Red's bank. Mission rewards and costs will use the bank.")
         else:
