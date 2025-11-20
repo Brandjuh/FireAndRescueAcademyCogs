@@ -1028,9 +1028,22 @@ class RapidResponse(commands.Cog):
         # Check eligibility with scheduler logic
         is_eligible, reason = await self.scheduler._is_eligible_for_mission(player)
         
+        # Show cooldown details if there is one
+        cooldown_text = f"{'✅ YES' if is_eligible else '❌ NO'}\n**Reason:** {reason}"
+        
+        if player['current_cooldown_until']:
+            cooldown_until = datetime.fromisoformat(player['current_cooldown_until'])
+            now = datetime.utcnow()
+            if now < cooldown_until:
+                time_left = cooldown_until - now
+                seconds = int(time_left.total_seconds())
+                cooldown_text += f"\n**Cooldown until:** <t:{int(cooldown_until.timestamp())}:R>"
+            else:
+                cooldown_text += f"\n**Cooldown:** Expired (should be cleared)"
+        
         embed.add_field(
             name="Eligible for Mission?",
-            value=f"{'✅ YES' if is_eligible else '❌ NO'}\n**Reason:** {reason}",
+            value=cooldown_text,
             inline=False
         )
         

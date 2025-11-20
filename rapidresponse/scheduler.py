@@ -102,15 +102,25 @@ class MissionScheduler:
             
             for player_row in active_players:
                 player = dict(player_row)
+                user_id = player['user_id']
                 
                 # Check if player is eligible for a new mission
                 is_eligible, reason = await self._is_eligible_for_mission(player)
                 
+                log.debug(
+                    f"Player {user_id} eligibility check: "
+                    f"{'ELIGIBLE' if is_eligible else 'NOT ELIGIBLE'} - {reason}"
+                )
+                
                 if is_eligible:
-                    log.info(f"Player {player['user_id']} is eligible ({reason}), assigning mission...")
-                    await self._assign_mission_to_player(player)
+                    log.info(f"✅ Player {user_id} is eligible ({reason}), assigning mission...")
+                    try:
+                        await self._assign_mission_to_player(player)
+                        log.info(f"✅ Successfully assigned mission to player {user_id}")
+                    except Exception as e:
+                        log.error(f"❌ Failed to assign mission to player {user_id}: {e}", exc_info=True)
                 else:
-                    log.debug(f"Player {player['user_id']} not eligible: {reason}")
+                    log.debug(f"⏭️ Player {user_id} not eligible: {reason}")
         
         except Exception as e:
             log.error(f"Error assigning missions: {e}", exc_info=True)
@@ -131,54 +141,42 @@ class MissionScheduler:
         if training:
             return (False, "Currently in training")
         
-        # Check cooldown
+        # Check stored cooldown_until
         if player['current_cooldown_until']:
             cooldown_until = datetime.fromisoformat(player['current_cooldown_until'])
-            if datetime.utcnow() < cooldown_until:
-                time_left = cooldown_until - datetime.utcnow()
-                minutes = int(time_left.total_seconds() / 60)
-                return (False, f"Cooldown active ({minutes} min left)")
-        
-        # Check time since last mission
-        if player['last_mission_time']:
-            last_mission = datetime.fromisoformat(player['last_mission_time'])
+            now = datetime.utcnow()
             
-            # Calculate minimum cooldown based on level
-            level = player['station_level']
-            if level <= 5:
-                min_cooldown = config.BASE_MISSION_COOLDOWN_MIN
-                max_cooldown = config.BASE_MISSION_COOLDOWN_MAX
+            if now < cooldown_until:
+                time_left = cooldown_until - now
+                seconds = int(time_left.total_seconds())
+                if seconds >= 60:
+                    minutes = int(seconds / 60)
+                    return (False, f"Mission cooldown ({minutes} min left)")
+                else:
+                    return (False, f"Mission cooldown ({seconds}s left)")
             else:
-                min_cooldown = config.ADVANCED_MISSION_COOLDOWN_MIN
-                max_cooldown = config.ADVANCED_MISSION_COOLDOWN_MAX
-            
-            cooldown_minutes = random.randint(min_cooldown, max_cooldown)
-            next_mission_time = last_mission + timedelta(minutes=cooldown_minutes)
-            
-            if datetime.utcnow() < next_mission_time:
-                time_left = next_mission_time - datetime.utcnow()
-                minutes = int(time_left.total_seconds() / 60)
-                return (False, f"Mission cooldown ({minutes} min left)")
-        else:
-            # First mission ever - check if enough time passed since going active
-            # For first mission, we want it to happen quickly (30 seconds)
-            # But we need a timestamp to check against
-            
-            # If last_mission_time is None, they've never done a mission
-            # Check when they last updated (went active)
+                # Cooldown expired, clear it
+                await self.db.update_player(player['user_id'], current_cooldown_until=None)
+                log.info(f"Cleared expired cooldown for player {player['user_id']}")
+        
+        # Check if this is first mission ever
+        if not player['last_mission_time']:
+            # For first mission, check if enough time passed since going active
             if player.get('updated_at'):
                 went_active = datetime.fromisoformat(player['updated_at'])
                 wait_time = timedelta(minutes=config.FIRST_MISSION_DELAY)
                 next_mission_time = went_active + wait_time
+                now = datetime.utcnow()
                 
-                if datetime.utcnow() < next_mission_time:
-                    time_left = next_mission_time - datetime.utcnow()
+                if now < next_mission_time:
+                    time_left = next_mission_time - now
                     seconds = int(time_left.total_seconds())
                     return (False, f"First mission cooldown ({seconds}s left)")
             
             # If no updated_at or time has passed, they're eligible
             return (True, "Ready for first mission")
         
+        # Has done missions before, check if cooldown is clear
         return (True, "Ready for mission")
     
     async def _assign_mission_to_player(self, player: dict):

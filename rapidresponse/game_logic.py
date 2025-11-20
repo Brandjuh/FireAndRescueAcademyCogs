@@ -230,10 +230,24 @@ class GameLogic:
         new_morale = max(config.MORALE_MIN, 
                         min(config.MORALE_MAX, player['morale'] + morale_change))
         
+        # Calculate cooldown for next mission
+        level = player['station_level']
+        if level <= 5:
+            min_cooldown = config.BASE_MISSION_COOLDOWN_MIN
+            max_cooldown = config.BASE_MISSION_COOLDOWN_MAX
+        else:
+            min_cooldown = config.ADVANCED_MISSION_COOLDOWN_MIN
+            max_cooldown = config.ADVANCED_MISSION_COOLDOWN_MAX
+        
+        # Random cooldown within range (in minutes)
+        cooldown_minutes = random.randint(int(min_cooldown), int(max_cooldown))
+        cooldown_until = datetime.utcnow() + timedelta(minutes=cooldown_minutes)
+        
         updates = {
             'morale': new_morale,
             'last_mission_time': datetime.utcnow().isoformat(),
             'total_missions': player['total_missions'] + 1,
+            'current_cooldown_until': cooldown_until.isoformat()
         }
         
         # Update streak
@@ -246,6 +260,12 @@ class GameLogic:
                 updates['failed_missions'] = player['failed_missions'] + 1
         
         await self.db.update_player(player['user_id'], **updates)
+        
+        log.info(
+            f"Mission {mission_instance_id} completed by {player['user_id']}: "
+            f"{outcome}, +{xp} XP, {credits:+d} credits. "
+            f"Next mission available in {cooldown_minutes} minute(s)"
+        )
         
         # Add XP (handles level ups)
         level_info = await self.db.add_xp(player['user_id'], xp)
