@@ -316,11 +316,11 @@ class FireStationCommand(commands.Cog):
         # Choose image by bay capacity (parking places)
         image_url = None
         if max_veh <= 1:
-            image_url = "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/main/FireStationCommand/Images/FDTT1B1.png"
+            image_url = "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/refs/heads/main/FireStationCommand/Images/FDT1B1.png"
         elif max_veh == 2:
-            image_url = "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/main/FireStationCommand/Images/FDT1B2.png"
+            image_url = "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/refs/heads/main/FireStationCommand/Images/FDT1B2.png"
         elif max_veh >= 3:
-            image_url = "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/main/FireStationCommand/Images/FDT1B3.png"
+            image_url = "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/refs/heads/main/FireStationCommand/Images/FDT1B3.png"
 
         if image_url:
             embed.set_image(url=image_url)
