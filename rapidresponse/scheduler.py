@@ -78,12 +78,19 @@ class MissionScheduler:
                     """) as cursor:
                         active_players = await cursor.fetchall()
             
+            log.info(f"Scheduler check: Found {len(active_players)} active players")
+            
             for player_row in active_players:
                 player = dict(player_row)
                 
                 # Check if player is eligible for a new mission
-                if await self._is_eligible_for_mission(player):
+                is_eligible = await self._is_eligible_for_mission(player)
+                
+                if is_eligible:
+                    log.info(f"Player {player['user_id']} is eligible for mission, assigning...")
                     await self._assign_mission_to_player(player)
+                else:
+                    log.debug(f"Player {player['user_id']} not eligible for mission yet")
         
         except Exception as e:
             log.error(f"Error assigning missions: {e}", exc_info=True)
@@ -139,6 +146,8 @@ class MissionScheduler:
     async def _assign_mission_to_player(self, player: dict):
         """Assign a mission to a player"""
         try:
+            log.info(f"Starting mission assignment for player {player['user_id']}")
+            
             # Select appropriate mission
             mission_data = self.mission_manager.select_mission_for_player(
                 player['station_level']
@@ -148,6 +157,8 @@ class MissionScheduler:
                 log.warning(f"No mission available for player {player['user_id']}")
                 return
             
+            log.info(f"Selected mission {mission_data['id']}: {mission_data['name']}")
+            
             # Calculate mission parameters
             tier = self.mission_manager.calculate_mission_tier(mission_data)
             difficulty = self.mission_manager.calculate_difficulty(mission_data, tier)
@@ -155,6 +166,8 @@ class MissionScheduler:
                 player['station_level'], tier
             )
             max_stages = self.mission_manager.determine_max_stages(mission_data, tier)
+            
+            log.info(f"Mission parameters: tier={tier}, difficulty={difficulty}, timeout={timeout_seconds}s")
             
             # Create mission in database
             import json
@@ -169,12 +182,16 @@ class MissionScheduler:
                 max_stage=max_stages
             )
             
+            log.info(f"Created mission instance {mission_instance_id} in database")
+            
             # Get player's thread
             thread = await self._get_or_create_player_thread(player)
             
             if not thread:
                 log.error(f"Could not get thread for player {player['user_id']}")
                 return
+            
+            log.info(f"Got thread {thread.id} for player {player['user_id']}")
             
             # Generate mission description and requirements
             description = self.mission_manager.generate_mission_description(mission_data)
@@ -204,11 +221,13 @@ class MissionScheduler:
             # Send mission
             message = await thread.send(embed=embed, view=view)
             
+            log.info(f"Sent mission message {message.id} to thread {thread.id}")
+            
             # Store message ID
             await self.db.update_mission(mission_instance_id, message_id=message.id)
             
             log.info(
-                f"Assigned mission {mission_instance_id} "
+                f"✅ Successfully assigned mission {mission_instance_id} "
                 f"(tier {tier}, {mission_data['name']}) "
                 f"to player {player['user_id']}"
             )
