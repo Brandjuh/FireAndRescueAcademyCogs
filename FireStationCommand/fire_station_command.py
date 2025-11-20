@@ -197,13 +197,14 @@ class FireStationCommand(commands.Cog):
     """Fire Station Command – management game."""
 
     __author__ = "You + ChatGPT"
-    __version__ = "0.3.0"
+    __version__ = "0.4.1"
 
     def __init__(self, bot: Red):
         self.bot = bot
+        # FIX: identifier must be a valid integer literal
         self.config = Config.get_conf(
             self,
-            identifier=0xF1RE5T4T10N,
+            identifier=1234567890123,
             force_registration=True,
         )
 
@@ -216,9 +217,9 @@ class FireStationCommand(commands.Cog):
             "is_active": False,
             "last_mission_ts": None,
             "mission_streak": 0,
-            "vehicles": [],        # list of dicts: {id, def_id, condition, equipment: [...]}
-            "expansions": [],      # list of expansion ids
-            "personnel": [],       # list of dicts
+            "vehicles": [],
+            "expansions": [],
+            "personnel": [],
             "training_jobs": [],
             "repair_jobs": [],
         }
@@ -236,33 +237,73 @@ class FireStationCommand(commands.Cog):
         if self.mission_task:
             self.mission_task.cancel()
 
-    # ------------------------------
-    # Helpers
-    # ------------------------------
-
     def calc_station_tier(self, xp: int) -> int:
         return max(1, min(3, xp // 1000 + 1))
 
     def get_balance(self, key: str, default: Any = None) -> Any:
         return self.content.balance.data.get(key, default)
 
-    # ------------------------------
-    # Mission scheduler (stub)
-    # ------------------------------
+    def simulate_volunteers(self, required_staff: int) -> Dict[str, Any]:
+        if required_staff <= 0:
+            return {
+                "required": 0,
+                "first_arrived": 0,
+                "second_arrived": 0,
+                "total_arrived": 0,
+                "used_realert": False,
+                "turnout_seconds": 0,
+            }
+
+        min_no_show = float(self.get_balance("volunteer_no_show_min", 0.05))
+        max_no_show = float(self.get_balance("volunteer_no_show_max", 0.2))
+        base_no_show = random.uniform(min_no_show, max_no_show)
+        realert_bonus = float(self.get_balance("volunteer_realert_bonus", 0.1))
+
+        alert_min = int(self.get_balance("volunteer_alert_min_seconds", 60))
+        alert_max = int(self.get_balance("volunteer_alert_max_seconds", 180))
+
+        first_arrived = 0
+        for _ in range(required_staff):
+            if random.random() > base_no_show:
+                first_arrived += 1
+
+        turnout_first = random.randint(alert_min, alert_max)
+
+        used_realert = False
+        second_arrived = 0
+        turnout_second = 0
+        total_arrived = first_arrived
+
+        if total_arrived < required_staff:
+            used_realert = True
+            no_show_second = max(0.0, base_no_show - realert_bonus)
+            remaining = required_staff - total_arrived
+            for _ in range(remaining):
+                if random.random() > no_show_second:
+                    second_arrived += 1
+
+            total_arrived += second_arrived
+            turnout_second = random.randint(alert_min, alert_max)
+
+        turnout_seconds = turnout_first + (turnout_second if used_realert else 0)
+
+        return {
+            "required": required_staff,
+            "first_arrived": first_arrived,
+            "second_arrived": second_arrived,
+            "total_arrived": total_arrived,
+            "used_realert": used_realert,
+            "turnout_seconds": turnout_seconds,
+        }
 
     async def mission_scheduler(self):
         await self.bot.wait_until_ready()
         while True:
             try:
-                # Placeholder: real auto-mission assignment can be added later.
                 log.debug("Mission scheduler tick")
             except Exception:
                 log.exception("Error in mission scheduler")
             await asyncio.sleep(300)
-
-    # ------------------------------
-    # Core commands
-    # ------------------------------
 
     @commands.group(name="fsc")
     async def fsc_group(self, ctx: commands.Context):
@@ -280,7 +321,6 @@ class FireStationCommand(commands.Cog):
             return
 
         vehicles = []
-        # starting engine
         vehicles.append(
             {
                 "id": 1,
@@ -294,8 +334,9 @@ class FireStationCommand(commands.Cog):
         await user_conf.vehicles.set(vehicles)
         await user_conf.station_tier.set(1)
         await ctx.send(
-            "Your **Tier 1 Volunteer Fire Station** has been created. "
-            "You start with 1 Standard Fire Engine and 6 untrained volunteers (abstracted). "
+            "Your **Tier 1 Volunteer Fire Station** has been created.\n"
+            "- You start with 1 Standard Fire Engine.\n"
+            "- You have 6 untrained volunteers (abstracted).\n"
             "Use `[p]fsc on` to go on duty and `[p]fsc mission` to request a mission."
         )
 
@@ -368,15 +409,10 @@ class FireStationCommand(commands.Cog):
         )
         await ctx.send(embed=embed)
 
-    # ------------------------------
-    # Missions (simple module)
-    # ------------------------------
-
     @fsc_group.command(name="mission")
     async def fsc_mission(self, ctx: commands.Context):
         """
-        Request a mission and resolve it immediately.
-        This is a first playable version of the mission system.
+        Request a mission and resolve it, including volunteer turnout simulation.
         """
         user_conf = self.config.user(ctx.author)
         data = await user_conf.all()
@@ -390,7 +426,6 @@ class FireStationCommand(commands.Cog):
 
         station_tier = self.calc_station_tier(data["xp"])
 
-        # pick suitable missions by tier
         candidates = [
             m for m in self.content.missions.values()
             if m.min_tier <= station_tier
@@ -401,17 +436,37 @@ class FireStationCommand(commands.Cog):
 
         mission = random.choice(candidates)
 
-        # Check required vehicles
         owned_defs = {v["def_id"] for v in data["vehicles"]}
-        missing = [vid for vid in mission.required_vehicles if vid not in owned_defs]
+        missing_vehicles = [vid for vid in mission.required_vehicles if vid not in owned_defs]
 
-        # base success chance
-        base_chance = 0.6  # 60%
-        xp_factor = min(0.2, data["xp"] / 5000.0)  # up to +20%
-        tier_factor = (station_tier - mission.min_tier) * 0.05  # +/- 5% per tier diff
-        missing_penalty = -0.25 if missing else 0.0  # heavy penalty if missing vehicle
+        required_staff = 0
+        for vid in mission.required_vehicles:
+            vdef = self.content.vehicles.get(vid)
+            if vdef:
+                required_staff += vdef.required_staff
 
-        success_chance = base_chance + xp_factor + tier_factor + missing_penalty
+        if required_staff <= 0:
+            required_staff = 4
+
+        vol_result = self.simulate_volunteers(required_staff)
+        arrived = vol_result["total_arrived"]
+        used_realert = vol_result["used_realert"]
+        turnout_seconds = vol_result["turnout_seconds"]
+
+        staffing_ratio = arrived / required_staff if required_staff > 0 else 1.0
+        understaffed = arrived < required_staff
+
+        base_chance = 0.6
+        xp_factor = min(0.2, data["xp"] / 5000.0)
+        tier_factor = (station_tier - mission.min_tier) * 0.05
+        missing_vehicle_penalty = -0.25 if missing_vehicles else 0.0
+
+        if understaffed:
+            staffing_penalty = -0.3 * (1.0 - staffing_ratio)
+        else:
+            staffing_penalty = 0.05
+
+        success_chance = base_chance + xp_factor + tier_factor + missing_vehicle_penalty + staffing_penalty
         success_chance = max(0.05, min(0.95, success_chance))
 
         roll = random.random()
@@ -422,8 +477,8 @@ class FireStationCommand(commands.Cog):
         credits_gain = int(mission.base_credits * (1.0 if success else 0.25))
 
         new_xp = data["xp"] + xp_gain
-        new_rep = data["reputation"] + (2 if success else -3)
-        new_rep = max(0, min(100, new_rep))
+        rep_change = 2 if success else -3
+        new_rep = max(0, min(100, data["reputation"] + rep_change))
 
         await user_conf.xp.set(new_xp)
         await user_conf.reputation.set(new_rep)
@@ -432,9 +487,34 @@ class FireStationCommand(commands.Cog):
         title = f"Mission: {mission.name}"
         description = mission.description or "A new incident has been dispatched."
         embed = discord.Embed(title=title, description=description, color=discord.Color.blurple())
-        embed.add_field(name="Required vehicles", value=", ".join(mission.required_vehicles) or "None", inline=False)
-        if missing:
-            embed.add_field(name="Missing vehicles", value=", ".join(missing), inline=False)
+        embed.add_field(
+            name="Required vehicles",
+            value=", ".join(mission.required_vehicles) or "None",
+            inline=False,
+        )
+        if missing_vehicles:
+            embed.add_field(
+                name="Missing vehicles",
+                value=", ".join(missing_vehicles),
+                inline=False,
+            )
+
+        embed.add_field(name="Required crew", value=str(required_staff), inline=True)
+        embed.add_field(name="Crew arrived", value=str(arrived), inline=True)
+        extra_info = []
+        extra_info.append(f"First alert: {vol_result['first_arrived']} arrived.")
+        if used_realert:
+            extra_info.append(f"Re-alert: {vol_result['second_arrived']} extra arrived.")
+        extra_info.append(f"Simulated turnout time: {turnout_seconds} seconds.")
+        if understaffed:
+            extra_info.append("Departed **understaffed** – heavy risk.")
+        else:
+            extra_info.append("Departed with **full crew**.")
+        embed.add_field(
+            name="Turnout",
+            value="\n".join(extra_info),
+            inline=False,
+        )
 
         embed.add_field(name="Success chance", value=f"{int(success_chance * 100)}%", inline=True)
         embed.add_field(name="Roll", value=f"{roll:.2f}", inline=True)
@@ -442,17 +522,16 @@ class FireStationCommand(commands.Cog):
             outcome = "✅ Mission **successful**!"
         else:
             outcome = "❌ Mission **failed**."
-
         embed.add_field(name="Outcome", value=outcome, inline=False)
         embed.add_field(name="XP gained", value=str(xp_gain), inline=True)
-        embed.add_field(name="Credits gained (internal stat)", value=str(credits_gain), inline=True)
-        embed.set_footer(text="Economy payout via Red bank can be wired to this later.")
+        embed.add_field(
+            name="Credits gained (internal stat)",
+            value=str(credits_gain),
+            inline=True,
+        )
+        embed.set_footer(text="Volunteer turnout, vehicle requirements and difficulty are simplified for this module.")
 
         await ctx.send(embed=embed)
-
-    # ------------------------------
-    # Admin / owner tools
-    # ------------------------------
 
     @fsc_group.group(name="admin")
     @checks.is_owner()
