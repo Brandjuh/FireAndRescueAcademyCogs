@@ -151,7 +151,10 @@ class GameLogic:
         )
         
         # Calculate rewards based on outcome
-        base_credits = mission_data.get('average_credits', 500)
+        base_credits = mission_data.get('average_credits')
+        if base_credits is None:
+            base_credits = 500  # Default credits if not specified
+        
         tier_info = config.MISSION_TIERS[mission['tier']]
         base_xp = int(base_credits * tier_info['xp_mult'])
         

@@ -83,7 +83,11 @@ class MissionManager:
     
     def calculate_mission_tier(self, mission: Dict[str, Any]) -> int:
         """Calculate mission tier based on credits and requirements"""
-        avg_credits = mission.get('average_credits', 0)
+        avg_credits = mission.get('average_credits')
+        
+        # Handle None or missing average_credits
+        if avg_credits is None:
+            avg_credits = 500  # Default to tier 1
         
         # Determine tier based on credits
         for tier, info in config.MISSION_TIERS.items():
@@ -154,6 +158,12 @@ class MissionManager:
         weighted_missions = []
         
         for mission in self.missions:
+            # Skip missions with invalid data
+            avg_credits = mission.get('average_credits')
+            if avg_credits is None:
+                # Skip missions without credits defined
+                continue
+            
             tier = self.calculate_mission_tier(mission)
             
             # Calculate weight based on level
@@ -176,7 +186,7 @@ class MissionManager:
             
             # Filter out event missions if they're not active
             additional = mission.get('additional', {})
-            if 'date_start' in additional and 'date_end' in additional:
+            if additional and 'date_start' in additional and 'date_end' in additional:
                 try:
                     # Check if event is currently active
                     # MissionChief uses timestamps
@@ -192,6 +202,7 @@ class MissionManager:
             weighted_missions.append((mission, weight))
         
         if not weighted_missions:
+            log.warning(f"No valid missions found for player level {station_level}")
             return None
         
         # Random selection based on weights

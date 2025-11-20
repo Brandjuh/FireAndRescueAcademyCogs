@@ -285,7 +285,10 @@ def create_mission_embed(
     )
     
     # Credits estimate
-    avg_credits = mission_data.get('average_credits', 500)
+    avg_credits = mission_data.get('average_credits')
+    if avg_credits is None:
+        avg_credits = 500  # Default
+    
     embed.add_field(
         name="💰 Estimated Rewards",
         value=(
