@@ -1,0 +1,26 @@
+expansions:
+  - id: extra_bay
+    name: "Extra Vehicle Bay"
+    description: "Adds one additional vehicle slot."
+    base_cost: 30000
+    build_time_hours: 4
+    effects:
+      extra_vehicle_slots: 1
+
+  - id: workshop
+    name: "Workshop"
+    description: "Enables in-house vehicle repairs."
+    base_cost: 100000
+    build_time_hours: 8
+    effects:
+      repair_time_multiplier: 0.7
+      repair_cost_multiplier: 0.7
+
+  - id: training_facility
+    name: "Training Facility"
+    description: "Reduces training time and cost."
+    base_cost: 80000
+    build_time_hours: 6
+    effects:
+      training_time_multiplier: 0.8
+      training_cost_multiplier: 0.9

@@ -1,0 +1,27 @@
+missions:
+  - id: small_bin_fire
+    name: "Small Bin Fire"
+    min_tier: 1
+    base_xp: 40
+    base_credits: 200
+    required_vehicles:
+      - engine_basic
+    description: "A small bin fire in a residential area. Quick response limits damage."
+
+  - id: vehicle_collision
+    name: "Vehicle Collision"
+    min_tier: 1
+    base_xp: 60
+    base_credits: 350
+    required_vehicles:
+      - engine_basic
+    description: "Two vehicles collided on a local road. Fire suppression and scene safety required."
+
+  - id: rescue_call
+    name: "Rescue Call – Person Trapped"
+    min_tier: 1
+    base_xp: 80
+    base_credits: 500
+    required_vehicles:
+      - rescue_basic
+    description: "A person is trapped in a vehicle after a collision. Technical rescue is needed."

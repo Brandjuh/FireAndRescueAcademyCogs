@@ -1,0 +1,31 @@
+vehicles:
+  - id: engine_basic
+    name: "Standard Fire Engine"
+    category: "fire"
+    tier_min: 1
+    base_cost: 50000
+    maintenance_cost: 500
+    response_speed: 1.0
+    reliability: 0.9
+    required_staff: 4
+    required_training:
+      - basic_firefighting
+    equipment_slots:
+      - hose
+      - ba_basic
+      - basic_tools
+
+  - id: rescue_basic
+    name: "Basic Rescue Truck"
+    category: "rescue"
+    tier_min: 1
+    base_cost: 75000
+    maintenance_cost: 700
+    response_speed: 0.9
+    reliability: 0.85
+    required_staff: 3
+    required_training:
+      - technical_rescue
+    equipment_slots:
+      - rescue_tools
+      - stabilization_kit

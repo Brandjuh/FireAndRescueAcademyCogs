@@ -1,0 +1,38 @@
+equipment:
+  - id: hose
+    name: "Fire Hose Set"
+    category: "fire"
+    base_cost: 1500
+    durability: 100
+    required_training: []
+
+  - id: ba_basic
+    name: "Basic Breathing Apparatus"
+    category: "ba"
+    base_cost: 3000
+    durability: 100
+    required_training:
+      - breathing_apparatus
+
+  - id: rescue_tools
+    name: "Hydraulic Rescue Tools"
+    category: "rescue"
+    base_cost: 5000
+    durability: 100
+    required_training:
+      - technical_rescue
+
+  - id: stabilization_kit
+    name: "Vehicle Stabilization Kit"
+    category: "rescue"
+    base_cost: 2500
+    durability: 100
+    required_training:
+      - technical_rescue
+
+  - id: basic_tools
+    name: "Basic Hand Tools"
+    category: "general"
+    base_cost: 1000
+    durability: 100
+    required_training: []
