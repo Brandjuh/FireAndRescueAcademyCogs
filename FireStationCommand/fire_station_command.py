@@ -76,12 +76,18 @@ class FireStationCommand(commands.Cog):
         return True
 
     def _make_timestamp_pair(self, minutes: float) -> Dict[str, Any]:
-        finish = dt.datetime.utcnow() + dt.timedelta(minutes=minutes)
-        ts = int(finish.timestamp())
+        # Use plain relative text to avoid any dependency on server/Discord timezones.
+        mins = int(round(minutes))
+        if mins <= 0:
+            rel = "now"
+        elif mins == 1:
+            rel = "in 1 minute"
+        else:
+            rel = f"in {mins} minutes"
         return {
-            "relative": f"<t:{ts}:R>",
-            "absolute": f"<t:{ts}:T>",
-            "raw": ts,
+            "relative": rel,
+            "absolute": "",
+            "raw": mins,
         }
 
     def _pick_random_incident(self) -> Dict[str, Any]:
