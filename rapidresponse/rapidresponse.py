@@ -406,29 +406,38 @@ class RapidResponse(commands.Cog):
         # Calculate cost
         cost = await self.game_logic.calculate_training_cost(player, stat_type)
         
-        # Check if player can afford it
+        # Check if player can afford it via Red bank
         try:
-            can_afford = await bank.can_spend(interaction.user, cost)
-        except:
-            can_afford = player['credits'] >= cost
-        
-        if not can_afford:
+            balance = await bank.get_balance(interaction.user)
+            can_afford = balance >= cost
+        except Exception as e:
+            log.error(f"Error checking bank balance: {e}")
             await interaction.followup.send(
-                f"❌ You need **{cost:,}** credits to train {stat_type.title()}!\n"
-                f"You currently have **{player['credits']:,}** credits.",
+                f"❌ Error checking your bank balance. Please try again.",
                 ephemeral=True
             )
             return
         
-        # Deduct cost
+        if not can_afford:
+            await interaction.followup.send(
+                f"❌ You need **{cost:,}** credits to train {stat_type.title()}!\n"
+                f"You currently have **{balance:,}** credits.\n\n"
+                f"Earn more credits by completing missions!",
+                ephemeral=True
+            )
+            return
+        
+        # Deduct cost from Red bank
         try:
             await bank.withdraw_credits(interaction.user, cost)
-        except:
-            # Fallback to internal credits
-            await self.db.update_player(
-                interaction.user.id,
-                credits=player['credits'] - cost
+            log.info(f"Withdrew {cost} credits from {interaction.user.id} for training")
+        except Exception as e:
+            log.error(f"Error withdrawing training cost: {e}", exc_info=True)
+            await interaction.followup.send(
+                f"❌ Error processing payment. Please try again.",
+                ephemeral=True
             )
+            return
         
         # Start training
         training_id = await self.db.start_training(interaction.user.id, stat_type)
@@ -525,7 +534,7 @@ class RapidResponse(commands.Cog):
         mission_instance_id: int,
         response_type: str
     ):
-        """Process a mission response"""
+        """Process a mission response with realistic delay"""
         try:
             player = await self.db.get_player(interaction.user.id)
             if not player:
@@ -535,7 +544,62 @@ class RapidResponse(commands.Cog):
                 )
                 return
             
-            # Resolve mission
+            # Get mission data for name and tier
+            mission = await self.db.get_mission_by_id(mission_instance_id)
+            if not mission:
+                await interaction.followup.send(
+                    "❌ Error: Mission not found!",
+                    ephemeral=True
+                )
+                return
+            
+            mission_name = mission['mission_name']
+            tier = mission['tier']
+            
+            # Parse mission data
+            import json
+            mission_data = json.loads(mission['mission_data'])
+            
+            # Create "dispatching" embed
+            response_label = config.RESPONSE_TYPES[response_type]['label']
+            
+            dispatch_embed = discord.Embed(
+                title=f"🚨 {mission_name}",
+                description=(
+                    f"**{response_label}** dispatched!\n\n"
+                    f"🚒 Units are en route to the scene...\n"
+                    f"⏱️ Estimated arrival time: {tier * 15}s"
+                ),
+                color=config.COLOR_INFO
+            )
+            
+            # Send initial dispatch message
+            await interaction.followup.send(embed=dispatch_embed)
+            
+            # Calculate delay based on tier (more complex = longer response)
+            # Tier 1: 20s, Tier 2: 30s, Tier 3: 45s, Tier 4: 60s
+            delay_map = {1: 20, 2: 30, 3: 45, 4: 60}
+            delay_seconds = delay_map.get(tier, 30)
+            
+            # Wait for "units to arrive"
+            await asyncio.sleep(delay_seconds / 2)
+            
+            # Send "arriving" update
+            arrival_embed = discord.Embed(
+                title=f"🚨 {mission_name}",
+                description=(
+                    f"📍 Units arriving at scene...\n"
+                    f"🔍 Assessing situation..."
+                ),
+                color=config.COLOR_WARNING
+            )
+            
+            await interaction.channel.send(embed=arrival_embed)
+            
+            # Wait for rest of delay
+            await asyncio.sleep(delay_seconds / 2)
+            
+            # Now resolve the mission
             result = await self.game_logic.resolve_mission(
                 mission_instance_id,
                 response_type,
@@ -549,32 +613,39 @@ class RapidResponse(commands.Cog):
                 )
                 return
             
-            # Get mission data for name
-            mission = await self.db.get_mission_by_id(mission_instance_id)
-            mission_name = mission['mission_name']
-            
             # Handle credits through Red bank
             credits = result.get('credits', 0)
             if credits > 0:
                 try:
+                    # Deposit to Red bank
                     await bank.deposit_credits(interaction.user, credits)
+                    log.info(f"Deposited {credits} credits to {interaction.user.id} via Red bank")
                 except Exception as e:
-                    log.error(f"Error depositing credits: {e}")
-                    # Fallback to internal credits
-                    await self.db.update_player(
-                        interaction.user.id,
-                        credits=player['credits'] + credits
-                    )
+                    log.error(f"Error depositing credits to Red bank: {e}", exc_info=True)
+                    # Try set_balance as fallback
+                    try:
+                        current = await bank.get_balance(interaction.user)
+                        await bank.set_balance(interaction.user, current + credits)
+                        log.info(f"Used set_balance fallback for {interaction.user.id}")
+                    except Exception as e2:
+                        log.error(f"Fallback also failed: {e2}", exc_info=True)
+                        await interaction.followup.send(
+                            f"⚠️ Warning: Could not deposit {credits} credits to your bank. "
+                            f"Contact an admin to manually add credits.",
+                            ephemeral=True
+                        )
             elif credits < 0:
                 try:
-                    await bank.withdraw_credits(interaction.user, abs(credits))
+                    # Withdraw from Red bank
+                    can_afford = await bank.can_spend(interaction.user, abs(credits))
+                    if can_afford:
+                        await bank.withdraw_credits(interaction.user, abs(credits))
+                        log.info(f"Withdrew {abs(credits)} credits from {interaction.user.id} via Red bank")
+                    else:
+                        log.warning(f"Player {interaction.user.id} cannot afford {abs(credits)} penalty")
+                        # Don't penalize if they can't afford it
                 except Exception as e:
-                    log.error(f"Error withdrawing credits: {e}")
-                    # Fallback to internal credits
-                    await self.db.update_player(
-                        interaction.user.id,
-                        credits=max(0, player['credits'] + credits)
-                    )
+                    log.error(f"Error withdrawing credits from Red bank: {e}", exc_info=True)
             
             # Create outcome embed
             embed = create_outcome_embed(
@@ -584,7 +655,7 @@ class RapidResponse(commands.Cog):
             )
             
             # Send outcome
-            await interaction.followup.send(embed=embed)
+            await interaction.channel.send(embed=embed)
             
             # If escalated, send new mission stage
             if result.get('escalated', False):
