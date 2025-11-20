@@ -4,20 +4,19 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import random
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import discord
-from redbot.core import commands, Config
+from redbot.core import commands, Config, bank
 
 
 class FireStationCommand(commands.Cog):
     """Fire station incident workflow mini-game."""
 
-    __version__ = "0.1.0"
+    __version__ = "0.2.0"
 
     def __init__(self, bot):
         self.bot = bot
-        # simple numeric identifier; change if you reuse this skeleton elsewhere
         self.config = Config.get_conf(self, identifier=0xF15701, force_registration=True)
 
         default_global: Dict[str, Any] = {
@@ -31,17 +30,42 @@ class FireStationCommand(commands.Cog):
 
         default_user: Dict[str, Any] = {
             "started": False,
-            "credits": 100_000,
-            "vehicles": [],             # [{id, name, crew_capacity}]
+            "credits": 0,              # local fallback economy
+            "vehicles": [],            # [{id, name, crew_capacity}]
             "next_vehicle_id": 1,
-            "active_mission": None,     # see below
+            "active_mission": None,    # mission state dict
         }
 
         self.config.register_global(**default_global)
         self.config.register_user(**default_user)
 
+        # simple inline incident list; later you can bind this to MC JSON
+        self.INCIDENTS: List[Dict[str, Any]] = [
+            {
+                "id": "house_fire",
+                "name": "House Fire",
+                "required_staff": 8,
+                "hint": "Reports of smoke from a residential building.",
+                "detail": "On approach you see smoke from the roof and people outside waving.",
+            },
+            {
+                "id": "car_crash",
+                "name": "Traffic Collision",
+                "required_staff": 6,
+                "hint": "Multiple calls of a crash at an intersection.",
+                "detail": "Police report two vehicles involved, possible entrapment.",
+            },
+            {
+                "id": "small_fire",
+                "name": "Trash Fire",
+                "required_staff": 4,
+                "hint": "Caller reports a small fire near containers.",
+                "detail": "On arrival, smoke visible but no exposures yet.",
+            },
+        ]
+
     # --------------------------------------------------
-    # Internal helpers
+    # Helpers
     # --------------------------------------------------
 
     async def _ensure_started(self, ctx: commands.Context) -> bool:
@@ -60,60 +84,22 @@ class FireStationCommand(commands.Cog):
             "raw": ts,
         }
 
-    # very small built-in incident list
-    INCIDENTS: List[Dict[str, Any]] = [
-        {
-            "id": "house_fire",
-            "name": "House Fire",
-            "required_staff": 8,
-            "hint": "Reports of smoke from a residential building.",
-            "detail": "On approach you see smoke from the roof and people outside waving.",
-        },
-        {
-            "id": "car_crash",
-            "name": "Traffic Collision",
-            "required_staff": 6,
-            "hint": "Multiple calls of a crash at an intersection.",
-            "detail": "Police report two vehicles involved, possible entrapment.",
-        },
-        {
-            "id": "small_fire",
-            "name": "Trash Fire",
-            "required_staff": 4,
-            "hint": "Caller reports a small fire near containers.",
-            "detail": "On arrival, smoke visible but no exposures yet.",
-        },
-    ]
-
     def _pick_random_incident(self) -> Dict[str, Any]:
         return random.choice(self.INCIDENTS)
 
     def _simulate_emergency_turnout(self, required: int) -> Dict[str, Any]:
-        """Emergency alert: faster but more chance on no-shows."""
         if required <= 0:
-            return {
-                "required": 0,
-                "first_arrived": 0,
-                "second_arrived": 0,
-                "total_arrived": 0,
-            }
+            return {"required": 0, "first_arrived": 0, "total_arrived": 0}
 
-        # first alert
         base_no_show = random.uniform(0.10, 0.25)
         first_arrived = 0
         for _ in range(required):
             if random.random() > base_no_show:
                 first_arrived += 1
 
-        return {
-            "required": required,
-            "first_arrived": first_arrived,
-            "second_arrived": 0,
-            "total_arrived": first_arrived,
-        }
+        return {"required": required, "first_arrived": first_arrived, "total_arrived": first_arrived}
 
     def _simulate_realert(self, current_total: int, required: int) -> Dict[str, int]:
-        """Re-alert: shorter delay, somewhat better attendance."""
         if current_total >= required:
             return {"second_arrived": 0, "total_arrived": current_total}
 
@@ -123,131 +109,58 @@ class FireStationCommand(commands.Cog):
         for _ in range(remaining):
             if random.random() > no_show_second:
                 second_arrived += 1
-        return {
-            "second_arrived": second_arrived,
-            "total_arrived": current_total + second_arrived,
-        }
+
+        return {"second_arrived": second_arrived, "total_arrived": current_total + second_arrived}
 
     async def _get_user_vehicles(self, user: discord.abc.User) -> List[Dict[str, Any]]:
         data = await self.config.user(user).all()
         return data.get("vehicles", [])
 
+    async def _get_credits(self, user: discord.abc.User) -> int:
+        try:
+            return int(await bank.get_balance(user))
+        except Exception:
+            data = await self.config.user(user).all()
+            return int(data.get("credits", 0))
 
-class AlertChoiceView(discord.ui.View):
-    def __init__(self, cog: FireStationCommand, user: discord.abc.User):
-        super().__init__(timeout=120)
-        self.cog = cog
-        self.user = user
+    async def _spend(self, user: discord.abc.User, amount: int) -> bool:
+        if amount <= 0:
+            return True
+        # try Red bank first
+        try:
+            can = await bank.can_spend(user, amount)  # type: ignore[attr-defined]
+            if can:
+                await bank.withdraw_credits(user, amount)
+                return True
+        except Exception:
+            pass
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.user.id
+        # fallback: local credits
+        user_conf = self.config.user(user)
+        data = await user_conf.all()
+        local = int(data.get("credits", 0))
+        if local < amount:
+            return False
+        await user_conf.credits.set(local - amount)
+        return True
 
-    @discord.ui.button(label="Normal turnout (15 min, full crew)", style=discord.ButtonStyle.secondary)
-    async def normal(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.handle_alert_choice(interaction, self.user, "normal")
-        self.stop()
-
-    @discord.ui.button(label="Emergency turnout (fast, risk of shortage)", style=discord.ButtonStyle.danger)
-    async def emergency(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.handle_alert_choice(interaction, self.user, "emergency")
-        self.stop()
-
-
-class TurnoutDecisionView(discord.ui.View):
-    def __init__(self, cog: FireStationCommand, user: discord.abc.User):
-        super().__init__(timeout=180)
-        self.cog = cog
-        self.user = user
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id == self.user.id
-
-    @discord.ui.button(label="Re-alert", style=discord.ButtonStyle.secondary)
-    async def realert(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.handle_realert(interaction, self.user)
-        self.stop()
-
-    @discord.ui.button(label="Proceed to vehicle selection", style=discord.ButtonStyle.success)
-    async def proceed(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.handle_proceed_to_vehicles(interaction, self.user)
-        self.stop()
-
-    @discord.ui.button(label="Cancel incident", style=discord.ButtonStyle.danger)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.handle_cancel_incident(interaction, self.user)
-        self.stop()
-
-
-class VehicleSelect(discord.ui.Select):
-    def __init__(self, cog: FireStationCommand, user: discord.abc.User, vehicles: List[Dict[str, Any]]):
-        options = []
-        for v in vehicles:
-            label = f"{v['name']} (cap {v['crew_capacity']})"
-            options.append(discord.SelectOption(label=label, value=str(v["id"])))
-        if not options:
-            options = [discord.SelectOption(label="No vehicles available", value="none")]
-        super().__init__(
-            placeholder="Select vehicles to dispatch",
-            min_values=1,
-            max_values=len(options),
-            options=options,
-        )
-        self.cog = cog
-        self.user = user
-
-    async def callback(self, interaction: discord.Interaction):
-        if self.values == ["none"]:
-            await interaction.response.send_message("You have no vehicles to dispatch.", ephemeral=True)
+    async def _give(self, user: discord.abc.User, amount: int) -> None:
+        if amount <= 0:
             return
-        await self.cog.handle_vehicle_selection(interaction, self.user, list(self.values))
+        try:
+            await bank.deposit_credits(user, amount)
+            return
+        except Exception:
+            pass
+        user_conf = self.config.user(user)
+        data = await user_conf.all()
+        local = int(data.get("credits", 0))
+        await user_conf.credits.set(local + amount)
 
+    # --------------------------------------------------
+    # Commands
+    # --------------------------------------------------
 
-class VehicleSelectView(discord.ui.View):
-    def __init__(self, cog: FireStationCommand, user: discord.abc.User, vehicles: List[Dict[str, Any]]):
-        super().__init__(timeout=180)
-        self.cog = cog
-        self.user = user
-        self.add_item(VehicleSelect(cog, user, vehicles))
-
-
-class VehicleShopSelect(discord.ui.Select):
-    CATALOG = {
-        "pumper": {"name": "Fire Engine", "crew_capacity": 6, "price": 50_000},
-        "ladder": {"name": "Aerial Ladder", "crew_capacity": 3, "price": 75_000},
-        "rescue": {"name": "Rescue Unit", "crew_capacity": 4, "price": 65_000},
-    }
-
-    def __init__(self, cog: FireStationCommand, user: discord.abc.User):
-        options = []
-        for vid, v in self.CATALOG.items():
-            label = f"{v['name']} ({v['price']} cr, cap {v['crew_capacity']})"
-            options.append(discord.SelectOption(label=label, value=vid))
-        super().__init__(
-            placeholder="Select a vehicle to buy",
-            min_values=1,
-            max_values=1,
-            options=options,
-        )
-        self.cog = cog
-        self.user = user
-
-    async def callback(self, interaction: discord.Interaction):
-        choice = self.values[0]
-        await self.cog.handle_vehicle_purchase(interaction, self.user, choice)
-
-
-class VehicleShopView(discord.ui.View):
-    def __init__(self, cog: FireStationCommand, user: discord.abc.User):
-        super().__init__(timeout=180)
-        self.add_item(VehicleShopSelect(cog, user))
-
-
-# --------------------------------------------------
-# Commands
-# --------------------------------------------------
-
-
-class FireStationCommand(FireStationCommand):  # type: ignore[misc]
     @commands.group(name="fsc")
     async def fsc_group(self, ctx: commands.Context):
         """Fire Station Command main group."""
@@ -269,14 +182,15 @@ class FireStationCommand(FireStationCommand):  # type: ignore[misc]
             "crew_capacity": 6,
         }
         await user_conf.started.set(True)
-        await user_conf.credits.set(100_000)
+        # give starter credits via bank/fallback
+        await self._give(ctx.author, 100_000)
         await user_conf.vehicles.set([starter_vehicle])
         await user_conf.next_vehicle_id.set(2)
         await user_conf.active_mission.set(None)
 
         await ctx.send(
             "You are now the commander of a small volunteer station.\n"
-            "You received one **Starter Fire Engine** with 6 crew capacity."
+            "You received one **Starter Fire Engine** with 6 crew capacity and 100,000 credits."
         )
 
     @fsc_group.command(name="status")
@@ -289,9 +203,10 @@ class FireStationCommand(FireStationCommand):  # type: ignore[misc]
         data = await user_conf.all()
         vehicles = data.get("vehicles", [])
         active = data.get("active_mission")
+        credits = await self._get_credits(ctx.author)
 
         lines = [
-            f"Credits: **{data.get('credits', 0)}**",
+            f"Credits: **{credits}**",
             f"Vehicles: **{len(vehicles)}**",
         ]
 
@@ -324,10 +239,12 @@ class FireStationCommand(FireStationCommand):  # type: ignore[misc]
             "detail": incident["detail"],
             "stage": "ALERT_CHOICE",
             "alert_mode": None,
+            "channel_id": ctx.channel.id,
+            "guild_id": ctx.guild.id if ctx.guild else None,
         }
         await user_conf.active_mission.set(mission)
 
-        view = AlertChoiceView(self, ctx.author)
+        view = AlertChoiceView(self, ctx.channel, ctx.author)
         await ctx.send(
             content=(
                 f"🚨 New incident: **{incident['name']}**\n"
@@ -343,14 +260,20 @@ class FireStationCommand(FireStationCommand):  # type: ignore[misc]
         if not await self._ensure_started(ctx):
             return
 
-        view = VehicleShopView(self, ctx.author)
+        view = VehicleShopView(self, ctx.channel, ctx.author)
         await ctx.send("🚗 Vehicle shop – select a vehicle to purchase:", view=view)
 
     # --------------------------------------------------
     # Workflow handlers
     # --------------------------------------------------
 
-    async def handle_alert_choice(self, interaction: discord.Interaction, user: discord.abc.User, mode: str):
+    async def handle_alert_choice(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        mode: str,
+    ):
         user_conf = self.config.user(user)
         data = await user_conf.all()
         mission = data.get("active_mission") or {}
@@ -385,17 +308,19 @@ class FireStationCommand(FireStationCommand):  # type: ignore[misc]
         )
         await user_conf.active_mission.set(mission)
 
+        # immediate feedback in the same channel via interaction
         await interaction.response.send_message(
             f"📟 Crew alerted with **{mode}** mode.\n"
             f"Turnout expected {ts['relative']} ({ts['absolute']}).",
-            ephemeral=True,
+            ephemeral=False,
         )
 
+        # wait for turnout time
         await asyncio.sleep(int(minutes * 60))
 
-        await self._show_turnout_result(user)
+        await self._show_turnout_result(channel, user)
 
-    async def _show_turnout_result(self, user: discord.abc.User):
+    async def _show_turnout_result(self, channel: discord.abc.Messageable, user: discord.abc.User):
         user_conf = self.config.user(user)
         data = await user_conf.all()
         mission = data.get("active_mission") or {}
@@ -412,14 +337,23 @@ class FireStationCommand(FireStationCommand):  # type: ignore[misc]
             "You can re-page for more, proceed with current crew, or cancel the call."
         )
 
-        view = TurnoutDecisionView(self, user)
-        try:
-            await user.send(text, view=view)
-        except Exception:
-            # optionally fall back to a guild channel
-            pass
+        view = TurnoutDecisionView(self, channel, user)
 
-    async def handle_realert(self, interaction: discord.Interaction, user: discord.abc.User):
+        try:
+            await channel.send(text, view=view)
+        except Exception:
+            # optional fallback to DM
+            try:
+                await user.send(text, view=view)
+            except Exception:
+                pass
+
+    async def handle_realert(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+    ):
         user_conf = self.config.user(user)
         data = await user_conf.all()
         mission = data.get("active_mission") or {}
@@ -445,13 +379,18 @@ class FireStationCommand(FireStationCommand):  # type: ignore[misc]
 
         await interaction.response.send_message(
             f"📟 Re-alert sent. Additional turnout expected {ts['relative']} ({ts['absolute']}).",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         await asyncio.sleep(int(minutes * 60))
-        await self._show_turnout_result(user)
+        await self._show_turnout_result(channel, user)
 
-    async def handle_proceed_to_vehicles(self, interaction: discord.Interaction, user: discord.abc.User):
+    async def handle_proceed_to_vehicles(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+    ):
         user_conf = self.config.user(user)
         data = await user_conf.all()
         mission = data.get("active_mission") or {}
@@ -470,21 +409,27 @@ class FireStationCommand(FireStationCommand):  # type: ignore[misc]
         await user_conf.active_mission.set(mission)
 
         vehicles = await self._get_user_vehicles(user)
-        view = VehicleSelectView(self, user, vehicles)
+        view = VehicleSelectView(self, channel, user, vehicles)
         await interaction.response.send_message(
             f"🚒 {arrived} personnel available. Select vehicles to dispatch:",
             view=view,
-            ephemeral=True,
+            ephemeral=False,
         )
 
-    async def handle_cancel_incident(self, interaction: discord.Interaction, user: discord.abc.User):
+    async def handle_cancel_incident(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+    ):
         user_conf = self.config.user(user)
         await user_conf.active_mission.set(None)
-        await interaction.response.send_message("Incident cancelled.", ephemeral=True)
+        await interaction.response.send_message("Incident cancelled.", ephemeral=False)
 
     async def handle_vehicle_selection(
         self,
         interaction: discord.Interaction,
+        channel: discord.abc.Messageable,
         user: discord.abc.User,
         values: List[str],
     ):
@@ -512,13 +457,13 @@ class FireStationCommand(FireStationCommand):  # type: ignore[misc]
 
         await interaction.response.send_message(
             f"🚨 Units are en route. ETA {ts['relative']} ({ts['absolute']}).",
-            ephemeral=True,
+            ephemeral=False,
         )
 
         await asyncio.sleep(int(minutes * 60))
-        await self._send_travel_update(user)
+        await self._send_travel_update(channel, user)
 
-    async def _send_travel_update(self, user: discord.abc.User):
+    async def _send_travel_update(self, channel: discord.abc.Messageable, user: discord.abc.User):
         user_conf = self.config.user(user)
         data = await user_conf.all()
         mission = data.get("active_mission") or {}
@@ -536,13 +481,16 @@ class FireStationCommand(FireStationCommand):  # type: ignore[misc]
         embed.set_footer(text="Use this information to judge if your dispatch was sufficient.")
 
         try:
-            await user.send(embed=embed)
+            await channel.send(embed=embed)
         except Exception:
-            pass
+            try:
+                await user.send(embed=embed)
+            except Exception:
+                pass
 
-        await self._resolve_incident(user)
+        await self._resolve_incident(channel, user)
 
-    async def _resolve_incident(self, user: discord.abc.User):
+    async def _resolve_incident(self, channel: discord.abc.Messageable, user: discord.abc.User):
         user_conf = self.config.user(user)
         data = await user_conf.all()
         mission = data.get("active_mission") or {}
@@ -573,8 +521,8 @@ class FireStationCommand(FireStationCommand):  # type: ignore[misc]
             outcome = "❌ Incident not successfully handled."
             reward = int(100 * success_score)
 
-        credits = data.get("credits", 0) + reward
-        await user_conf.credits.set(credits)
+        await self._give(user, reward)
+        total_credits = await self._get_credits(user)
         await user_conf.active_mission.set(None)
 
         lines = [
@@ -586,19 +534,30 @@ class FireStationCommand(FireStationCommand):  # type: ignore[misc]
             "",
             outcome,
             f"Reward: **{reward}** credits",
-            f"Total credits: **{credits}**",
+            f"Total credits: **{total_credits}**",
         ]
 
+        text = "\n".join(lines)
+
         try:
-            await user.send("\n".join(lines))
+            await channel.send(text)
         except Exception:
-            pass
+            try:
+                await user.send(text)
+            except Exception:
+                pass
 
     # --------------------------------------------------
     # Vehicle shop handling
     # --------------------------------------------------
 
-    async def handle_vehicle_purchase(self, interaction: discord.Interaction, user: discord.abc.User, vehicle_id: str):
+    async def handle_vehicle_purchase(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        vehicle_id: str,
+    ):
         user_conf = self.config.user(user)
         data = await user_conf.all()
 
@@ -609,10 +568,19 @@ class FireStationCommand(FireStationCommand):  # type: ignore[misc]
 
         vdef = catalog[vehicle_id]
         price = int(vdef["price"])
-        credits = int(data.get("credits", 0))
+
+        credits = await self._get_credits(user)
         if credits < price:
             await interaction.response.send_message(
                 f"You do not have enough credits. You need {price} but only have {credits}.",
+                ephemeral=True,
+            )
+            return
+
+        ok = await self._spend(user, price)
+        if not ok:
+            await interaction.response.send_message(
+                "You do not have enough credits to complete this purchase.",
                 ephemeral=True,
             )
             return
@@ -626,7 +594,6 @@ class FireStationCommand(FireStationCommand):  # type: ignore[misc]
         }
         vehicles.append(new_vehicle)
 
-        await user_conf.credits.set(credits - price)
         await user_conf.vehicles.set(vehicles)
         await user_conf.next_vehicle_id.set(next_id + 1)
 
@@ -634,3 +601,129 @@ class FireStationCommand(FireStationCommand):  # type: ignore[misc]
             f"Purchased **{vdef['name']}** for {price} credits. It has been added to your fleet.",
             ephemeral=True,
         )
+
+
+class AlertChoiceView(discord.ui.View):
+    def __init__(self, cog: FireStationCommand, channel: discord.abc.Messageable, user: discord.abc.User):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Normal turnout (15 min, full crew)", style=discord.ButtonStyle.secondary)
+    async def normal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.handle_alert_choice(interaction, self.channel, self.user, "normal")
+        self.stop()
+
+    @discord.ui.button(label="Emergency turnout (fast, risk of shortage)", style=discord.ButtonStyle.danger)
+    async def emergency(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.handle_alert_choice(interaction, self.channel, self.user, "emergency")
+        self.stop()
+
+
+class TurnoutDecisionView(discord.ui.View):
+    def __init__(self, cog: FireStationCommand, channel: discord.abc.Messageable, user: discord.abc.User):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Re-alert", style=discord.ButtonStyle.secondary)
+    async def realert(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.handle_realert(interaction, self.channel, self.user)
+        self.stop()
+
+    @discord.ui.button(label="Proceed to vehicle selection", style=discord.ButtonStyle.success)
+    async def proceed(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.handle_proceed_to_vehicles(interaction, self.channel, self.user)
+        self.stop()
+
+    @discord.ui.button(label="Cancel incident", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.handle_cancel_incident(interaction, self.channel, self.user)
+        self.stop()
+
+
+class VehicleSelect(discord.ui.Select):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        vehicles: List[Dict[str, Any]],
+    ):
+        options: List[discord.SelectOption] = []
+        for v in vehicles:
+            label = f"{v['name']} (cap {v['crew_capacity']})"
+            options.append(discord.SelectOption(label=label, value=str(v["id"])))
+        if not options:
+            options = [discord.SelectOption(label="No vehicles available", value="none")]
+
+        super().__init__(
+            placeholder="Select vehicles to dispatch",
+            min_values=1,
+            max_values=len(options),
+            options=options,
+        )
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values == ["none"]:
+            await interaction.response.send_message("You have no vehicles to dispatch.", ephemeral=True)
+            return
+        await self.cog.handle_vehicle_selection(interaction, self.channel, self.user, list(self.values))
+
+
+class VehicleSelectView(discord.ui.View):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        vehicles: List[Dict[str, Any]],
+    ):
+        super().__init__(timeout=180)
+        self.add_item(VehicleSelect(cog, channel, user, vehicles))
+
+
+class VehicleShopSelect(discord.ui.Select):
+    CATALOG = {
+        "pumper": {"name": "Fire Engine", "crew_capacity": 6, "price": 50_000},
+        "ladder": {"name": "Aerial Ladder", "crew_capacity": 3, "price": 75_000},
+        "rescue": {"name": "Rescue Unit", "crew_capacity": 4, "price": 65_000},
+    }
+
+    def __init__(self, cog: FireStationCommand, channel: discord.abc.Messageable, user: discord.abc.User):
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+
+        options: List[discord.SelectOption] = []
+        for vid, v in self.CATALOG.items():
+            label = f"{v['name']} ({v['price']} cr, cap {v['crew_capacity']})"
+            options.append(discord.SelectOption(label=label, value=vid))
+
+        super().__init__(
+            placeholder="Select a vehicle to buy",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        choice = self.values[0]
+        await self.cog.handle_vehicle_purchase(interaction, self.channel, self.user, choice)
+
+
+class VehicleShopView(discord.ui.View):
+    def __init__(self, cog: FireStationCommand, channel: discord.abc.Messageable, user: discord.abc.User):
+        super().__init__(timeout=180)
+        self.add_item(VehicleShopSelect(cog, channel, user))
