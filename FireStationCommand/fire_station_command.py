@@ -12,43 +12,42 @@ from redbot.core import commands, Config, bank
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.0.0"
+    __version__ = "1.1.0"
 
     def __init__(self, bot):
         self.bot = bot
-        # New, clean identifier so we don't fight with old schemas
-        self.config = Config.get_conf(self, identifier=0xF15703, force_registration=True)
+        # fresh identifier
+        self.config = Config.get_conf(self, identifier=0xF15704, force_registration=True)
 
         default_global: Dict[str, Any] = {
             "volunteer_normal_minutes": 15.0,
             "volunteer_emergency_minutes": 5.0,
-            "career_turnout_minutes": 0.0,   # effectively instant
+            "career_turnout_minutes": 0.0,
             "realert_minutes_min": 1.0,
             "realert_minutes_max": 3.0,
             "travel_minutes_min": 3.0,
             "travel_minutes_max": 8.0,
-            "staff_cost": 2000,              # per recruit
-            "upgrade_base_cost": 50000,      # multiplied by current level
+            "staff_cost": 2000,
+            "upgrade_base_cost": 50000,
             "career_convert_cost": 250000,
             "max_station_level": 5,
         }
 
         default_user: Dict[str, Any] = {
             "started": False,
-            "credits": 0,              # local fallback economy
-            "vehicles": [],            # [{id, name, crew_capacity}]
+            "credits": 0,
+            "vehicles": [],
             "next_vehicle_id": 1,
             "station_level": 1,
             "station_type": "volunteer",  # volunteer | career
             "staff_total": 6,
             "staff_trained": 0,
-            "active_mission": {},      # dict; empty = no active
+            "active_mission": {},
         }
 
         self.config.register_global(**default_global)
         self.config.register_user(**default_user)
 
-        # A tiny incident pool; later you can wire this to MC JSON
         self.INCIDENTS: List[Dict[str, Any]] = [
             {
                 "id": "house_fire",
@@ -107,7 +106,6 @@ class FireStationCommand(commands.Cog):
     async def _spend(self, user: discord.abc.User, amount: int) -> bool:
         if amount <= 0:
             return True
-        # try Red bank first
         try:
             can = await bank.can_spend(user, amount)  # type: ignore[attr-defined]
             if can:
@@ -115,7 +113,6 @@ class FireStationCommand(commands.Cog):
                 return True
         except Exception:
             pass
-        # fallback: local credits
         user_conf = self.config.user(user)
         data = await user_conf.all()
         local = int(data.get("credits", 0))
@@ -129,13 +126,11 @@ class FireStationCommand(commands.Cog):
         return data.get("vehicles", [])
 
     def _max_staff(self, level: int) -> int:
-        # Start at 6, +2 per level
         if level < 1:
             level = 1
         return 6 + (level - 1) * 2
 
     def _max_vehicles(self, level: int) -> int:
-        # Start at 1, +1 per level
         if level < 1:
             level = 1
         return 1 + (level - 1)
@@ -152,12 +147,9 @@ class FireStationCommand(commands.Cog):
         return f"in {mins} minutes"
 
     def _simulate_emergency_turnout(self, available: int, required: int) -> Dict[str, int]:
-        """Simulate emergency turnout: faster but more no-shows."""
         if available <= 0:
             return {"available": 0, "arrived": 0}
-
         arrived = 0
-        # each available staff has a chance to respond
         base_no_show = random.uniform(0.10, 0.25)
         for _ in range(available):
             if random.random() > base_no_show:
@@ -165,10 +157,8 @@ class FireStationCommand(commands.Cog):
         return {"available": available, "arrived": arrived}
 
     def _simulate_realert(self, current_total: int, available: int, required: int) -> Dict[str, int]:
-        """Second alert: better attendance among remaining staff."""
         if current_total >= available:
             return {"second_arrived": 0, "total_arrived": current_total}
-
         remaining = available - current_total
         no_show_second = random.uniform(0.0, 0.10)
         second_arrived = 0
@@ -213,7 +203,6 @@ class FireStationCommand(commands.Cog):
         await user_conf.staff_trained.set(0)
         await user_conf.active_mission.set({})
 
-        # give starter credits via bank/fallback
         await self._give(ctx.author, 100_000)
 
         credits = await self._get_credits(ctx.author)
@@ -279,7 +268,7 @@ class FireStationCommand(commands.Cog):
 
     @fsc_group.command(name="station")
     async def fsc_station(self, ctx: commands.Context):
-        """Detailed overview of your station."""
+        """Detailed overview of your station (with image by bay count)."""
         if not await self._ensure_started(ctx):
             return
 
@@ -320,11 +309,23 @@ class FireStationCommand(commands.Cog):
                 inline=False,
             )
 
+        # Choose image by bay capacity (parking places)
+        image_url = None
+        if max_veh <= 1:
+            image_url = "https://example.com/fra_tier1_flag.png"
+        elif max_veh == 2:
+            image_url = "https://example.com/fra_tier1_bay2.png"
+        elif max_veh >= 3:
+            image_url = "https://example.com/fra_tier1_bay3.png"
+
+        if image_url:
+            embed.set_image(url=image_url)
+
         await ctx.send(embed=embed)
 
     @fsc_group.command(name="recruit")
     async def fsc_recruit(self, ctx: commands.Context, amount: int):
-        """Recruit new staff (cost per person)."""
+        """Recruit new staff (with confirmation)."""
         if not await self._ensure_started(ctx):
             return
         if amount <= 0:
@@ -356,9 +357,37 @@ class FireStationCommand(commands.Cog):
             )
             return
 
-        ok = await self._spend(ctx.author, total_cost)
-        if not ok:
-            await ctx.send("You do not have enough credits to complete this recruitment.")
+        embed = discord.Embed(
+            title="Confirm recruitment",
+            description=f"Recruit **{amount}** new staff for **{total_cost:,}** credits?",
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="After recruitment", value=f"{staff_total + amount} / {max_staff} staff", inline=False)
+
+        view = ConfirmRecruitView(self, ctx.author, amount, total_cost)
+        await ctx.send(embed=embed, view=view)
+
+    async def _confirm_recruit(self, interaction: discord.Interaction, user: discord.abc.User, amount: int, total_cost: int):
+        user_conf = self.config.user(user)
+        data = await user_conf.all()
+        lvl = int(data.get("station_level", 1))
+        staff_total = int(data.get("staff_total", 0))
+        max_staff = self._max_staff(lvl)
+
+        if staff_total >= max_staff:
+            await interaction.response.send_message("Recruitment failed: already at maximum staff.", ephemeral=True)
+            return
+
+        if staff_total + amount > max_staff:
+            amount = max_staff - staff_total
+            total_cost = 0  # we will recompute
+            glb = await self.config.all()
+            cost_per = int(glb.get("staff_cost", 2000))
+            total_cost = amount * cost_per
+
+        credits = await self._get_credits(user)
+        if credits < total_cost or not await self._spend(user, total_cost):
+            await interaction.response.send_message("Recruitment failed: not enough credits.", ephemeral=True)
             return
 
         staff_total += amount
@@ -371,11 +400,11 @@ class FireStationCommand(commands.Cog):
         )
         embed.add_field(name="Total staff", value=f"{staff_total} / {max_staff}", inline=True)
         embed.add_field(name="Cost", value=f"{total_cost:,} credits", inline=True)
-        await ctx.send(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=False)
 
     @fsc_group.command(name="upgrade")
     async def fsc_upgrade(self, ctx: commands.Context):
-        """Upgrade your station level (increases capacity)."""
+        """Upgrade your station level (confirmation)."""
         if not await self._ensure_started(ctx):
             return
 
@@ -400,30 +429,53 @@ class FireStationCommand(commands.Cog):
             )
             return
 
-        ok = await self._spend(ctx.author, cost)
-        if not ok:
-            await ctx.send("You do not have enough credits to complete this upgrade.")
-            return
-
-        lvl += 1
-        await user_conf.station_level.set(lvl)
-
-        max_staff = self._max_staff(lvl)
-        max_veh = self._max_vehicles(lvl)
+        new_lvl = lvl + 1
+        max_staff = self._max_staff(new_lvl)
+        max_veh = self._max_vehicles(new_lvl)
 
         embed = discord.Embed(
-            title="Station upgraded",
-            description=f"Your station is now level **{lvl}**.",
+            title="Confirm station upgrade",
+            description=f"Upgrade station from level **{lvl}** to **{new_lvl}** for **{cost:,}** credits?",
             color=discord.Color.blue(),
         )
         embed.add_field(name="New staff capacity", value=f"max {max_staff}", inline=True)
         embed.add_field(name="New vehicle capacity", value=f"max {max_veh}", inline=True)
+
+        view = ConfirmUpgradeView(self, ctx.author, new_lvl, cost)
+        await ctx.send(embed=embed, view=view)
+
+    async def _confirm_upgrade(self, interaction: discord.Interaction, user: discord.abc.User, new_level: int, cost: int):
+        user_conf = self.config.user(user)
+        data = await user_conf.all()
+        current_lvl = int(data.get("station_level", 1))
+
+        if new_level <= current_lvl:
+            await interaction.response.send_message("Upgrade cancelled: level already changed.", ephemeral=True)
+            return
+
+        credits = await self._get_credits(user)
+        if credits < cost or not await self._spend(user, cost):
+            await interaction.response.send_message("Upgrade failed: not enough credits.", ephemeral=True)
+            return
+
+        await user_conf.station_level.set(new_level)
+
+        max_staff = self._max_staff(new_level)
+        max_veh = self._max_vehicles(new_level)
+
+        embed = discord.Embed(
+            title="Station upgraded",
+            description=f"Your station is now level **{new_level}**.",
+            color=discord.Color.blue(),
+        )
+        embed.add_field(name="Staff capacity", value=f"max {max_staff}", inline=True)
+        embed.add_field(name="Vehicle capacity", value=f"max {max_veh}", inline=True)
         embed.add_field(name="Cost", value=f"{cost:,} credits", inline=True)
-        await ctx.send(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=False)
 
     @fsc_group.command(name="career")
     async def fsc_career(self, ctx: commands.Context):
-        """Convert your volunteer station to a career station (faster turnout)."""
+        """Convert your volunteer station to a career station (confirmation)."""
         if not await self._ensure_started(ctx):
             return
 
@@ -451,9 +503,31 @@ class FireStationCommand(commands.Cog):
             )
             return
 
-        ok = await self._spend(ctx.author, cost)
-        if not ok:
-            await ctx.send("You do not have enough credits to complete this conversion.")
+        embed = discord.Embed(
+            title="Confirm career conversion",
+            description=f"Convert your station to **career** for **{cost:,}** credits?",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(
+            name="Effect",
+            value="Turnout becomes effectively instant and more reliable.",
+            inline=False,
+        )
+
+        view = ConfirmCareerView(self, ctx.author, cost)
+        await ctx.send(embed=embed, view=view)
+
+    async def _confirm_career(self, interaction: discord.Interaction, user: discord.abc.User, cost: int):
+        user_conf = self.config.user(user)
+        data = await user_conf.all()
+        stype = data.get("station_type", "volunteer")
+        if stype == "career":
+            await interaction.response.send_message("Your station is already a career station.", ephemeral=True)
+            return
+
+        credits = await self._get_credits(user)
+        if credits < cost or not await self._spend(user, cost):
+            await interaction.response.send_message("Conversion failed: not enough credits.", ephemeral=True)
             return
 
         await user_conf.station_type.set("career")
@@ -464,7 +538,7 @@ class FireStationCommand(commands.Cog):
             color=discord.Color.gold(),
         )
         embed.add_field(name="Cost", value=f"{cost:,} credits", inline=True)
-        await ctx.send(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=False)
 
     @fsc_group.command(name="shop")
     async def fsc_shop(self, ctx: commands.Context):
@@ -567,14 +641,12 @@ class FireStationCommand(commands.Cog):
         available = staff_total
 
         if stype == "career":
-            # Career: instant turnout, everyone comes
             minutes = float(glb.get("career_turnout_minutes", 0.0))
             first_arrived = min(available, required)
             total = first_arrived
         else:
             if mode == "normal":
                 minutes = float(glb.get("volunteer_normal_minutes", 15.0))
-                # normal: mostly everyone available shows
                 first_arrived = min(available, required)
                 total = first_arrived
             else:
@@ -602,7 +674,6 @@ class FireStationCommand(commands.Cog):
             ephemeral=False,
         )
 
-        # wait for turnout time
         if minutes > 0:
             await asyncio.sleep(int(minutes * 60))
 
@@ -839,7 +910,7 @@ class FireStationCommand(commands.Cog):
     # Vehicle shop handling
     # --------------------------------------------------
 
-    async def handle_vehicle_purchase(
+    async def _confirm_vehicle_purchase(
         self,
         interaction: discord.Interaction,
         channel: discord.abc.Messageable,
@@ -857,23 +928,24 @@ class FireStationCommand(commands.Cog):
         vdef = catalog[vehicle_id]
         price = int(vdef["price"])
 
-        credits = await self._get_credits(user)
-        if credits < price:
+        # Check capacity again
+        lvl = int(data.get("station_level", 1))
+        vehicles = data.get("vehicles", [])
+        max_veh = self._max_vehicles(lvl)
+        if len(vehicles) >= max_veh:
             await interaction.response.send_message(
-                f"You do not have enough credits. You need {price:,} but only have {credits:,}.",
-                ephemeral=True,
+                "Purchase failed: you are at maximum vehicle capacity.", ephemeral=True
             )
             return
 
-        ok = await self._spend(user, price)
-        if not ok:
+        credits = await self._get_credits(user)
+        if credits < price or not await self._spend(user, price):
             await interaction.response.send_message(
                 "You do not have enough credits to complete this purchase.",
                 ephemeral=True,
             )
             return
 
-        vehicles = data.get("vehicles", [])
         next_id = int(data.get("next_vehicle_id", 1))
         new_vehicle = {
             "id": next_id,
@@ -887,7 +959,7 @@ class FireStationCommand(commands.Cog):
 
         await interaction.response.send_message(
             f"Purchased **{vdef['name']}** for {price:,} credits. It has been added to your fleet.",
-            ephemeral=True,
+            ephemeral=False,
         )
 
 
@@ -903,11 +975,18 @@ class AlertChoiceView(discord.ui.View):
 
     @discord.ui.button(label="Normal turnout (volunteer)", style=discord.ButtonStyle.secondary)
     async def normal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Disable buttons to prevent double-clicks
+        for child in self.children:
+            child.disabled = True
+        await interaction.message.edit(view=self)
         await self.cog.handle_alert_choice(interaction, self.channel, self.user, "normal")
         self.stop()
 
     @discord.ui.button(label="Emergency turnout (volunteer)", style=discord.ButtonStyle.danger)
     async def emergency(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.message.edit(view=self)
         await self.cog.handle_alert_choice(interaction, self.channel, self.user, "emergency")
         self.stop()
 
@@ -922,18 +1001,29 @@ class TurnoutDecisionView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user.id
 
+    async def _disable_and_edit(self, interaction: discord.Interaction):
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+
     @discord.ui.button(label="Re-alert", style=discord.ButtonStyle.secondary)
     async def realert(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._disable_and_edit(interaction)
         await self.cog.handle_realert(interaction, self.channel, self.user)
         self.stop()
 
     @discord.ui.button(label="Proceed to vehicle selection", style=discord.ButtonStyle.success)
     async def proceed(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._disable_and_edit(interaction)
         await self.cog.handle_proceed_to_vehicles(interaction, self.channel, self.user)
         self.stop()
 
     @discord.ui.button(label="Cancel incident", style=discord.ButtonStyle.danger)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._disable_and_edit(interaction)
         await self.cog.handle_cancel_incident(interaction, self.channel, self.user)
         self.stop()
 
@@ -1008,10 +1098,147 @@ class VehicleShopSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         choice = self.values[0]
-        await self.cog.handle_vehicle_purchase(interaction, self.channel, self.user, choice)
+        vdef = self.CATALOG.get(choice)
+        if not vdef:
+            await interaction.response.send_message("Unknown vehicle type.", ephemeral=True)
+            return
+
+        price = int(vdef["price"])
+        embed = discord.Embed(
+            title="Confirm vehicle purchase",
+            description=f"Buy **{vdef['name']}** for **{price:,}** credits?",
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(name="Crew capacity", value=str(vdef["crew_capacity"]), inline=True)
+
+        view = ConfirmVehiclePurchaseView(self.cog, self.channel, self.user, choice)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 class VehicleShopView(discord.ui.View):
     def __init__(self, cog: FireStationCommand, channel: discord.abc.Messageable, user: discord.abc.User):
         super().__init__(timeout=180)
         self.add_item(VehicleShopSelect(cog, channel, user))
+
+
+class ConfirmRecruitView(discord.ui.View):
+    def __init__(self, cog: FireStationCommand, user: discord.abc.User, amount: int, cost: int):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.user = user
+        self.amount = amount
+        self.cost = cost
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.message.edit(view=self)
+        await self.cog._confirm_recruit(interaction, self.user, self.amount, self.cost)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        await interaction.response.send_message("Recruitment cancelled.", ephemeral=True)
+        self.stop()
+
+
+class ConfirmUpgradeView(discord.ui.View):
+    def __init__(self, cog: FireStationCommand, user: discord.abc.User, new_level: int, cost: int):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.user = user
+        self.new_level = new_level
+        self.cost = cost
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.message.edit(view=self)
+        await self.cog._confirm_upgrade(interaction, self.user, self.new_level, self.cost)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        await interaction.response.send_message("Upgrade cancelled.", ephemeral=True)
+        self.stop()
+
+
+class ConfirmCareerView(discord.ui.View):
+    def __init__(self, cog: FireStationCommand, user: discord.abc.User, cost: int):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.user = user
+        self.cost = cost
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.message.edit(view=self)
+        await self.cog._confirm_career(interaction, self.user, self.cost)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        await interaction.response.send_message("Conversion cancelled.", ephemeral=True)
+        self.stop()
+
+
+class ConfirmVehiclePurchaseView(discord.ui.View):
+    def __init__(self, cog: FireStationCommand, channel: discord.abc.Messageable, user: discord.abc.User, vehicle_id: str):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+        self.vehicle_id = vehicle_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.message.edit(view=self)
+        await self.cog._confirm_vehicle_purchase(interaction, self.channel, self.user, self.vehicle_id)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        await interaction.response.send_message("Purchase cancelled.", ephemeral=True)
+        self.stop()
