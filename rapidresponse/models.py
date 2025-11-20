@@ -18,7 +18,7 @@ class Database:
         
     async def initialize(self):
         """Initialize database with required tables"""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(str(self.db_path)) as db:
             # Players table
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS players (
@@ -120,7 +120,7 @@ class Database:
     
     async def get_player(self, user_id: int) -> Optional[Dict[str, Any]]:
         """Get player data"""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(str(self.db_path)) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT * FROM players WHERE user_id = ?", (user_id,)
@@ -132,7 +132,7 @@ class Database:
     
     async def create_player(self, user_id: int, guild_id: int) -> Dict[str, Any]:
         """Create a new player"""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(str(self.db_path)) as db:
             await db.execute("""
                 INSERT INTO players (user_id, guild_id)
                 VALUES (?, ?)
@@ -152,7 +152,7 @@ class Database:
         fields = ", ".join(f"{k} = ?" for k in kwargs.keys())
         values = list(kwargs.values()) + [user_id]
         
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(str(self.db_path)) as db:
             await db.execute(
                 f"UPDATE players SET {fields} WHERE user_id = ?",
                 values
@@ -216,7 +216,7 @@ class Database:
         now = datetime.utcnow()
         expires_at = now + timedelta(seconds=timeout_seconds)
         
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(str(self.db_path)) as db:
             cursor = await db.execute("""
                 INSERT INTO active_missions (
                     user_id, mission_id, mission_name, mission_data,
@@ -231,7 +231,7 @@ class Database:
     
     async def get_active_mission(self, user_id: int) -> Optional[Dict[str, Any]]:
         """Get player's current active mission"""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(str(self.db_path)) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("""
                 SELECT * FROM active_missions
@@ -245,7 +245,7 @@ class Database:
     
     async def get_mission_by_id(self, mission_instance_id: int) -> Optional[Dict[str, Any]]:
         """Get mission by instance ID"""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(str(self.db_path)) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT * FROM active_missions WHERE mission_instance_id = ?",
@@ -264,7 +264,7 @@ class Database:
         fields = ", ".join(f"{k} = ?" for k in kwargs.keys())
         values = list(kwargs.values()) + [mission_instance_id]
         
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(str(self.db_path)) as db:
             await db.execute(
                 f"UPDATE active_missions SET {fields} WHERE mission_instance_id = ?",
                 values
@@ -284,7 +284,7 @@ class Database:
         if not mission:
             return
         
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(str(self.db_path)) as db:
             # Update mission status
             await db.execute(
                 "UPDATE active_missions SET status = ? WHERE mission_instance_id = ?",
@@ -309,7 +309,7 @@ class Database:
         now = datetime.utcnow()
         completes_at = now + timedelta(hours=1)  # TRAINING_DURATION_HOURS
         
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(str(self.db_path)) as db:
             cursor = await db.execute("""
                 INSERT INTO training (user_id, stat_type, started_at, completes_at)
                 VALUES (?, ?, ?, ?)
@@ -319,7 +319,7 @@ class Database:
     
     async def get_active_training(self, user_id: int) -> Optional[Dict[str, Any]]:
         """Get active training session"""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(str(self.db_path)) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("""
                 SELECT * FROM training
@@ -333,7 +333,7 @@ class Database:
     
     async def complete_training(self, training_id: int):
         """Mark training as complete"""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(str(self.db_path)) as db:
             await db.execute(
                 "UPDATE training SET is_complete = 1 WHERE id = ?",
                 (training_id,)
@@ -355,7 +355,7 @@ class Database:
         
         order_by = valid_stats[stat]
         
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(str(self.db_path)) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(f"""
                 SELECT user_id, station_level, total_missions, mission_streak,
@@ -372,7 +372,7 @@ class Database:
         """Cache mission data"""
         import json
         
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(str(self.db_path)) as db:
             # Clear old cache
             await db.execute("DELETE FROM mission_cache")
             
@@ -389,7 +389,7 @@ class Database:
         """Get cached missions"""
         import json
         
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(str(self.db_path)) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM mission_cache") as cursor:
                 rows = await cursor.fetchall()
@@ -397,7 +397,7 @@ class Database:
     
     async def get_config(self, key: str) -> Optional[str]:
         """Get config value"""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(str(self.db_path)) as db:
             async with db.execute(
                 "SELECT value FROM config WHERE key = ?", (key,)
             ) as cursor:
@@ -408,7 +408,7 @@ class Database:
     
     async def set_config(self, key: str, value: str):
         """Set config value"""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(str(self.db_path)) as db:
             await db.execute("""
                 INSERT OR REPLACE INTO config (key, value)
                 VALUES (?, ?)
@@ -419,7 +419,7 @@ class Database:
         """Clean up expired missions"""
         now = datetime.utcnow().isoformat()
         
-        async with aiosqlite.connect(self.db_path) as db:
+        async with aiosqlite.connect(str(self.db_path)) as db:
             # Get expired missions that are still pending
             db.row_factory = aiosqlite.Row
             async with db.execute("""
