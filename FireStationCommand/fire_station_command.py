@@ -17,7 +17,7 @@ class FireStationCommand(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=0xF15701, force_registration=True)
+        self.config = Config.get_conf(self, identifier=0xF15702, force_registration=True)
 
         default_global: Dict[str, Any] = {
             "normal_turnout_minutes": 15.0,
