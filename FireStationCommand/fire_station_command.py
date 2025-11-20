@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 import discord
-from redbot.core import commands, Config, checks
+from redbot.core import commands, Config, checks, bank
 from redbot.core.bot import Red
 
 import yaml
@@ -73,6 +73,7 @@ class MissionDef:
     base_xp: int
     base_credits: int
     required_vehicles: List[str]
+    required_equipment: List[str]
     description: str
 
 
@@ -175,6 +176,7 @@ class GameContent:
                     base_xp=int(m["base_xp"]),
                     base_credits=int(m["base_credits"]),
                     required_vehicles=list(m.get("required_vehicles", [])),
+                    required_equipment=list(m.get("required_equipment", [])),
                     description=m.get("description", ""),
                 )
             except Exception:
@@ -198,7 +200,7 @@ class FireStationCommand(commands.Cog):
     """Fire Station Command – management game."""
 
     __author__ = "You + ChatGPT"
-    __version__ = "0.8.0"
+    __version__ = "0.10.0"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -213,6 +215,7 @@ class FireStationCommand(commands.Cog):
             "station_tier": 1,
             "xp": 0,
             "credits_earned": 0,
+            "credits_spent": 0,
             "reputation": 50,
             "is_active": False,
             "last_mission_ts": None,
@@ -233,8 +236,14 @@ class FireStationCommand(commands.Cog):
             "mutual_requests": [],
         }
 
+        default_global = {
+            "use_bank_economy": False,
+            "vehicle_sell_refund": 0.5,
+        }
+
         self.config.register_user(**default_user)
         self.config.register_guild(**default_guild)
+        self.config.register_global(**default_global)
 
         base_path = Path(__file__).parent / "data" / "config"
         self.content = GameContent.from_files(base_path)
@@ -422,6 +431,73 @@ class FireStationCommand(commands.Cog):
                     continue
         return base * factor
 
+    def _max_vehicle_slots(self, expansions_ids: List[str]) -> int:
+        base_slots = int(self.get_balance("base_vehicle_slots", 1))
+        extra = 0
+        for ex_id in expansions_ids:
+            ex_def = self.content.expansions.get(ex_id)
+            if not ex_def:
+                continue
+            extra += int(ex_def.effects.get("extra_vehicle_slots", 0))
+        return base_slots + extra
+
+    async def _get_funds(self, user: discord.abc.User) -> int:
+        g = await self.config.global_.all()
+        use_bank = g.get("use_bank_economy", False)
+        if use_bank and await bank.is_bank_loaded():
+            try:
+                if not await bank.is_account_created(user):
+                    await bank.create_account(user)
+                bal = await bank.get_balance(user)
+                return int(bal)
+            except Exception:
+                log.exception("Error reading bank balance, falling back to internal.")
+        data = await self.config.user(user).all()
+        return int(data.get("credits_earned", 0) - data.get("credits_spent", 0))
+
+    async def _charge(self, ctx: commands.Context, user: discord.abc.User, amount: int, reason: str) -> bool:
+        if amount <= 0:
+            return True
+        g = await self.config.global_.all()
+        use_bank = g.get("use_bank_economy", False)
+        if use_bank and await bank.is_bank_loaded():
+            try:
+                if not await bank.is_account_created(user):
+                    await bank.create_account(user)
+                bal = await bank.get_balance(user)
+                if bal < amount:
+                    await ctx.send(f"You do not have enough funds in your wallet for this action.\nRequired: {amount}, you have: {int(bal)}.")
+                    return False
+                await bank.withdraw_credits(user, amount)
+                return True
+            except Exception:
+                log.exception("Error charging via bank, falling back to internal economy.")
+
+        user_conf = self.config.user(user)
+        data = await user_conf.all()
+        balance = int(data.get("credits_earned", 0) - data.get("credits_spent", 0))
+        if balance < amount:
+            await ctx.send(f"You do not have enough internal credits for this action.\nRequired: {amount}, you have: {balance}.")
+            return False
+        await user_conf.credits_spent.set(int(data.get("credits_spent", 0)) + int(amount))
+        return True
+
+    async def _payout(self, user: discord.abc.User, amount: int):
+        if amount <= 0:
+            return
+        g = await self.config.global_.all()
+        use_bank = g.get("use_bank_economy", False)
+        if use_bank and await bank.is_bank_loaded():
+            try:
+                if not await bank.is_account_created(user):
+                    await bank.create_account(user)
+                await bank.deposit_credits(user, amount)
+            except Exception:
+                log.exception("Error paying out via bank, still recording internal earnings.")
+        user_conf = self.config.user(user)
+        data = await user_conf.all()
+        await user_conf.credits_earned.set(int(data.get("credits_earned", 0)) + int(amount))
+
     # ------------------------------
     # Mission scheduler (stub)
     # ------------------------------
@@ -487,6 +563,8 @@ class FireStationCommand(commands.Cog):
         station_tier = self.calc_station_tier(data["xp"])
         is_active = data["is_active"]
 
+        funds = await self._get_funds(ctx.author)
+
         embed = discord.Embed(
             title="Fire Station Command – Status",
             color=discord.Color.red(),
@@ -500,6 +578,7 @@ class FireStationCommand(commands.Cog):
         )
         embed.add_field(name="XP", value=str(data["xp"]), inline=True)
         embed.add_field(name="Reputation", value=str(data["reputation"]), inline=True)
+        embed.add_field(name="Funds available", value=str(funds), inline=True)
 
         if data.get("mutual_active"):
             helpers = data.get("mutual_helpers", [])
@@ -541,6 +620,7 @@ class FireStationCommand(commands.Cog):
         target = member or ctx.author
         data = await self.config.user(target).all()
         station_tier = self.calc_station_tier(data["xp"])
+        funds = await self._get_funds(target)
 
         embed = discord.Embed(
             title=f"{target.display_name} – Fire Station Profile",
@@ -577,7 +657,324 @@ class FireStationCommand(commands.Cog):
                 value="None",
                 inline=False,
             )
+        embed.add_field(name="Funds available", value=str(funds), inline=True)
         await ctx.send(embed=embed)
+
+    # ------------------------------
+    # GARAGE / VEHICLES
+    # ------------------------------
+
+    @fsc_group.group(name="garage")
+    async def fsc_garage(self, ctx: commands.Context):
+        """Manage your vehicles (buy, list, sell)."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+
+    @fsc_garage.command(name="catalog")
+    async def garage_catalog(self, ctx: commands.Context):
+        """Show available vehicle types."""
+        if not self.content.vehicles:
+            await ctx.send("No vehicle definitions are configured.")
+            return
+        lines = []
+        for v in self.content.vehicles.values():
+            lines.append(
+                f"- `{v.id}`: **{v.name}** – cost {v.base_cost}, requires tier ≥ {v.tier_min}, staff {v.required_staff}"
+            )
+        await ctx.send("\n".join(lines))
+
+    @fsc_garage.command(name="list")
+    async def garage_list(self, ctx: commands.Context):
+        """List your owned vehicles."""
+        user_conf = self.config.user(ctx.author)
+        data = await user_conf.all()
+        vehicles = data.get("vehicles", [])
+        expansions_ids = data.get("expansions", [])
+        max_slots = self._max_vehicle_slots(expansions_ids)
+
+        embed = discord.Embed(
+            title="Your garage",
+            color=discord.Color.dark_red(),
+        )
+        embed.add_field(name="Slots used", value=f"{len(vehicles)}/{max_slots}", inline=True)
+
+        if not vehicles:
+            embed.add_field(name="Vehicles", value="You do not own any vehicles yet.", inline=False)
+        else:
+            lines = []
+            for v in vehicles:
+                vdef = self.content.vehicles.get(v.get("def_id"))
+                name = vdef.name if vdef else v.get("def_id")
+                cond = v.get("condition", 100)
+                eq = v.get("equipment", [])
+                if eq:
+                    eq_str = ", ".join(eq)
+                else:
+                    eq_str = "None"
+                lines.append(f"- ID {v.get('id')}: {name} – {cond}% condition – Equipment: {eq_str}")
+            embed.add_field(name="Vehicles", value="\n".join(lines), inline=False)
+
+        await ctx.send(embed=embed)
+
+    @fsc_garage.command(name="buy")
+    async def garage_buy(self, ctx: commands.Context, vehicle_def_id: str):
+        """Buy a new vehicle and add it to your garage."""
+        user_conf = self.config.user(ctx.author)
+        data = await user_conf.all()
+
+        if not data["started"]:
+            await ctx.send("You have not started yet. Use `[p]fsc start` first.")
+            return
+
+        vdef = self.content.vehicles.get(vehicle_def_id)
+        if not vdef:
+            await ctx.send(f"Vehicle type `{vehicle_def_id}` does not exist.")
+            return
+
+        station_tier = self.calc_station_tier(data["xp"])
+        if station_tier < vdef.tier_min:
+            await ctx.send(
+                f"Your station tier is too low for this vehicle. Required tier: {vdef.tier_min}, you are tier {station_tier}."
+            )
+            return
+
+        vehicles = list(data.get("vehicles", []))
+        expansions_ids = data.get("expansions", [])
+        max_slots = self._max_vehicle_slots(expansions_ids)
+        if len(vehicles) >= max_slots:
+            await ctx.send(
+                f"You do not have any free vehicle bays.\n"
+                f"Current: {len(vehicles)}/{max_slots}. Build an `extra_bay` expansion first."
+            )
+            return
+
+        cost = int(vdef.base_cost)
+        ok = await self._charge(ctx, ctx.author, cost, f"Purchase of {vdef.name}")
+        if not ok:
+            return
+
+        new_id = 1
+        if vehicles:
+            new_id = max(int(v.get("id", 0)) for v in vehicles) + 1
+
+        vehicles.append(
+            {
+                "id": new_id,
+                "def_id": vdef.id,
+                "condition": 100,
+                "equipment": [],
+            }
+        )
+        await user_conf.vehicles.set(vehicles)
+
+        await ctx.send(
+            f"You purchased a new **{vdef.name}** (ID {new_id}) for {cost} credits."
+        )
+
+    @fsc_garage.command(name="sell")
+    async def garage_sell(self, ctx: commands.Context, vehicle_id: int):
+        """Sell one of your vehicles for a partial refund."""
+        user_conf = self.config.user(ctx.author)
+        data = await user_conf.all()
+        vehicles = list(data.get("vehicles", []))
+        if not vehicles:
+            await ctx.send("You do not own any vehicles.")
+            return
+
+        v = next((x for x in vehicles if int(x.get("id")) == int(vehicle_id)), None)
+        if not v:
+            await ctx.send(f"Vehicle with ID `{vehicle_id}` not found.")
+            return
+
+        vdef = self.content.vehicles.get(v.get("def_id"))
+        if not vdef:
+            await ctx.send("This vehicle type is no longer defined; selling will grant no refund.")
+            refund = 0
+        else:
+            g = await self.config.global_.all()
+            factor = float(g.get("vehicle_sell_refund", 0.5))
+            refund = int(vdef.base_cost * factor)
+
+        vehicles = [x for x in vehicles if int(x.get("id")) != int(vehicle_id)]
+        await user_conf.vehicles.set(vehicles)
+
+        if refund > 0:
+            await self._payout(ctx.author, refund)
+            await ctx.send(
+                f"Vehicle ID {vehicle_id} has been sold. You received {refund} credits back."
+            )
+        else:
+            await ctx.send(f"Vehicle ID {vehicle_id} has been removed without refund.")
+
+    # ------------------------------
+    # EQUIPMENT MANAGEMENT
+    # ------------------------------
+
+    @fsc_group.group(name="equipment")
+    async def fsc_equipment(self, ctx: commands.Context):
+        """Manage firefighting and rescue equipment."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+
+    @fsc_equipment.command(name="catalog")
+    async def equipment_catalog(self, ctx: commands.Context):
+        """Show all defined equipment types."""
+        if not self.content.equipment:
+            await ctx.send("No equipment definitions are configured.")
+            return
+
+        lines = []
+        for e in self.content.equipment.values():
+            lines.append(
+                f"- `{e.id}`: **{e.name}** – category {e.category}, cost {e.base_cost}"
+            )
+        await ctx.send("\n".join(lines))
+
+    @fsc_equipment.command(name="buy")
+    async def equipment_buy(self, ctx: commands.Context, equipment_id: str, quantity: int = 1):
+        """Buy loose equipment items (added to your station pool)."""
+        if quantity <= 0:
+            await ctx.send("Quantity must be at least 1.")
+            return
+
+        e_def = self.content.equipment.get(equipment_id)
+        if not e_def:
+            await ctx.send(f"Equipment `{equipment_id}` does not exist.")
+            return
+
+        user_conf = self.config.user(ctx.author)
+        data = await user_conf.all()
+        if not data["started"]:
+            await ctx.send("You have not started yet. Use `[p]fsc start` first.")
+            return
+
+        # simple pool in user config: {equipment_id: qty}
+        pool = dict(data.get("equipment_pool", {}))
+        total_cost = int(e_def.base_cost * quantity)
+        ok = await self._charge(ctx, ctx.author, total_cost, f"Buying equipment: {e_def.name} x{quantity}")
+        if not ok:
+            return
+
+        pool[equipment_id] = int(pool.get(equipment_id, 0)) + int(quantity)
+        await user_conf.equipment_pool.set(pool)
+
+        await ctx.send(
+            f"Purchased **{quantity}x {e_def.name}** for {total_cost} credits.\n"
+            f"Assign them to vehicles with `[p]fsc equipment assign`."
+        )
+
+    @fsc_equipment.command(name="pool")
+    async def equipment_pool(self, ctx: commands.Context):
+        """Show your unassigned equipment pool."""
+        user_conf = self.config.user(ctx.author)
+        data = await user_conf.all()
+        pool = dict(data.get("equipment_pool", {}))
+
+        if not pool:
+            await ctx.send("You have no unassigned equipment in your pool.")
+            return
+
+        lines = []
+        for eq_id, qty in pool.items():
+            e_def = self.content.equipment.get(eq_id)
+            name = e_def.name if e_def else eq_id
+            lines.append(f"- {name} (`{eq_id}`): {qty} in pool")
+
+        await ctx.send("\n".join(lines))
+
+    @fsc_equipment.command(name="assign")
+    async def equipment_assign(self, ctx: commands.Context, vehicle_id: int, equipment_id: str, quantity: int = 1):
+        """
+        Assign equipment from your pool to a vehicle.
+
+        Quantity is optional and defaults to 1. Each slot only needs 1 of a given type,
+        but pool quantities allow you to move items between vehicles later.
+        """
+        if quantity <= 0:
+            await ctx.send("Quantity must be at least 1.")
+            return
+
+        e_def = self.content.equipment.get(equipment_id)
+        if not e_def:
+            await ctx.send(f"Equipment `{equipment_id}` does not exist.")
+            return
+
+        user_conf = self.config.user(ctx.author)
+        data = await user_conf.all()
+        vehicles = list(data.get("vehicles", []))
+        pool = dict(data.get("equipment_pool", {}))
+
+        v = next((x for x in vehicles if int(x.get("id")) == int(vehicle_id)), None)
+        if not v:
+            await ctx.send(f"Vehicle with ID `{vehicle_id}` not found.")
+            return
+
+        vdef = self.content.vehicles.get(v.get("def_id"))
+        if not vdef:
+            await ctx.send("This vehicle type is no longer defined; cannot check slots.")
+            return
+
+        if equipment_id not in vdef.equipment_slots:
+            await ctx.send(
+                f"{vdef.name} does not support equipment slot `{equipment_id}`.\n"
+                f"Allowed slots: {', '.join(vdef.equipment_slots) or 'None'}."
+            )
+            return
+
+        available = int(pool.get(equipment_id, 0))
+        if available < quantity:
+            await ctx.send(
+                f"You do not have enough `{equipment_id}` in your equipment pool.\n"
+                f"Requested: {quantity}, available: {available}."
+            )
+            return
+
+        current_eq = set(v.get("equipment", []))
+        current_eq.add(equipment_id)
+        v["equipment"] = list(current_eq)
+
+        pool[equipment_id] = available - quantity
+        if pool[equipment_id] <= 0:
+            pool.pop(equipment_id, None)
+
+        await user_conf.vehicles.set(vehicles)
+        await user_conf.equipment_pool.set(pool)
+
+        await ctx.send(
+            f"Assigned **{equipment_id}** to vehicle ID `{vehicle_id}` ({vdef.name})."
+        )
+
+    @fsc_equipment.command(name="unassign")
+    async def equipment_unassign(self, ctx: commands.Context, vehicle_id: int, equipment_id: str):
+        """
+        Remove equipment from a vehicle back into the pool.
+        """
+        user_conf = self.config.user(ctx.author)
+        data = await user_conf.all()
+        vehicles = list(data.get("vehicles", []))
+        pool = dict(data.get("equipment_pool", {}))
+
+        v = next((x for x in vehicles if int(x.get("id")) == int(vehicle_id)), None)
+        if not v:
+            await ctx.send(f"Vehicle with ID `{vehicle_id}` not found.")
+            return
+
+        eq_list = set(v.get("equipment", []))
+        if equipment_id not in eq_list:
+            await ctx.send(f"Vehicle ID `{vehicle_id}` does not have `{equipment_id}` assigned.")
+            return
+
+        eq_list.remove(equipment_id)
+        v["equipment"] = list(eq_list)
+
+        pool[equipment_id] = int(pool.get(equipment_id, 0)) + 1
+
+        await user_conf.vehicles.set(vehicles)
+        await user_conf.equipment_pool.set(pool)
+
+        await ctx.send(
+            f"Removed **{equipment_id}** from vehicle ID `{vehicle_id}` and returned it to your pool."
+        )
 
     # ------------------------------
     # TRAINING MODULE
@@ -692,6 +1089,11 @@ class FireStationCommand(commands.Cog):
                 await ctx.send("You already have this training running.")
                 return
 
+        cost = int(t_def.cost)
+        ok = await self._charge(ctx, ctx.author, cost, f"Training: {t_def.name}")
+        if not ok:
+            return
+
         expansions_ids = data.get("expansions", [])
         multiplier = self._apply_multiplier_with_expansions(
             "training_time_multiplier", expansions_ids, default=1.0
@@ -717,7 +1119,7 @@ class FireStationCommand(commands.Cog):
         finish_str = finish_time.strftime("%Y-%m-%d %H:%M UTC")
 
         await ctx.send(
-            f"Started training **{t_def.name}** (`{training_id}`).\n"
+            f"Started training **{t_def.name}** (`{training_id}`) for {cost} credits.\n"
             f"Estimated completion: `{finish_str}`."
         )
 
@@ -920,7 +1322,6 @@ class FireStationCommand(commands.Cog):
             if ex.id in owned:
                 status = "Built"
             elif ex.id in running_for:
-                # find job
                 job = next((j for j in jobs if j.get("expansion_id") == ex.id and not j.get("completed")), None)
                 if job:
                     remaining = max(0, (job.get("start_ts", 0) + job.get("duration", 0)) - now)
@@ -1032,6 +1433,11 @@ class FireStationCommand(commands.Cog):
                 await ctx.send("This expansion is already being built.")
                 return
 
+        cost = int(ex_def.base_cost)
+        ok = await self._charge(ctx, ctx.author, cost, f"Building expansion: {ex_def.name}")
+        if not ok:
+            return
+
         expansions_ids = list(owned)
         multiplier = self._apply_multiplier_with_expansions(
             "expansion_time_multiplier", expansions_ids, default=1.0
@@ -1057,7 +1463,7 @@ class FireStationCommand(commands.Cog):
         finish_str = finish_time.strftime("%Y-%m-%d %H:%M UTC")
 
         await ctx.send(
-            f"Started building expansion **{ex_def.name}** (`{expansion_id}`).\n"
+            f"Started building expansion **{ex_def.name}** (`{expansion_id}`) for {cost} credits.\n"
             f"Estimated completion: `{finish_str}`."
         )
 
@@ -1319,14 +1725,14 @@ class FireStationCommand(commands.Cog):
         await ctx.send(f"Mutual aid request `#{request_id}` has been cancelled.")
 
     # ------------------------------
-    # Missions with volunteers, wear, expansions and mutual aid
+    # Missions with volunteers, wear, equipment, mutual aid and economy
     # ------------------------------
 
     @fsc_group.command(name="mission")
     async def fsc_mission(self, ctx: commands.Context):
         """
         Request a mission and resolve it, including volunteer turnout,
-        vehicle wear and optional mutual aid.
+        vehicle equipment, mutual aid and payouts.
         """
         user_conf = self.config.user(ctx.author)
         data = await user_conf.all()
@@ -1356,10 +1762,17 @@ class FireStationCommand(commands.Cog):
         mission = random.choice(candidates)
 
         vehicles = list(data.get("vehicles", []))
-        expansions_ids = data.get("expansions", [])
 
         owned_defs = {v["def_id"] for v in vehicles}
         missing_vehicles = [vid for vid in mission.required_vehicles if vid not in owned_defs]
+
+        # Equipment coverage: count how many required_equipment are actually present on any responding vehicle
+        required_equipment = mission.required_equipment or []
+        equipment_present = set()
+        for v in vehicles:
+            for eq in v.get("equipment", []):
+                equipment_present.add(eq)
+        missing_equipment = [eq for eq in required_equipment if eq not in equipment_present]
 
         required_staff = 0
         for vid in mission.required_vehicles:
@@ -1382,13 +1795,21 @@ class FireStationCommand(commands.Cog):
         xp_factor = min(0.2, data["xp"] / 5000.0)
         tier_factor = (station_tier - mission.min_tier) * 0.05
         missing_vehicle_penalty = -0.25 if missing_vehicles else 0.0
+        missing_equipment_penalty = -0.15 * len(missing_equipment)
 
         if understaffed:
             staffing_penalty = -0.3 * (1.0 - staffing_ratio)
         else:
             staffing_penalty = 0.05
 
-        success_chance = base_chance + xp_factor + tier_factor + missing_vehicle_penalty + staffing_penalty
+        success_chance = (
+            base_chance
+            + xp_factor
+            + tier_factor
+            + missing_vehicle_penalty
+            + missing_equipment_penalty
+            + staffing_penalty
+        )
 
         mutual_bonus = 0.0
         mutual_helpers_ids: List[int] = []
@@ -1442,8 +1863,11 @@ class FireStationCommand(commands.Cog):
             for hid in mutual_helpers_ids:
                 helper_conf = self.config.user_from_id(hid)
                 hdata = await helper_conf.all()
-                await helper_conf.credits_earned.set(hdata.get("credits_earned", 0) + helper_credits_each)
                 await helper_conf.xp.set(hdata.get("xp", 0) + helper_xp_each)
+                helper_user = ctx.guild.get_member(hid) if ctx.guild else None
+                if helper_user is None:
+                    helper_user = self.bot.get_user(hid) or discord.Object(id=hid)
+                await self._payout(helper_user, helper_credits_each)
 
         new_xp = data["xp"] + xp_gain
         rep_change = 2 if success else -3
@@ -1451,7 +1875,7 @@ class FireStationCommand(commands.Cog):
 
         await user_conf.xp.set(new_xp)
         await user_conf.reputation.set(new_rep)
-        await user_conf.credits_earned.set(data["credits_earned"] + owner_credits)
+        await self._payout(ctx.author, owner_credits)
 
         if mutual_active:
             await user_conf.mutual_active.set(False)
@@ -1466,10 +1890,21 @@ class FireStationCommand(commands.Cog):
             value=", ".join(mission.required_vehicles) or "None",
             inline=False,
         )
+        embed.add_field(
+            name="Required equipment",
+            value=", ".join(required_equipment) or "None",
+            inline=False,
+        )
         if missing_vehicles:
             embed.add_field(
                 name="Missing vehicles",
                 value=", ".join(missing_vehicles),
+                inline=False,
+            )
+        if missing_equipment:
+            embed.add_field(
+                name="Missing equipment",
+                value=", ".join(missing_equipment),
                 inline=False,
             )
 
@@ -1533,7 +1968,7 @@ class FireStationCommand(commands.Cog):
                 inline=False,
             )
 
-        embed.set_footer(text="Expansions, repairs, trainings and mutual aid all influence your operations.")
+        embed.set_footer(text="Expansions, vehicles, trainings, equipment, repairs, mutual aid and economy all influence your operations.")
 
         await ctx.send(embed=embed)
 
@@ -1634,3 +2069,12 @@ class FireStationCommand(commands.Cog):
             chunks.append(chunk)
         for c in chunks:
             await ctx.send(c)
+
+    @fsc_admin.command(name="usebank")
+    async def admin_use_bank(self, ctx: commands.Context, use_bank: bool):
+        """Toggle using Red's bank as economy backend."""
+        await self.config.global_.use_bank_economy.set(use_bank)
+        if use_bank:
+            await ctx.send("Economy is now linked to Red's bank. Mission rewards and costs will use the bank.")
+        else:
+            await ctx.send("Economy is now using internal credits only.")

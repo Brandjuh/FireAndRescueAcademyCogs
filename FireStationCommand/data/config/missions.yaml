@@ -6,6 +6,9 @@ missions:
     base_credits: 200
     required_vehicles:
       - engine_basic
+    required_equipment:
+      - hose
+      - basic_tools
     description: "A small bin fire in a residential area. Quick response limits damage."
 
   - id: vehicle_collision
@@ -15,6 +18,9 @@ missions:
     base_credits: 350
     required_vehicles:
       - engine_basic
+    required_equipment:
+      - hose
+      - basic_tools
     description: "Two vehicles collided on a local road. Fire suppression and scene safety required."
 
   - id: rescue_call
@@ -24,4 +30,7 @@ missions:
     base_credits: 500
     required_vehicles:
       - rescue_basic
+    required_equipment:
+      - rescue_tools
+      - stabilization_kit
     description: "A person is trapped in a vehicle after a collision. Technical rescue is needed."
