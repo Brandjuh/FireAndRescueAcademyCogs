@@ -516,7 +516,7 @@ class RapidResponse(commands.Cog):
             embed.set_footer(text="Answers sent after this message will count!")
             embed.timestamp = datetime.utcnow()
             
-            round_msg = await channel.send("@here", embed=embed)
+            round_msg = await channel.send(embed=embed)
             game.round_message_id = round_msg.id
             game.round_start_time = time.time()
             
