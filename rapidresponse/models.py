@@ -82,6 +82,26 @@ class RapidResponseDB:
                 )
             """)
             
+            # User preferences table
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS user_preferences (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    notify_on_game_start INTEGER DEFAULT 0,
+                    PRIMARY KEY (guild_id, user_id)
+                )
+            """)
+            
+            # Mission list lockout tracking (for recovery on bot restart)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS mission_list_lockouts (
+                    game_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    locked_at TEXT NOT NULL,
+                    PRIMARY KEY (game_id, user_id)
+                )
+            """)
+            
             await db.commit()
         
         log.info(f"RapidResponse database initialized at {self.db_path}")
@@ -257,3 +277,59 @@ class RapidResponseDB:
                 'perfect_rounds': perfect_rounds,
                 'win_rate': (total_wins / total_games * 100) if total_games > 0 else 0.0
             }
+    
+    async def set_notify_preference(self, guild_id: int, user_id: int, notify: bool):
+        """Set user's notify preference."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT OR REPLACE INTO user_preferences (guild_id, user_id, notify_on_game_start)
+                VALUES (?, ?, ?)
+            """, (guild_id, user_id, 1 if notify else 0))
+            await db.commit()
+    
+    async def get_notify_preference(self, guild_id: int, user_id: int) -> bool:
+        """Get user's notify preference."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                SELECT notify_on_game_start FROM user_preferences
+                WHERE guild_id = ? AND user_id = ?
+            """, (guild_id, user_id))
+            result = await cursor.fetchone()
+            return bool(result[0]) if result else False
+    
+    async def get_notify_users(self, guild_id: int) -> List[int]:
+        """Get all users who want notifications for this guild."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                SELECT user_id FROM user_preferences
+                WHERE guild_id = ? AND notify_on_game_start = 1
+            """, (guild_id,))
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
+    
+    async def add_lockout(self, game_id: int, user_id: int):
+        """Track that a user has been locked out of mission list."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                INSERT OR IGNORE INTO mission_list_lockouts (game_id, user_id, locked_at)
+                VALUES (?, ?, ?)
+            """, (game_id, user_id, datetime.utcnow().isoformat()))
+            await db.commit()
+    
+    async def remove_lockout(self, game_id: int, user_id: int):
+        """Remove lockout tracking."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                DELETE FROM mission_list_lockouts
+                WHERE game_id = ? AND user_id = ?
+            """, (game_id, user_id))
+            await db.commit()
+    
+    async def get_lockouts_for_game(self, game_id: int) -> List[int]:
+        """Get all locked out users for a game."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                SELECT user_id FROM mission_list_lockouts WHERE game_id = ?
+            """, (game_id,))
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
