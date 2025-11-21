@@ -300,7 +300,7 @@ class RapidResponse(commands.Cog):
             name="⚠️ Important",
             value=(
                 "• Joining locks mission list access (prevents cheating)\n"
-                "• Solo mode: Perfect match = 2x entry, Not perfect = Lose entry\n"
+                "• Solo: Better score = More credits (up to 2x entry fee)\n"
                 "• Multiplayer: Winner takes all!"
             ),
             inline=False
@@ -491,9 +491,13 @@ class RapidResponse(commands.Cog):
                 embed.add_field(
                     name="🎮 Solo Mode",
                     value=(
-                        "Playing solo!\n"
-                        "🏆 Perfect match = **2x entry fee**\n"
-                        "💔 Not perfect = **Entry fee lost**"
+                        "Playing solo! Payout based on performance:\n"
+                        "🏆 Perfect = **2.0x** entry fee\n"
+                        "⭐ 80%+ = **1.5x** entry fee\n"
+                        "👍 60%+ = **1.25x** entry fee\n"
+                        "✅ 40%+ = Entry fee back\n"
+                        "😕 20%+ = **0.5x** entry fee\n"
+                        "💔 <20% = Entry fee lost"
                     ),
                     inline=False
                 )
@@ -664,44 +668,104 @@ class RapidResponse(commands.Cog):
             
             # Handle payouts
             if game.solo and winners:
-                # Solo mode: 2x entry fee for perfect, lose entry fee if not perfect
+                # Solo mode: Graduated payout based on score
                 winner_id = winners[0]
+                score = scores.get(winner_id, 0)
                 is_perfect = perfect_matches.get(winner_id, False)
                 
+                # Calculate max possible score for this mission
+                max_possible_score = 0
+                for vehicle_type, count in game.mission_requirements.items():
+                    max_possible_score += 2  # Type used
+                    max_possible_score += count  # Correct counts
+                max_possible_score += 4  # Perfect bonus
+                
+                # Calculate payout based on score percentage
                 if is_perfect:
-                    # Perfect score: get 2x entry fee
+                    # Perfect: 2x entry fee
                     winnings = game.entry_fee * 2
-                    await self.db.set_winner(game.game_id, winner_id, winnings)
-                    
+                    payout_type = "perfect"
+                elif score >= max_possible_score * 0.8:
+                    # 80%+ score: 1.5x entry fee
+                    winnings = int(game.entry_fee * 1.5)
+                    payout_type = "excellent"
+                elif score >= max_possible_score * 0.6:
+                    # 60%+ score: 1.25x entry fee
+                    winnings = int(game.entry_fee * 1.25)
+                    payout_type = "good"
+                elif score >= max_possible_score * 0.4:
+                    # 40%+ score: Entry fee back
+                    winnings = game.entry_fee
+                    payout_type = "okay"
+                elif score >= max_possible_score * 0.2:
+                    # 20%+ score: Half entry fee back
+                    winnings = game.entry_fee // 2
+                    payout_type = "poor"
+                else:
+                    # <20% score: Nothing
+                    winnings = 0
+                    payout_type = "failed"
+                
+                await self.db.set_winner(game.game_id, winner_id, winnings)
+                
+                if winnings > 0:
                     try:
                         winner = await self.bot.fetch_user(winner_id)
                         await bank.deposit_credits(winner, winnings)
                     except Exception as e:
                         log.error(f"Error paying solo winner {winner_id}: {e}")
-                    
-                    winner_user = self.bot.get_user(winner_id)
-                    embed.add_field(
-                        name="🏆 Perfect Solo Victory!",
-                        value=(
-                            f"{winner_user.mention}\n"
-                            f"Perfect match! You win: **{humanize_number(winnings)} credits** (2x entry fee)"
-                        ),
-                        inline=False
+                
+                winner_user = self.bot.get_user(winner_id)
+                
+                # Build message based on performance
+                if payout_type == "perfect":
+                    message = (
+                        f"{winner_user.mention}\n"
+                        f"🏆 **Perfect Match!**\n"
+                        f"Score: {score:.1f}/{max_possible_score:.1f}\n"
+                        f"You win: **{humanize_number(winnings)} credits** (2x entry fee!)"
                     )
-                else:
-                    # Not perfect: lose entry fee
-                    await self.db.set_winner(game.game_id, winner_id, 0)
-                    
-                    winner_user = self.bot.get_user(winner_id)
-                    embed.add_field(
-                        name="💔 Solo Game Complete",
-                        value=(
-                            f"{winner_user.mention}\n"
-                            f"Not a perfect match - entry fee lost.\n"
-                            f"💡 Get a perfect score next time to win 2x your entry fee!"
-                        ),
-                        inline=False
+                elif payout_type == "excellent":
+                    message = (
+                        f"{winner_user.mention}\n"
+                        f"⭐ **Excellent Performance!**\n"
+                        f"Score: {score:.1f}/{max_possible_score:.1f} ({score/max_possible_score*100:.0f}%)\n"
+                        f"You win: **{humanize_number(winnings)} credits** (1.5x entry fee)"
                     )
+                elif payout_type == "good":
+                    message = (
+                        f"{winner_user.mention}\n"
+                        f"👍 **Good Job!**\n"
+                        f"Score: {score:.1f}/{max_possible_score:.1f} ({score/max_possible_score*100:.0f}%)\n"
+                        f"You win: **{humanize_number(winnings)} credits** (1.25x entry fee)"
+                    )
+                elif payout_type == "okay":
+                    message = (
+                        f"{winner_user.mention}\n"
+                        f"✅ **Decent Attempt**\n"
+                        f"Score: {score:.1f}/{max_possible_score:.1f} ({score/max_possible_score*100:.0f}%)\n"
+                        f"Entry fee returned: **{humanize_number(winnings)} credits**"
+                    )
+                elif payout_type == "poor":
+                    message = (
+                        f"{winner_user.mention}\n"
+                        f"😕 **Needs Improvement**\n"
+                        f"Score: {score:.1f}/{max_possible_score:.1f} ({score/max_possible_score*100:.0f}%)\n"
+                        f"Partial refund: **{humanize_number(winnings)} credits** (50% of entry fee)"
+                    )
+                else:  # failed
+                    message = (
+                        f"{winner_user.mention}\n"
+                        f"💔 **Too Low Score**\n"
+                        f"Score: {score:.1f}/{max_possible_score:.1f} ({score/max_possible_score*100:.0f}%)\n"
+                        f"Entry fee lost. Practice more and try again!"
+                    )
+                
+                embed.add_field(
+                    name="🎮 Solo Game Results",
+                    value=message,
+                    inline=False
+                )
             elif winners:
                 # Multiplayer mode: split pot among winners
                 winnings_per_winner = game.total_pot // len(winners)
@@ -991,10 +1055,14 @@ class RapidResponse(commands.Cog):
         embed.add_field(
             name="🎮 Solo Mode",
             value=(
-                "Play alone to practice!\n"
-                "🏆 **Perfect match** = Win 2x your entry fee\n"
-                "💔 **Not perfect** = Lose your entry fee\n"
-                "High risk, high reward!"
+                "Play alone! Payouts based on score:\n"
+                "🏆 **100% (Perfect)** = 2.0x entry fee\n"
+                "⭐ **80-99%** = 1.5x entry fee\n"
+                "👍 **60-79%** = 1.25x entry fee\n"
+                "✅ **40-59%** = Entry fee back\n"
+                "😕 **20-39%** = Half entry fee back\n"
+                "💔 **<20%** = Entry fee lost\n\n"
+                "The better you play, the more you earn!"
             ),
             inline=False
         )
