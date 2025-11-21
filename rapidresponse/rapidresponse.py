@@ -327,12 +327,17 @@ class RapidResponse(commands.Cog):
             notify_role = ctx.guild.get_role(notify_role_id)
             if notify_role:
                 try:
+                    # Check if role is mentionable or if bot can mention it
+                    mentions = discord.AllowedMentions(roles=[notify_role])
                     await ctx.send(
-                        f"{notify_role.mention} A new Rapid Response game is starting!",
-                        allowed_mentions=discord.AllowedMentions(roles=True)
+                        f"{notify_role.mention} 🚒 A new Rapid Response game is starting!",
+                        allowed_mentions=mentions
                     )
+                    log.info(f"Pinged notify role {notify_role.name} for game start")
+                except discord.Forbidden:
+                    log.error(f"No permission to mention role {notify_role.name}")
                 except Exception as e:
-                    log.error(f"Error pinging notify role: {e}")
+                    log.error(f"Error pinging notify role: {e}", exc_info=True)
         
         # Start lobby timer
         game.lobby_task = self.bot.loop.create_task(self.lobby_timer(game))
@@ -854,20 +859,55 @@ class RapidResponse(commands.Cog):
     @commands.guild_only()
     async def rr_notify(self, ctx):
         """Toggle notifications for new Rapid Response games."""
-        current = await self.db.get_notify_preference(ctx.guild.id, ctx.author.id)
-        new_value = not current
+        notify_role_id = await self.config.guild(ctx.guild).notify_role_id()
         
-        await self.db.set_notify_preference(ctx.guild.id, ctx.author.id, new_value)
-        
-        if new_value:
+        if not notify_role_id:
             await ctx.send(
-                "✅ You will now be notified when new Rapid Response games start!\n"
-                f"You'll receive a ping via the game notification role."
+                "❌ Notify role not configured. "
+                "Ask an admin to set it with `[p]rr config notifyrole @Role`"
             )
+            return
+        
+        notify_role = ctx.guild.get_role(notify_role_id)
+        if not notify_role:
+            await ctx.send("❌ Notify role not found. Please contact an admin.")
+            return
+        
+        # Check if user has the role
+        if notify_role in ctx.author.roles:
+            # Remove role
+            try:
+                await ctx.author.remove_roles(notify_role, reason="Rapid Response notify disabled")
+                await self.db.set_notify_preference(ctx.guild.id, ctx.author.id, False)
+                await ctx.send(
+                    f"❌ You will no longer be notified about new Rapid Response games.\n"
+                    f"Role {notify_role.mention} removed."
+                )
+            except discord.Forbidden:
+                await ctx.send(
+                    "❌ I don't have permission to manage this role. "
+                    "Please contact an admin to fix bot permissions."
+                )
+            except Exception as e:
+                log.error(f"Error removing notify role: {e}", exc_info=True)
+                await ctx.send("❌ An error occurred while removing the role.")
         else:
-            await ctx.send(
-                "❌ You will no longer be notified about new Rapid Response games."
-            )
+            # Add role
+            try:
+                await ctx.author.add_roles(notify_role, reason="Rapid Response notify enabled")
+                await self.db.set_notify_preference(ctx.guild.id, ctx.author.id, True)
+                await ctx.send(
+                    f"✅ You will now be notified when new Rapid Response games start!\n"
+                    f"Role {notify_role.mention} added. You'll receive a ping when games begin."
+                )
+            except discord.Forbidden:
+                await ctx.send(
+                    "❌ I don't have permission to manage this role. "
+                    "Please contact an admin to fix bot permissions."
+                )
+            except Exception as e:
+                log.error(f"Error adding notify role: {e}", exc_info=True)
+                await ctx.send("❌ An error occurred while adding the role.")
     
     @rapidresponse.command(name="stats")
     @commands.guild_only()
@@ -984,6 +1024,45 @@ class RapidResponse(commands.Cog):
         """Set the role to ping for game notifications."""
         await self.config.guild(ctx.guild).notify_role_id.set(role.id)
         await ctx.send(f"✅ Notify role set to {role.mention}")
+    
+    @rr_config.command(name="testnotify")
+    async def rr_config_testnotify(self, ctx):
+        """Test the notify role ping (for debugging)."""
+        notify_role_id = await self.config.guild(ctx.guild).notify_role_id()
+        
+        if not notify_role_id:
+            await ctx.send("❌ No notify role configured. Use `[p]rr config notifyrole @Role` first.")
+            return
+        
+        notify_role = ctx.guild.get_role(notify_role_id)
+        if not notify_role:
+            await ctx.send("❌ Notify role not found. It may have been deleted.")
+            return
+        
+        # Test the ping
+        try:
+            mentions = discord.AllowedMentions(roles=[notify_role])
+            await ctx.send(
+                f"🧪 **Test Notification**\n{notify_role.mention} This is a test ping for Rapid Response notifications!",
+                allowed_mentions=mentions
+            )
+            await ctx.send("✅ Test ping sent successfully! If the role didn't ping, check:")
+            await ctx.send(
+                "1. Role must be mentionable OR bot must have permission to mention any role\n"
+                "2. Bot needs 'Mention @everyone, @here, and All Roles' permission\n"
+                "3. Bot's highest role must be above the notify role"
+            )
+        except discord.Forbidden:
+            await ctx.send(
+                "❌ I don't have permission to mention this role!\n\n"
+                "**Possible fixes:**\n"
+                "1. Make the role mentionable (Role Settings → Allow anyone to @mention)\n"
+                "2. Give the bot 'Mention @everyone, @here, and All Roles' permission\n"
+                "3. Move the bot's role above the notify role in role hierarchy"
+            )
+        except Exception as e:
+            await ctx.send(f"❌ Error testing notify: {str(e)}")
+            log.error(f"Error testing notify role: {e}", exc_info=True)
     
     @rapidresponse.command(name="help")
     async def rr_help(self, ctx):
