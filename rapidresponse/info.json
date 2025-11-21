@@ -1,0 +1,9 @@
+{
+    "author": ["BrandjuhNL"],
+    "description": "Rapid Response - A MissionChief guessing game where players identify vehicle requirements for random missions",
+    "install_msg": "Thank you for installing Rapid Response! Use [p]rapidresponse start to begin. Configure settings with [p]rapidresponse config.",
+    "short": "MissionChief vehicle guessing game",
+    "tags": ["game", "economy", "missionchief", "quiz"],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores user IDs, game statistics, and scores for gameplay purposes."
+}
