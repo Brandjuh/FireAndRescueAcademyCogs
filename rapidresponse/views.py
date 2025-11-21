@@ -50,8 +50,13 @@ class LobbyView(discord.ui.View):
             game.add_player(interaction.user.id)
             await self.cog.db.add_player(game.game_id, interaction.user.id, game.entry_fee)
             
+            # Lock mission list channel
+            await self.cog.lock_mission_list(interaction.guild.id, interaction.user.id)
+            await self.cog.db.add_lockout(game.game_id, interaction.user.id)
+            
             await interaction.followup.send(
-                f"✅ You've joined the game! Entry fee: {game.entry_fee} credits",
+                f"✅ You've joined the game! Entry fee: {game.entry_fee} credits\n"
+                f"⚠️ Mission list access temporarily disabled during game.",
                 ephemeral=True
             )
             
@@ -87,8 +92,13 @@ class LobbyView(discord.ui.View):
             # Remove player
             game.remove_player(interaction.user.id)
             
+            # Unlock mission list channel
+            await self.cog.unlock_mission_list(interaction.guild.id, interaction.user.id)
+            await self.cog.db.remove_lockout(game.game_id, interaction.user.id)
+            
             await interaction.followup.send(
-                f"You've left the game. Refunded {game.entry_fee} credits.",
+                f"You've left the game. Refunded {game.entry_fee} credits.\n"
+                f"✅ Mission list access restored.",
                 ephemeral=True
             )
             
