@@ -43,7 +43,9 @@ class RapidResponse(commands.Cog):
             "entry_fee": 1000,
             "lobby_duration": 60,
             "round_duration": 60,
-            "enabled": True
+            "enabled": True,
+            "mission_list_channel_id": 1436050384023191632,  # Channel to lock during games
+            "notify_role_id": 1441473542725046312  # Role to ping for game notifications
         }
         self.config.register_guild(**default_guild)
         
@@ -89,6 +91,15 @@ class RapidResponse(commands.Cog):
                 # Get players
                 players = await self.db.get_game_players(game_id)
                 
+                # Unlock mission list for all locked players
+                locked_users = await self.db.get_lockouts_for_game(game_id)
+                for user_id in locked_users:
+                    try:
+                        await self.unlock_mission_list(guild.id, user_id)
+                        await self.db.remove_lockout(game_id, user_id)
+                    except Exception as e:
+                        log.error(f"Error unlocking mission list for user {user_id}: {e}")
+                
                 # Refund all players
                 for player_data in players:
                     user_id = player_data['user_id']
@@ -111,12 +122,61 @@ class RapidResponse(commands.Cog):
                     if channel:
                         await channel.send(
                             "⚠️ A Rapid Response game was cancelled due to bot restart. "
-                            "All entry fees have been refunded."
+                            "All entry fees have been refunded and mission list access restored."
                         )
                 except Exception as e:
                     log.error(f"Error notifying channel {channel_id}: {e}")
         
         log.info("Recovery complete")
+    
+    async def lock_mission_list(self, guild_id: int, user_id: int):
+        """Lock mission list channel for a user."""
+        try:
+            mission_channel_id = await self.config.guild_from_id(guild_id).mission_list_channel_id()
+            guild = self.bot.get_guild(guild_id)
+            
+            if not guild:
+                return
+            
+            channel = guild.get_channel(mission_channel_id)
+            if not channel:
+                log.warning(f"Mission list channel {mission_channel_id} not found")
+                return
+            
+            member = guild.get_member(user_id)
+            if not member:
+                return
+            
+            # Set permission overwrite to deny view
+            await channel.set_permissions(member, view_channel=False, reason="Rapid Response game active")
+            log.info(f"Locked mission list for user {user_id}")
+            
+        except Exception as e:
+            log.error(f"Error locking mission list for user {user_id}: {e}", exc_info=True)
+    
+    async def unlock_mission_list(self, guild_id: int, user_id: int):
+        """Unlock mission list channel for a user."""
+        try:
+            mission_channel_id = await self.config.guild_from_id(guild_id).mission_list_channel_id()
+            guild = self.bot.get_guild(guild_id)
+            
+            if not guild:
+                return
+            
+            channel = guild.get_channel(mission_channel_id)
+            if not channel:
+                return
+            
+            member = guild.get_member(user_id)
+            if not member:
+                return
+            
+            # Remove the permission overwrite
+            await channel.set_permissions(member, overwrite=None, reason="Rapid Response game ended")
+            log.info(f"Unlocked mission list for user {user_id}")
+            
+        except Exception as e:
+            log.error(f"Error unlocking mission list for user {user_id}: {e}", exc_info=True)
     
     async def fetch_missions(self) -> List[Dict]:
         """Fetch missions from MissionChief API."""
@@ -237,6 +297,16 @@ class RapidResponse(commands.Cog):
         )
         
         embed.add_field(
+            name="⚠️ Important",
+            value=(
+                "• Joining locks mission list access (prevents cheating)\n"
+                "• Solo mode: Perfect match = 2x entry, Not perfect = Lose entry\n"
+                "• Multiplayer: Winner takes all!"
+            ),
+            inline=False
+        )
+        
+        embed.add_field(
             name="Players (0)",
             value="*No players yet*",
             inline=False
@@ -250,6 +320,19 @@ class RapidResponse(commands.Cog):
         # Send lobby message
         lobby_msg = await ctx.send(embed=embed, view=view)
         game.lobby_message_id = lobby_msg.id
+        
+        # Ping notify role if configured
+        notify_role_id = await self.config.guild(ctx.guild).notify_role_id()
+        if notify_role_id:
+            notify_role = ctx.guild.get_role(notify_role_id)
+            if notify_role:
+                try:
+                    await ctx.send(
+                        f"{notify_role.mention} A new Rapid Response game is starting!",
+                        allowed_mentions=discord.AllowedMentions(roles=True)
+                    )
+                except Exception as e:
+                    log.error(f"Error pinging notify role: {e}")
         
         # Start lobby timer
         game.lobby_task = self.bot.loop.create_task(self.lobby_timer(game))
@@ -407,7 +490,11 @@ class RapidResponse(commands.Cog):
             if game.solo:
                 embed.add_field(
                     name="🎮 Solo Mode",
-                    value="Playing solo - entry fee will be returned!",
+                    value=(
+                        "Playing solo!\n"
+                        "🏆 Perfect match = **2x entry fee**\n"
+                        "💔 Not perfect = **Entry fee lost**"
+                    ),
                     inline=False
                 )
             else:
@@ -509,10 +596,12 @@ class RapidResponse(commands.Cog):
             
             # Calculate scores
             scores = {}
+            perfect_matches = {}
             for user_id in game.players:
                 answer = game.player_answers[user_id]
                 score, is_perfect = calculate_score(game.mission_requirements, answer.vehicles)
                 scores[user_id] = score
+                perfect_matches[user_id] = is_perfect
                 
                 # Save to database
                 await self.db.save_answer(
@@ -531,6 +620,11 @@ class RapidResponse(commands.Cog):
             else:
                 winners = []
                 max_score = 0.0
+            
+            # Unlock mission list for all players
+            for user_id in game.players:
+                await self.unlock_mission_list(channel.guild.id, user_id)
+                await self.db.remove_lockout(game.game_id, user_id)
             
             # Create results embed
             embed = discord.Embed(
@@ -569,8 +663,47 @@ class RapidResponse(commands.Cog):
                 )
             
             # Handle payouts
-            if winners:
-                # Split pot among winners
+            if game.solo and winners:
+                # Solo mode: 2x entry fee for perfect, lose entry fee if not perfect
+                winner_id = winners[0]
+                is_perfect = perfect_matches.get(winner_id, False)
+                
+                if is_perfect:
+                    # Perfect score: get 2x entry fee
+                    winnings = game.entry_fee * 2
+                    await self.db.set_winner(game.game_id, winner_id, winnings)
+                    
+                    try:
+                        winner = await self.bot.fetch_user(winner_id)
+                        await bank.deposit_credits(winner, winnings)
+                    except Exception as e:
+                        log.error(f"Error paying solo winner {winner_id}: {e}")
+                    
+                    winner_user = self.bot.get_user(winner_id)
+                    embed.add_field(
+                        name="🏆 Perfect Solo Victory!",
+                        value=(
+                            f"{winner_user.mention}\n"
+                            f"Perfect match! You win: **{humanize_number(winnings)} credits** (2x entry fee)"
+                        ),
+                        inline=False
+                    )
+                else:
+                    # Not perfect: lose entry fee
+                    await self.db.set_winner(game.game_id, winner_id, 0)
+                    
+                    winner_user = self.bot.get_user(winner_id)
+                    embed.add_field(
+                        name="💔 Solo Game Complete",
+                        value=(
+                            f"{winner_user.mention}\n"
+                            f"Not a perfect match - entry fee lost.\n"
+                            f"💡 Get a perfect score next time to win 2x your entry fee!"
+                        ),
+                        inline=False
+                    )
+            elif winners:
+                # Multiplayer mode: split pot among winners
                 winnings_per_winner = game.total_pot // len(winners)
                 
                 for winner_id in winners:
@@ -588,24 +721,14 @@ class RapidResponse(commands.Cog):
                     if user:
                         winner_mentions.append(user.mention)
                 
-                if game.solo:
-                    embed.add_field(
-                        name="💰 Solo Winner",
-                        value=(
-                            f"{winner_mentions[0]}\n"
-                            f"Entry fee returned: **{humanize_number(winnings_per_winner)} credits**"
-                        ),
-                        inline=False
-                    )
-                else:
-                    embed.add_field(
-                        name="💰 Winners",
-                        value=(
-                            f"{', '.join(winner_mentions)}\n"
-                            f"Each wins: **{humanize_number(winnings_per_winner)} credits**"
-                        ),
-                        inline=False
-                    )
+                embed.add_field(
+                    name="💰 Winners",
+                    value=(
+                        f"{', '.join(winner_mentions)}\n"
+                        f"Each wins: **{humanize_number(winnings_per_winner)} credits**"
+                    ),
+                    inline=False
+                )
             
             # Show detailed breakdown for each player
             if len(game.players) <= 5:  # Only show details if not too many players
@@ -635,6 +758,11 @@ class RapidResponse(commands.Cog):
         try:
             channel = self.bot.get_channel(game.channel_id)
             
+            # Unlock mission list for all players
+            for user_id in game.players:
+                await self.unlock_mission_list(game.guild_id, user_id)
+                await self.db.remove_lockout(game.game_id, user_id)
+            
             # Refund all players
             for user_id in game.players:
                 try:
@@ -648,13 +776,34 @@ class RapidResponse(commands.Cog):
             
             # Notify channel
             if channel:
-                await channel.send(f"❌ {reason}. All entry fees have been refunded.")
+                await channel.send(
+                    f"❌ {reason}. All entry fees have been refunded and mission list access restored."
+                )
             
             # Clean up
             self.game_manager.remove_game(game.channel_id)
             
         except Exception as e:
             log.error(f"Error cancelling game: {e}", exc_info=True)
+    
+    @rapidresponse.command(name="notify")
+    @commands.guild_only()
+    async def rr_notify(self, ctx):
+        """Toggle notifications for new Rapid Response games."""
+        current = await self.db.get_notify_preference(ctx.guild.id, ctx.author.id)
+        new_value = not current
+        
+        await self.db.set_notify_preference(ctx.guild.id, ctx.author.id, new_value)
+        
+        if new_value:
+            await ctx.send(
+                "✅ You will now be notified when new Rapid Response games start!\n"
+                f"You'll receive a ping via the game notification role."
+            )
+        else:
+            await ctx.send(
+                "❌ You will no longer be notified about new Rapid Response games."
+            )
     
     @rapidresponse.command(name="stats")
     @commands.guild_only()
@@ -703,6 +852,22 @@ class RapidResponse(commands.Cog):
         embed.add_field(name="Lobby Duration", value=f"{config['lobby_duration']} seconds", inline=True)
         embed.add_field(name="Round Duration", value=f"{config['round_duration']} seconds", inline=True)
         
+        # Mission list channel
+        mission_channel = ctx.guild.get_channel(config['mission_list_channel_id'])
+        embed.add_field(
+            name="Mission List Channel",
+            value=mission_channel.mention if mission_channel else "Not set",
+            inline=True
+        )
+        
+        # Notify role
+        notify_role = ctx.guild.get_role(config['notify_role_id'])
+        embed.add_field(
+            name="Notify Role",
+            value=notify_role.mention if notify_role else "Not set",
+            inline=True
+        )
+        
         await ctx.send(embed=embed)
     
     @rr_config.command(name="entryfee")
@@ -743,6 +908,18 @@ class RapidResponse(commands.Cog):
         
         status = "enabled" if not current else "disabled"
         await ctx.send(f"✅ Rapid Response {status}.")
+    
+    @rr_config.command(name="missionchannel")
+    async def rr_config_missionchannel(self, ctx, channel: discord.TextChannel):
+        """Set the mission list channel to lock during games."""
+        await self.config.guild(ctx.guild).mission_list_channel_id.set(channel.id)
+        await ctx.send(f"✅ Mission list channel set to {channel.mention}")
+    
+    @rr_config.command(name="notifyrole")
+    async def rr_config_notifyrole(self, ctx, role: discord.Role):
+        """Set the role to ping for game notifications."""
+        await self.config.guild(ctx.guild).notify_role_id.set(role.id)
+        await ctx.send(f"✅ Notify role set to {role.mention}")
     
     @rapidresponse.command(name="help")
     async def rr_help(self, ctx):
@@ -804,8 +981,29 @@ class RapidResponse(commands.Cog):
             name="📊 Commands",
             value=(
                 f"`{ctx.prefix}rr start` - Start a new game\n"
+                f"`{ctx.prefix}rr notify` - Toggle game start notifications\n"
                 f"`{ctx.prefix}rr stats [@user]` - View statistics\n"
                 f"`{ctx.prefix}rr config` - Admin settings"
+            ),
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🎮 Solo Mode",
+            value=(
+                "Play alone to practice!\n"
+                "🏆 **Perfect match** = Win 2x your entry fee\n"
+                "💔 **Not perfect** = Lose your entry fee\n"
+                "High risk, high reward!"
+            ),
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🔒 Mission List Lockout",
+            value=(
+                "When you join a game, you temporarily lose access to the mission list channel.\n"
+                "This prevents cheating! Access is restored when the game ends."
             ),
             inline=False
         )
