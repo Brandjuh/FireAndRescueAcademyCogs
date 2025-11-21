@@ -407,7 +407,7 @@ class RapidResponse(commands.Cog):
             if game.solo:
                 embed.add_field(
                     name="🎮 Solo Mode",
-                    value="Playing solo - no pot payout, stats only!",
+                    value="Playing solo - entry fee will be returned!",
                     inline=False
                 )
             else:
@@ -569,7 +569,7 @@ class RapidResponse(commands.Cog):
                 )
             
             # Handle payouts
-            if not game.solo and winners:
+            if winners:
                 # Split pot among winners
                 winnings_per_winner = game.total_pot // len(winners)
                 
@@ -588,20 +588,24 @@ class RapidResponse(commands.Cog):
                     if user:
                         winner_mentions.append(user.mention)
                 
-                embed.add_field(
-                    name="💰 Winners",
-                    value=(
-                        f"{', '.join(winner_mentions)}\n"
-                        f"Each wins: **{humanize_number(winnings_per_winner)} credits**"
-                    ),
-                    inline=False
-                )
-            elif game.solo:
-                embed.add_field(
-                    name="🎮 Solo Mode",
-                    value="No pot payout in solo mode - but great practice!",
-                    inline=False
-                )
+                if game.solo:
+                    embed.add_field(
+                        name="💰 Solo Winner",
+                        value=(
+                            f"{winner_mentions[0]}\n"
+                            f"Entry fee returned: **{humanize_number(winnings_per_winner)} credits**"
+                        ),
+                        inline=False
+                    )
+                else:
+                    embed.add_field(
+                        name="💰 Winners",
+                        value=(
+                            f"{', '.join(winner_mentions)}\n"
+                            f"Each wins: **{humanize_number(winnings_per_winner)} credits**"
+                        ),
+                        inline=False
+                    )
             
             # Show detailed breakdown for each player
             if len(game.players) <= 5:  # Only show details if not too many players
