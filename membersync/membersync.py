@@ -43,9 +43,11 @@ def _mc_profile_url(mc_id: str) -> str:
     return f"https://www.missionchief.com/users/{mc_id}"
 
 class MemberSync(commands.Cog):
-    """Synchronises Missionchief members with Discord and handles verification workflow."""
+    """Synchronises Missionchief members with Discord and handles verification workflow.
+    
+    Author: BrandjuhNL"""
 
-    __version__ = "2.3.0"
+    __version__ = "2.3.1"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -742,270 +744,6 @@ class MemberSync(commands.Cog):
         """MemberSync administration."""
         pass
 
-    @membersync_group.command(name="fulltest")
-    @checks.is_owner()
-    async def full_test(self, ctx: commands.Context, test_member: Optional[discord.Member] = None):
-        """Run a comprehensive test of all MemberSync functionality.
-        
-        Tests:
-        1. First verify attempt (not in DB) → queued
-        2. Second verify attempt → already in queue message
-        3. User found in DB → auto-approval + role granted
-        4. User left alliance → prune removes role
-        """
-        
-        if test_member is None:
-            test_member = ctx.author
-        
-        test_mc_id = "999999"
-        test_mc_name = "TestUser999"
-        
-        embed = discord.Embed(
-            title="🧪 MemberSync Full Test",
-            description=f"Testing all functionality with {test_member.mention}",
-            color=discord.Color.blue()
-        )
-        
-        test_msg = await ctx.send(embed=embed)
-        
-        results = []
-        
-        # ========== TEST 1: First verify (not in DB) ==========
-        results.append("\n**TEST 1: First Verify (Not in DB)**")
-        try:
-            # Make sure user is not already in queue or linked
-            q = await self.config.queue()
-            q.pop(str(test_member.id), None)
-            await self.config.queue.set(q)
-            
-            # Remove any existing link
-            def _remove_link():
-                con = sqlite3.connect(self.links_db)
-                try:
-                    con.execute("DELETE FROM links WHERE discord_id=?", (str(test_member.id),))
-                    con.commit()
-                finally:
-                    con.close()
-            await asyncio.get_running_loop().run_in_executor(None, _remove_link)
-            
-            # Simulate verify when NOT in database
-            # User should be added to queue
-            expected_completion = datetime.utcnow() + timedelta(hours=1, minutes=15)
-            expected_timestamp = int(expected_completion.timestamp())
-            
-            q = await self.config.queue()
-            q[str(test_member.id)] = {
-                "attempts": 0,
-                "enqueued_at": utcnow_iso(),
-                "by": test_member.display_name,
-                "mc_id": test_mc_id,
-                "guild_id": int(ctx.guild.id),
-            }
-            await self.config.queue.set(q)
-            
-            # Verify queue entry
-            q_check = await self.config.queue()
-            if str(test_member.id) in q_check:
-                results.append("✅ User added to queue successfully")
-                results.append(f"   Expected completion: <t:{expected_timestamp}:R>")
-            else:
-                results.append("❌ FAILED: User not added to queue")
-            
-        except Exception as e:
-            results.append(f"❌ FAILED: {e}")
-        
-        # Update embed
-        embed.description = "\n".join(results)
-        await test_msg.edit(embed=embed)
-        await asyncio.sleep(2)
-        
-        # ========== TEST 2: Second verify (already in queue) ==========
-        results.append("\n**TEST 2: Second Verify (Already in Queue)**")
-        try:
-            q = await self.config.queue()
-            if str(test_member.id) in q:
-                existing = q[str(test_member.id)]
-                attempts = existing.get("attempts", 0)
-                
-                # This should show "already in queue" message
-                results.append("✅ User is in queue")
-                results.append(f"   Attempts: {attempts}/30")
-                
-                # Simulate the "already in queue" response
-                enqueued_at = existing.get("enqueued_at", "Unknown")
-                try:
-                    enqueued_dt = datetime.fromisoformat(enqueued_at.replace('Z', '+00:00'))
-                    enqueued_timestamp = int(enqueued_dt.timestamp())
-                    results.append(f"   Queued since: <t:{enqueued_timestamp}:R>")
-                except:
-                    results.append(f"   Queued at: {enqueued_at[:19]}")
-                
-                results.append("✅ Would show 'already in queue' message to user")
-            else:
-                results.append("❌ FAILED: User not in queue")
-        except Exception as e:
-            results.append(f"❌ FAILED: {e}")
-        
-        # Update embed
-        embed.description = "\n".join(results)
-        await test_msg.edit(embed=embed)
-        await asyncio.sleep(2)
-        
-        # ========== TEST 3: User found in DB → Approval + Role ==========
-        results.append("\n**TEST 3: User Found → Auto-Approval + Role**")
-        try:
-            # Simulate finding user and approving
-            auto_approve = await self.config.auto_approve()
-            results.append(f"   Auto-approve mode: {'ON' if auto_approve else 'OFF'}")
-            
-            # Approve the link
-            ok, msg = await self._approve_link(
-                ctx.guild,
-                test_member,
-                test_mc_id,
-                approver=ctx.author if isinstance(ctx.author, discord.Member) else None,
-                manual=False
-            )
-            
-            if ok:
-                results.append("✅ User approved successfully")
-                
-                # Check if role was granted
-                role_id = await self.config.verified_role_id()
-                role = ctx.guild.get_role(int(role_id)) if role_id else None
-                
-                if role:
-                    if role in test_member.roles:
-                        results.append(f"✅ Role {role.name} granted successfully")
-                    else:
-                        results.append(f"⚠️ Role exists but not in user's roles (check bot permissions)")
-                else:
-                    results.append("⚠️ No verified role configured")
-                
-                # Check database link
-                link = await self.get_link_for_discord(test_member.id)
-                if link and link.get('status') == 'approved':
-                    results.append(f"✅ Link created in database")
-                    results.append(f"   Discord: {test_member.id}")
-                    results.append(f"   MC ID: {link.get('mc_user_id')}")
-                else:
-                    results.append("❌ Link not found in database")
-                
-                # Remove from queue
-                q = await self.config.queue()
-                if str(test_member.id) in q:
-                    q.pop(str(test_member.id))
-                    await self.config.queue.set(q)
-                    results.append("✅ Removed from queue")
-            else:
-                results.append(f"❌ FAILED to approve: {msg}")
-            
-        except Exception as e:
-            results.append(f"❌ FAILED: {e}")
-            import traceback
-            results.append(f"```{traceback.format_exc()[:200]}```")
-        
-        # Update embed
-        embed.description = "\n".join(results)
-        await test_msg.edit(embed=embed)
-        await asyncio.sleep(2)
-        
-        # ========== TEST 4: User left alliance → Prune removes role ==========
-        results.append("\n**TEST 4: User Left Alliance → Prune Removes Role**")
-        try:
-            role_id = await self.config.verified_role_id()
-            role = ctx.guild.get_role(int(role_id)) if role_id else None
-            
-            if not role:
-                results.append("⚠️ SKIPPED: No verified role configured")
-            else:
-                # Check if user has role before prune
-                had_role_before = role in test_member.roles
-                results.append(f"   Role before prune: {'YES' if had_role_before else 'NO'}")
-                
-                if had_role_before:
-                    # Simulate prune (user not in alliance DB)
-                    # The prune checks if MC ID exists in members_current
-                    # Since test_mc_id (999999) won't exist, prune should remove role
-                    
-                    link = await self.get_link_for_discord(test_member.id)
-                    if link:
-                        mcid = str(link["mc_user_id"])
-                        
-                        # Query alliance DB to confirm user is NOT there
-                        rows = await self._query_alliance(
-                            "SELECT * FROM members_current WHERE user_id=? OR mc_user_id=? OR profile_href LIKE ?",
-                            (mcid, mcid, f"%/users/{mcid}")
-                        )
-                        
-                        if not rows:
-                            results.append(f"✅ User MC ID {mcid} not in alliance DB (as expected for test)")
-                            
-                            # Remove role (simulating prune)
-                            try:
-                                await test_member.remove_roles(role, reason="MemberSync TEST: simulated prune")
-                                results.append(f"✅ Role {role.name} removed successfully")
-                                
-                                # Verify removal
-                                if role not in test_member.roles:
-                                    results.append("✅ PRUNE TEST PASSED")
-                                else:
-                                    results.append("⚠️ Role removal didn't take effect immediately")
-                            except Exception as e:
-                                results.append(f"❌ Failed to remove role: {e}")
-                        else:
-                            results.append(f"⚠️ User IS in alliance DB (unexpected)")
-                    else:
-                        results.append("❌ No link found for user")
-                else:
-                    results.append("⚠️ User doesn't have role, skipping prune test")
-            
-        except Exception as e:
-            results.append(f"❌ FAILED: {e}")
-            import traceback
-            results.append(f"```{traceback.format_exc()[:200]}```")
-        
-        # ========== CLEANUP ==========
-        results.append("\n**CLEANUP**")
-        try:
-            # Remove from queue
-            q = await self.config.queue()
-            if str(test_member.id) in q:
-                q.pop(str(test_member.id))
-                await self.config.queue.set(q)
-            
-            # Remove link from database
-            def _remove_link():
-                con = sqlite3.connect(self.links_db)
-                try:
-                    con.execute("DELETE FROM links WHERE discord_id=?", (str(test_member.id),))
-                    con.commit()
-                finally:
-                    con.close()
-            await asyncio.get_running_loop().run_in_executor(None, _remove_link)
-            
-            # Remove role if still has it
-            role_id = await self.config.verified_role_id()
-            role = ctx.guild.get_role(int(role_id)) if role_id else None
-            if role and role in test_member.roles:
-                try:
-                    await test_member.remove_roles(role, reason="MemberSync TEST: cleanup")
-                except:
-                    pass
-            
-            results.append("✅ Cleanup complete")
-            
-        except Exception as e:
-            results.append(f"⚠️ Cleanup error: {e}")
-        
-        # Final update
-        results.append("\n**TEST COMPLETE** ✅")
-        embed.description = "\n".join(results)
-        embed.color = discord.Color.green()
-        await test_msg.edit(embed=embed)
-        
-        await self._debug_log("Full test completed")
-
     @membersync_group.command(name="health")
     async def health_check(self, ctx: commands.Context):
         """Check if all background loops are running properly."""
@@ -1093,6 +831,49 @@ class MemberSync(commands.Cog):
             await ctx.send(f"✅ Restarted: {', '.join(restarted)}")
         else:
             await ctx.send("✅ All loops are already running!")
+
+    @membersync_group.command(name="forcequeue")
+    async def force_queue_process(self, ctx: commands.Context):
+        """Manually force process the queue once (emergency debug tool)."""
+        msg = await ctx.send("🔄 Forcing queue processing...")
+        
+        try:
+            await self._debug_log("=" * 50)
+            await self._debug_log("MANUAL QUEUE PROCESS STARTED")
+            await self._debug_log("=" * 50)
+            await self._process_queue_once()
+            await msg.edit(content="✅ Queue processed! Check debug logs.")
+        except Exception as e:
+            await msg.edit(content=f"❌ Queue processing failed: {e}")
+            log.exception("Manual queue process error")
+            await self._debug_log(f"CRITICAL: Manual queue process failed: {e}", "error")
+
+    @membersync_group.command(name="queuedebug")
+    async def queue_debug(self, ctx: commands.Context):
+        """Deep debug of queue data structure."""
+        queue = await self.config.queue()
+        
+        embed = discord.Embed(title="🐛 Queue Debug", color=discord.Color.red())
+        embed.add_field(name="Queue Size", value=len(queue), inline=False)
+        
+        if queue:
+            for user_id, data in list(queue.items())[:5]:
+                member = ctx.guild.get_member(int(user_id))
+                name = f"{member.display_name} ({member.name})" if member else f"Unknown ({user_id})"
+                
+                value = f"```json\n{str(data)[:200]}```"
+                embed.add_field(name=name, value=value, inline=False)
+        
+        # Check if guild is configured
+        guild_id = await self.config.guild_id()
+        embed.add_field(name="Configured Guild ID", value=str(guild_id), inline=True)
+        embed.add_field(name="Current Guild ID", value=str(ctx.guild.id), inline=True)
+        
+        # Check auto-approve
+        auto = await self.config.auto_approve()
+        embed.add_field(name="Auto-Approve", value="✅ Enabled" if auto else "❌ Disabled", inline=True)
+        
+        await ctx.send(embed=embed)
 
     @membersync_group.command(name="queueinfo")
     async def queue_info(self, ctx: commands.Context, member: discord.Member):
