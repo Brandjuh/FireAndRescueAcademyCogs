@@ -47,7 +47,7 @@ class MemberSync(commands.Cog):
     
     Author: BrandjuhNL"""
 
-    __version__ = "2.3.1"
+    __version__ = "2.3.2"
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -627,11 +627,20 @@ class MemberSync(commands.Cog):
                     await self._debug_log(f"Error processing queue item {user_id}: {e}", "error")
                     log.exception(f"Error processing queue item {user_id}")
 
+            # Remove completed items
             if done:
                 for uid in done:
                     queue.pop(uid, None)
-                await self.config.queue.set(queue)
                 await self._debug_log(f"Removed {len(done)} items from queue")
+            
+            # CRITICAL FIX: Always save queue to persist attempt counter updates
+            # Not just when items are removed!
+            await self.config.queue.set(queue)
+            
+            if queue:
+                await self._debug_log(f"Queue saved: {len(queue)} items remaining")
+            else:
+                await self._debug_log("Queue now empty")
         
         except Exception as e:
             log.exception("Critical error in _process_queue_once: %s", e)
