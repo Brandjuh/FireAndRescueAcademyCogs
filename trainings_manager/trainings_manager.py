@@ -107,9 +107,12 @@ DISCIPLINES: Dict[str, List[Tuple[str, int]]] = {
         ("Hazmat Medic Training", 3),
         ("Tactical Medic Training", 4),
         ("Truck Driver's License", 2),
+        ("Mountain Dog Training", 5),
+(       ("Mountain Rescue Certificate", 5)
     ],
-    "TEST": [
-        ("TEST DEBUG", 0), 
+    "OTHER": [
+        ("Not specified (USE REFERENCE)", 0),
+        ("TEST DEBUG (DO NOT USE)", 0),
     ],
 }
 
