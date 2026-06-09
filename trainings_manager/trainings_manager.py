@@ -84,6 +84,7 @@ DISCIPLINES: Dict[str, List[Tuple[str, int]]] = {
         ("EMS Mobile Command", 7),
         ("HazMat", 3),
         ("Heavy Machinery Operating", 3),
+        ("Hooklift Truck Driving", 4),
         ("Hotshot Crew Training", 3),
         ("Law Enforcement for Arson Investigation", 4),
         ("Lifeguard Supervisor", 5),
