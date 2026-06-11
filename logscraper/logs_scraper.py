@@ -3,7 +3,7 @@ from redbot.core import commands, Config, data_manager
 import aiohttp
 import asyncio
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from pathlib import Path
 import re
@@ -85,6 +85,14 @@ class LogsScraper(commands.Cog):
         """Cancel background task on unload"""
         if self.scrape_task:
             self.scrape_task.cancel()
+
+    @staticmethod
+    def _next_scrape_time(now):
+        """Return the next hourly :15 scrape time."""
+        next_run = now.replace(minute=15, second=0, microsecond=0)
+        if now >= next_run:
+            next_run += timedelta(hours=1)
+        return next_run
     
     async def _background_scrape(self):
         """Background task - scrapes every hour at :15"""
@@ -94,9 +102,7 @@ class LogsScraper(commands.Cog):
             try:
                 # Wait until next :15 mark
                 now = datetime.now()
-                next_run = now.replace(minute=15, second=0, microsecond=0)
-                if now.minute >= 15:
-                    next_run = next_run.replace(hour=(now.hour + 1) % 24)
+                next_run = self._next_scrape_time(now)
                 
                 wait_seconds = (next_run - now).total_seconds()
                 await self._debug_log(f"⏰ Next auto-scrape: {next_run.strftime('%H:%M')}")
