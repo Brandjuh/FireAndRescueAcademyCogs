@@ -1,0 +1,60 @@
+from datetime import datetime
+from pathlib import Path
+
+from redbot.core import commands, data_manager
+
+from .fixture_capture import sanitize_applications_fixture
+
+
+class ApplicationsFixtureCapture(commands.Cog):
+    """Owner-only helper for capturing local ApplicationsScraper fixtures."""
+
+    def __init__(self, bot):
+        self.bot = bot
+
+    @commands.command(name="capture_applications_fixture")
+    @commands.is_owner()
+    async def capture_applications_fixture(self, ctx):
+        """Capture private raw HTML and a sanitized review fixture locally."""
+        applications_scraper = self.bot.get_cog("ApplicationsScraper")
+        cookie_manager = self.bot.get_cog("CookieManager")
+        if not applications_scraper or not cookie_manager:
+            await ctx.send(
+                "Fixture capture failed: ApplicationsScraper and CookieManager must be loaded."
+            )
+            return
+
+        try:
+            session = await cookie_manager.get_session()
+            async with session.get(applications_scraper.applications_url) as response:
+                if response.status != 200:
+                    await ctx.send(f"Fixture capture failed: HTTP status {response.status}.")
+                    return
+                html = await response.text()
+        except Exception as exc:
+            await ctx.send(f"Fixture capture failed: {exc}")
+            return
+
+        if not await applications_scraper._check_logged_in(html):
+            await ctx.send("Fixture capture failed: the MissionChief session is not logged in.")
+            return
+
+        capture_dir = Path(
+            data_manager.cog_data_path(raw_name="applicationscraper_fixture_captures")
+        )
+        capture_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        raw_path = capture_dir / f"applications-{timestamp}.raw-private.html"
+        sanitized_path = capture_dir / f"applications-{timestamp}.sanitized-review.html"
+
+        raw_path.write_text(html, encoding="utf-8")
+        sanitized_path.write_text(sanitize_applications_fixture(html), encoding="utf-8")
+
+        await ctx.send(
+            "Fixture capture completed locally.\n"
+            f"Private raw file: `{raw_path}`\n"
+            f"Sanitized review file: `{sanitized_path}`\n"
+            "Review the sanitized file manually before sharing or committing it. "
+            "The bot will not upload either file."
+        )
