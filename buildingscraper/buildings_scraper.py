@@ -1,12 +1,14 @@
 import discord
 from redbot.core import commands, Config, data_manager
-import aiohttp
 import asyncio
+import logging
 import sqlite3
 from datetime import datetime
-from bs4 import BeautifulSoup
-from pathlib import Path
-import re
+
+from .parsing import next_hourly_run, parse_buildings_html
+
+log = logging.getLogger("red.FARA.BuildingsScraper")
+
 
 class BuildingsScraper(commands.Cog):
     """Scrapes alliance buildings from MissionChief"""
@@ -54,9 +56,7 @@ class BuildingsScraper(commands.Cog):
         while True:
             try:
                 now = datetime.now()
-                next_run = now.replace(minute=45, second=0, microsecond=0)
-                if now.minute >= 45:
-                    next_run = next_run.replace(hour=now.hour + 1)
+                next_run = next_hourly_run(now)
                 wait_seconds = (next_run - now).total_seconds()
                 
                 await asyncio.sleep(wait_seconds)
@@ -93,8 +93,8 @@ class BuildingsScraper(commands.Cog):
         if self.debug_mode and ctx:
             try:
                 await ctx.send(message)
-            except:
-                pass
+            except Exception:
+                log.exception("Failed to send buildings scraper debug message")
     
     async def _scrape_all_buildings(self, ctx=None):
         """Scrape all buildings from the buildings page"""
@@ -115,53 +115,15 @@ class BuildingsScraper(commands.Cog):
                 html = await resp.text()
                 await self._debug_log(f"📄 HTML: {len(html)} chars", ctx)
                 
-                # Parse buildings
-                soup = BeautifulSoup(html, 'html.parser')
-                buildings = []
+                buildings = parse_buildings_html(html)
                 
-                # Find all building rows - look for links to /buildings/
-                for link in soup.find_all('a', href=lambda x: x and '/buildings/' in str(x)):
-                    # Extract building ID
-                    match = re.search(r'/buildings/(\d+)', link['href'])
-                    if not match:
-                        continue
-                    
-                    building_id = int(match.group(1))
-                    
-                    # Get parent row for more info
-                    row = link.find_parent('tr')
-                    if not row:
-                        continue
-                    
-                    # Extract data
-                    building_name = link.get_text(strip=True)
-                    
-                    # Find owner (usually in another column)
-                    cols = row.find_all('td')
-                    owner_name = "Unknown"
-                    classrooms = 0
-                    
-                    for col in cols:
-                        # Look for owner link
-                        owner_link = col.find('a', href=lambda x: x and '/users/' in str(x))
-                        if owner_link:
-                            owner_name = owner_link.get_text(strip=True)
-                        
-                        # Look for classroom count
-                        text = col.get_text(strip=True)
-                        classroom_match = re.search(r'(\d+)\s*classroom', text, re.IGNORECASE)
-                        if classroom_match:
-                            classrooms = int(classroom_match.group(1))
-                    
-                    buildings.append({
-                        'building_id': building_id,
-                        'owner_name': owner_name,
-                        'building_type': building_name,
-                        'classrooms': classrooms
-                    })
-                    
-                    if self.debug_mode:
-                        await self._debug_log(f"🏢 {owner_name}: {building_name} (ID: {building_id}, Classrooms: {classrooms})", ctx)
+                if self.debug_mode:
+                    for building in buildings:
+                        await self._debug_log(
+                            f"{building['owner_name']}: {building['building_type']} "
+                            f"(ID: {building['building_id']}, Classrooms: {building['classrooms']})",
+                            ctx,
+                        )
                 
                 if not buildings:
                     await self._debug_log("⚠️ No buildings found", ctx)
