@@ -26,17 +26,24 @@ class ApplicationsFixtureCapture(commands.Cog):
 
         try:
             session = await cookie_manager.get_session()
-            async with session.get(applications_scraper.applications_url) as response:
+            async with session.get(
+                applications_scraper.applications_url,
+                allow_redirects=True,
+            ) as response:
                 if response.status != 200:
                     await ctx.send(f"Fixture capture failed: HTTP status {response.status}.")
                     return
                 html = await response.text()
+                final_url = str(response.url)
         except Exception as exc:
             await ctx.send(f"Fixture capture failed: {exc}")
             return
 
-        if not await applications_scraper._check_logged_in(html):
-            await ctx.send("Fixture capture failed: the MissionChief session is not logged in.")
+        login_failure_fragments = await cookie_manager.config.login_failure_url_contains()
+        if any(fragment in final_url for fragment in login_failure_fragments):
+            await ctx.send(
+                f"Fixture capture failed: MissionChief redirected to a login page ({final_url})."
+            )
             return
 
         capture_dir = Path(
