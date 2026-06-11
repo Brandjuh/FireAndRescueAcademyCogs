@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 from bs4 import BeautifulSoup
 
 from applicationscraper.applications_scraper import ApplicationsScraper
-from applicationscraper.fixture_capture import sanitize_applications_fixture
+from applicationscraper.fixture_capture import inspect_applications_page, sanitize_applications_fixture
 from applicationscraper.fixture_capture_cog import ApplicationsFixtureCapture
 
 
@@ -39,6 +39,30 @@ class _FakeSession:
 
 
 class FixtureSanitizerTests(unittest.TestCase):
+    def test_inspection_reports_empty_and_populated_pages(self):
+        empty = inspect_applications_page("<div class='alert'>No applications</div>")
+        populated = inspect_applications_page(
+            """
+            <table class="table"><tbody><tr><td><a href="/profile/123">A</a></td></tr></tbody></table>
+            <div class="card"><a href="/profile/456">B</a></div>
+            <li class="application"><a href="/profile/789">C</a></li>
+            """
+        )
+
+        self.assertEqual(
+            empty,
+            {
+                "table_rows": 0,
+                "cards_or_panels": 0,
+                "application_list_items": 0,
+                "profile_links": 0,
+            },
+        )
+        self.assertEqual(populated["table_rows"], 1)
+        self.assertEqual(populated["cards_or_panels"], 1)
+        self.assertEqual(populated["application_list_items"], 1)
+        self.assertEqual(populated["profile_links"], 3)
+
     def test_removes_secrets_and_personal_data_while_preserving_parser_markers(self):
         sanitized = sanitize_applications_fixture(
             """
@@ -136,6 +160,10 @@ class FixtureSanitizerTests(unittest.TestCase):
             self.assertEqual(attachment.filename, sanitized_file.name)
             self.assertNotEqual(Path(attachment.path), raw_file)
             self.assertIn("private raw file remains local", sent_message.args[0].lower())
+            self.assertIn(
+                "capture again while an application is pending",
+                sent_message.args[0].lower(),
+            )
 
     def test_capture_command_rejects_a_real_login_redirect(self):
         applications_scraper = types.SimpleNamespace(
