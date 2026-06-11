@@ -5,9 +5,9 @@ from bs4 import BeautifulSoup
 
 
 def parse_buildings_html(html: str) -> list[dict]:
-    """Extract alliance buildings from a MissionChief buildings page."""
+    """Extract buildings while preserving the scraper's existing behavior."""
     soup = BeautifulSoup(html, "html.parser")
-    buildings = {}
+    buildings = []
 
     for link in soup.find_all("a", href=lambda value: value and "/buildings/" in str(value)):
         match = re.search(r"/buildings/(\d+)", link["href"])
@@ -16,9 +16,6 @@ def parse_buildings_html(html: str) -> list[dict]:
             continue
 
         building_id = int(match.group(1))
-        if building_id in buildings:
-            continue
-
         owner_name = "Unknown"
         classrooms = 0
 
@@ -28,21 +25,23 @@ def parse_buildings_html(html: str) -> list[dict]:
                 owner_name = owner_link.get_text(strip=True)
 
             classroom_match = re.search(
-                r"(\d+)\s*classrooms?\b",
-                column.get_text(" ", strip=True),
+                r"(\d+)\s*classroom",
+                column.get_text(strip=True),
                 re.IGNORECASE,
             )
             if classroom_match:
                 classrooms = int(classroom_match.group(1))
 
-        buildings[building_id] = {
-            "building_id": building_id,
-            "owner_name": owner_name,
-            "building_type": link.get_text(strip=True),
-            "classrooms": classrooms,
-        }
+        buildings.append(
+            {
+                "building_id": building_id,
+                "owner_name": owner_name,
+                "building_type": link.get_text(strip=True),
+                "classrooms": classrooms,
+            }
+        )
 
-    return list(buildings.values())
+    return buildings
 
 
 def next_hourly_run(now: datetime, minute: int = 45) -> datetime:
