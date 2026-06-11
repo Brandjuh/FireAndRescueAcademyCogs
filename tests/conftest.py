@@ -13,6 +13,22 @@ class _CommandDecorator:
         return _Decorator()
 
 
+class _Group:
+    def __init__(self, function):
+        self.function = function
+
+    def __call__(self, *args, **kwargs):
+        return self.function(*args, **kwargs)
+
+    command = _CommandDecorator()
+
+
+class _GroupDecorator:
+    def __call__(self, *args, **kwargs):
+        del args, kwargs
+        return lambda function: _Group(function)
+
+
 def pytest_configure():
     """Provide the minimal Redbot import surface required by isolated cog tests."""
     discord = types.ModuleType("discord")
@@ -20,12 +36,14 @@ def pytest_configure():
         path=path,
         filename=filename,
     )
+    discord.TextChannel = object
     redbot = types.ModuleType("redbot")
     redbot_core = types.ModuleType("redbot.core")
     commands = types.ModuleType("redbot.core.commands")
 
     commands.Cog = object
     commands.command = _CommandDecorator()
+    commands.group = _GroupDecorator()
     commands.is_owner = _CommandDecorator()
 
     redbot_core.commands = commands
