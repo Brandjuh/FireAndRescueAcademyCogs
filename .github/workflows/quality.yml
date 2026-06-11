@@ -17,5 +17,5 @@ jobs:
           cache: pip
       - run: python -m pip install -r requirements-dev.txt
       - run: python -m compileall -q .
-      - run: python -m ruff check buildingscraper tests
+      - run: python -m ruff check buildingscraper applicationscraper/fixture_capture.py applicationscraper/fixture_capture_cog.py tests
       - run: python -m pytest
