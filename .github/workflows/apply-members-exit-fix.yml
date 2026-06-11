@@ -1,16 +1,16 @@
 name: Apply MembersScraper exit detection fix
 
 on:
-  push:
+  pull_request:
     branches:
-      - codex/fix-members-exit-detection
+      - main
 
 permissions:
   contents: write
 
 jobs:
   apply-fix:
-    if: github.actor != 'github-actions[bot]'
+    if: github.head_ref == 'codex/fix-members-exit-detection' && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -88,7 +88,6 @@ jobs:
           if text.count(old) != 1:
               raise SystemExit('Expected exactly one characterization test block')
           tests.write_text(text.replace(old, new), encoding='utf-8')
-
           Path('.github/workflows/apply-members-exit-fix.yml').unlink()
           PY
       - name: Verify
