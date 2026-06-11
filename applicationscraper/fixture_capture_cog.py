@@ -4,7 +4,7 @@ from pathlib import Path
 import discord
 from redbot.core import commands, data_manager
 
-from .fixture_capture import sanitize_applications_fixture
+from .fixture_capture import inspect_applications_page, sanitize_applications_fixture
 
 
 class ApplicationsFixtureCapture(commands.Cog):
@@ -58,10 +58,31 @@ class ApplicationsFixtureCapture(commands.Cog):
 
         raw_path.write_text(html, encoding="utf-8")
         sanitized_path.write_text(sanitize_applications_fixture(html), encoding="utf-8")
+        inspection = inspect_applications_page(html)
+        candidate_count = (
+            inspection["table_rows"]
+            + inspection["cards_or_panels"]
+            + inspection["application_list_items"]
+        )
+
+        if candidate_count:
+            capture_summary = (
+                "Application candidates found: "
+                f"{inspection['table_rows']} table rows, "
+                f"{inspection['cards_or_panels']} cards/panels, "
+                f"{inspection['application_list_items']} list items, "
+                f"{inspection['profile_links']} profile links."
+            )
+        else:
+            capture_summary = (
+                "No application candidates were found. This capture is useful only as an "
+                "empty-state fixture. Capture again while an application is pending."
+            )
 
         await ctx.send(
             "Fixture capture completed.\n"
             f"Private raw file: `{raw_path}`\n"
+            f"{capture_summary}\n"
             "The sanitized review file is attached. Review it manually before sharing or "
             "committing it. The private raw file remains local and is not attached.",
             file=discord.File(
