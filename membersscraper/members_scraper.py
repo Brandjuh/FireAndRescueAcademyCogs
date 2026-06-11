@@ -767,9 +767,10 @@ class MembersScraper(commands.Cog):
         all_members = []
         page = 1
         max_pages = 100
+        scrape_timestamp = datetime.utcnow().isoformat()
         
         while page <= max_pages:
-            members = await self._scrape_members_page(session, page, ctx)
+            members = await self._scrape_members_page(session, page, scrape_timestamp, ctx)
             if not members:
                 break
             all_members.extend(members)
