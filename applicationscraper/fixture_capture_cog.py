@@ -1,6 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 
+import discord
 from redbot.core import commands, data_manager
 
 from .fixture_capture import sanitize_applications_fixture
@@ -59,9 +60,12 @@ class ApplicationsFixtureCapture(commands.Cog):
         sanitized_path.write_text(sanitize_applications_fixture(html), encoding="utf-8")
 
         await ctx.send(
-            "Fixture capture completed locally.\n"
+            "Fixture capture completed.\n"
             f"Private raw file: `{raw_path}`\n"
-            f"Sanitized review file: `{sanitized_path}`\n"
-            "Review the sanitized file manually before sharing or committing it. "
-            "The bot will not upload either file."
+            "The sanitized review file is attached. Review it manually before sharing or "
+            "committing it. The private raw file remains local and is not attached.",
+            file=discord.File(
+                sanitized_path,
+                filename=sanitized_path.name,
+            ),
         )
