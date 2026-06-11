@@ -34,6 +34,18 @@ _Group.group = _GroupDecorator()
 
 def pytest_configure():
     """Provide the minimal Redbot import surface required by isolated cog tests."""
+    class _Embed:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.fields = []
+            self.footer = None
+
+        def add_field(self, **kwargs):
+            self.fields.append(kwargs)
+
+        def set_footer(self, **kwargs):
+            self.footer = kwargs
+
     discord = types.ModuleType("discord")
     discord.File = lambda path, filename=None: types.SimpleNamespace(
         path=path,
@@ -41,6 +53,16 @@ def pytest_configure():
     )
     discord.TextChannel = object
     discord.Role = object
+    discord.Embed = _Embed
+    discord.Color = types.SimpleNamespace(
+        blue=lambda: "blue",
+        dark_blue=lambda: "dark_blue",
+        dark_gold=lambda: "dark_gold",
+        green=lambda: "green",
+        orange=lambda: "orange",
+        red=lambda: "red",
+    )
+    discord.Forbidden = type("Forbidden", (Exception,), {})
     redbot = types.ModuleType("redbot")
     redbot_core = types.ModuleType("redbot.core")
     redbot_core_bot = types.ModuleType("redbot.core.bot")

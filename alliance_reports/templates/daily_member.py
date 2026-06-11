@@ -8,7 +8,6 @@ from typing import Optional
 import discord
 
 from ..data_aggregator import DataAggregator
-from ..calculators.activity_score import ActivityScoreCalculator
 from ..embed_formatter import EmbedFormatter
 
 log = logging.getLogger("red.FARA.AllianceReports.DailyMember")
@@ -36,15 +35,10 @@ class DailyMemberReport:
             # Get daily data
             data = await self.aggregator.get_daily_data()
             
-            # Calculate activity score
-            weights = await self.config_manager.config.activity_weights()
-            calculator = ActivityScoreCalculator(weights)
-            score_data = calculator.calculate_daily_score(data)
-            
             # Create embed
-            embed = EmbedFormatter.create_daily_member_embed(data, score_data)
+            embed = EmbedFormatter.create_daily_member_embed(data)
             
-            log.info(f"Daily member report generated (Activity Score: {score_data.get('overall', 0)})")
+            log.info("Daily member report generated")
             return embed
             
         except Exception as e:
