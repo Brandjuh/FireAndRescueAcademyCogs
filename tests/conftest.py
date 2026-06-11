@@ -47,6 +47,7 @@ def pytest_configure():
     commands.group = _GroupDecorator()
     commands.is_owner = _CommandDecorator()
     commands.admin_or_permissions = _CommandDecorator()
+    checks.is_owner = _CommandDecorator()
 
     redbot_core.commands = commands
     redbot_core.checks = checks

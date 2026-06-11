@@ -220,64 +220,6 @@ class EmojiList(commands.Cog):
             embed.set_footer(text=f"Showing first 25 of {len(guilds_with_emojis)} servers")
         
         await ctx.send(embed=embed)
-        
-        if not all_emojis:
-            embed = discord.Embed(
-                title="❌ No Emojis Found",
-                description=f"**{server_name}** doesn't have any custom emojis.",
-                color=discord.Color.red()
-            )
-            await ctx.send(embed=embed)
-            return
-        
-        # Sort emojis: non-animated first, then animated, alphabetically within each group
-        all_emojis.sort(key=lambda e: (e.animated, e.name.lower()))
-        
-        # If export is True, generate TXT file
-        if export:
-            await self._export_to_txt(ctx, all_emojis, server_name)
-            return
-        
-        # Create embeds with pagination (10 emojis per page)
-        embeds = []
-        emojis_per_page = 10
-        
-        for i in range(0, len(all_emojis), emojis_per_page):
-            chunk = all_emojis[i:i + emojis_per_page]
-            
-            embed = discord.Embed(
-                title=f"🎭 Emoji List - {server_name}",
-                description=f"Total Emojis: **{len(all_emojis)}**",
-                color=discord.Color.blurple()
-            )
-            
-            for emoji in chunk:
-                # Format code based on whether emoji is animated
-                if emoji.animated:
-                    code = f"`<a:{emoji.name}:{emoji.id}>`"
-                    emoji_display = f"<a:{emoji.name}:{emoji.id}>"
-                else:
-                    code = f"`<:{emoji.name}:{emoji.id}>`"
-                    emoji_display = f"<:{emoji.name}:{emoji.id}>"
-                
-                # Add field with emoji and code
-                embed.add_field(
-                    name=f"{emoji_display} {emoji.name}",
-                    value=code,
-                    inline=False
-                )
-            
-            # Add footer with page info
-            embed.set_footer(text=f"Page {len(embeds) + 1}/{(len(all_emojis) + emojis_per_page - 1) // emojis_per_page}")
-            embeds.append(embed)
-        
-        # Send with pagination if multiple pages
-        if len(embeds) == 1:
-            await ctx.send(embed=embeds[0])
-        else:
-            view = EmojiListView(embeds, ctx.author.id)
-            message = await ctx.send(embed=embeds[0], view=view)
-            view.message = message
     
     async def _export_to_txt(self, ctx: commands.Context, emojis: list, server_name: str):
         """Export emojis to a TXT file and send it to the user.

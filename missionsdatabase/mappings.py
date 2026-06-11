@@ -326,7 +326,6 @@ def get_vehicle_name(vehicle_key: str) -> str:
         "hazmat_vehicles": "HazMat",
         "quints": "Quints",
         "rescue_engines": "Rescue Engines",
-        "k9_units": "K-9 Units",
         "swat_vehicles": "SWAT Vehicles",
         "swat_armoured_vehicles": "SWAT Armoured Vehicles",
         "swat_suvs": "SWAT SUVs",
