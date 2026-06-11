@@ -16,6 +16,10 @@ class _CommandDecorator:
 def pytest_configure():
     """Provide the minimal Redbot import surface required by isolated cog tests."""
     discord = types.ModuleType("discord")
+    discord.File = lambda path, filename=None: types.SimpleNamespace(
+        path=path,
+        filename=filename,
+    )
     redbot = types.ModuleType("redbot")
     redbot_core = types.ModuleType("redbot.core")
     commands = types.ModuleType("redbot.core.commands")

@@ -130,6 +130,12 @@ class FixtureSanitizerTests(unittest.TestCase):
             self.assertNotIn("987654", sanitized)
             self.assertIn("Fixture Applicant", sanitized)
             ctx.send.assert_awaited_once()
+            sent_message = ctx.send.await_args
+            attachment = sent_message.kwargs["file"]
+            self.assertEqual(Path(attachment.path), sanitized_file)
+            self.assertEqual(attachment.filename, sanitized_file.name)
+            self.assertNotEqual(Path(attachment.path), raw_file)
+            self.assertIn("private raw file remains local", sent_message.args[0].lower())
 
     def test_capture_command_rejects_a_real_login_redirect(self):
         applications_scraper = types.SimpleNamespace(
