@@ -627,7 +627,7 @@ class MembersScraper(commands.Cog):
         
         # Detect exits before saving (only if not backfilling)
         exits = []
-        if not custom_timestamp:  # Only detect exits on live scrapes
+        if not custom_timestamp and all_members:  # Only detect exits on successful live scrapes
             exits = await self._detect_exits(all_members, ctx)
             
             if exits:
