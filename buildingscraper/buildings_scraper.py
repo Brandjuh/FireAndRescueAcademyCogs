@@ -197,13 +197,6 @@ class BuildingsScraper(commands.Cog):
             self.debug_mode = False
             await ctx.send("✅ Debug OFF")
     
-    @commands.group(name="buildings")
-    @commands.is_owner()
-    async def buildings_group(self, ctx):
-        """Buildings scraper commands"""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
-    
     @buildings_group.command(name="stats")
     async def show_stats(self, ctx):
         """Show buildings statistics"""
