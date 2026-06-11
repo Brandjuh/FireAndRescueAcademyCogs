@@ -3,6 +3,8 @@ Configuration commands for MemberManager
 Extension of the main cog for settings management
 """
 
+import asyncio
+
 import discord
 from redbot.core import commands
 from redbot.core.utils.chat_formatting import box
