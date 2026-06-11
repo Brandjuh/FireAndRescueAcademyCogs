@@ -187,7 +187,7 @@ class ConfigManager:
             db_locations = {
                 # V2 Databases
                 "members_v2_db_path": scraper_db_path / "members_v2.db",
-                "logs_v2_db_path": scraper_db_path / "logs_v2.db",
+                "logs_v2_db_path": scraper_db_path / "logs_v3.db",
                 "income_v2_db_path": scraper_db_path / "income_v2.db",
                 "buildings_v2_db_path": scraper_db_path / "buildings_v2.db",
                 

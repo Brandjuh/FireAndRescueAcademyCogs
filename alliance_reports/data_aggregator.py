@@ -17,7 +17,7 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 from zoneinfo import ZoneInfo
 
 log = logging.getLogger("red.FARA.AllianceReports.DataAggregator")
@@ -25,6 +25,17 @@ log = logging.getLogger("red.FARA.AllianceReports.DataAggregator")
 
 class DataAggregator:
     """Aggregate data from all V2 alliance databases."""
+
+    DB_CONFIG_KEYS = {
+        "members_v2": "members_v2_db_path",
+        "logs_v2": "logs_v2_db_path",
+        "income_v2": "income_v2_db_path",
+        "buildings_v2": "buildings_v2_db_path",
+        "alliance": "alliance_db_path",
+        "membersync": "membersync_db_path",
+        "building_manager": "building_manager_db_path",
+        "sanctions": "sanctions_db_path",
+    }
     
     def __init__(self, config_manager):
         """Initialize data aggregator."""
@@ -34,42 +45,17 @@ class DataAggregator:
     def _get_db_connection(self, db_name: str) -> Optional[sqlite3.Connection]:
         """Get database connection."""
         try:
-            db_paths = {
-                "members_v2": "members_v2_db_path",
-                "logs_v2": "logs_v2_db_path",
-                "income_v2": "income_v2_db_path",
-                "buildings_v2": "buildings_v2_db_path",
-                "alliance": "alliance_db_path",
-                "membersync": "membersync_db_path",
-                "building_manager": "building_manager_db_path",
-                "sanctions": "sanctions_db_path",
-            }
-            
-            if db_name not in db_paths:
+            config_key = self.DB_CONFIG_KEYS.get(db_name)
+            if not config_key:
                 log.error(f"Unknown database: {db_name}")
                 return None
             
-            # Get path from config manager's cache
-            base_path = Path.home() / ".local/share/Red-DiscordBot/data/frab"
-            
-            if db_name == "members_v2":
-                db_path = base_path / "cogs/scraper_databases/members_v2.db"
-            elif db_name == "logs_v2":
-                db_path = base_path / "cogs/scraper_databases/logs_v3.db"  # FIXED: Use V3 with correct schema
-            elif db_name == "income_v2":
-                db_path = base_path / "cogs/scraper_databases/income_v2.db"
-            elif db_name == "buildings_v2":
-                db_path = base_path / "cogs/scraper_databases/buildings_v2.db"
-            elif db_name == "alliance":
-                db_path = base_path / "cogs/AllianceScraper/alliance.db"
-            elif db_name == "membersync":
-                db_path = base_path / "cogs/MemberSync/membersync.db"
-            elif db_name == "building_manager":
-                db_path = base_path / "cogs/BuildingManager/building_manager.db"
-            elif db_name == "sanctions":
-                db_path = base_path / "cogs/SanctionsManager/sanctions.db"
-            else:
+            configured_path = self.config_manager._db_cache.get(config_key)
+            if not configured_path:
+                log.error(f"Database path is not configured: {config_key}")
                 return None
+
+            db_path = Path(configured_path)
             
             if not db_path.exists():
                 log.error(f"Database not found: {db_path}")
@@ -138,7 +124,7 @@ class DataAggregator:
                 "treasury": await self._get_treasury_data_monthly(first_day, last_day),
                 "sanctions": await self._get_sanctions_data_monthly(first_day, last_day),
                 "admin_activity": await self._get_admin_activity_monthly(first_day, last_day),
-                "activity_score": 85,  # Calculate from data
+                "activity_score": None,
             }
             
             log.info("Monthly data aggregation complete")
@@ -722,26 +708,12 @@ class DataAggregator:
             
             conn.close()
             
-            # Top trainings (placeholder - would need to parse descriptions)
-            top_trainings = [
-                ("Police Training", 15),
-                ("Fire Training", 12),
-                ("EMS Training", 9),
-                ("Coastal Training", 8),
-                ("Advanced Course", 7),
-            ]
-            
             return {
                 "started_period": started,
                 "completed_period": completed,
                 "success_rate": success_rate,
-                "top_5_trainings": top_trainings,
-                "by_discipline_counts": {
-                    "Police": int(started * 0.48),
-                    "Fire": int(started * 0.31),
-                    "EMS": int(started * 0.15),
-                    "Coastal": int(started * 0.06),
-                },
+                "top_5_trainings": [],
+                "by_discipline_counts": {},
             }
         
         except Exception as e:
@@ -1012,7 +984,7 @@ class DataAggregator:
                 "total_actions_period": total_actions,
                 "most_active_admin_name": most_active,
                 "most_active_admin_count": most_active_count,
-                "avg_response_hours": 1.37,
+                "avg_response_hours": None,
             }
         
         except Exception as e:

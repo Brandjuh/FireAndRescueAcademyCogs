@@ -5,7 +5,7 @@ Creates beautiful Discord embeds for reports.
 
 import logging
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any
 import discord
 
 log = logging.getLogger("red.FARA.AllianceReports.EmbedFormatter")
@@ -104,11 +104,10 @@ class EmbedFormatter:
         lines = []
         
         total = data.get("total_members", 0)
-        new_joins = data.get("new_joins", 0)
-        left = data.get("left", 0)
-        kicked = data.get("kicked", 0)
-        net = data.get("net_change", 0)
-        verifications = data.get("verifications_approved", 0)
+        new_joins = data.get("new_joins_24h", 0)
+        left = data.get("left_24h", 0)
+        kicked = data.get("kicked_24h", 0)
+        verifications = data.get("verifications_approved_24h", 0)
         dod = data.get("day_over_day_change", 0)
         
         # Format changes with arrows
@@ -134,8 +133,8 @@ class EmbedFormatter:
         """Format training data."""
         lines = []
         
-        started = data.get("started", 0)
-        completed = data.get("completed", 0)
+        started = data.get("started_24h", 0)
+        completed = data.get("completed_24h", 0)
         dod_started = data.get("day_over_day_started", 0)
         dod_completed = data.get("day_over_day_completed", 0)
         
@@ -157,9 +156,9 @@ class EmbedFormatter:
         """Format buildings data."""
         lines = []
         
-        approved = data.get("approved", 0)
-        ext_started = data.get("extensions_started", 0)
-        ext_completed = data.get("extensions_completed", 0)
+        approved = data.get("approved_24h", 0)
+        ext_started = data.get("extensions_started_24h", 0)
+        ext_completed = data.get("extensions_completed_24h", 0)
         
         dod_approved = data.get("day_over_day_approved", 0)
         dod_ext_started = data.get("day_over_day_extensions_started", 0)
@@ -176,8 +175,8 @@ class EmbedFormatter:
         """Format operations data."""
         lines = []
         
-        missions = data.get("large_missions_started", 0)
-        events = data.get("alliance_events_started", 0)
+        missions = data.get("large_missions_started_24h", 0)
+        events = data.get("alliance_events_started_24h", 0)
         
         dod_missions = data.get("day_over_day_missions", 0)
         dod_events = data.get("day_over_day_events", 0)
@@ -194,7 +193,7 @@ class EmbedFormatter:
         
         balance = data.get("current_balance", 0)
         change = data.get("change_24h", 0)
-        change_pct = data.get("change_percent", 0)
+        change_pct = data.get("change_24h_pct", 0)
         contributors = data.get("contributors_24h", 0)
         
         # Format balance with dots as thousands separator

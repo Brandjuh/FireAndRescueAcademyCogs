@@ -6,7 +6,7 @@ Comprehensive administrative view with detailed metrics and alerts
 import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 
 import discord
 
@@ -401,9 +401,7 @@ class DailyAdminReport:
         
         value = (
             f"• Response time (all): {self._format_hours(overall_avg)} {meets_target}\n"
-            f"   └─ Target: <{target:.0f}h\n"
-            f"• Member satisfaction: No complaints filed\n"
-            f"• System health: All systems operational"
+            f"   └─ Target: <{target:.0f}h"
         )
         
         embed.add_field(
