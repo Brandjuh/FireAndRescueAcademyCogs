@@ -3,6 +3,7 @@ import sys
 import types
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
 
 from bs4 import BeautifulSoup
 
@@ -16,6 +17,32 @@ class _CommandDecorator:
     def __call__(self, *args, **kwargs):
         del args, kwargs
         return _Decorator()
+
+
+class _FakeResponse:
+    status = 200
+
+    def __init__(self, html):
+        self.html = html
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        del exc_type, exc_value, traceback
+
+    async def text(self):
+        return self.html
+
+
+class _FakeSession:
+    def __init__(self, html):
+        self.html = html
+        self.requested_urls = []
+
+    def get(self, url):
+        self.requested_urls.append(url)
+        return _FakeResponse(self.html)
 
 
 def _install_redbot_test_stubs():
@@ -142,6 +169,42 @@ class LoginCheckCharacterizationTests(unittest.TestCase):
         result = asyncio.run(self.scraper._check_logged_in("<html><body>Applications</body></html>"))
 
         self.assertFalse(result)
+
+
+class ScrapeApplicationsCharacterizationTests(unittest.TestCase):
+    def setUp(self):
+        self.scraper = ApplicationsScraper.__new__(ApplicationsScraper)
+        self.scraper.applications_url = "https://www.missionchief.com/verband/bewerbungen"
+
+    def test_current_table_discovery_and_parsing_work_together(self):
+        session = _FakeSession(
+            """
+            <html>
+              <a href="/users/sign_out">Sign out</a>
+              <table class="table">
+                <tbody>
+                  <tr>
+                    <td><a href="/profile/123">Test Applicant</a></td>
+                    <td><time datetime="2026-06-10T10:00:00">Yesterday</time></td>
+                    <td>12,345 Credits and 7 buildings</td>
+                  </tr>
+                </tbody>
+              </table>
+            </html>
+            """
+        )
+
+        with patch(
+            "applicationscraper.applications_scraper.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            applications = asyncio.run(self.scraper._scrape_applications(session))
+
+        self.assertEqual(session.requested_urls, [self.scraper.applications_url])
+        self.assertEqual(len(applications), 1)
+        self.assertEqual(applications[0]["applicant_id"], 123)
+        self.assertEqual(applications[0]["credits"], 12345)
+        self.assertEqual(applications[0]["buildings"], 7)
 
 
 if __name__ == "__main__":
