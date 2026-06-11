@@ -62,64 +62,11 @@ class MonthlyAdminReport:
                 log.error("No data available for monthly admin report")
                 return None
             
-            # Calculate trends
-            trends = await self.trends_calc.calculate_monthly_trends(data, tz)
-            
-            # Generate predictions
-            preds = await self.predictions.generate_predictions(data, trends)
-            
-            # Build all embeds - SPLIT INTO SMALLER CHUNKS
+            # Only publish sections backed by current database queries.
             embeds = []
-            
-            # 1. Executive Summary
-            exec_embed = await self._create_executive_summary(data, trends, month_name, now, tz_str)
+            exec_embed = await self._create_executive_summary(data, month_name, now, tz_str)
             if exec_embed:
                 embeds.append(exec_embed)
-            
-            # 2. Membership Analysis - Part 1
-            member_embed_1 = await self._create_membership_analysis_part1(data, trends)
-            if member_embed_1:
-                embeds.append(member_embed_1)
-            
-            # 3. Membership Analysis - Part 2
-            member_embed_2 = await self._create_membership_analysis_part2(data, trends)
-            if member_embed_2:
-                embeds.append(member_embed_2)
-            
-            # 4. Training Analysis
-            training_embed = await self._create_training_analysis(data, trends)
-            if training_embed:
-                embeds.append(training_embed)
-            
-            # 5. Building Analysis
-            building_embed = await self._create_building_analysis(data, trends)
-            if building_embed:
-                embeds.append(building_embed)
-            
-            # 6. Treasury Analysis - Part 1
-            treasury_embed_1 = await self._create_treasury_analysis_part1(data, trends)
-            if treasury_embed_1:
-                embeds.append(treasury_embed_1)
-            
-            # 7. Treasury Analysis - Part 2
-            treasury_embed_2 = await self._create_treasury_analysis_part2(data)
-            if treasury_embed_2:
-                embeds.append(treasury_embed_2)
-            
-            # 8. Sanctions & Operations
-            ops_embed = await self._create_sanctions_operations(data)
-            if ops_embed:
-                embeds.append(ops_embed)
-            
-            # 9. Admin Performance
-            admin_embed = await self._create_admin_performance(data)
-            if admin_embed:
-                embeds.append(admin_embed)
-            
-            # 10. Risk & Conclusion
-            risk_embed = await self._create_risk_conclusion(data, preds, month_name)
-            if risk_embed:
-                embeds.append(risk_embed)
             
             log.info(f"Monthly admin report generated with {len(embeds)} embeds")
             return embeds if embeds else None
@@ -131,7 +78,6 @@ class MonthlyAdminReport:
     async def _create_executive_summary(
         self,
         data: Dict,
-        trends: Dict,
         month_name: str,
         now: datetime,
         tz_str: str
@@ -155,7 +101,8 @@ class MonthlyAdminReport:
             training_vol = training.get("started_period", 0)
             building_vol = buildings.get("approved_period", 0)
             treasury_growth = treasury.get("growth_percentage", 0)
-            activity_score = data.get("activity_score", 0)
+            activity_score = data.get("activity_score")
+            activity_score_text = f"{activity_score}/100" if activity_score is not None else "Not available"
             
             summary = (
                 f"**Key Metrics:**\n"
@@ -163,11 +110,13 @@ class MonthlyAdminReport:
                 f"• Financial Growth: {treasury_growth:+.1f}% ({treasury.get('growth_amount', 0):+,} credits)\n"
                 f"• Training Volume: {training_vol} trainings\n"
                 f"• Building Activity: {building_vol} approvals\n"
-                f"• Overall Health Score: {activity_score}/100\n"
+                f"• Overall Health Score: {activity_score_text}\n"
             )
             
             # Status determination
-            if activity_score >= 85 and treasury_growth > 10 and member_growth > 0:
+            if activity_score is None:
+                status = "⚪ **HEALTH SCORE NOT AVAILABLE**"
+            elif activity_score >= 85 and treasury_growth > 10 and member_growth > 0:
                 status = "🟢 **HEALTHY GROWTH PHASE**"
             elif activity_score >= 70:
                 status = "🟡 **STABLE OPERATIONS**"
@@ -179,37 +128,6 @@ class MonthlyAdminReport:
             embed.add_field(
                 name="📑 EXECUTIVE SUMMARY",
                 value=summary,
-                inline=False
-            )
-            
-            # Month-over-Month Highlights
-            mom = trends.get("mom", {})
-            
-            highlights = "**Month-over-Month Highlights:**\n"
-            
-            # Membership trend
-            member_trend = mom.get("members", {})
-            member_change = member_trend.get("percentage", 0)
-            highlights += f"• Membership: {member_trend.get('trend', '➡️')} {member_change:+.1f}%\n"
-            
-            # Training trend
-            train_trend = mom.get("trainings", {})
-            train_change = train_trend.get("percentage", 0)
-            highlights += f"• Trainings: {train_trend.get('trend', '➡️')} {train_change:+.1f}%\n"
-            
-            # Building trend
-            build_trend = mom.get("buildings", {})
-            build_change = build_trend.get("percentage", 0)
-            highlights += f"• Buildings: {build_trend.get('trend', '➡️')} {build_change:+.1f}%\n"
-            
-            # Treasury trend
-            treas_trend = mom.get("treasury", {})
-            treas_change = treas_trend.get("percentage", 0)
-            highlights += f"• Treasury: {treas_trend.get('trend', '➡️')} {treas_change:+.1f}%\n"
-            
-            embed.add_field(
-                name="📈 TRENDS",
-                value=highlights,
                 inline=False
             )
             
@@ -764,12 +682,13 @@ class MonthlyAdminReport:
             total = admin.get("total_actions_period", 0)
             most_active = admin.get("most_active_admin_name", "N/A")
             most_count = admin.get("most_active_admin_count", 0)
-            avg_response = admin.get("avg_response_hours", 0)
+            avg_response = admin.get("avg_response_hours")
+            avg_response_text = self._format_hours(avg_response) if avg_response is not None else "Not available"
             
             summary = (
                 f"**Team Summary:**\n"
                 f"• Total Actions: {total}\n"
-                f"• Avg Response: {self._format_hours(avg_response)} ✅\n"
+                f"• Avg Response: {avg_response_text}\n"
                 f"• Most Active: {most_active} ({most_count})"
             )
             

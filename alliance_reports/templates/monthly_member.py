@@ -64,32 +64,11 @@ class MonthlyMemberReport:
                 log.error("No data available for monthly member report")
                 return None
             
-            # Calculate trends
-            trends = await self.trends_calc.calculate_monthly_trends(data, tz)
-            
-            # Generate fun facts
-            fun_facts = await self.fun_facts.generate_facts(data, count=5)
-            
-            # Generate predictions
-            preds = await self.predictions.generate_predictions(data, trends)
-            
-            # Build embeds (multiple for member report)
+            # Only publish sections backed by current database queries.
             embeds = []
-            
-            # Main embed - Overview
             main_embed = await self._create_main_embed(data, month_name, now, tz_str)
             if main_embed:
                 embeds.append(main_embed)
-            
-            # Details embed - Breakdown
-            details_embed = await self._create_details_embed(data, trends)
-            if details_embed:
-                embeds.append(details_embed)
-            
-            # Fun & Predictions embed
-            fun_embed = await self._create_fun_predictions_embed(data, fun_facts, preds, month_name)
-            if fun_embed:
-                embeds.append(fun_embed)
             
             log.info(f"Monthly member report generated with {len(embeds)} embeds")
             return embeds if embeds else None
@@ -122,7 +101,7 @@ class MonthlyMemberReport:
             # Highlights summary
             highlights = (
                 f"🎉 **{month_name.upper()} HIGHLIGHTS**\n\n"
-                f"We've had an incredible month! Here's what we achieved together:"
+                f"Here's what the recorded data shows:"
             )
             embed.add_field(name="\u200b", value=highlights, inline=False)
             
@@ -205,8 +184,7 @@ class MonthlyMemberReport:
             treasury_value = (
                 f"• Opening Balance: {opening:,} credits\n"
                 f"• Closing Balance: {closing:,} credits\n"
-                f"• Growth: {growth:+,} credits ({growth_pct:+.1f}%!)\n\n"
-                f"**📈 30-day trend:** Strong growth ↗️"
+                f"• Growth: {growth:+,} credits ({growth_pct:+.1f}%)"
             )
             
             embed.add_field(
@@ -216,10 +194,11 @@ class MonthlyMemberReport:
             )
             
             # Activity score
-            score = data.get("activity_score", 0)
+            score = data.get("activity_score")
+            score_text = f"**{score}/100**" if score is not None else "**Not available**"
             embed.add_field(
                 name="🔥 Overall Activity Score",
-                value=f"**{score}/100**",
+                value=score_text,
                 inline=False
             )
             

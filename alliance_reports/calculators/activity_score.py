@@ -68,8 +68,6 @@ class ActivityScoreCalculator:
         
         overall = int(min(100, max(0, overall)))
         
-        # Calculate change from ideal (all 80+)
-        ideal_overall = sum(self.weights.values())  # Should be 100
         change = overall - 80  # 80 is "good" baseline
         
         return {
@@ -87,9 +85,9 @@ class ActivityScoreCalculator:
         score = 50  # Base score
         
         # Positive factors
-        new_joins = data.get("new_joins", 0)
-        verifications = data.get("verifications_approved", 0)
-        net_change = data.get("net_change", 0)
+        new_joins = data.get("new_joins_24h", 0)
+        verifications = data.get("verifications_approved_24h", 0)
+        net_change = new_joins - data.get("left_24h", 0) - data.get("kicked_24h", 0)
         
         # Each new join adds points
         score += min(20, new_joins * 5)
@@ -104,7 +102,7 @@ class ActivityScoreCalculator:
             score -= abs(net_change) * 3  # Penalty for net loss
         
         # Kicked members penalty
-        kicked = data.get("kicked", 0)
+        kicked = data.get("kicked_24h", 0)
         if kicked > 0:
             score -= kicked * 5
         
@@ -117,8 +115,8 @@ class ActivityScoreCalculator:
         
         score = 30  # Lower base - training needs activity
         
-        started = data.get("started", 0)
-        completed = data.get("completed", 0)
+        started = data.get("started_24h", 0)
+        completed = data.get("completed_24h", 0)
         
         # Started trainings
         score += min(35, started * 7)
@@ -141,9 +139,9 @@ class ActivityScoreCalculator:
         
         score = 40  # Base score
         
-        approved = data.get("approved", 0)
-        ext_started = data.get("extensions_started", 0)
-        ext_completed = data.get("extensions_completed", 0)
+        approved = data.get("approved_24h", 0)
+        ext_started = data.get("extensions_started_24h", 0)
+        ext_completed = data.get("extensions_completed_24h", 0)
         
         # New buildings
         score += min(20, approved * 5)
@@ -164,7 +162,7 @@ class ActivityScoreCalculator:
         score = 50  # Base score
         
         change_24h = data.get("change_24h", 0)
-        change_percent = data.get("change_percent", 0)
+        change_percent = data.get("change_24h_pct", 0)
         contributors = data.get("contributors_24h", 0)
         
         # Positive balance change
@@ -195,8 +193,8 @@ class ActivityScoreCalculator:
         
         score = 40  # Base score
         
-        missions = data.get("large_missions_started", 0)
-        events = data.get("alliance_events_started", 0)
+        missions = data.get("large_missions_started_24h", 0)
+        events = data.get("alliance_events_started_24h", 0)
         
         # Large missions
         score += min(30, missions * 15)
