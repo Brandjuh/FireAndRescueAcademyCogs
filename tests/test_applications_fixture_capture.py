@@ -15,8 +15,9 @@ from applicationscraper.fixture_capture_cog import ApplicationsFixtureCapture
 class _FakeResponse:
     status = 200
 
-    def __init__(self, html):
+    def __init__(self, html, url="https://www.missionchief.com/verband/bewerbungen"):
         self.html = html
+        self.url = url
 
     async def __aenter__(self):
         return self
@@ -32,8 +33,8 @@ class _FakeSession:
     def __init__(self, html):
         self.html = html
 
-    def get(self, url):
-        del url
+    def get(self, url, **kwargs):
+        del url, kwargs
         return _FakeResponse(self.html)
 
 
@@ -80,7 +81,6 @@ class FixtureSanitizerTests(unittest.TestCase):
     def test_capture_command_writes_only_local_raw_and_sanitized_files(self):
         applications_scraper = types.SimpleNamespace(
             applications_url="https://www.missionchief.com/verband/bewerbungen",
-            _check_logged_in=AsyncMock(return_value=True),
         )
         cookie_manager = types.SimpleNamespace(
             get_session=AsyncMock(
@@ -92,7 +92,12 @@ class FixtureSanitizerTests(unittest.TestCase):
                     </html>
                     """
                 )
-            )
+            ),
+            config=types.SimpleNamespace(
+                login_failure_url_contains=AsyncMock(
+                    return_value=["/users/sign_in", "/login"]
+                )
+            ),
         )
         bot = types.SimpleNamespace(
             get_cog=lambda name: {
@@ -125,6 +130,37 @@ class FixtureSanitizerTests(unittest.TestCase):
             self.assertNotIn("987654", sanitized)
             self.assertIn("Fixture Applicant", sanitized)
             ctx.send.assert_awaited_once()
+
+    def test_capture_command_rejects_a_real_login_redirect(self):
+        applications_scraper = types.SimpleNamespace(
+            applications_url="https://www.missionchief.com/verband/bewerbungen"
+        )
+        response = _FakeResponse(
+            "<html>Login</html>",
+            url="https://www.missionchief.com/users/sign_in",
+        )
+        session = types.SimpleNamespace(get=lambda *args, **kwargs: response)
+        cookie_manager = types.SimpleNamespace(
+            get_session=AsyncMock(return_value=session),
+            config=types.SimpleNamespace(
+                login_failure_url_contains=AsyncMock(
+                    return_value=["/users/sign_in", "/login"]
+                )
+            ),
+        )
+        bot = types.SimpleNamespace(
+            get_cog=lambda name: {
+                "ApplicationsScraper": applications_scraper,
+                "CookieManager": cookie_manager,
+            }.get(name)
+        )
+        capture_cog = ApplicationsFixtureCapture(bot)
+        ctx = types.SimpleNamespace(send=AsyncMock())
+
+        asyncio.run(capture_cog.capture_applications_fixture(ctx))
+
+        message = ctx.send.await_args.args[0]
+        self.assertIn("redirected to a login page", message)
 
 
 if __name__ == "__main__":
