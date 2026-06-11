@@ -1,5 +1,8 @@
 import asyncio
+import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from membersscraper.members_scraper import MembersScraper
@@ -111,6 +114,71 @@ class MembersScraperCharacterizationTests(unittest.TestCase):
         self.scraper._check_logged_in = AsyncMock(return_value=False)
 
         self.assertEqual(self.scrape("<tr><td>Not available</td></tr>"), [])
+
+
+class MembersScraperDatabaseCharacterizationTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        directory = Path(self.temporary_directory.name)
+        self.scraper = MembersScraper.__new__(MembersScraper)
+        self.scraper.db_path = str(directory / "members.db")
+        self.scraper.membersync_db = str(directory / "membersync.db")
+        self.scraper._debug_log = AsyncMock()
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    def insert_member(self, member_id, username, timestamp):
+        connection = sqlite3.connect(self.scraper.db_path)
+        try:
+            connection.execute(
+                """
+                INSERT INTO members
+                (member_id, username, rank, earned_credits, contribution_rate, online_status, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (member_id, username, "Member", 1000, 5.0, "offline", timestamp),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def test_database_initialization_creates_expected_schema_and_latest_view(self):
+        self.scraper._init_database()
+        self.insert_member(1, "Older Member", "2026-06-10T12:00:00")
+        self.insert_member(2, "Latest Member", "2026-06-11T12:00:00")
+
+        connection = sqlite3.connect(self.scraper.db_path)
+        try:
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(members)").fetchall()
+            }
+            current_members = connection.execute(
+                "SELECT mc_user_id, name, scraped_at FROM members_current"
+            ).fetchall()
+        finally:
+            connection.close()
+
+        self.assertIn("contribution_rate", columns)
+        self.assertEqual(current_members, [(2, "Latest Member", "2026-06-11T12:00:00")])
+
+    def test_exit_detection_currently_skips_newest_stored_snapshot(self):
+        self.scraper._init_database()
+        self.insert_member(1, "Stale Member", "2026-06-10T12:00:00")
+        self.insert_member(2, "Latest Member", "2026-06-11T12:00:00")
+
+        exits = asyncio.run(
+            self.scraper._detect_exits(
+                [
+                    {
+                        "member_id": 2,
+                        "suspicious": False,
+                    }
+                ]
+            )
+        )
+
+        self.assertEqual([member["member_id"] for member in exits], [1])
 
 
 if __name__ == "__main__":
