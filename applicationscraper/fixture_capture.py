@@ -58,3 +58,30 @@ def sanitize_applications_fixture(html: str) -> str:
         text_node.replace_with("Fixture text")
 
     return str(soup)
+
+
+def inspect_applications_page(html: str) -> dict[str, int]:
+    """Count the structures currently used by ApplicationsScraper."""
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.find("table", class_="table")
+    table_rows = 0
+    if table:
+        tbody = table.find("tbody")
+        table_rows = len(tbody.find_all("tr") if tbody else table.find_all("tr"))
+
+    cards = soup.find_all(
+        "div",
+        class_=lambda value: value and ("card" in value.lower() or "panel" in value.lower()),
+    )
+    list_items = soup.find_all(
+        "li",
+        class_=lambda value: value and "application" in value.lower(),
+    )
+    profile_links = soup.find_all("a", href=lambda value: value and "/profile/" in value)
+
+    return {
+        "table_rows": table_rows,
+        "cards_or_panels": len(cards),
+        "application_list_items": len(list_items),
+        "profile_links": len(profile_links),
+    }
