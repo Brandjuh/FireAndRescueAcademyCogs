@@ -446,8 +446,8 @@ class LogsScraper(commands.Cog):
     @logs_group.command(name="scrape")
     async def scrape_logs(self, ctx, max_pages: int = 5):
         """Manually scrape logs (max 100 pages)"""
-        if max_pages > 100:
-            await ctx.send("❌ Max 100 pages allowed")
+        if max_pages < 1 or max_pages > 100:
+            await ctx.send("❌ Pages must be between 1 and 100")
             return
         
         await ctx.send(f"🔄 Starting logs scrape (max {max_pages} pages)...")
@@ -461,8 +461,8 @@ class LogsScraper(commands.Cog):
     @logs_group.command(name="backfill")
     async def backfill_logs(self, ctx, max_pages: int = 100):
         """Backfill historical logs (use with caution - can take a while!)"""
-        if max_pages > 500:
-            await ctx.send("❌ Max 500 pages allowed for backfill")
+        if max_pages < 1 or max_pages > 500:
+            await ctx.send("❌ Pages must be between 1 and 500 for backfill")
             return
         
         await ctx.send(f"⚠️ Starting backfill of {max_pages} pages (~{max_pages * 1.5 / 60:.1f} minutes)...")
