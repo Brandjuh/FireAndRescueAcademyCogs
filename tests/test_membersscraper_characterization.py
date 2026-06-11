@@ -162,7 +162,7 @@ class MembersScraperDatabaseCharacterizationTests(unittest.TestCase):
         self.assertIn("contribution_rate", columns)
         self.assertEqual(current_members, [(2, "Latest Member", "2026-06-11T12:00:00")])
 
-    def test_exit_detection_currently_skips_newest_stored_snapshot(self):
+    def test_exit_detection_uses_newest_stored_snapshot(self):
         self.scraper._init_database()
         self.insert_member(1, "Stale Member", "2026-06-10T12:00:00")
         self.insert_member(2, "Latest Member", "2026-06-11T12:00:00")
@@ -178,7 +178,16 @@ class MembersScraperDatabaseCharacterizationTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual([member["member_id"] for member in exits], [1])
+        self.assertEqual(exits, [])
+
+    def test_exit_detection_finds_member_missing_from_newest_stored_snapshot(self):
+        self.scraper._init_database()
+        self.insert_member(1, "Stale Member", "2026-06-10T12:00:00")
+        self.insert_member(2, "Latest Member", "2026-06-11T12:00:00")
+
+        exits = asyncio.run(self.scraper._detect_exits([]))
+
+        self.assertEqual([member["member_id"] for member in exits], [2])
 
 
 if __name__ == "__main__":

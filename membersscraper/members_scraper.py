@@ -372,21 +372,21 @@ class MembersScraper(commands.Cog):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Get the second-most recent timestamp (previous scrape)
+        # The current scrape is not saved yet, so the latest stored snapshot is previous.
         cursor.execute('''
             SELECT DISTINCT timestamp 
             FROM members 
             ORDER BY timestamp DESC 
-            LIMIT 2
+            LIMIT 1
         ''')
         timestamps = cursor.fetchall()
         
-        if len(timestamps) < 2:
-            await self._debug_log("⚠️ Not enough historical data for exit detection (need at least 2 scrapes)", ctx)
+        if not timestamps:
+            await self._debug_log("No historical data available for exit detection", ctx)
             conn.close()
             return []
         
-        previous_timestamp = timestamps[1][0]
+        previous_timestamp = timestamps[0][0]
         await self._debug_log(f"📅 Comparing current scrape to: {previous_timestamp}", ctx)
         
         # Get all members from previous scrape
