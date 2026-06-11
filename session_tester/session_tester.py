@@ -23,7 +23,6 @@ class SessionTester(commands.Cog):
             r = await session.get(url, allow_redirects=True)
             text = await r.text()
             final_url = str(r.url)
-            await session.close()
             await ctx.send(f"GET {url} -> {r.status}; final={final_url}; length={len(text)}")
         except Exception as e:
             await ctx.send(f"Request failed: {e}")

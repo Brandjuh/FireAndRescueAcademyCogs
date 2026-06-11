@@ -40,13 +40,16 @@ def pytest_configure():
     redbot = types.ModuleType("redbot")
     redbot_core = types.ModuleType("redbot.core")
     commands = types.ModuleType("redbot.core.commands")
+    checks = types.ModuleType("redbot.core.checks")
 
     commands.Cog = object
     commands.command = _CommandDecorator()
     commands.group = _GroupDecorator()
     commands.is_owner = _CommandDecorator()
+    checks.is_owner = _CommandDecorator()
 
     redbot_core.commands = commands
+    redbot_core.checks = checks
     redbot_core.Config = object
     redbot_core.data_manager = object
     redbot.core = redbot_core
@@ -55,3 +58,4 @@ def pytest_configure():
     sys.modules.setdefault("redbot", redbot)
     sys.modules.setdefault("redbot.core", redbot_core)
     sys.modules.setdefault("redbot.core.commands", commands)
+    sys.modules.setdefault("redbot.core.checks", checks)
