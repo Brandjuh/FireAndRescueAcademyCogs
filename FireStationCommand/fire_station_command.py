@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import random
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -34,21 +35,7 @@ class FireStationCommand(commands.Cog):
         self.config = Config.get_conf(self, identifier=0xF15704, force_registration=True)
         self.game_data = self._load_game_data()
 
-        default_global: Dict[str, Any] = {
-            "volunteer_normal_minutes": 15.0,
-            "volunteer_emergency_minutes": 5.0,
-            "career_turnout_minutes": self._balance_seconds_as_minutes(
-                "career_turnout_seconds", 0.0
-            ),
-            "realert_minutes_min": 1.0,
-            "realert_minutes_max": 3.0,
-            "travel_minutes_min": 3.0,
-            "travel_minutes_max": 8.0,
-            "staff_cost": 2000,
-            "upgrade_base_cost": 50000,
-            "career_convert_cost": self._balance_int("career_upgrade_cost", 250000),
-            "max_station_level": 5,
-        }
+        default_global = self._build_default_global_config()
 
         default_user: Dict[str, Any] = {
             "started": False,
@@ -173,6 +160,23 @@ class FireStationCommand(commands.Cog):
 
     def _reward_multiplier(self) -> float:
         return max(0.0, self._balance_float("credits_reward_multiplier", 1.0))
+
+    def _build_default_global_config(self) -> Dict[str, Any]:
+        return {
+            "volunteer_normal_minutes": 2.0,
+            "volunteer_emergency_minutes": 0.5,
+            "career_turnout_minutes": self._balance_seconds_as_minutes(
+                "career_turnout_seconds", 0.0
+            ),
+            "realert_minutes_min": 0.25,
+            "realert_minutes_max": 0.75,
+            "travel_minutes_min": 1.0,
+            "travel_minutes_max": 2.0,
+            "staff_cost": 2000,
+            "upgrade_base_cost": 50000,
+            "career_convert_cost": self._balance_int("career_upgrade_cost", 250000),
+            "max_station_level": 5,
+        }
 
     def _utcnow(self) -> datetime:
         return datetime.now(timezone.utc)
@@ -423,9 +427,9 @@ class FireStationCommand(commands.Cog):
         return random.choice(self.INCIDENTS)
 
     def _make_relative_text(self, minutes: float) -> str:
-        mins = int(round(minutes))
-        if mins <= 0:
+        if minutes <= 0:
             return "now"
+        mins = max(1, int(math.ceil(minutes)))
         if mins == 1:
             return "in 1 minute"
         return f"in {mins} minutes"
@@ -453,6 +457,60 @@ class FireStationCommand(commands.Cog):
             "second_arrived": second_arrived,
             "total_arrived": current_total + second_arrived,
         }
+
+    def _alert_narrative(self, mode: str, station_type: str, minutes: float) -> str:
+        if station_type == "career":
+            options = [
+                "The watch room lights up as the call drops. Boots hit the floor almost immediately and the crew moves as one toward the bay.",
+                "From the dispatch desk, the assignment is clean: tones, address, incident type. The career crew is already moving before the last detail is read out.",
+            ]
+        elif mode == "emergency":
+            options = [
+                "Across town, pagers cut through dinner, work, and quiet living rooms. Volunteers grab keys, leave half-finished tasks behind, and head for the station.",
+                "The alert tone lands hard. One firefighter steps away from a workbench, another leaves the house still pulling on a jacket, all converging on the station.",
+                "Dispatch marks it urgent. Phones buzz, pagers chirp, and the first volunteers start moving before the message has finished scrolling.",
+            ]
+        else:
+            options = [
+                "The call is toned as routine, but the station still begins to stir. Volunteers acknowledge from home, work, and the road as they make their way in.",
+                "Dispatch sends the details calmly. Around the district, responders wrap up what they are doing and start toward the station.",
+                "A steady alert rolls out over the pagers. It is not panic, but it is movement: doors closing, engines starting, and crew members checking in.",
+            ]
+        return f"{random.choice(options)} Turnout expected {self._make_relative_text(minutes)}."
+
+    def _realert_narrative(self, minutes: float) -> str:
+        options = [
+            "The first turnout is not enough, so dispatch sends a second tone. The message is sharper this time: more hands are needed.",
+            "A re-alert goes out across the district. Anyone who missed the first call gets a second chance to make the bay.",
+            "The incident commander asks for more crew. Dispatch repeats the call, and late responders start checking in.",
+        ]
+        return f"{random.choice(options)} Additional turnout expected {self._make_relative_text(minutes)}."
+
+    def _turnout_result_narrative(self, arrived: int, required: int, available: int) -> str:
+        if arrived >= required:
+            return (
+                "The bay fills with enough crew to make a confident first move. "
+                "The incident can proceed with the planned staffing."
+            )
+        if arrived > 0:
+            return (
+                "The turnout is thin. A small crew is ready, but the incident may stretch them "
+                "unless more personnel arrive or the dispatch is kept tight."
+            )
+        if available > 0:
+            return (
+                "The station stays quiet after the tones. No one makes it in fast enough, "
+                "leaving the call without a crew ready to roll."
+            )
+        return "There is no available staff to answer the call."
+
+    def _travel_narrative(self, minutes: float) -> str:
+        options = [
+            "The bay doors lift and the unit rolls out into traffic. Dispatch keeps the channel open while the crew builds the first picture from the notes.",
+            "The engine clears the station and turns toward the incident. In the cab, the crew reviews the call details and starts planning the first action.",
+            "Sirens carry down the street as the unit goes en route. The address is set, the crew is briefed, and the scene is coming closer.",
+        ]
+        return f"{random.choice(options)} ETA {self._make_relative_text(minutes)}."
 
     async def _build_dashboard_embed(self, user: discord.abc.User) -> discord.Embed:
         data = await self.config.user(user).all()
@@ -646,7 +704,7 @@ class FireStationCommand(commands.Cog):
     # Commands
     # --------------------------------------------------
 
-    @commands.group(name="fsc")
+    @commands.group(name="fsc", invoke_without_command=True)
     async def fsc_group(self, ctx: commands.Context):
         """Fire Station Command main group."""
         if ctx.invoked_subcommand is None:
@@ -1102,8 +1160,6 @@ class FireStationCommand(commands.Cog):
                 first_arrived = sim["arrived"]
                 total = first_arrived
 
-        rel = self._make_relative_text(minutes)
-
         mission.update(
             {
                 "alert_mode": mode,
@@ -1117,10 +1173,15 @@ class FireStationCommand(commands.Cog):
         self._set_mission_due(mission, self.ACTION_SHOW_TURNOUT_RESULT, minutes)
         await user_conf.active_mission.set(mission)
 
-        await interaction.response.send_message(
-            f"📟 Crew alerted with **{mode}** mode. Turnout expected {rel}.",
-            ephemeral=False,
+        embed = discord.Embed(
+            title="Crew alerted",
+            description=self._alert_narrative(mode, stype, minutes),
+            color=discord.Color.orange(),
         )
+        embed.add_field(name="Alert mode", value=mode.capitalize(), inline=True)
+        embed.add_field(name="Expected turnout", value=self._make_relative_text(minutes), inline=True)
+        embed.add_field(name="Required staff", value=str(required), inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=False)
 
         if minutes > 0:
             await asyncio.sleep(int(minutes * 60))
@@ -1147,6 +1208,11 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Required staff", value=str(required), inline=True)
         embed.add_field(name="Available staff", value=str(available), inline=True)
         embed.add_field(name="Arrived staff", value=str(arrived), inline=True)
+        embed.add_field(
+            name="Narrative",
+            value=self._turnout_result_narrative(arrived, required, available),
+            inline=False,
+        )
         embed.set_footer(text="Re-alert for more crew, proceed with current crew, or cancel the call.")
 
         view = TurnoutDecisionView(self, channel, user)
@@ -1184,15 +1250,18 @@ class FireStationCommand(commands.Cog):
         min_minutes = float(glb.get("realert_minutes_min", 1.0))
         max_minutes = float(glb.get("realert_minutes_max", 3.0))
         minutes = random.uniform(min_minutes, max_minutes)
-        rel = self._make_relative_text(minutes)
-
         self._set_mission_due(mission, self.ACTION_SHOW_TURNOUT_RESULT, minutes)
         await user_conf.active_mission.set(mission)
 
-        await interaction.response.send_message(
-            f"📟 Re-alert sent. Additional turnout expected {rel}.",
-            ephemeral=False,
+        embed = discord.Embed(
+            title="Re-alert sent",
+            description=self._realert_narrative(minutes),
+            color=discord.Color.orange(),
         )
+        embed.add_field(name="Current turnout", value=str(current_total), inline=True)
+        embed.add_field(name="Available staff", value=str(available), inline=True)
+        embed.add_field(name="Additional ETA", value=self._make_relative_text(minutes), inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=False)
 
         await asyncio.sleep(int(minutes * 60))
         await self._show_turnout_result(channel, user)
@@ -1225,7 +1294,10 @@ class FireStationCommand(commands.Cog):
 
         embed = discord.Embed(
             title="Vehicle selection",
-            description=f"{arrived} personnel available. Select vehicles to dispatch.",
+            description=(
+                f"{arrived} personnel are ready in the bay. Select the vehicles that best match "
+                "the incident picture and available crew."
+            ),
             color=discord.Color.blue(),
         )
         await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
@@ -1262,17 +1334,19 @@ class FireStationCommand(commands.Cog):
         min_minutes = float(glb.get("travel_minutes_min", 3.0))
         max_minutes = float(glb.get("travel_minutes_max", 8.0))
         minutes = random.uniform(min_minutes, max_minutes)
-        rel = self._make_relative_text(minutes)
-
         mission["selected_vehicle_ids"] = [int(v) for v in values]
         self._set_mission_stage(mission, self.STAGE_TRAVEL)
         self._set_mission_due(mission, self.ACTION_SHOW_TRAVEL_UPDATE, minutes)
         await user_conf.active_mission.set(mission)
 
-        await interaction.response.send_message(
-            f"🚨 Units are en route. ETA {rel}.",
-            ephemeral=False,
+        embed = discord.Embed(
+            title="Units en route",
+            description=self._travel_narrative(minutes),
+            color=discord.Color.blue(),
         )
+        embed.add_field(name="ETA", value=self._make_relative_text(minutes), inline=True)
+        embed.add_field(name="Vehicles dispatched", value=str(len(values)), inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=False)
 
         await asyncio.sleep(int(minutes * 60))
         await self._send_travel_update(channel, user)
@@ -1460,45 +1534,114 @@ class FscDashboardView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user.id
 
+    def _dashboard_view(self) -> "FscDashboardView":
+        return FscDashboardView(self.cog, self.user, self.channel, self.guild)
+
     @discord.ui.button(label="Refresh", style=discord.ButtonStyle.primary)
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = await self.cog._build_dashboard_embed(self.user)
-        view = FscDashboardView(self.cog, self.user, self.channel, self.guild)
-        await interaction.response.edit_message(embed=embed, view=view)
+        await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
 
     @discord.ui.button(label="Station", style=discord.ButtonStyle.secondary)
     async def station(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = await self.cog.config.user(self.user).all()
         if not data["started"]:
-            await interaction.response.send_message("Create a station first.", ephemeral=True)
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Action required", value="Create a station first.", inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=FscStartView(self.cog, self.user))
             return
         embed = self.cog._build_station_overview_embed(data)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
 
     @discord.ui.button(label="Shop", style=discord.ButtonStyle.secondary)
     async def shop(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = await self.cog.config.user(self.user).all()
         if not data["started"]:
-            await interaction.response.send_message("Create a station first.", ephemeral=True)
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Action required", value="Create a station first.", inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=FscStartView(self.cog, self.user))
             return
-        await self.cog._send_vehicle_shop(
-            interaction.response.send_message,
-            self.channel,
-            self.user,
-            ephemeral=True,
+        lvl = int(data.get("station_level", 1))
+        vehicles = data.get("vehicles", [])
+        max_veh = self.cog._max_vehicles(lvl)
+        if len(vehicles) >= max_veh:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(
+                name="Vehicle shop",
+                value="You are at maximum vehicle capacity. Upgrade your station to buy more vehicles.",
+                inline=False,
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
+            return
+
+        embed = discord.Embed(
+            title="Vehicle shop",
+            description="Select a vehicle to purchase from the menu below.",
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(
+            name="Capacity",
+            value=f"{len(vehicles)} / {max_veh} vehicles currently in your station.",
+            inline=False,
+        )
+        await interaction.response.edit_message(
+            content=None,
+            embed=embed,
+            view=VehicleShopView(self.cog, self.channel, self.user),
         )
 
     @discord.ui.button(label="Mission", style=discord.ButtonStyle.danger)
     async def mission(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel = interaction.channel or self.channel
         data = await self.cog.config.user(self.user).all()
         if not data["started"]:
-            await interaction.response.send_message("Create a station first.", ephemeral=True)
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Action required", value="Create a station first.", inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=FscStartView(self.cog, self.user))
             return
-        await self.cog._start_mission_for_user(
-            interaction.response.send_message,
-            self.channel,
-            self.guild,
-            self.user,
+
+        active = data.get("active_mission", {}) or {}
+        if active:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(
+                name="Mission",
+                value="You already have an active incident. Finish or cancel it first.",
+                inline=False,
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
+            return
+
+        staff_total = int(data.get("staff_total", 0))
+        if staff_total <= 0:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(
+                name="Mission",
+                value="You have no staff at your station. Recruit staff before taking incidents.",
+                inline=False,
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
+            return
+
+        incident = self.cog._pick_random_incident()
+        mission = self.cog._new_mission_state(
+            incident,
+            channel_id=channel.id,
+            guild_id=self.guild.id if self.guild else None,
+        )
+        await self.cog.config.user(self.user).active_mission.set(mission)
+
+        embed = discord.Embed(
+            title=f"🚨 New incident: {incident['name']}",
+            description=incident.get("dispatch_narrative", incident["hint"]),
+            color=discord.Color.red(),
+        )
+        embed.add_field(name="Required staff", value=str(incident["required_staff"]), inline=True)
+        embed.add_field(name="Initial report", value=incident["hint"], inline=False)
+        embed.set_footer(text="Choose how to alert your crew below.")
+        await interaction.response.edit_message(
+            content=None,
+            embed=embed,
+            view=AlertChoiceView(self.cog, channel, self.user),
         )
 
     @discord.ui.button(label="Commands", style=discord.ButtonStyle.secondary)
@@ -1511,7 +1654,7 @@ class FscDashboardView(discord.ui.View):
         embed.add_field(name="Recruit", value="`[p]fsc recruit <amount>`", inline=False)
         embed.add_field(name="Upgrade", value="`[p]fsc upgrade`", inline=False)
         embed.add_field(name="Career station", value="`[p]fsc career`", inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
 
 
 class AlertChoiceView(discord.ui.View):
