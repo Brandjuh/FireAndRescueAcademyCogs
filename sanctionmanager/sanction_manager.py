@@ -8,6 +8,7 @@ from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional
 
 import discord
+from discord import app_commands
 from redbot.core import commands, Config
 from redbot.core.bot import Red
 from redbot.core.utils.chat_formatting import box
@@ -1561,6 +1562,11 @@ class SanctionsManager(commands.Cog):
         db_path = str(data_manager.cog_data_path(self) / "sanctions.db")
         self.db = SanctionsDatabase(db_path)
         self._panel_task: Optional[asyncio.Task] = None
+        self._sanction_context_menu = app_commands.ContextMenu(
+            name="Sanction Member",
+            callback=self._sanction_context_menu_callback,
+        )
+        self._context_menu_guild: Optional[discord.Object] = None
 
         self.bot.add_view(StartView(self))
 
@@ -1571,6 +1577,59 @@ class SanctionsManager(commands.Cog):
     def cog_unload(self):
         if self._panel_task:
             self._panel_task.cancel()
+        self._unregister_context_menu()
+
+    async def _get_context_menu_guild(self) -> Optional[discord.Object]:
+        """Resolve the guild where the context menu should be synced."""
+        guilds = getattr(self.bot, "guilds", [])
+        if guilds:
+            return discord.Object(id=guilds[0].id)
+        return None
+
+    async def _register_context_menu(self):
+        """Register and sync the Discord user context menu for sanctions."""
+        tree = getattr(self.bot, "tree", None)
+        add_command = getattr(tree, "add_command", None) if tree else None
+        sync = getattr(tree, "sync", None) if tree else None
+        if not add_command or not sync:
+            log.warning("App command tree not available; SanctionManager context menu not registered")
+            return
+
+        guild = await self._get_context_menu_guild()
+        if not guild:
+            log.warning("No guild available; SanctionManager context menu not registered")
+            return
+
+        try:
+            remove_command = getattr(tree, "remove_command", None)
+            if remove_command:
+                remove_command(
+                    self._sanction_context_menu.name,
+                    type=discord.AppCommandType.user,
+                    guild=guild,
+                )
+            add_command(self._sanction_context_menu, guild=guild)
+            await sync(guild=guild)
+            self._context_menu_guild = guild
+            log.info("SanctionManager context menu synced for guild %s", guild.id)
+        except Exception as exc:
+            log.warning("Failed to register SanctionManager context menu: %s", exc)
+
+    def _unregister_context_menu(self):
+        """Remove the Discord user context menu on unload."""
+        tree = getattr(self.bot, "tree", None)
+        remove_command = getattr(tree, "remove_command", None) if tree else None
+        if not remove_command:
+            return
+
+        try:
+            remove_command(
+                self._sanction_context_menu.name,
+                type=discord.AppCommandType.user,
+                guild=self._context_menu_guild,
+            )
+        except Exception as exc:
+            log.debug("Failed to unregister SanctionManager context menu: %s", exc)
 
     def get_member_sanctions(
         self,
@@ -1747,10 +1806,72 @@ class SanctionsManager(commands.Cog):
 
         return unique_results[:limit]
 
+    async def _send_sanction_type_selection(
+        self,
+        interaction: discord.Interaction,
+        target: Dict[str, Any],
+    ) -> None:
+        """Open the existing sanction type flow for a resolved target."""
+        view = SanctionTypeView(
+            self,
+            admin_user_id=interaction.user.id,
+            admin_username=str(interaction.user),
+            target_discord_id=target.get("discord_id"),
+            target_mc_id=target.get("mc_user_id"),
+            target_mc_username=(
+                target.get("mc_username")
+                or target.get("name")
+                or target.get("discord_display_name")
+                or target.get("discord_username")
+            ),
+            target_discord_user=target.get("discord_member"),
+        )
+        await interaction.response.send_message(
+            content="Select the type of sanction:",
+            embed=view._create_target_embed(),
+            view=view,
+            ephemeral=True,
+        )
+
+    async def _sanction_context_menu_callback(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+    ) -> None:
+        """Start SanctionManager from Discord's right-click user context menu."""
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message(
+                "You don't have permission to create sanctions.",
+                ephemeral=True,
+            )
+            return
+
+        results = await self.search_sanction_targets(
+            interaction.guild,
+            str(member.id),
+            threshold=1.0,
+            limit=1,
+        )
+        if not results:
+            results = [{
+                "score": 1.0,
+                "discord_id": member.id,
+                "discord_username": str(member),
+                "discord_display_name": getattr(member, "display_name", None),
+                "discord_member": member,
+                "mc_user_id": None,
+                "mc_username": None,
+                "name": getattr(member, "display_name", None) or str(member),
+                "source": "discord",
+            }]
+
+        await self._send_sanction_type_selection(interaction, results[0])
+
     async def _delayed_panel_start(self):
         """Post configured persistent panels after startup."""
         await self.bot.wait_until_ready()
         await asyncio.sleep(5)
+        await self._register_context_menu()
         for guild in getattr(self.bot, "guilds", []):
             await self._ensure_panel_message(guild)
 
