@@ -296,6 +296,33 @@ class MemberOverviewView(discord.ui.View):
             inline=False
         )
         
+        contribution_lines = [
+            f"**Status:** {data.contribution_data_status}",
+        ]
+        if data.contribution_rate is not None:
+            contribution_lines.append(f"**Current Rate:** {data.contribution_rate:.1f}%")
+        else:
+            contribution_lines.append("**Current Rate:** No data")
+        if data.contribution_trend:
+            contribution_lines.append(f"**Trend:** {data.contribution_trend}")
+        if data.contribution_history:
+            history = " -> ".join(f"{rate:.1f}%" for rate in data.contribution_history[:4])
+            contribution_lines.append(f"**Recent History:** {history}")
+        if data.contribution_snapshot_at:
+            contribution_lines.append(f"**Snapshot:** {data.contribution_snapshot_at}")
+        if data.contribution_snapshot_source:
+            contribution_lines.append(f"**Source:** {data.contribution_snapshot_source}")
+        if data.contribution_grace_status:
+            contribution_lines.append(f"**Grace:** {data.contribution_grace_status}")
+        if data.contribution_join_source:
+            contribution_lines.append(f"**Join Source:** {data.contribution_join_source}")
+
+        embed.add_field(
+            name="Contribution",
+            value="\n".join(contribution_lines),
+            inline=False
+        )
+
         # Quick Stats
         stats_lines = [
             f"**Sanctions:** {data.infractions_count} active",
