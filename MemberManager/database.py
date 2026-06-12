@@ -279,10 +279,13 @@ class MemberDatabase:
             query += " AND ref_code=?"
             params.append(ref_code)
         else:
-            if discord_id:
+            if discord_id and mc_user_id:
+                query += " AND (discord_id=? OR mc_user_id=?)"
+                params.extend([discord_id, mc_user_id])
+            elif discord_id:
                 query += " AND discord_id=?"
                 params.append(discord_id)
-            if mc_user_id:
+            elif mc_user_id:
                 query += " AND mc_user_id=?"
                 params.append(mc_user_id)
             if status:
