@@ -439,6 +439,55 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         self.assertIn("Expired warnings: 1", embed.fields[0]["value"])
         self.assertIn("Removed sanctions: 1", embed.fields[0]["value"])
 
+    def test_sanctions_list_counts_expired_and_removed_statuses_separately(self):
+        class FakeSanctionManager:
+            def get_member_sanctions(self, **kwargs):
+                del kwargs
+                return [
+                    {
+                        "sanction_id": 1,
+                        "sanction_type": "Warning - Official 1st",
+                        "reason_detail": "Active warning",
+                        "created_at": 1_800_000_000,
+                        "effective_status": "active",
+                    },
+                    {
+                        "sanction_id": 2,
+                        "sanction_type": "Warning - Official 2nd",
+                        "reason_detail": "Second active warning",
+                        "created_at": 1_800_000_100,
+                        "effective_status": "active",
+                    },
+                    {
+                        "sanction_id": 3,
+                        "sanction_type": "Warning - Official 1st",
+                        "reason_detail": "Expired warning",
+                        "created_at": 1_700_000_000,
+                        "effective_status": "expired",
+                    },
+                    {
+                        "sanction_id": 4,
+                        "sanction_type": "Kick",
+                        "reason_detail": "Removed sanction",
+                        "created_at": 1_700_000_100,
+                        "effective_status": "removed",
+                    },
+                ]
+
+        view = MemberOverviewView.__new__(MemberOverviewView)
+        view.member_data = MemberData(discord_id=123, mc_user_id="456", discord_username="DiscordUser")
+        view.integrations = {"sanction_manager": FakeSanctionManager()}
+        view.guild = types.SimpleNamespace(id=1)
+        view.infraction_page = 0
+        view.infractions_per_page = 10
+
+        embed = asyncio.run(view.get_infractions_embed())
+
+        self.assertIn("Sanctions List", embed.kwargs["title"])
+        self.assertIn("Active: 2", embed.footer["text"])
+        self.assertIn("Expired: 1", embed.footer["text"])
+        self.assertIn("Removed: 1", embed.footer["text"])
+
     def test_sanction_manager_public_contract_delegates_to_database(self):
         SanctionsManager = load_sanctions_manager_class()
         calls = {}
