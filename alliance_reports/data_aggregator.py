@@ -7,15 +7,14 @@ V2 Database Structure:
 - logs_v2.db: logs table (id, hash, ts, action_key, executed_name, affected_name, description, contribution_amount, scraped_at)
 - income_v2.db: income table (entry_type, period, username, amount, description, timestamp)
 - buildings_v2.db: buildings table (building_id, owner_name, building_type, classrooms, timestamp)
-- alliance.db: treasury_balance, treasury_income, treasury_expenses (LEGACY - STILL USED)
-- membersync.db: links, reviews (LEGACY)
+- membersync.db: links (LEGACY)
 - building_manager.db: building_requests, building_actions (LEGACY)
 - sanctions.db: sanctions (LEGACY)
 """
 
 import logging
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 from zoneinfo import ZoneInfo
@@ -67,23 +66,20 @@ class DataAggregator:
             log.exception(f"Error connecting to {db_name} database: {e}")
             return None
     
+    @staticmethod
+    def _get_game_day_window(utc_now: datetime) -> tuple[datetime, datetime]:
+        """Return the current MissionChief US game day as UTC datetimes."""
+        eastern = ZoneInfo("America/New_York")
+        local_now = utc_now.astimezone(eastern)
+        local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        return local_start.astimezone(ZoneInfo("UTC")), utc_now
+
     async def get_daily_data(self) -> Dict:
-        """Get aggregated data for daily reports (last 24 hours GAME TIME)."""
+        """Get aggregated data for the current MissionChief US game day."""
         try:
-            log.info("Aggregating daily data (EDT Game Day)...")
-            
-            # Calculate EDT game day boundaries
+            log.info("Aggregating daily data (US Eastern game day)...")
             utc_now = datetime.now(ZoneInfo("UTC"))
-            
-            # Game day starts at 04:00 UTC (00:00 EDT)
-            # Find the most recent 04:00 UTC mark
-            if utc_now.hour >= 4:
-                game_day_start = utc_now.replace(hour=4, minute=0, second=0, microsecond=0)
-            else:
-                game_day_start = (utc_now - timedelta(days=1)).replace(hour=4, minute=0, second=0, microsecond=0)
-            
-            # Game day ends NOW (include all logs up to this moment)
-            game_day_end = utc_now
+            game_day_start, game_day_end = self._get_game_day_window(utc_now)
             
             log.info(f"Game Day: {game_day_start.isoformat()} to {game_day_end.isoformat()} (UTC)")
             
@@ -92,7 +88,6 @@ class DataAggregator:
                 "training": await self._get_training_data_daily(game_day_start, game_day_end),
                 "buildings": await self._get_buildings_data_daily(game_day_start, game_day_end),
                 "operations": await self._get_operations_data_daily(game_day_start, game_day_end),
-                "treasury": await self._get_treasury_data_daily(game_day_start, game_day_end),
                 "sanctions": await self._get_sanctions_data_daily(game_day_start, game_day_end),
                 "admin_activity": await self._get_admin_activity_daily(game_day_start, game_day_end),
             }
@@ -109,22 +104,20 @@ class DataAggregator:
         try:
             log.info(f"Aggregating monthly data for {month_date.strftime('%B %Y')}...")
             
-            # Get first and last day of month
+            # Use an exclusive end boundary so the full last day is included.
             first_day = month_date.replace(day=1)
             if month_date.month == 12:
-                last_day = month_date.replace(year=month_date.year + 1, month=1, day=1) - timedelta(days=1)
+                period_end = month_date.replace(year=month_date.year + 1, month=1, day=1)
             else:
-                last_day = month_date.replace(month=month_date.month + 1, day=1) - timedelta(days=1)
+                period_end = month_date.replace(month=month_date.month + 1, day=1)
             
             data = {
-                "membership": await self._get_membership_data_monthly(first_day, last_day),
-                "training": await self._get_training_data_monthly(first_day, last_day),
-                "buildings": await self._get_buildings_data_monthly(first_day, last_day),
-                "operations": await self._get_operations_data_monthly(first_day, last_day),
-                "treasury": await self._get_treasury_data_monthly(first_day, last_day),
-                "sanctions": await self._get_sanctions_data_monthly(first_day, last_day),
-                "admin_activity": await self._get_admin_activity_monthly(first_day, last_day),
-                "activity_score": None,
+                "membership": await self._get_membership_data_monthly(first_day, period_end),
+                "training": await self._get_training_data_monthly(first_day, period_end),
+                "buildings": await self._get_buildings_data_monthly(first_day, period_end),
+                "operations": await self._get_operations_data_monthly(first_day, period_end),
+                "sanctions": await self._get_sanctions_data_monthly(first_day, period_end),
+                "admin_activity": await self._get_admin_activity_monthly(first_day, period_end),
             }
             
             log.info("Monthly data aggregation complete")
@@ -212,7 +205,7 @@ class DataAggregator:
                 verif_approved = cursor_ms.fetchone()[0]
                 
                 # Pending verifications
-                cursor_ms.execute("SELECT COUNT(*) FROM reviews WHERE status = 'pending'")
+                cursor_ms.execute("SELECT COUNT(*) FROM links WHERE status = 'pending'")
                 verif_pending = cursor_ms.fetchone()[0]
                 
                 conn_ms.close()
@@ -223,12 +216,7 @@ class DataAggregator:
                 "left_24h": left,
                 "kicked_24h": kicked,
                 "verifications_approved_24h": verif_approved,
-                "verifications_denied_24h": 0,
                 "verifications_pending": verif_pending,
-                "avg_verification_time_hours": 0,
-                "inactive_30_60_days": 0,
-                "inactive_60_plus_days": 0,
-                "oldest_verification_hours": 0,
             }
         
         except Exception as e:
@@ -265,14 +253,8 @@ class DataAggregator:
             conn.close()
             
             return {
-                "requests_submitted_24h": started,
-                "requests_approved_24h": started,
-                "requests_denied_24h": 0,
                 "started_24h": started,
                 "completed_24h": completed,
-                "avg_approval_time_hours": 0,
-                "reminders_sent_24h": 0,
-                "by_discipline_24h": {},
             }
         
         except Exception as e:
@@ -352,17 +334,13 @@ class DataAggregator:
                 conn_logs.close()
             
             return {
-                "requests_submitted_24h": approved + denied,
+                "processed_24h": approved + denied,
                 "approved_24h": approved,
                 "denied_24h": denied,
                 "pending": pending,
-                "avg_review_time_hours": 0,
                 "extensions_started_24h": ext_started,
                 "extensions_completed_24h": ext_completed,
-                "extensions_in_progress": 0,
-                "extensions_trend_pct": 0,
                 "by_type_24h": by_type,
-                "oldest_request_hours": 0,
             }
         
         except Exception as e:
@@ -479,7 +457,6 @@ class DataAggregator:
                 "expenses_24h": expenses_24h,
                 "contributors_24h": contributors,
                 "largest_expense_24h": largest_expense,
-                "trend_7d": 0,
             }
         
         except Exception as e:
@@ -513,18 +490,11 @@ class DataAggregator:
             """)
             active_warnings = cursor.fetchone()[0]
             
-            active_1st = int(active_warnings * 0.625)
-            active_2nd = int(active_warnings * 0.25)
-            active_3rd = active_warnings - active_1st - active_2nd
-            
             conn.close()
             
             return {
                 "issued_24h": issued,
                 "active_warnings": active_warnings,
-                "active_1st_warnings": active_1st,
-                "active_2nd_warnings": active_2nd,
-                "active_3rd_warnings": active_3rd,
             }
         
         except Exception as e:
@@ -566,19 +536,6 @@ class DataAggregator:
             
             conn.close()
             
-            # Verification actions
-            conn_ms = self._get_db_connection("membersync")
-            verif_actions = 0
-            if conn_ms:
-                cursor_ms = conn_ms.cursor()
-                cursor_ms.execute("""
-                    SELECT COUNT(*) FROM audit 
-                    WHERE datetime(scraped_at) >= datetime(?)
-                    AND datetime(scraped_at) < datetime(?)
-                """, (game_day_start.isoformat(), game_day_end.isoformat()))
-                verif_actions = cursor_ms.fetchone()[0]
-                conn_ms.close()
-            
             # Sanction actions
             conn_s = self._get_db_connection("sanctions")
             sanction_actions = 0
@@ -594,8 +551,6 @@ class DataAggregator:
             
             return {
                 "building_reviews_24h": building_reviews,
-                "training_approvals_24h": 0,
-                "verifications_24h": verif_actions,
                 "sanctions_24h": sanction_actions,
                 "most_active_admin": most_active,
                 "most_active_admin_count": most_active_count,
@@ -616,8 +571,31 @@ class DataAggregator:
             
             cursor = conn.cursor()
             
-            # Ending members (latest snapshot)
-            cursor.execute("SELECT COUNT(DISTINCT member_id) FROM members WHERE timestamp = (SELECT MAX(timestamp) FROM members)")
+            cursor.execute(
+                "SELECT MAX(timestamp) FROM members WHERE datetime(timestamp) < datetime(?)",
+                (start.isoformat(),),
+            )
+            starting_snapshot = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT MAX(timestamp) FROM members WHERE datetime(timestamp) < datetime(?)",
+                (end.isoformat(),),
+            )
+            ending_snapshot = cursor.fetchone()[0]
+            if not starting_snapshot or not ending_snapshot:
+                conn.close()
+                return {"error": "Required monthly member snapshots are unavailable"}
+
+            # Use actual snapshots for the starting and ending member counts.
+            cursor.execute(
+                "SELECT COUNT(DISTINCT member_id) FROM members WHERE timestamp = ?",
+                (starting_snapshot,),
+            )
+            starting_members = cursor.fetchone()[0]
+
+            cursor.execute(
+                "SELECT COUNT(DISTINCT member_id) FROM members WHERE timestamp = ?",
+                (ending_snapshot,),
+            )
             ending_members = cursor.fetchone()[0]
             
             conn.close()
@@ -633,14 +611,16 @@ class DataAggregator:
                 cursor_logs.execute("""
                     SELECT COUNT(*) FROM logs 
                     WHERE action_key = 'added_to_alliance' 
-                    AND datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
+                    AND datetime(scraped_at) >= datetime(?)
+                    AND datetime(scraped_at) < datetime(?)
                 """, (start.isoformat(), end.isoformat()))
                 new_joins = cursor_logs.fetchone()[0]
                 
                 cursor_logs.execute("""
                     SELECT COUNT(*) FROM logs 
                     WHERE action_key = 'left_alliance' 
-                    AND datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
+                    AND datetime(scraped_at) >= datetime(?)
+                    AND datetime(scraped_at) < datetime(?)
                 """, (start.isoformat(), end.isoformat()))
                 left = cursor_logs.fetchone()[0]
                 
@@ -654,15 +634,13 @@ class DataAggregator:
                 cursor_s.execute("""
                     SELECT COUNT(*) FROM sanctions 
                     WHERE sanction_type = 'Kick' 
-                    AND created_at BETWEEN ? AND ?
+                    AND created_at >= ?
+                    AND created_at < ?
                 """, (int(start.timestamp()), int(end.timestamp())))
                 kicked = cursor_s.fetchone()[0]
                 conn_s.close()
             
-            net_growth = new_joins - left - kicked
-            starting_members = ending_members - net_growth
-            net_growth_pct = (net_growth / starting_members * 100) if starting_members > 0 else 0
-            retention_rate = ((starting_members - left - kicked) / starting_members * 100) if starting_members > 0 else 0
+            net_growth = ending_members - starting_members
             
             return {
                 "starting_members": starting_members,
@@ -671,8 +649,6 @@ class DataAggregator:
                 "left_period": left,
                 "kicked_period": kicked,
                 "net_growth": net_growth,
-                "net_growth_pct": net_growth_pct,
-                "retention_rate": retention_rate,
             }
         
         except Exception as e:
@@ -692,7 +668,8 @@ class DataAggregator:
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'created_course' 
-                AND datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
+                AND datetime(scraped_at) >= datetime(?)
+                AND datetime(scraped_at) < datetime(?)
             """, (start.isoformat(), end.isoformat()))
             started = cursor.fetchone()[0]
             
@@ -700,7 +677,8 @@ class DataAggregator:
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'course_completed' 
-                AND datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
+                AND datetime(scraped_at) >= datetime(?)
+                AND datetime(scraped_at) < datetime(?)
             """, (start.isoformat(), end.isoformat()))
             completed = cursor.fetchone()[0]
             
@@ -735,7 +713,8 @@ class DataAggregator:
             cursor.execute("""
                 SELECT COUNT(*) FROM building_requests 
                 WHERE status = 'approved' 
-                AND updated_at BETWEEN ? AND ?
+                AND updated_at >= ?
+                AND updated_at < ?
             """, (start_ts, end_ts))
             approved = cursor.fetchone()[0]
             
@@ -743,7 +722,8 @@ class DataAggregator:
             cursor.execute("""
                 SELECT COUNT(*) FROM building_requests 
                 WHERE status = 'denied' 
-                AND updated_at BETWEEN ? AND ?
+                AND updated_at >= ?
+                AND updated_at < ?
             """, (start_ts, end_ts))
             denied = cursor.fetchone()[0]
             
@@ -752,7 +732,8 @@ class DataAggregator:
                 SELECT building_type, COUNT(*) 
                 FROM building_requests 
                 WHERE status = 'approved' 
-                AND updated_at BETWEEN ? AND ?
+                AND updated_at >= ?
+                AND updated_at < ?
                 GROUP BY building_type
             """, (start_ts, end_ts))
             by_type = dict(cursor.fetchall())
@@ -770,14 +751,16 @@ class DataAggregator:
                 cursor_logs.execute("""
                     SELECT COUNT(*) FROM logs 
                     WHERE action_key = 'extension_started' 
-                    AND datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
+                    AND datetime(scraped_at) >= datetime(?)
+                    AND datetime(scraped_at) < datetime(?)
                 """, (start.isoformat(), end.isoformat()))
                 ext_started = cursor_logs.fetchone()[0]
                 
                 cursor_logs.execute("""
                     SELECT COUNT(*) FROM logs 
                     WHERE action_key = 'expansion_finished' 
-                    AND datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
+                    AND datetime(scraped_at) >= datetime(?)
+                    AND datetime(scraped_at) < datetime(?)
                 """, (start.isoformat(), end.isoformat()))
                 ext_completed = cursor_logs.fetchone()[0]
                 
@@ -808,7 +791,8 @@ class DataAggregator:
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'large_mission_started' 
-                AND datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
+                AND datetime(scraped_at) >= datetime(?)
+                AND datetime(scraped_at) < datetime(?)
             """, (start.isoformat(), end.isoformat()))
             missions = cursor.fetchone()[0]
             
@@ -816,7 +800,8 @@ class DataAggregator:
             cursor.execute("""
                 SELECT COUNT(*) FROM logs 
                 WHERE action_key = 'alliance_event_started' 
-                AND datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
+                AND datetime(scraped_at) >= datetime(?)
+                AND datetime(scraped_at) < datetime(?)
             """, (start.isoformat(), end.isoformat()))
             events = cursor.fetchone()[0]
             
@@ -849,8 +834,12 @@ class DataAggregator:
             result = cursor.fetchone()
             opening = result[0] if result else 0
             
-            # Closing balance
-            cursor.execute("SELECT total_funds FROM treasury_balance ORDER BY scraped_at DESC LIMIT 1")
+            # Closing balance from the latest snapshot inside the requested month.
+            cursor.execute("""
+                SELECT total_funds FROM treasury_balance
+                WHERE datetime(scraped_at) < datetime(?)
+                ORDER BY scraped_at DESC LIMIT 1
+            """, (end.isoformat(),))
             result = cursor.fetchone()
             closing = result[0] if result else 0
             
@@ -860,7 +849,8 @@ class DataAggregator:
             # Largest contribution
             cursor.execute("""
                 SELECT MAX(credits) FROM treasury_expenses 
-                WHERE datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
+                WHERE datetime(scraped_at) >= datetime(?)
+                AND datetime(scraped_at) < datetime(?)
             """, (start.isoformat(), end.isoformat()))
             result = cursor.fetchone()
             largest_contribution = result[0] if result and result[0] else 0
@@ -893,7 +883,8 @@ class DataAggregator:
             # Total issued
             cursor.execute("""
                 SELECT COUNT(*) FROM sanctions 
-                WHERE created_at BETWEEN ? AND ?
+                WHERE created_at >= ?
+                AND created_at < ?
             """, (start_ts, end_ts))
             issued = cursor.fetchone()[0]
             
@@ -908,7 +899,8 @@ class DataAggregator:
                     END as type,
                     COUNT(*) 
                 FROM sanctions 
-                WHERE created_at BETWEEN ? AND ?
+                WHERE created_at >= ?
+                AND created_at < ?
                 GROUP BY type
             """, (start_ts, end_ts))
             by_type = dict(cursor.fetchall())
@@ -938,7 +930,8 @@ class DataAggregator:
             # Total actions
             cursor.execute("""
                 SELECT COUNT(*) FROM building_actions 
-                WHERE timestamp BETWEEN ? AND ?
+                WHERE timestamp >= ?
+                AND timestamp < ?
             """, (start_ts, end_ts))
             total_actions = cursor.fetchone()[0]
             
@@ -946,7 +939,8 @@ class DataAggregator:
             cursor.execute("""
                 SELECT admin_username, COUNT(*) as count 
                 FROM building_actions 
-                WHERE timestamp BETWEEN ? AND ?
+                WHERE timestamp >= ?
+                AND timestamp < ?
                 GROUP BY admin_username 
                 ORDER BY count DESC 
                 LIMIT 1
@@ -957,24 +951,13 @@ class DataAggregator:
             
             conn.close()
             
-            # Add verification and sanction actions
-            conn_ms = self._get_db_connection("membersync")
-            if conn_ms:
-                cursor_ms = conn_ms.cursor()
-                cursor_ms.execute("""
-                    SELECT COUNT(*) FROM audit 
-                    WHERE datetime(scraped_at) BETWEEN datetime(?) AND datetime(?)
-                """, (start.isoformat(), end.isoformat()))
-                verif_actions = cursor_ms.fetchone()[0]
-                total_actions += verif_actions
-                conn_ms.close()
-            
             conn_s = self._get_db_connection("sanctions")
             if conn_s:
                 cursor_s = conn_s.cursor()
                 cursor_s.execute("""
                     SELECT COUNT(*) FROM sanctions 
-                    WHERE created_at BETWEEN ? AND ?
+                    WHERE created_at >= ?
+                    AND created_at < ?
                 """, (start_ts, end_ts))
                 sanction_actions = cursor_s.fetchone()[0]
                 total_actions += sanction_actions
