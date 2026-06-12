@@ -14,6 +14,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added mission state helpers with explicit stage constants and schema versioning.
 - Added mission timestamp fields for future scheduler/resume support.
 - Added an interactive `[p]fsc` dashboard with station overview and action buttons.
+- Added mission control buttons for active incidents from the dashboard and `[p]fsc mission`.
 - Added richer story narrative fields for mission dispatches, scene updates, and outcomes.
 - Added narrative alert, re-alert, turnout, and en-route messages with dispatch and responder perspectives.
 
@@ -27,7 +28,9 @@ All notable changes to FireStationCommand will be documented in this file.
 - New missions now store a mission state schema version.
 - Mission state now tracks `created_at`, `updated_at`, `next_action`, and `next_action_at`.
 - `[p]fsc` now opens the station dashboard instead of showing command help.
+- `[p]fsc mission` now opens mission controls when an incident is already active.
 - Mission embeds now use narrative text from mission config when available.
+- On-scene updates now pause briefly before sending the incident result.
 - Crew alert, turnout result, re-alert, vehicle selection, and en-route updates now use richer embeds instead of short plain status messages.
 - Early manual gameplay timers are shorter until automatic dispatch is implemented.
 - Short positive wait times now display as at least `in 1 minute` instead of `now`.
