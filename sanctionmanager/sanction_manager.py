@@ -2072,13 +2072,12 @@ class SanctionsManager(commands.Cog):
         except Exception as exc:
             log.error("Failed to record MemberManager sanction audit event: %s", exc, exc_info=True)
 
-    async def _is_admin(self, interaction: discord.Interaction) -> bool:
-        """Check if user has admin permissions."""
-        guild = interaction.guild
-        if guild is None or not isinstance(interaction.user, discord.Member):
+    async def can_manage_sanctions(self, guild: discord.Guild, user: Any) -> bool:
+        """Return whether a guild user can manage sanctions."""
+        if guild is None or not isinstance(user, discord.Member):
             return False
         
-        if interaction.user.guild_permissions.administrator:
+        if user.guild_permissions.administrator:
             return True
         
         role_id = await self.config.guild(guild).admin_role_id()
@@ -2086,7 +2085,11 @@ class SanctionsManager(commands.Cog):
             return False
         
         role = guild.get_role(role_id)
-        return role in interaction.user.roles if role else False
+        return role in user.roles if role else False
+
+    async def _is_admin(self, interaction: discord.Interaction) -> bool:
+        """Check if an interaction user can manage sanctions."""
+        return await self.can_manage_sanctions(interaction.guild, interaction.user)
 
     @commands.group(name="sanctionset", invoke_without_command=True)
     @commands.admin()
@@ -2430,7 +2433,7 @@ class SanctionsManager(commands.Cog):
     @commands.guild_only()
     async def remove(self, ctx: commands.Context, sanction_id: int, *, reason: str):
         """Remove/archive a sanction (admin only)."""
-        if not await self._is_admin(discord.Interaction(data={}, state=ctx.bot._connection)):
+        if not await self.can_manage_sanctions(ctx.guild, ctx.author):
             await ctx.send("You don't have permission to do this.")
             return
         
@@ -2460,19 +2463,9 @@ class SanctionsManager(commands.Cog):
     @commands.guild_only()
     async def edit(self, ctx: commands.Context, sanction_id: int):
         """Edit a sanction (admin only)."""
-        if not isinstance(ctx.author, discord.Member):
+        if not await self.can_manage_sanctions(ctx.guild, ctx.author):
+            await ctx.send("You don't have permission to edit sanctions.")
             return
-        
-        # Check admin permission
-        if not ctx.author.guild_permissions.administrator:
-            role_id = await self.config.guild(ctx.guild).admin_role_id()
-            if not role_id:
-                await ctx.send("You don't have permission to edit sanctions.")
-                return
-            role = ctx.guild.get_role(role_id)
-            if not role or role not in ctx.author.roles:
-                await ctx.send("You don't have permission to edit sanctions.")
-                return
         
         sanction = self.db.get_sanction(sanction_id)
         

@@ -51,6 +51,52 @@ class MemberManagerSanctionsTests(unittest.TestCase):
 
         self.assertEqual(module.DEFAULT_PANEL_CHANNEL_ID, 1426226521231589507)
 
+    def test_sanction_manager_permission_helper_accepts_administrator(self):
+        SanctionsManager = load_sanctions_manager_class()
+        manager = SanctionsManager.__new__(SanctionsManager)
+        guild = types.SimpleNamespace(id=1)
+        user = types.SimpleNamespace(
+            guild_permissions=types.SimpleNamespace(administrator=True),
+            roles=[],
+        )
+
+        allowed = asyncio.run(manager.can_manage_sanctions(guild, user))
+
+        self.assertTrue(allowed)
+
+    def test_sanction_manager_permission_helper_accepts_configured_role(self):
+        SanctionsManager = load_sanctions_manager_class()
+        role = object()
+        manager = SanctionsManager.__new__(SanctionsManager)
+        manager.config = types.SimpleNamespace(
+            guild=lambda guild: types.SimpleNamespace(admin_role_id=AsyncMock(return_value=99))
+        )
+        guild = types.SimpleNamespace(id=1, get_role=lambda role_id: role if role_id == 99 else None)
+        user = types.SimpleNamespace(
+            guild_permissions=types.SimpleNamespace(administrator=False),
+            roles=[role],
+        )
+
+        allowed = asyncio.run(manager.can_manage_sanctions(guild, user))
+
+        self.assertTrue(allowed)
+
+    def test_sanction_manager_permission_helper_rejects_unprivileged_member(self):
+        SanctionsManager = load_sanctions_manager_class()
+        manager = SanctionsManager.__new__(SanctionsManager)
+        manager.config = types.SimpleNamespace(
+            guild=lambda guild: types.SimpleNamespace(admin_role_id=AsyncMock(return_value=99))
+        )
+        guild = types.SimpleNamespace(id=1, get_role=lambda role_id: object())
+        user = types.SimpleNamespace(
+            guild_permissions=types.SimpleNamespace(administrator=False),
+            roles=[],
+        )
+
+        allowed = asyncio.run(manager.can_manage_sanctions(guild, user))
+
+        self.assertFalse(allowed)
+
     def test_sanctionmanager_send_panel_message_stores_message_id(self):
         module = load_sanction_manager_module()
         stored = {}
