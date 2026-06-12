@@ -646,7 +646,7 @@ class FireStationCommand(commands.Cog):
     # Commands
     # --------------------------------------------------
 
-    @commands.group(name="fsc")
+    @commands.group(name="fsc", invoke_without_command=True)
     async def fsc_group(self, ctx: commands.Context):
         """Fire Station Command main group."""
         if ctx.invoked_subcommand is None:
@@ -1460,45 +1460,114 @@ class FscDashboardView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user.id
 
+    def _dashboard_view(self) -> "FscDashboardView":
+        return FscDashboardView(self.cog, self.user, self.channel, self.guild)
+
     @discord.ui.button(label="Refresh", style=discord.ButtonStyle.primary)
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = await self.cog._build_dashboard_embed(self.user)
-        view = FscDashboardView(self.cog, self.user, self.channel, self.guild)
-        await interaction.response.edit_message(embed=embed, view=view)
+        await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
 
     @discord.ui.button(label="Station", style=discord.ButtonStyle.secondary)
     async def station(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = await self.cog.config.user(self.user).all()
         if not data["started"]:
-            await interaction.response.send_message("Create a station first.", ephemeral=True)
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Action required", value="Create a station first.", inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=FscStartView(self.cog, self.user))
             return
         embed = self.cog._build_station_overview_embed(data)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
 
     @discord.ui.button(label="Shop", style=discord.ButtonStyle.secondary)
     async def shop(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = await self.cog.config.user(self.user).all()
         if not data["started"]:
-            await interaction.response.send_message("Create a station first.", ephemeral=True)
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Action required", value="Create a station first.", inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=FscStartView(self.cog, self.user))
             return
-        await self.cog._send_vehicle_shop(
-            interaction.response.send_message,
-            self.channel,
-            self.user,
-            ephemeral=True,
+        lvl = int(data.get("station_level", 1))
+        vehicles = data.get("vehicles", [])
+        max_veh = self.cog._max_vehicles(lvl)
+        if len(vehicles) >= max_veh:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(
+                name="Vehicle shop",
+                value="You are at maximum vehicle capacity. Upgrade your station to buy more vehicles.",
+                inline=False,
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
+            return
+
+        embed = discord.Embed(
+            title="Vehicle shop",
+            description="Select a vehicle to purchase from the menu below.",
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(
+            name="Capacity",
+            value=f"{len(vehicles)} / {max_veh} vehicles currently in your station.",
+            inline=False,
+        )
+        await interaction.response.edit_message(
+            content=None,
+            embed=embed,
+            view=VehicleShopView(self.cog, self.channel, self.user),
         )
 
     @discord.ui.button(label="Mission", style=discord.ButtonStyle.danger)
     async def mission(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel = interaction.channel or self.channel
         data = await self.cog.config.user(self.user).all()
         if not data["started"]:
-            await interaction.response.send_message("Create a station first.", ephemeral=True)
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Action required", value="Create a station first.", inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=FscStartView(self.cog, self.user))
             return
-        await self.cog._start_mission_for_user(
-            interaction.response.send_message,
-            self.channel,
-            self.guild,
-            self.user,
+
+        active = data.get("active_mission", {}) or {}
+        if active:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(
+                name="Mission",
+                value="You already have an active incident. Finish or cancel it first.",
+                inline=False,
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
+            return
+
+        staff_total = int(data.get("staff_total", 0))
+        if staff_total <= 0:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(
+                name="Mission",
+                value="You have no staff at your station. Recruit staff before taking incidents.",
+                inline=False,
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
+            return
+
+        incident = self.cog._pick_random_incident()
+        mission = self.cog._new_mission_state(
+            incident,
+            channel_id=channel.id,
+            guild_id=self.guild.id if self.guild else None,
+        )
+        await self.cog.config.user(self.user).active_mission.set(mission)
+
+        embed = discord.Embed(
+            title=f"🚨 New incident: {incident['name']}",
+            description=incident.get("dispatch_narrative", incident["hint"]),
+            color=discord.Color.red(),
+        )
+        embed.add_field(name="Required staff", value=str(incident["required_staff"]), inline=True)
+        embed.add_field(name="Initial report", value=incident["hint"], inline=False)
+        embed.set_footer(text="Choose how to alert your crew below.")
+        await interaction.response.edit_message(
+            content=None,
+            embed=embed,
+            view=AlertChoiceView(self.cog, channel, self.user),
         )
 
     @discord.ui.button(label="Commands", style=discord.ButtonStyle.secondary)
@@ -1511,7 +1580,7 @@ class FscDashboardView(discord.ui.View):
         embed.add_field(name="Recruit", value="`[p]fsc recruit <amount>`", inline=False)
         embed.add_field(name="Upgrade", value="`[p]fsc upgrade`", inline=False)
         embed.add_field(name="Career station", value="`[p]fsc career`", inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
 
 
 class AlertChoiceView(discord.ui.View):

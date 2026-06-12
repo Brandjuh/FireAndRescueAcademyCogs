@@ -28,6 +28,11 @@ All notable changes to FireStationCommand will be documented in this file.
 - `[p]fsc` now opens the station dashboard instead of showing command help.
 - Mission embeds now use narrative text from mission config when available.
 
+### Fixed
+
+- Prevented Red help from appearing after the `[p]fsc` dashboard.
+- Dashboard buttons now update the existing dashboard message instead of opening private responses.
+
 ### Known Issues
 
 - Mission timers still rely on in-memory `asyncio.sleep` calls.
