@@ -809,10 +809,10 @@ class MemberOverviewView(discord.ui.View):
             status = sanction.get("effective_status", sanction.get("status", "active"))
             
             # Status emoji
-            if status != "active":
+            if status == "removed":
                 emoji = "⚫"
                 removed_count += 1
-            elif sanction.get("_display_expired"):
+            elif status == "expired" or sanction.get("_display_expired"):
                 emoji = "⏱️"
                 expired_count += 1
             else:
