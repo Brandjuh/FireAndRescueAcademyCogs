@@ -73,6 +73,37 @@ class MemberManagerContributionTests(unittest.TestCase):
 
         self.assertEqual(data.contribution_data_status, "unavailable")
 
+    def test_membermanager_uses_membersscraper_public_contract(self):
+        members_scraper = types.SimpleNamespace(
+            get_member_snapshot=AsyncMock(
+                return_value={
+                    "user_id": "456",
+                    "name": "MCUser",
+                    "role": "Member",
+                    "contribution_rate": 7.5,
+                    "snapshot_at": "2026-06-12T12:00:00",
+                    "snapshot_source": "live",
+                }
+            ),
+            get_member_contribution_history=AsyncMock(return_value=[7.5, 7.0]),
+            get_member_first_seen=AsyncMock(return_value="2026-06-01T12:00:00+00:00"),
+        )
+        cog = MemberManager.__new__(MemberManager)
+        cog.members_scraper = members_scraper
+        cog.logs_scraper = None
+
+        snapshot = asyncio.run(cog._get_mc_data("456"))
+        history = asyncio.run(cog._get_historical_rates_for_member("456"))
+        join_date, join_source = asyncio.run(cog._get_join_date_for_member("456", "MCUser", None))
+
+        self.assertEqual(snapshot["contribution_rate"], 7.5)
+        self.assertEqual(history, [7.5, 7.0])
+        self.assertEqual(join_date, datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc))
+        self.assertEqual(join_source, "first scrape (fallback)")
+        members_scraper.get_member_snapshot.assert_awaited_once_with("456")
+        members_scraper.get_member_contribution_history.assert_awaited_once_with("456", limit=12)
+        members_scraper.get_member_first_seen.assert_awaited_once_with("456")
+
     def test_overview_embed_includes_contribution_field(self):
         data = MemberData(
             discord_id=123,
