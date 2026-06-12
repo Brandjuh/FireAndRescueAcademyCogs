@@ -455,6 +455,43 @@ class MemberSync(commands.Cog):
             log.exception("Error sending review embed")
             return None
 
+    async def _record_membermanager_link_event(
+        self,
+        *,
+        guild_id: int,
+        discord_id: int,
+        mc_user_id: str,
+        event_type: str,
+        actor_id: Optional[int] = None,
+        event_data: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Record MemberSync changes in MemberManager when that cog is loaded."""
+        try:
+            member_manager = self.bot.get_cog("MemberManager")
+            member_db = getattr(member_manager, "db", None)
+            add_event = getattr(member_db, "add_event", None)
+            if not add_event:
+                return
+
+            payload = {
+                "mc_user_id": str(mc_user_id),
+                "source": "MemberSync",
+            }
+            if event_data:
+                payload.update(event_data)
+
+            await add_event(
+                guild_id=guild_id,
+                discord_id=int(discord_id),
+                mc_user_id=str(mc_user_id),
+                event_type=event_type,
+                event_data=payload,
+                triggered_by="membersync",
+                actor_id=actor_id,
+            )
+        except Exception:
+            log.exception("Failed to record MemberManager audit event for MemberSync")
+
     async def _approve_link(self, guild: discord.Guild, user: discord.Member, mc_id: str, approver: Optional[discord.Member]=None, manual: bool = False) -> Tuple[bool, str]:
         """Approve a verification link"""
         try:
@@ -480,6 +517,18 @@ class MemberSync(commands.Cog):
                     con.close()
             await asyncio.get_running_loop().run_in_executor(None, _run)
 
+            await self._record_membermanager_link_event(
+                guild_id=guild.id,
+                discord_id=user.id,
+                mc_user_id=str(mc_id),
+                event_type="link_approved",
+                actor_id=approver.id if approver else None,
+                event_data={
+                    "status": "approved",
+                    "manual": bool(manual),
+                },
+            )
+
             if role and role not in user.roles:
                 try:
                     await user.add_roles(role, reason=f"MemberSync {'manual' if manual else 'auto'} verified")
@@ -499,7 +548,7 @@ class MemberSync(commands.Cog):
                     url = _mc_profile_url(mc_id)
                     await ch.send(f"✅ Linked {user.mention} to MC [{mc_id}]({url}) (Manual approval by {approver.mention if approver else 'System'})")
 
-            await self._debug_log(f"✅ Link approved successfully")
+            await self._debug_log("✅ Link approved successfully")
             return True, "Approved, linked and role granted."
         
         except Exception as e:
@@ -529,6 +578,18 @@ class MemberSync(commands.Cog):
                     con.close()
             await asyncio.get_running_loop().run_in_executor(None, _run)
 
+            await self._record_membermanager_link_event(
+                guild_id=guild.id,
+                discord_id=user.id,
+                mc_user_id=str(mc_id),
+                event_type="link_denied",
+                actor_id=reviewer.id if reviewer else None,
+                event_data={
+                    "status": "denied",
+                    "reason": reason,
+                },
+            )
+
             try:
                 await user.send(f"❌ Your verification for MC `{mc_id}` was denied. Reason: {reason}")
             except Exception:
@@ -539,7 +600,7 @@ class MemberSync(commands.Cog):
             if isinstance(ch, discord.TextChannel):
                 await ch.send(f"❌ Denied verification for {user.mention} (MC `{mc_id}`): {reason}")
 
-            await self._debug_log(f"✅ Link denied")
+            await self._debug_log("✅ Link denied")
         
         except Exception as e:
             await self._debug_log(f"Error denying link: {e}", "error")
@@ -837,7 +898,7 @@ class MemberSync(commands.Cog):
                 try:
                     exc = self._bg_task.exception()
                     embed.add_field(name="Queue Error", value=f"```{str(exc)[:1000]}```", inline=False)
-                except:
+                except Exception:
                     pass
         
         # Check if prune loop is running
@@ -849,7 +910,7 @@ class MemberSync(commands.Cog):
                 try:
                     exc = self._prune_task.exception()
                     embed.add_field(name="Prune Error", value=f"```{str(exc)[:1000]}```", inline=False)
-                except:
+                except Exception:
                     pass
         
         # Check guild config
@@ -1205,7 +1266,7 @@ class MemberSync(commands.Cog):
             embed = discord.Embed(
                 title="✅ Member Found!",
                 color=discord.Color.green(),
-                description=f"This member can be verified"
+                description="This member can be verified"
             )
             embed.add_field(name="MC Name", value=result.get("name", "Unknown"), inline=True)
             embed.add_field(name="MC ID", value=result.get("mc_id", "Unknown"), inline=True)
@@ -1329,7 +1390,7 @@ class MemberSync(commands.Cog):
                 enqueued_dt = datetime.fromisoformat(enqueued_at.replace('Z', '+00:00'))
                 enqueued_timestamp = int(enqueued_dt.timestamp())
                 time_display = f"<t:{enqueued_timestamp}:R>"
-            except:
+            except Exception:
                 time_display = enqueued_at[:19]
             
             queue_msg = (
@@ -1361,7 +1422,7 @@ class MemberSync(commands.Cog):
                 )
                 
                 if ok:
-                    await ctx.send(f"✅ **Verified!** Your account has been linked and you've been granted the Verified role.")
+                    await ctx.send("✅ **Verified!** Your account has been linked and you've been granted the Verified role.")
                     await self._debug_log(f"✅ Immediate auto-approval for {ctx.author.name}")
                 else:
                     await ctx.send(f"⚠️ Found you, but failed to complete verification: {msg}")
@@ -1539,7 +1600,7 @@ class MemberSync(commands.Cog):
                 member = ctx.guild.get_member(int(target))
                 if not member:
                     member = await ctx.guild.fetch_member(int(target))
-            except:
+            except Exception:
                 if not mc_id:
                     target_mc_id = target
         else:
@@ -1584,7 +1645,7 @@ class MemberSync(commands.Cog):
                 member = ctx.guild.get_member(int(target))
                 if not member:
                     member = await ctx.guild.fetch_member(int(target))
-            except:
+            except Exception:
                 mc_id = target
                 link = await self.get_link_for_mc(mc_id)
                 if link:

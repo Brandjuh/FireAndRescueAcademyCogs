@@ -1,10 +1,32 @@
 import asyncio
+import importlib.util
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 from MemberManager.membermanager import MemberManager
 from MemberManager.views import MemberOverviewView
+
+
+def load_membersync_class():
+    from discord import app_commands
+    from redbot.core import checks, commands
+
+    if not hasattr(app_commands, "describe"):
+        app_commands.describe = lambda **kwargs: (lambda func: func)
+    if not hasattr(checks, "admin_or_permissions"):
+        checks.admin_or_permissions = lambda **kwargs: (lambda func: func)
+    if not hasattr(commands, "cooldown"):
+        commands.cooldown = lambda *args, **kwargs: (lambda func: func)
+    if not hasattr(commands, "BucketType"):
+        commands.BucketType = types.SimpleNamespace(user="user")
+
+    module_path = Path(__file__).resolve().parents[1] / "membersync" / "membersync.py"
+    spec = importlib.util.spec_from_file_location("membersync_under_test", module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.MemberSync
 
 
 class MemberManagerMemberSyncTests(unittest.TestCase):
@@ -120,6 +142,58 @@ class MemberManagerMemberSyncTests(unittest.TestCase):
 
         field_names = [field["name"] for field in embed.fields]
         self.assertIn("MemberSync", field_names)
+
+    def test_membersync_records_membermanager_audit_when_available(self):
+        MemberSync = load_membersync_class()
+        add_event = AsyncMock()
+        membersync = MemberSync.__new__(MemberSync)
+        membersync.bot = types.SimpleNamespace(
+            get_cog=lambda name: types.SimpleNamespace(db=types.SimpleNamespace(add_event=add_event))
+            if name == "MemberManager"
+            else None
+        )
+
+        asyncio.run(
+            membersync._record_membermanager_link_event(
+                guild_id=1,
+                discord_id=123,
+                mc_user_id="456",
+                event_type="link_approved",
+                actor_id=999,
+                event_data={"status": "approved", "manual": True},
+            )
+        )
+
+        add_event.assert_awaited_once_with(
+            guild_id=1,
+            discord_id=123,
+            mc_user_id="456",
+            event_type="link_approved",
+            event_data={
+                "mc_user_id": "456",
+                "source": "MemberSync",
+                "status": "approved",
+                "manual": True,
+            },
+            triggered_by="membersync",
+            actor_id=999,
+        )
+
+    def test_membersync_audit_hook_is_noop_without_membermanager(self):
+        MemberSync = load_membersync_class()
+        membersync = MemberSync.__new__(MemberSync)
+        membersync.bot = types.SimpleNamespace(get_cog=lambda name: None)
+
+        asyncio.run(
+            membersync._record_membermanager_link_event(
+                guild_id=1,
+                discord_id=123,
+                mc_user_id="456",
+                event_type="link_denied",
+                actor_id=999,
+                event_data={"status": "denied", "reason": "Mismatch"},
+            )
+        )
 
 
 if __name__ == "__main__":
