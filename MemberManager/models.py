@@ -29,6 +29,12 @@ class MemberData:
     mc_role: Optional[str] = None
     contribution_rate: Optional[float] = None
     contribution_trend: Optional[str] = None  # "up", "down", "stable"
+    contribution_snapshot_at: Optional[str] = None
+    contribution_snapshot_source: Optional[str] = None
+    contribution_history: List[float] = field(default_factory=list)
+    contribution_data_status: str = "unavailable"
+    contribution_join_source: Optional[str] = None
+    contribution_grace_status: Optional[str] = None
     mc_joined: Optional[datetime] = None
     mc_left: Optional[datetime] = None
     

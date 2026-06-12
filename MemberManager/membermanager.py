@@ -1410,9 +1410,14 @@ class MemberManager(ConfigCommands, commands.Cog):
             conn = sqlite3.connect(str(db_path))
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
+
+            cursor.execute("PRAGMA table_info(members)")
+            columns = {row["name"] for row in cursor.fetchall()}
+            source_select = "snapshot_source" if "snapshot_source" in columns else "'unknown' AS snapshot_source"
             
-            cursor.execute("""
-                SELECT member_id, username, rank, earned_credits, contribution_rate
+            cursor.execute(f"""
+                SELECT member_id, username, rank, earned_credits, contribution_rate,
+                       timestamp, {source_select}
                 FROM members
                 WHERE member_id = ?
                 ORDER BY timestamp DESC
@@ -1428,7 +1433,9 @@ class MemberManager(ConfigCommands, commands.Cog):
                     "name": row["username"],
                     "role": row["rank"],
                     "earned_credits": row["earned_credits"],
-                    "contribution_rate": row["contribution_rate"]
+                    "contribution_rate": row["contribution_rate"],
+                    "snapshot_at": row["timestamp"],
+                    "snapshot_source": row["snapshot_source"],
                 }
         
         except Exception as e:
@@ -1553,6 +1560,50 @@ class MemberManager(ConfigCommands, commands.Cog):
         except Exception as e:
             log.error(f"Failed to get MC data for {mc_user_id}: {e}", exc_info=True)
             return None
+
+    async def _populate_contribution_data(self, data: MemberData) -> None:
+        """Populate contribution status fields from existing scraper reads."""
+        if not data.mc_user_id:
+            data.contribution_data_status = "missing"
+            return
+
+        if not self.members_scraper:
+            data.contribution_data_status = "unavailable"
+            return
+
+        if data.contribution_rate is None:
+            data.contribution_data_status = "missing"
+            return
+
+        data.contribution_data_status = "available"
+        data.contribution_history = await self._get_historical_rates_for_member(data.mc_user_id)
+
+        if len(data.contribution_history) >= 2:
+            current = data.contribution_history[0]
+            previous = data.contribution_history[1]
+            if abs(current - previous) < 0.5:
+                data.contribution_trend = "stable"
+            elif current > previous:
+                data.contribution_trend = "up"
+            else:
+                data.contribution_trend = "down"
+
+        join_date, join_source = await self._get_join_date_for_member(
+            data.mc_user_id,
+            data.mc_username,
+            self.logs_scraper,
+        )
+        data.contribution_join_source = join_source
+        if join_date:
+            data.mc_joined = join_date
+            days_in_alliance = (datetime.now(timezone.utc) - join_date).days
+            data.contribution_grace_status = (
+                f"{days_in_alliance} days in alliance"
+                if days_in_alliance >= 7
+                else f"grace period ({days_in_alliance}/7 days)"
+            )
+        else:
+            data.contribution_grace_status = "join date unavailable"
     
     # ==================== DEBUG COMMAND ====================
     
@@ -1817,6 +1868,8 @@ class MemberManager(ConfigCommands, commands.Cog):
                     data.mc_username = mc_data.get("name")
                     data.mc_role = mc_data.get("role")
                     data.contribution_rate = mc_data.get("contribution_rate")
+                    data.contribution_snapshot_at = mc_data.get("snapshot_at")
+                    data.contribution_snapshot_source = mc_data.get("snapshot_source")
                     mc_in_alliance = True
             except Exception as e:
                 log.error(f"Failed to get MC data for {data.mc_user_id}: {e}")
@@ -1824,6 +1877,8 @@ class MemberManager(ConfigCommands, commands.Cog):
         if data.mc_user_id and not mc_in_alliance:
             data.mc_username = f"Former member ({data.mc_user_id})"
             data.mc_role = "Left alliance"
+
+        await self._populate_contribution_data(data)
         
         # Get notes count
         if self.db:
