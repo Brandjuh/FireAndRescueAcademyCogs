@@ -24,18 +24,21 @@ class FireStationCommand(commands.Cog):
         self.bot = bot
         # fresh identifier
         self.config = Config.get_conf(self, identifier=0xF15704, force_registration=True)
+        self.game_data = self._load_game_data()
 
         default_global: Dict[str, Any] = {
             "volunteer_normal_minutes": 15.0,
             "volunteer_emergency_minutes": 5.0,
-            "career_turnout_minutes": 0.0,
+            "career_turnout_minutes": self._balance_seconds_as_minutes(
+                "career_turnout_seconds", 0.0
+            ),
             "realert_minutes_min": 1.0,
             "realert_minutes_max": 3.0,
             "travel_minutes_min": 3.0,
             "travel_minutes_max": 8.0,
             "staff_cost": 2000,
             "upgrade_base_cost": 50000,
-            "career_convert_cost": 250000,
+            "career_convert_cost": self._balance_int("career_upgrade_cost", 250000),
             "max_station_level": 5,
         }
 
@@ -54,7 +57,6 @@ class FireStationCommand(commands.Cog):
         self.config.register_global(**default_global)
         self.config.register_user(**default_user)
 
-        self.game_data = self._load_game_data()
         self.vehicle_definitions = self._build_vehicle_definitions()
         self.INCIDENTS = self._build_incidents()
         self.VEHICLE_CATALOG = self._build_vehicle_catalog()
@@ -126,6 +128,31 @@ class FireStationCommand(commands.Cog):
             "trainings": self._load_yaml_config("trainings.yaml"),
             "expansions": self._load_yaml_config("expansions.yaml"),
         }
+
+    def _balance_config(self) -> Dict[str, Any]:
+        balance = self.game_data.get("balance", {}).get("balance", {})
+        return balance if isinstance(balance, dict) else {}
+
+    def _balance_int(self, key: str, default: int) -> int:
+        value = self._balance_config().get(key, default)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _balance_float(self, key: str, default: float) -> float:
+        value = self._balance_config().get(key, default)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _balance_seconds_as_minutes(self, key: str, default: float) -> float:
+        seconds = self._balance_float(key, default * 60)
+        return max(0.0, seconds / 60)
+
+    def _reward_multiplier(self) -> float:
+        return max(0.0, self._balance_float("credits_reward_multiplier", 1.0))
 
     def _build_vehicle_definitions(self) -> Dict[str, Dict[str, Any]]:
         vehicles = self.game_data.get("vehicles", {}).get("vehicles", [])
@@ -1008,7 +1035,7 @@ class FireStationCommand(commands.Cog):
 
         success_score = (ratio_staff * 0.6) + (ratio_capacity * 0.4)
         success_score = max(0.0, min(1.5, success_score))
-        base_reward = int(mission.get("base_credits", 1000))
+        base_reward = int(mission.get("base_credits", 1000) * self._reward_multiplier())
 
         if success_score >= 1.0:
             outcome = "✅ Incident successfully handled."

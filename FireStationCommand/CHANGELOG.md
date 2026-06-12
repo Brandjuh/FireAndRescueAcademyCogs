@@ -9,6 +9,8 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added FireStationCommand-specific cog metadata.
 - Added YAML-backed loading for missions and vehicle shop data.
 - Added fallback data so the cog can still load if YAML data is unavailable.
+- Added balance-backed reward multiplier support.
+- Added tests for FireStationCommand data loading helpers.
 
 ### Changed
 
@@ -16,6 +18,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - Vehicle shop options now come from `data/config/vehicles.yaml` when available.
 - Mission definitions now come from `data/config/missions.yaml` when available.
 - Mission rewards now use each mission's `base_credits` value when available.
+- Career conversion cost and career turnout time now use matching `balance.yaml` values when available.
 
 ### Known Issues
 
