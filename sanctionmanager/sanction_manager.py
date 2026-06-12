@@ -1283,6 +1283,18 @@ class SummarySanctionView(discord.ui.View):
             reason_detail=self.reason_detail,
             additional_notes=self.additional_notes
         )
+        await self.cog._record_membermanager_sanction_event(
+            guild_id=guild.id,
+            sanction={
+                "sanction_id": sanction_id,
+                "discord_user_id": self.target_discord_id,
+                "mc_user_id": self.target_mc_id,
+                "sanction_type": self.sanction_type,
+            },
+            event_type="sanction_added",
+            actor_id=self.admin_user_id,
+            event_data={"source": "SanctionManager"},
+        )
 
         # Auto-remove roles for Kick or Ban
         roles_removed = []
@@ -1513,6 +1525,39 @@ class SanctionsManager(commands.Cog):
             admin_user_id,
             notes,
         )
+
+    async def _record_membermanager_sanction_event(
+        self,
+        *,
+        guild_id: int,
+        sanction: dict,
+        event_type: str,
+        actor_id: Optional[int],
+        event_data: Optional[dict] = None,
+    ) -> None:
+        """Record SanctionManager activity in MemberManager when it is loaded."""
+        member_manager = self.bot.get_cog("MemberManager")
+        member_db = getattr(member_manager, "db", None) if member_manager else None
+        if not member_db:
+            return
+
+        payload = {
+            "sanction_id": sanction.get("sanction_id"),
+            "sanction_type": sanction.get("sanction_type"),
+            **(event_data or {}),
+        }
+        try:
+            await member_db.add_event(
+                guild_id=guild_id,
+                discord_id=sanction.get("discord_user_id"),
+                mc_user_id=sanction.get("mc_user_id"),
+                event_type=event_type,
+                event_data=payload,
+                triggered_by="sanctionmanager",
+                actor_id=actor_id,
+            )
+        except Exception as exc:
+            log.error("Failed to record MemberManager sanction audit event: %s", exc, exc_info=True)
 
     async def _is_admin(self, interaction: discord.Interaction) -> bool:
         """Check if user has admin permissions."""
@@ -1843,6 +1888,13 @@ class SanctionsManager(commands.Cog):
             ctx.author.id,
             f"Removed by {ctx.author}: {reason}"
         )
+        await self._record_membermanager_sanction_event(
+            guild_id=ctx.guild.id,
+            sanction=sanction,
+            event_type="sanction_removed",
+            actor_id=ctx.author.id,
+            event_data={"reason": reason, "source": "SanctionManager"},
+        )
         
         await ctx.send(f"✅ Sanction #{sanction_id} has been removed.")
 
@@ -1953,6 +2005,13 @@ class EditMCInfoModal(discord.ui.Modal, title="Edit MC Info"):
             self.editor.id,
             **updates
         )
+        await self.cog._record_membermanager_sanction_event(
+            guild_id=self.sanction["guild_id"],
+            sanction=self.sanction,
+            event_type="sanction_edited",
+            actor_id=self.editor.id,
+            event_data={"fields": sorted(updates), "source": "SanctionManager"},
+        )
         
         await interaction.response.send_message(
             f"✅ Updated MC info for sanction #{self.sanction['sanction_id']}",
@@ -1980,6 +2039,13 @@ class EditSanctionTypeSelect(discord.ui.Select):
             self.parent.sanction['sanction_id'],
             self.parent.editor.id,
             sanction_type=new_type
+        )
+        await self.parent.cog._record_membermanager_sanction_event(
+            guild_id=self.parent.sanction["guild_id"],
+            sanction=self.parent.sanction,
+            event_type="sanction_edited",
+            actor_id=self.parent.editor.id,
+            event_data={"fields": ["sanction_type"], "source": "SanctionManager"},
         )
         
         await interaction.response.send_message(
@@ -2020,6 +2086,13 @@ class EditReasonModal(discord.ui.Modal, title="Edit Reason"):
             reason_category=str(self.reason_category),
             reason_detail=str(self.reason_detail)
         )
+        await self.cog._record_membermanager_sanction_event(
+            guild_id=self.sanction["guild_id"],
+            sanction=self.sanction,
+            event_type="sanction_edited",
+            actor_id=self.editor.id,
+            event_data={"fields": ["reason_category", "reason_detail"], "source": "SanctionManager"},
+        )
         
         await interaction.response.send_message(
             f"✅ Updated reason for sanction #{self.sanction['sanction_id']}",
@@ -2048,6 +2121,13 @@ class EditNotesModal(discord.ui.Modal, title="Edit Admin Notes"):
             self.sanction['sanction_id'],
             self.editor.id,
             additional_notes=str(self.notes) if self.notes.value else None
+        )
+        await self.cog._record_membermanager_sanction_event(
+            guild_id=self.sanction["guild_id"],
+            sanction=self.sanction,
+            event_type="sanction_edited",
+            actor_id=self.editor.id,
+            event_data={"fields": ["additional_notes"], "source": "SanctionManager"},
         )
         
         await interaction.response.send_message(

@@ -228,6 +228,59 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         self.assertEqual(calls["edit"], (42, 999, {"reason_detail": "Updated"}))
         self.assertEqual(calls["remove"], (42, "removed", 999, "Resolved"))
 
+    def test_sanction_manager_records_membermanager_audit_when_available(self):
+        SanctionsManager = load_sanctions_manager_class()
+        add_event = AsyncMock()
+        manager = SanctionsManager.__new__(SanctionsManager)
+        manager.bot = types.SimpleNamespace(
+            get_cog=lambda name: types.SimpleNamespace(db=types.SimpleNamespace(add_event=add_event))
+            if name == "MemberManager"
+            else None
+        )
+
+        asyncio.run(
+            manager._record_membermanager_sanction_event(
+                guild_id=1,
+                sanction={
+                    "sanction_id": 42,
+                    "discord_user_id": 123,
+                    "mc_user_id": "456",
+                    "sanction_type": "Warning",
+                },
+                event_type="sanction_added",
+                actor_id=999,
+                event_data={"source": "SanctionManager"},
+            )
+        )
+
+        add_event.assert_awaited_once_with(
+            guild_id=1,
+            discord_id=123,
+            mc_user_id="456",
+            event_type="sanction_added",
+            event_data={
+                "sanction_id": 42,
+                "sanction_type": "Warning",
+                "source": "SanctionManager",
+            },
+            triggered_by="sanctionmanager",
+            actor_id=999,
+        )
+
+    def test_sanction_manager_audit_hook_is_noop_without_membermanager(self):
+        SanctionsManager = load_sanctions_manager_class()
+        manager = SanctionsManager.__new__(SanctionsManager)
+        manager.bot = types.SimpleNamespace(get_cog=lambda name: None)
+
+        asyncio.run(
+            manager._record_membermanager_sanction_event(
+                guild_id=1,
+                sanction={"sanction_id": 42},
+                event_type="sanction_removed",
+                actor_id=999,
+            )
+        )
+
     def test_create_sanction_modal_uses_public_contract(self):
         calls = {}
 
