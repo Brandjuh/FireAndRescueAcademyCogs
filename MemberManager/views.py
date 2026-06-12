@@ -13,13 +13,13 @@ VERSION v2.1 - IMPROVEMENTS:
 import discord
 from typing import Optional, Dict, Any, List
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
+from .audit import EVENT_EMOJI, fetch_missionchief_events, merge_timeline_events
 from .models import MemberData
 from .utils import (
     format_timestamp,
     format_contribution_trend,
-    format_role_list,
     truncate_text,
     get_severity_emoji,
     build_mc_profile_url
@@ -831,126 +831,86 @@ class MemberOverviewView(discord.ui.View):
             title=f"📋 Audit Log - {data.get_display_name()}",
             color=discord.Color.dark_gray()
         )
-        
+        return await self._build_audit_timeline_embed(embed)
+
+    async def _build_audit_timeline_embed(self, embed: discord.Embed) -> discord.Embed:
+        """Build the combined audit timeline from existing stored data."""
+        data = self.member_data
+
         try:
-            # Get ALL events for this member
-            events = await self.db.get_events(
+            member_events = await self.db.get_events(
                 discord_id=data.discord_id,
                 mc_user_id=data.mc_user_id,
-                limit=10000  # Get all events
+                limit=10000,
+            )
+
+            missionchief_events = []
+            logs_scraper = self.integrations.get("logs_scraper")
+            if logs_scraper:
+                missionchief_events = await fetch_missionchief_events(
+                    logs_scraper.db_path,
+                    mc_user_id=data.mc_user_id,
+                    mc_username=data.mc_username,
+                    limit=250,
+                )
+
+            audit_events = merge_timeline_events(
+                member_events,
+                missionchief_events,
+                query=self.audit_search_query,
             )
         except Exception as e:
-            log.error(f"Error fetching audit log: {e}")
+            log.error(f"Error fetching audit log: {e}", exc_info=True)
             embed.description = "⚠️ Error loading audit log"
             return embed
-        
-        if not events:
-            embed.description = "*No audit entries for this member.*"
-            return embed
-        
-        # Filter for admin actions
-        admin_actions = [
-            "note_created", "note_edited", "note_deleted",
-            "infraction_added", "infraction_revoked",
-            "sanction_added", "sanction_edited", "sanction_removed",
-            "link_created", "link_approved", "link_denied",
-            "role_changed", "contribution_drop", "role_restored"
-        ]
-        
-        audit_events = [e for e in events if e.get("event_type") in admin_actions]
-        
-        # 🔧 NEW: Apply search filter
-        if self.audit_search_query:
-            filtered = []
-            query_lower = self.audit_search_query.lower()
-            
-            for event in audit_events:
-                # Search in event type, triggered_by, and notes
-                searchable = [
-                    event.get("event_type", "").lower(),
-                    event.get("triggered_by", "").lower(),
-                    event.get("notes", "").lower(),
-                    str(event.get("event_data", {})).lower()
-                ]
-                
-                if any(query_lower in field for field in searchable):
-                    filtered.append(event)
-            
-            audit_events = filtered
-        
+
         if not audit_events:
             if self.audit_search_query:
                 embed.description = f"*No audit entries matching '{self.audit_search_query}'*"
             else:
-                embed.description = "*No administrative actions recorded.*"
+                embed.description = "*No audit entries for this member.*"
             return embed
-        
-        # Pagination
+
         total_count = len(audit_events)
         total_pages = (total_count + self.audit_per_page - 1) // self.audit_per_page
-        current_page = self.audit_page + 1
-        
+        current_page = min(self.audit_page + 1, total_pages)
+
         start_idx = self.audit_page * self.audit_per_page
         end_idx = start_idx + self.audit_per_page
         page_events = audit_events[start_idx:end_idx]
-        
+
         lines = []
         for entry in page_events:
-            event_type = entry.get("event_type", "unknown")
-            timestamp = format_timestamp(entry.get("timestamp", 0), "R")
-            triggered_by = entry.get("triggered_by", "system")
-            actor_id = entry.get("actor_id")
-            
-            # 🔧 NEW: Get server nickname instead of Discord username
-            actor_display = triggered_by
-            if actor_id and self.guild:
-                member = self.guild.get_member(actor_id)
+            timestamp = format_timestamp(entry.timestamp, "R") if entry.timestamp else "Unknown time"
+            actor_display = entry.actor_name or "system"
+            if entry.actor_id and self.guild:
+                member = self.guild.get_member(entry.actor_id)
                 if member:
-                    actor_display = member.display_name  # Server nickname
-            
-            # Action emoji mapping
-            action_emoji = {
-                "note_created": "📝",
-                "note_edited": "✏️",
-                "note_deleted": "🗑️",
-                "infraction_added": "⚠️",
-                "infraction_revoked": "✅",
-                "sanction_added": "🚨",
-                "sanction_edited": "✏️",
-                "sanction_removed": "✅",
-                "link_created": "🔗",
-                "link_approved": "✅",
-                "link_denied": "❌",
-                "role_changed": "👔",
-                "contribution_drop": "📉",
-                "role_restored": "🔄"
-            }.get(event_type, "•")
-            
-            action_display = event_type.replace("_", " ").title()
-            
-            lines.append(f"{action_emoji} **{action_display}**")
-            lines.append(f"  *By {actor_display} • {timestamp}*")
-            
-            event_data = entry.get("event_data", {})
-            if isinstance(event_data, dict):
-                if "ref_code" in event_data:
-                    lines.append(f"  📄 Ref: `{event_data['ref_code']}`")
-                if "sanction_id" in event_data:
-                    lines.append(f"  🚨 Sanction: `#{event_data['sanction_id']}`")
-                if "reason" in event_data:
-                    lines.append(f"  💬 {truncate_text(event_data['reason'], 60)}")
-            
+                    actor_display = member.display_name
+
+            action_emoji = EVENT_EMOJI.get(
+                entry.event_type,
+                EVENT_EMOJI.get(entry.source.lower(), "•"),
+            )
+
+            lines.append(f"{action_emoji} **{entry.title}**")
+            lines.append(f"  *{entry.source} • {actor_display} • {timestamp}*")
+
+            if entry.reference:
+                lines.append(f"  Ref: `{entry.reference}`")
+            if entry.details:
+                lines.append(f"  {truncate_text(entry.details, 120)}")
+
             lines.append("")
-        
+
         embed.description = "\n".join(lines)
-        
-        # Footer with pagination and search info
+
         footer_text = f"Page {current_page}/{total_pages} • Total: {total_count} entries"
         if self.audit_search_query:
             footer_text += f" • Filtered by: '{self.audit_search_query}'"
-        
+
         embed.set_footer(text=footer_text)
-        
+
         return embed
 
 

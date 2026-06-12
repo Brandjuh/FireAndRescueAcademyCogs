@@ -122,6 +122,7 @@ def pytest_configure():
     discord.Color = types.SimpleNamespace(
         blue=lambda: "blue",
         dark_blue=lambda: "dark_blue",
+        dark_gray=lambda: "dark_gray",
         dark_gold=lambda: "dark_gold",
         gold=lambda: "gold",
         green=lambda: "green",
