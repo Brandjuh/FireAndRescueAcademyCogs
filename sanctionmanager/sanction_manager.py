@@ -373,7 +373,12 @@ class SanctionsDatabase:
         
         return results
     
-    def get_stats_overall(self, guild_id: int) -> dict:
+    def get_stats_overall(
+        self,
+        guild_id: int,
+        period_start_ts: Optional[int] = None,
+        period_end_ts: Optional[int] = None,
+    ) -> dict:
         """Get overall statistics with explicit status and staff activity counts."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -386,6 +391,41 @@ class SanctionsDatabase:
         ''', (guild_id,))
         sanctions = [dict(row) for row in cursor.fetchall()]
         summary = self.summarize_sanctions(sanctions)
+        period_sanctions = sanctions
+        if period_start_ts is not None and period_end_ts is not None:
+            period_sanctions = [
+                sanction
+                for sanction in sanctions
+                if period_start_ts <= int(sanction.get("created_at") or 0) < period_end_ts
+            ]
+        issued_period = len(period_sanctions)
+        active_warnings = len([
+            sanction
+            for sanction in summary["sanctions"]
+            if sanction.get("effective_status") == "active"
+            and "Warning" in (sanction.get("sanction_type") or "")
+        ])
+        by_type_period = {
+            "warnings": len([
+                sanction for sanction in period_sanctions
+                if "Warning" in (sanction.get("sanction_type") or "")
+            ]),
+            "kicks": len([
+                sanction for sanction in period_sanctions
+                if "Kick" in (sanction.get("sanction_type") or "")
+            ]),
+            "bans": len([
+                sanction for sanction in period_sanctions
+                if "Ban" in (sanction.get("sanction_type") or "")
+            ]),
+            "other": len([
+                sanction for sanction in period_sanctions
+                if all(
+                    marker not in (sanction.get("sanction_type") or "")
+                    for marker in ("Warning", "Kick", "Ban")
+                )
+            ]),
+        }
         
         # Total by type
         cursor.execute('''
@@ -447,13 +487,31 @@ class SanctionsDatabase:
             LIMIT 5
         ''', (guild_id,))
         top_staff_activity = cursor.fetchall()
+
+        history_period_clause = ""
+        history_period_params = []
+        if period_start_ts is not None and period_end_ts is not None:
+            history_period_clause = "AND h.action_at >= ? AND h.action_at < ?"
+            history_period_params = [period_start_ts, period_end_ts]
+
+        cursor.execute(f'''
+            SELECT COUNT(*)
+            FROM sanction_history h
+            JOIN sanctions s ON s.sanction_id = h.sanction_id
+            WHERE s.guild_id = ?
+            {history_period_clause}
+        ''', (guild_id, *history_period_params))
+        staff_activity_period = cursor.fetchone()[0]
         
         conn.close()
         
         return {
             "issued_total": summary["historical_count"],
+            "issued_period": issued_period,
+            "by_type_period": by_type_period,
             "historical_count": summary["historical_count"],
             "active_count": summary["active_count"],
+            "active_warnings": active_warnings,
             "expired_count": summary["expired_count"],
             "removed_count": summary["removed_count"],
             "type_counts": type_counts,
@@ -462,6 +520,7 @@ class SanctionsDatabase:
             "most_sanctioned": most_sanctioned,
             "history_action_counts": history_action_counts,
             "staff_activity_total": sum(history_action_counts.values()),
+            "staff_activity_period": staff_activity_period,
             "top_staff_activity": top_staff_activity,
         }
     
@@ -1702,9 +1761,18 @@ class SanctionsManager(commands.Cog):
         )
         return SanctionsDatabase.summarize_sanctions(sanctions)
 
-    def get_sanction_stats(self, guild_id: int) -> dict:
+    def get_sanction_stats(
+        self,
+        guild_id: int,
+        period_start_ts: Optional[int] = None,
+        period_end_ts: Optional[int] = None,
+    ) -> dict:
         """Public contract for other cogs to read SanctionManager statistics."""
-        return self.db.get_stats_overall(guild_id)
+        return self.db.get_stats_overall(
+            guild_id,
+            period_start_ts=period_start_ts,
+            period_end_ts=period_end_ts,
+        )
 
     def get_sanction_by_id(self, sanction_id: int) -> Optional[dict]:
         """Public contract for other cogs to read one sanction by ID."""

@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import importlib.util
+import sqlite3
 import tempfile
 import types
 import unittest
@@ -386,6 +387,78 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         self.assertEqual(stats["history_action_counts"]["created"], 3)
         self.assertEqual(stats["history_action_counts"]["status_changed_to_removed"], 1)
         self.assertEqual(stats["staff_activity_total"], 4)
+
+    def test_sanction_stats_contract_supports_period_counts(self):
+        SanctionsDatabase = load_sanctions_database_class()
+        SanctionsManager = load_sanctions_manager_class()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = SanctionsDatabase(str(Path(temp_dir) / "sanctions.db"))
+            first_id = database.add_sanction(
+                guild_id=1,
+                discord_user_id=123,
+                mc_user_id="456",
+                mc_username="PeriodUser",
+                admin_user_id=9001,
+                admin_username="AdminOne",
+                sanction_type="Warning - Official 1st",
+                reason_category="Conduct",
+                reason_detail="Period warning",
+                additional_notes=None,
+            )
+            second_id = database.add_sanction(
+                guild_id=1,
+                discord_user_id=124,
+                mc_user_id="457",
+                mc_username="OutsideUser",
+                admin_user_id=9001,
+                admin_username="AdminOne",
+                sanction_type="Kick",
+                reason_category="Conduct",
+                reason_detail="Outside kick",
+                additional_notes=None,
+            )
+            database.update_sanction_status(
+                first_id,
+                "removed",
+                admin_user_id=9001,
+                notes="Resolved in period",
+            )
+
+            connection = sqlite3.connect(database.db_path)
+            connection.execute(
+                "UPDATE sanctions SET created_at = ? WHERE sanction_id = ?",
+                (1000, first_id),
+            )
+            connection.execute(
+                "UPDATE sanctions SET created_at = ? WHERE sanction_id = ?",
+                (5000, second_id),
+            )
+            connection.execute(
+                "UPDATE sanction_history SET action_at = ? WHERE sanction_id = ?",
+                (1200, first_id),
+            )
+            connection.execute(
+                "UPDATE sanction_history SET action_at = ? WHERE sanction_id = ?",
+                (5000, second_id),
+            )
+            connection.commit()
+            connection.close()
+
+            manager = SanctionsManager.__new__(SanctionsManager)
+            manager.db = database
+
+            stats = manager.get_sanction_stats(
+                1,
+                period_start_ts=900,
+                period_end_ts=2000,
+            )
+
+        self.assertEqual(stats["issued_total"], 2)
+        self.assertEqual(stats["issued_period"], 1)
+        self.assertEqual(stats["by_type_period"]["warnings"], 1)
+        self.assertEqual(stats["by_type_period"]["kicks"], 0)
+        self.assertEqual(stats["staff_activity_period"], 2)
 
     def test_sanctions_embed_uses_view_guild_without_message_object(self):
         class FakeSanctionDB:

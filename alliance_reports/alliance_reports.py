@@ -564,7 +564,7 @@ class AllianceReports(commands.Cog):
         try:
             from .data_aggregator import DataAggregator
             
-            aggregator = DataAggregator(self.config_manager)
+            aggregator = DataAggregator(self.config_manager, self.bot)
             
             # Test V2 database connections
             await ctx.send("\n🔌 Testing V2 databases...")
