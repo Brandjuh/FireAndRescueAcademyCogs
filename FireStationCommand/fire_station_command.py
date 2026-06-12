@@ -26,8 +26,10 @@ class FireStationCommand(commands.Cog):
     STAGE_STAFF_TURNOUT = "STAFF_TURNOUT"
     STAGE_VEHICLE_SELECT = "VEHICLE_SELECT"
     STAGE_TRAVEL = "TRAVEL"
+    STAGE_SCENE_WORK = "SCENE_WORK"
     ACTION_SHOW_TURNOUT_RESULT = "SHOW_TURNOUT_RESULT"
     ACTION_SHOW_TRAVEL_UPDATE = "SHOW_TRAVEL_UPDATE"
+    ACTION_RESOLVE_INCIDENT = "RESOLVE_INCIDENT"
 
     def __init__(self, bot):
         self.bot = bot
@@ -172,6 +174,8 @@ class FireStationCommand(commands.Cog):
             "realert_minutes_max": 0.75,
             "travel_minutes_min": 1.0,
             "travel_minutes_max": 2.0,
+            "scene_work_minutes_min": 0.5,
+            "scene_work_minutes_max": 1.5,
             "staff_cost": 2000,
             "upgrade_base_cost": 50000,
             "career_convert_cost": self._balance_int("career_upgrade_cost", 250000),
@@ -572,6 +576,8 @@ class FireStationCommand(commands.Cog):
             guidance = "Select vehicles to dispatch with the available crew."
         elif stage == self.STAGE_TRAVEL:
             guidance = "Units are en route. Refresh this panel while waiting for the next update."
+        elif stage == self.STAGE_SCENE_WORK:
+            guidance = "Crews are working on scene. Refresh this panel while waiting for the incident result."
         else:
             guidance = "Review the current mission state."
 
@@ -1435,7 +1441,12 @@ class FireStationCommand(commands.Cog):
         mission = data.get("active_mission", {}) or {}
         if not self._mission_is_stage(mission, self.STAGE_TRAVEL):
             return
-        self._clear_mission_due(mission)
+        glb = await self.config.all()
+        min_minutes = float(glb.get("scene_work_minutes_min", 0.5))
+        max_minutes = float(glb.get("scene_work_minutes_max", 1.5))
+        minutes = random.uniform(min_minutes, max_minutes)
+        self._set_mission_stage(mission, self.STAGE_SCENE_WORK)
+        self._set_mission_due(mission, self.ACTION_RESOLVE_INCIDENT, minutes)
         await user_conf.active_mission.set(mission)
 
         title = mission.get("title", "Incident")
@@ -1446,6 +1457,7 @@ class FireStationCommand(commands.Cog):
             description=detail,
             color=discord.Color.orange(),
         )
+        embed.add_field(name="Scene work", value=f"Incident result expected {self._make_relative_text(minutes)}.", inline=False)
         embed.set_footer(text="Use this information to judge if your dispatch was sufficient.")
 
         try:
@@ -1456,14 +1468,20 @@ class FireStationCommand(commands.Cog):
             except Exception:
                 pass
 
+        await asyncio.sleep(int(minutes * 60))
         await self._resolve_incident(channel, user)
 
     async def _resolve_incident(self, channel: discord.abc.Messageable, user: discord.abc.User):
         user_conf = self.config.user(user)
         data = await user_conf.all()
         mission = data.get("active_mission", {}) or {}
-        if self._mission_stage(mission) not in {self.STAGE_TRAVEL, self.STAGE_VEHICLE_SELECT}:
+        if self._mission_stage(mission) not in {
+            self.STAGE_TRAVEL,
+            self.STAGE_VEHICLE_SELECT,
+            self.STAGE_SCENE_WORK,
+        }:
             return
+        self._clear_mission_due(mission)
 
         required = int(mission.get("required_staff", 0))
         arrived = int(mission.get("turnout_total_arrived", 0))
@@ -1868,7 +1886,7 @@ class MissionControlView(discord.ui.View):
             self._add_button("Proceed to vehicles", discord.ButtonStyle.success, self._proceed)
         elif stage == self.cog.STAGE_VEHICLE_SELECT:
             self.add_item(VehicleSelect(cog, channel, user, vehicles))
-        elif stage == self.cog.STAGE_TRAVEL:
+        elif stage in {self.cog.STAGE_TRAVEL, self.cog.STAGE_SCENE_WORK}:
             self._add_button("Refresh", discord.ButtonStyle.primary, self._refresh)
 
         self._add_button("Cancel incident", discord.ButtonStyle.danger, self._cancel)
