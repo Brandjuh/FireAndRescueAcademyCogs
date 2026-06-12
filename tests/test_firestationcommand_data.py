@@ -227,6 +227,45 @@ def test_set_and_clear_mission_due_tracks_next_action():
     assert mission["updated_at"] == "2026-06-12T12:00:00Z"
 
 
+def test_build_mission_control_embed_guides_alert_choice():
+    cog = _cog_with_game_data({})
+    mission = {
+        "title": "Small Bin Fire",
+        "required_staff": 4,
+        "dispatch_narrative": "Smoke is showing behind several homes.",
+        "stage": FireStationCommand.STAGE_ALERT_CHOICE,
+    }
+
+    embed = FireStationCommand._build_mission_control_embed(cog, mission)
+
+    assert embed.kwargs["title"] == "Mission control - Small Bin Fire"
+    assert embed.kwargs["description"] == "Smoke is showing behind several homes."
+    assert embed.fields[0]["name"] == "Stage"
+    assert embed.fields[0]["value"] == FireStationCommand.STAGE_ALERT_CHOICE
+    assert embed.fields[2]["name"] == "Guidance"
+    assert embed.fields[2]["value"] == "Choose how to alert your crew."
+
+
+def test_build_mission_control_embed_shows_turnout_and_next_update():
+    cog = _cog_with_game_data({})
+    mission = {
+        "title": "Traffic Collision",
+        "required_staff": 6,
+        "stage": FireStationCommand.STAGE_STAFF_TURNOUT,
+        "turnout_total_arrived": 3,
+        "turnout_available": 6,
+        "next_action": FireStationCommand.ACTION_SHOW_TURNOUT_RESULT,
+        "next_action_at": "2026-06-12T12:01:00Z",
+    }
+
+    embed = FireStationCommand._build_mission_control_embed(cog, mission)
+
+    fields = {field["name"]: field["value"] for field in embed.fields}
+    assert fields["Guidance"] == "Crew turnout is in progress. Refresh this panel after the expected turnout time."
+    assert fields["Turnout"] == "3 / 6 arrived"
+    assert fields["Next update"] == "2026-06-12T12:01:00Z"
+
+
 def test_alert_narrative_includes_expected_turnout(monkeypatch):
     cog = _cog_with_game_data({})
     monkeypatch.setattr(

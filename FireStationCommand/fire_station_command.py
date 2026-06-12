@@ -557,6 +557,84 @@ class FireStationCommand(commands.Cog):
             embed.add_field(name="Active incident", value="None", inline=False)
         return embed
 
+    def _build_mission_control_embed(self, mission: Dict[str, Any]) -> discord.Embed:
+        stage = self._mission_stage(mission)
+        next_action = mission.get("next_action")
+        next_action_at = mission.get("next_action_at")
+
+        if stage == self.STAGE_ALERT_CHOICE:
+            guidance = "Choose how to alert your crew."
+        elif stage == self.STAGE_STAFF_TURNOUT and next_action:
+            guidance = "Crew turnout is in progress. Refresh this panel after the expected turnout time."
+        elif stage == self.STAGE_STAFF_TURNOUT:
+            guidance = "Review turnout and decide whether to re-alert, proceed, or cancel."
+        elif stage == self.STAGE_VEHICLE_SELECT:
+            guidance = "Select vehicles to dispatch with the available crew."
+        elif stage == self.STAGE_TRAVEL:
+            guidance = "Units are en route. Refresh this panel while waiting for the next update."
+        else:
+            guidance = "Review the current mission state."
+
+        embed = discord.Embed(
+            title=f"Mission control - {mission.get('title', 'Incident')}",
+            description=mission.get("dispatch_narrative") or mission.get("hint", guidance),
+            color=discord.Color.red(),
+        )
+        embed.add_field(name="Stage", value=stage or "Unknown", inline=True)
+        embed.add_field(name="Required staff", value=str(mission.get("required_staff", "Unknown")), inline=True)
+        embed.add_field(name="Guidance", value=guidance, inline=False)
+
+        alert_mode = mission.get("alert_mode")
+        if alert_mode:
+            embed.add_field(name="Alert mode", value=str(alert_mode).capitalize(), inline=True)
+
+        if "turnout_total_arrived" in mission:
+            arrived = int(mission.get("turnout_total_arrived", 0))
+            available = int(mission.get("turnout_available", 0))
+            embed.add_field(name="Turnout", value=f"{arrived} / {available} arrived", inline=True)
+
+        if next_action_at:
+            embed.add_field(name="Next update", value=str(next_action_at), inline=False)
+
+        selected = mission.get("selected_vehicle_ids", [])
+        if selected:
+            embed.add_field(name="Vehicles dispatched", value=str(len(selected)), inline=True)
+
+        embed.set_footer(text="Use the buttons below to continue this mission.")
+        return embed
+
+    async def _build_mission_control_view(
+        self,
+        user: discord.abc.User,
+        channel: discord.abc.Messageable,
+        guild: discord.Guild | None,
+        mission: Dict[str, Any],
+    ) -> discord.ui.View:
+        vehicles: List[Dict[str, Any]] = []
+        if self._mission_is_stage(mission, self.STAGE_VEHICLE_SELECT):
+            vehicles = await self._get_user_vehicles(user)
+        return MissionControlView(self, user, channel, guild, mission, vehicles)
+
+    async def _send_active_mission_control(
+        self,
+        send,
+        channel: discord.abc.Messageable,
+        guild: discord.Guild | None,
+        user: discord.abc.User,
+        *,
+        ephemeral: bool = False,
+    ) -> None:
+        data = await self.config.user(user).all()
+        mission = data.get("active_mission", {}) or {}
+        kwargs = {"ephemeral": True} if ephemeral else {}
+        if not mission:
+            await send("You do not have an active incident.", **kwargs)
+            return
+
+        embed = self._build_mission_control_embed(mission)
+        view = await self._build_mission_control_view(user, channel, guild, mission)
+        await send(embed=embed, view=view, **kwargs)
+
     def _build_station_overview_embed(self, data: Dict[str, Any]) -> discord.Embed:
         lvl = int(data.get("station_level", 1))
         stype = data.get("station_type", "volunteer")
@@ -1088,7 +1166,7 @@ class FireStationCommand(commands.Cog):
         data = await user_conf.all()
         active = data.get("active_mission", {}) or {}
         if active:
-            await ctx.send("You already have an active incident. Finish or cancel it first.")
+            await self._send_active_mission_control(ctx.send, ctx.channel, ctx.guild, ctx.author)
             return
 
         staff_total = int(data.get("staff_total", 0))
@@ -1602,13 +1680,9 @@ class FscDashboardView(discord.ui.View):
 
         active = data.get("active_mission", {}) or {}
         if active:
-            embed = await self.cog._build_dashboard_embed(self.user)
-            embed.add_field(
-                name="Mission",
-                value="You already have an active incident. Finish or cancel it first.",
-                inline=False,
-            )
-            await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
+            embed = self.cog._build_mission_control_embed(active)
+            view = await self.cog._build_mission_control_view(self.user, channel, self.guild, active)
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
             return
 
         staff_total = int(data.get("staff_total", 0))
@@ -1764,6 +1838,109 @@ class VehicleSelectView(discord.ui.View):
     ):
         super().__init__(timeout=180)
         self.add_item(VehicleSelect(cog, channel, user, vehicles))
+
+
+class MissionControlView(discord.ui.View):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        user: discord.abc.User,
+        channel: discord.abc.Messageable,
+        guild: discord.Guild | None,
+        mission: Dict[str, Any],
+        vehicles: List[Dict[str, Any]],
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.user = user
+        self.channel = channel
+        self.guild = guild
+        self.mission = mission
+
+        stage = self.cog._mission_stage(mission)
+        if stage == self.cog.STAGE_ALERT_CHOICE:
+            self._add_button("Normal turnout", discord.ButtonStyle.secondary, self._normal_turnout)
+            self._add_button("Emergency turnout", discord.ButtonStyle.danger, self._emergency_turnout)
+        elif stage == self.cog.STAGE_STAFF_TURNOUT and mission.get("next_action"):
+            self._add_button("Refresh", discord.ButtonStyle.primary, self._refresh)
+        elif stage == self.cog.STAGE_STAFF_TURNOUT:
+            self._add_button("Re-alert", discord.ButtonStyle.secondary, self._realert)
+            self._add_button("Proceed to vehicles", discord.ButtonStyle.success, self._proceed)
+        elif stage == self.cog.STAGE_VEHICLE_SELECT:
+            self.add_item(VehicleSelect(cog, channel, user, vehicles))
+        elif stage == self.cog.STAGE_TRAVEL:
+            self._add_button("Refresh", discord.ButtonStyle.primary, self._refresh)
+
+        self._add_button("Cancel incident", discord.ButtonStyle.danger, self._cancel)
+        self._add_button("Back", discord.ButtonStyle.secondary, self._back)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    def _add_button(self, label: str, style: discord.ButtonStyle, callback):
+        button = discord.ui.Button(label=label, style=style)
+        button.callback = callback
+        self.add_item(button)
+
+    async def _disable_and_edit(self, interaction: discord.Interaction):
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+
+    async def _normal_turnout(self, interaction: discord.Interaction):
+        await self._disable_and_edit(interaction)
+        await self.cog.handle_alert_choice(interaction, self.channel, self.user, "normal")
+        self.stop()
+
+    async def _emergency_turnout(self, interaction: discord.Interaction):
+        await self._disable_and_edit(interaction)
+        await self.cog.handle_alert_choice(interaction, self.channel, self.user, "emergency")
+        self.stop()
+
+    async def _realert(self, interaction: discord.Interaction):
+        await self._disable_and_edit(interaction)
+        await self.cog.handle_realert(interaction, self.channel, self.user)
+        self.stop()
+
+    async def _proceed(self, interaction: discord.Interaction):
+        await self._disable_and_edit(interaction)
+        await self.cog.handle_proceed_to_vehicles(interaction, self.channel, self.user)
+        self.stop()
+
+    async def _cancel(self, interaction: discord.Interaction):
+        await self._disable_and_edit(interaction)
+        await self.cog.handle_cancel_incident(interaction, self.channel, self.user)
+        self.stop()
+
+    async def _refresh(self, interaction: discord.Interaction):
+        data = await self.cog.config.user(self.user).all()
+        mission = data.get("active_mission", {}) or {}
+        if not mission:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            view = FscDashboardView(
+                self.cog,
+                self.user,
+                interaction.channel or self.channel,
+                interaction.guild or self.guild,
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+            return
+
+        channel = interaction.channel or self.channel
+        guild = interaction.guild or self.guild
+        embed = self.cog._build_mission_control_embed(mission)
+        view = await self.cog._build_mission_control_view(self.user, channel, guild, mission)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+    async def _back(self, interaction: discord.Interaction):
+        embed = await self.cog._build_dashboard_embed(self.user)
+        channel = interaction.channel or self.channel
+        guild = interaction.guild or self.guild
+        view = FscDashboardView(self.cog, self.user, channel, guild)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
 
 
 class VehicleShopSelect(discord.ui.Select):
