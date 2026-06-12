@@ -113,6 +113,54 @@ class MemberManagerViewFilterTests(unittest.TestCase):
         self.assertIn("Building constructed", embed.description)
         self.assertNotIn("Large scale mission started", embed.description)
 
+    def test_log_tabs_use_logscraper_public_contract_when_available(self):
+        logs_scraper = types.SimpleNamespace(
+            get_member_logs=AsyncMock(
+                return_value={
+                    "rows": [
+                        {
+                            "id": 1,
+                            "ts": "2026-06-12T10:00:00+00:00",
+                            "event_timestamp": "2026-06-12T10:00:00+00:00",
+                            "action_key": "large_mission_started",
+                            "action_text": "Large scale mission started",
+                            "executed_name": "MCUser",
+                            "executed_mc_id": "456",
+                            "affected_name": "Mission",
+                            "affected_mc_id": "",
+                            "description": "Large operation",
+                            "contribution_amount": 0,
+                        }
+                    ],
+                    "total": 1,
+                }
+            )
+        )
+        view = MemberOverviewView.__new__(MemberOverviewView)
+        view.member_data = MemberData(
+            discord_id=123,
+            mc_user_id="456",
+            discord_username="DiscordUser",
+            mc_username="MCUser",
+            link_status="approved",
+            is_verified=True,
+        )
+        view.integrations = {"logs_scraper": logs_scraper}
+        view.events_page = 0
+        view.events_per_page = 10
+
+        embed = asyncio.run(view.get_events_embed())
+
+        self.assertIn("Large scale mission started", embed.description)
+        logs_scraper.get_member_logs.assert_awaited_once_with(
+            mc_user_id="456",
+            mc_username="MCUser",
+            action_keys={"large_mission_started", "alliance_event_started"},
+            limit=10,
+            offset=0,
+            include_total=True,
+        )
+
     def test_simple_overview_is_default_and_toggle_switches_to_advanced(self):
         view = MemberOverviewView.__new__(MemberOverviewView)
         view.member_data = MemberData(

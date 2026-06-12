@@ -4,6 +4,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import discord
 
@@ -308,6 +309,68 @@ class MemberManagerAuditTests(unittest.TestCase):
         self.assertIn("Note Created", result.description)
         self.assertIn("Admin Nick", result.description)
         self.assertNotIn("Building constructed", result.description)
+
+    def test_audit_embed_uses_logscraper_public_contract_when_available(self):
+        class FakeDB:
+            async def get_events(self, **kwargs):
+                return []
+
+        logs_scraper = types.SimpleNamespace(
+            get_member_logs=AsyncMock(
+                return_value={
+                    "rows": [
+                        {
+                            "id": 1,
+                            "ts": "2026-06-12T10:00:00+00:00",
+                            "event_timestamp": "2026-06-12T10:00:00+00:00",
+                            "action_key": "chat_ban_set",
+                            "action_text": "Chat ban set",
+                            "executed_name": "Admin",
+                            "executed_mc_id": "999",
+                            "affected_name": "MCUser",
+                            "affected_mc_id": "456",
+                            "description": "Personal audit log",
+                        },
+                        {
+                            "id": 2,
+                            "ts": "2026-06-12T11:00:00+00:00",
+                            "event_timestamp": "2026-06-12T11:00:00+00:00",
+                            "action_key": "building_constructed",
+                            "action_text": "Building constructed",
+                            "executed_name": "MCUser",
+                            "executed_mc_id": "456",
+                            "affected_name": "Station",
+                            "affected_mc_id": "",
+                            "description": "Building log",
+                        },
+                    ]
+                }
+            )
+        )
+        view = MemberOverviewView.__new__(MemberOverviewView)
+        view.member_data = MemberData(
+            discord_id=123,
+            mc_user_id="456",
+            discord_username="DiscordUser",
+            mc_username="MCUser",
+        )
+        view.db = FakeDB()
+        view.integrations = {"logs_scraper": logs_scraper}
+        view.audit_search_query = None
+        view.audit_page = 0
+        view.audit_per_page = 10
+        view.guild = None
+
+        embed = discord.Embed(title="Audit", color=discord.Color.dark_gray())
+        result = asyncio.run(view._build_audit_timeline_embed(embed))
+
+        self.assertIn("Chat ban set", result.description)
+        self.assertNotIn("Building constructed", result.description)
+        logs_scraper.get_member_logs.assert_awaited_once_with(
+            mc_user_id="456",
+            mc_username="MCUser",
+            limit=250,
+        )
 
 
 if __name__ == "__main__":
