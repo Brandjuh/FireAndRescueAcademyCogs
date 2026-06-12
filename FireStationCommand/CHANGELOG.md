@@ -13,6 +13,8 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added tests for FireStationCommand data loading helpers.
 - Added mission state helpers with explicit stage constants and schema versioning.
 - Added mission timestamp fields for future scheduler/resume support.
+- Added an interactive `[p]fsc` dashboard with station overview and action buttons.
+- Added richer story narrative fields for mission dispatches, scene updates, and outcomes.
 
 ### Changed
 
@@ -23,6 +25,8 @@ All notable changes to FireStationCommand will be documented in this file.
 - Career conversion cost and career turnout time now use matching `balance.yaml` values when available.
 - New missions now store a mission state schema version.
 - Mission state now tracks `created_at`, `updated_at`, `next_action`, and `next_action_at`.
+- `[p]fsc` now opens the station dashboard instead of showing command help.
+- Mission embeds now use narrative text from mission config when available.
 
 ### Known Issues
 
