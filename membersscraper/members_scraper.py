@@ -75,6 +75,7 @@ class MembersScraper(commands.Cog):
                         contribution_rate REAL DEFAULT 0.0,
                         online_status TEXT,
                         timestamp TEXT,
+                        snapshot_source TEXT DEFAULT 'unknown',
                         PRIMARY KEY (member_id, timestamp)
                     )
                 ''')
@@ -88,9 +89,15 @@ class MembersScraper(commands.Cog):
                     cursor.execute('ALTER TABLE members ADD COLUMN contribution_rate REAL DEFAULT 0.0')
                     log.info("✅ Migration complete")
                 
+                if 'snapshot_source' not in columns:
+                    log.info("MIGRATION: Adding snapshot_source column")
+                    cursor.execute("ALTER TABLE members ADD COLUMN snapshot_source TEXT DEFAULT 'unknown'")
+                    log.info("Migration complete")
+
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON members(timestamp)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_member_id ON members(member_id)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_contribution_rate ON members(contribution_rate)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_snapshot_source ON members(snapshot_source)')
                 
                 # Suspicious members table
                 cursor.execute('''
@@ -599,6 +606,7 @@ class MembersScraper(commands.Cog):
         
         # CRITICAL FIX: Create single timestamp for entire scrape
         scrape_timestamp = custom_timestamp if custom_timestamp else datetime.utcnow().isoformat()
+        snapshot_source = "backfill" if custom_timestamp else "live"
         
         await self._debug_log(f"🚀 Starting member scrape (max {max_pages} pages)", ctx)
         await self._debug_log(f"📅 Scrape timestamp: {scrape_timestamp}", ctx)
@@ -675,8 +683,9 @@ class MembersScraper(commands.Cog):
                         
                         cursor.execute('''
                             INSERT OR REPLACE INTO members 
-                            (member_id, username, rank, earned_credits, contribution_rate, online_status, timestamp)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            (member_id, username, rank, earned_credits, contribution_rate,
+                             online_status, timestamp, snapshot_source)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         ''', (
                             member['member_id'],
                             member['username'],
@@ -684,7 +693,8 @@ class MembersScraper(commands.Cog):
                             credits,
                             contribution_rate,
                             member['online_status'],
-                            member['timestamp']
+                            member['timestamp'],
+                            snapshot_source
                         ))
                         if cursor.rowcount > 0:
                             inserted += 1
@@ -796,8 +806,9 @@ class MembersScraper(commands.Cog):
                 try:
                     cursor.execute('''
                         INSERT OR IGNORE INTO members 
-                        (member_id, username, rank, earned_credits, contribution_rate, online_status, timestamp)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        (member_id, username, rank, earned_credits, contribution_rate,
+                         online_status, timestamp, snapshot_source)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'backfill')
                     ''', (
                         member['member_id'],
                         member['username'],

@@ -134,8 +134,9 @@ class MembersScraperDatabaseCharacterizationTests(unittest.TestCase):
             connection.execute(
                 """
                 INSERT INTO members
-                (member_id, username, rank, earned_credits, contribution_rate, online_status, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (member_id, username, rank, earned_credits, contribution_rate,
+                 online_status, timestamp, snapshot_source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'live')
                 """,
                 (member_id, username, "Member", 1000, 5.0, "offline", timestamp),
             )
@@ -160,6 +161,7 @@ class MembersScraperDatabaseCharacterizationTests(unittest.TestCase):
             connection.close()
 
         self.assertIn("contribution_rate", columns)
+        self.assertIn("snapshot_source", columns)
         self.assertEqual(current_members, [(2, "Latest Member", "2026-06-11T12:00:00")])
 
     def test_exit_detection_uses_newest_stored_snapshot(self):
