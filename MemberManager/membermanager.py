@@ -22,15 +22,14 @@ from datetime import datetime, timezone
 
 import discord
 from discord import app_commands
-from redbot.core import commands, Config, checks
+from redbot.core import commands, Config
 from redbot.core.bot import Red
 from redbot.core.data_manager import cog_data_path
-from redbot.core.utils.chat_formatting import box, pagify
 
 from .database import MemberDatabase
-from .models import MemberData, NoteData, InfractionData
+from .models import MemberData
 from .views import MemberOverviewView
-from .utils import fuzzy_search_member, format_contribution_trend
+from .utils import fuzzy_search_member
 from .automation import ContributionMonitor
 from .config_commands import ConfigCommands
 
@@ -294,6 +293,15 @@ class MemberManager(ConfigCommands, commands.Cog):
             log.info(f"Connected to: {', '.join(integrations)}")
         else:
             log.warning("No integrations found - some features may not work")
+
+    def _get_integrations_payload(self) -> Dict[str, Any]:
+        """Return the current integration objects passed into MemberManager views."""
+        return {
+            "membersync": self.membersync,
+            "alliance_scraper": self.alliance_scraper,
+            "logs_scraper": self.logs_scraper,
+            "sanction_manager": self.sanction_manager,
+        }
     
     # ==================== PERMISSIONS ====================
     
@@ -375,17 +383,13 @@ class MemberManager(ConfigCommands, commands.Cog):
         member_data: MemberData,
     ) -> None:
         """Send a private member overview through a context or interaction sender."""
+        await self._connect_integrations()
         view = MemberOverviewView(
             bot=self.bot,
             db=self.db,
             config=self.config,
             member_data=member_data,
-            integrations={
-                "membersync": self.membersync,
-                "alliance_scraper": self.alliance_scraper,
-                "logs_scraper": self.logs_scraper,
-                "sanction_manager": self.sanction_manager,
-            },
+            integrations=self._get_integrations_payload(),
             invoker_id=user_id,
             guild=guild,
         )
@@ -628,17 +632,14 @@ class MemberManager(ConfigCommands, commands.Cog):
             )
             return
         
+        await self._connect_integrations()
+
         view = MemberOverviewView(
             bot=self.bot,
             db=self.db,
             config=self.config,
             member_data=member_data,
-            integrations={
-                "membersync": self.membersync,
-                "alliance_scraper": self.alliance_scraper,
-                "logs_scraper": self.logs_scraper,
-                "sanction_manager": self.sanction_manager,
-            },
+            integrations=self._get_integrations_payload(),
             invoker_id=ctx.author.id,
             guild=ctx.guild
         )
