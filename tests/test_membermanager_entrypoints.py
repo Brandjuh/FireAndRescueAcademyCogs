@@ -61,6 +61,40 @@ class MemberManagerEntrypointTests(unittest.TestCase):
         self.assertEqual(stored["id"], 98765)
         channel.send.assert_awaited_once()
 
+    def test_context_menu_registration_syncs_panel_guild(self):
+        calls = {}
+
+        class Tree:
+            def remove_command(self, name, *, type=None, guild=None):
+                calls["removed"] = (name, type, guild.id)
+
+            def add_command(self, command, *, guild=None):
+                calls["added"] = (command.name, guild.id)
+
+            async def sync(self, *, guild=None):
+                calls["synced"] = guild.id
+
+        guild = types.SimpleNamespace(id=111)
+        channel = types.SimpleNamespace(guild=guild)
+        cog = MemberManager.__new__(MemberManager)
+        cog._member_context_menu = types.SimpleNamespace(name="Member Management")
+        cog._context_menu_guild = None
+        cog.config = types.SimpleNamespace(
+            panel_channel_id=AsyncMock(return_value=222),
+        )
+        cog.bot = types.SimpleNamespace(
+            tree=Tree(),
+            get_channel=lambda channel_id: channel if channel_id == 222 else None,
+            guilds=[],
+        )
+
+        asyncio.run(cog._register_context_menu())
+
+        self.assertEqual(calls["removed"][0], "Member Management")
+        self.assertEqual(calls["added"], ("Member Management", 111))
+        self.assertEqual(calls["synced"], 111)
+        self.assertEqual(cog._context_menu_guild.id, 111)
+
 
 if __name__ == "__main__":
     unittest.main()

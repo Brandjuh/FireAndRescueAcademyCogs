@@ -87,6 +87,11 @@ class _ContextMenu:
         self.callback = callback
 
 
+class _Object:
+    def __init__(self, *, id):
+        self.id = id
+
+
 def pytest_configure():
     """Provide the minimal Redbot import surface required by isolated cog tests."""
     class _Embed:
@@ -112,6 +117,7 @@ def pytest_configure():
     discord.Guild = object
     discord.Message = object
     discord.Interaction = object
+    discord.Object = _Object
     discord.Embed = _Embed
     discord.Color = types.SimpleNamespace(
         blue=lambda: "blue",
