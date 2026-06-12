@@ -1065,7 +1065,7 @@ class FireStationCommand(commands.Cog):
             await ctx.send("You are at maximum vehicle capacity. Upgrade your station to buy more vehicles.")
             return
 
-        view = VehicleShopView(self, ctx.channel, ctx.author)
+        view = VehicleShopView(self, ctx.channel, ctx.author, ctx.guild)
         embed = discord.Embed(
             title="Vehicle shop",
             description="Select a vehicle to purchase from the menu below.",
@@ -1587,7 +1587,7 @@ class FscDashboardView(discord.ui.View):
         await interaction.response.edit_message(
             content=None,
             embed=embed,
-            view=VehicleShopView(self.cog, self.channel, self.user),
+            view=VehicleShopView(self.cog, self.channel, self.user, self.guild),
         )
 
     @discord.ui.button(label="Mission", style=discord.ButtonStyle.danger)
@@ -1804,9 +1804,30 @@ class VehicleShopSelect(discord.ui.Select):
 
 
 class VehicleShopView(discord.ui.View):
-    def __init__(self, cog: FireStationCommand, channel: discord.abc.Messageable, user: discord.abc.User):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        guild: discord.Guild | None = None,
+    ):
         super().__init__(timeout=180)
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+        self.guild = guild
         self.add_item(VehicleShopSelect(cog, channel, user))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = await self.cog._build_dashboard_embed(self.user)
+        channel = interaction.channel or self.channel
+        guild = interaction.guild or self.guild
+        view = FscDashboardView(self.cog, self.user, channel, guild)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
 
 
 class ConfirmRecruitView(discord.ui.View):
