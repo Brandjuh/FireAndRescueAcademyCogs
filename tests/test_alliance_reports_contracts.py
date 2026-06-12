@@ -324,13 +324,15 @@ class AllianceReportContractTests(unittest.TestCase):
             sanctions_path = temp_path / "sanctions.db"
 
             members = sqlite3.connect(members_path)
-            members.execute("CREATE TABLE members (member_id INTEGER, timestamp TEXT)")
+            members.execute(
+                "CREATE TABLE members (member_id INTEGER, timestamp TEXT, snapshot_source TEXT)"
+            )
             members.executemany(
-                "INSERT INTO members VALUES (?, ?)",
+                "INSERT INTO members VALUES (?, ?, ?)",
                 [
-                    (1, "2026-04-30T23:00:00"),
-                    (1, "2026-05-31T23:00:00"),
-                    (2, "2026-05-31T23:00:00"),
+                    (1, "2026-04-30T23:00:00", "live"),
+                    (1, "2026-05-31T23:00:00", "live"),
+                    (2, "2026-05-31T23:00:00", "live"),
                 ],
             )
             members.commit()
