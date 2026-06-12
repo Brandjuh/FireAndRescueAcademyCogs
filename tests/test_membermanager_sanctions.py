@@ -319,6 +319,74 @@ class MemberManagerSanctionsTests(unittest.TestCase):
             {1: "expired", 2: "active", 3: "removed"},
         )
 
+    def test_sanction_stats_contract_defines_status_and_staff_activity_counts(self):
+        SanctionsDatabase = load_sanctions_database_class()
+        SanctionsManager = load_sanctions_manager_class()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = SanctionsDatabase(str(Path(temp_dir) / "sanctions.db"))
+            active_id = database.add_sanction(
+                guild_id=1,
+                discord_user_id=123,
+                mc_user_id="456",
+                mc_username="ActiveUser",
+                admin_user_id=9001,
+                admin_username="AdminOne",
+                sanction_type="Warning - Official 1st",
+                reason_category="Conduct",
+                reason_detail="Active warning",
+                additional_notes=None,
+            )
+            expired_id = database.add_sanction(
+                guild_id=1,
+                discord_user_id=124,
+                mc_user_id="457",
+                mc_username="ExpiredUser",
+                admin_user_id=9001,
+                admin_username="AdminOne",
+                sanction_type="Warning - Official 1st",
+                reason_category="Conduct",
+                reason_detail="Expired warning",
+                additional_notes=None,
+                expires_at=1,
+            )
+            removed_id = database.add_sanction(
+                guild_id=1,
+                discord_user_id=125,
+                mc_user_id="458",
+                mc_username="RemovedUser",
+                admin_user_id=9002,
+                admin_username="AdminTwo",
+                sanction_type="Kick",
+                reason_category="Activity",
+                reason_detail="Removed kick",
+                additional_notes=None,
+            )
+            database.update_sanction_status(
+                removed_id,
+                "removed",
+                admin_user_id=9002,
+                notes="Resolved",
+            )
+
+            manager = SanctionsManager.__new__(SanctionsManager)
+            manager.db = database
+
+            stats = manager.get_sanction_stats(1)
+
+        self.assertNotEqual(active_id, expired_id)
+        self.assertEqual(stats["issued_total"], 3)
+        self.assertEqual(stats["historical_count"], 3)
+        self.assertEqual(stats["active_count"], 1)
+        self.assertEqual(stats["expired_count"], 1)
+        self.assertEqual(stats["removed_count"], 1)
+        self.assertEqual(stats["type_counts"]["Warning - Official 1st"], 2)
+        self.assertEqual(stats["type_counts"]["Kick"], 1)
+        self.assertEqual(stats["reason_counts"]["Conduct"], 2)
+        self.assertEqual(stats["history_action_counts"]["created"], 3)
+        self.assertEqual(stats["history_action_counts"]["status_changed_to_removed"], 1)
+        self.assertEqual(stats["staff_activity_total"], 4)
+
     def test_sanctions_embed_uses_view_guild_without_message_object(self):
         class FakeSanctionDB:
             def __init__(self):

@@ -374,9 +374,18 @@ class SanctionsDatabase:
         return results
     
     def get_stats_overall(self, guild_id: int) -> dict:
-        """Get overall statistics."""
+        """Get overall statistics with explicit status and staff activity counts."""
         conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT *
+            FROM sanctions
+            WHERE guild_id = ?
+        ''', (guild_id,))
+        sanctions = [dict(row) for row in cursor.fetchall()]
+        summary = self.summarize_sanctions(sanctions)
         
         # Total by type
         cursor.execute('''
@@ -417,14 +426,43 @@ class SanctionsDatabase:
             LIMIT 5
         ''', (guild_id,))
         most_sanctioned = cursor.fetchall()
+
+        # Staff activity from sanction history
+        cursor.execute('''
+            SELECT h.action_type, COUNT(*) as count
+            FROM sanction_history h
+            JOIN sanctions s ON s.sanction_id = h.sanction_id
+            WHERE s.guild_id = ?
+            GROUP BY h.action_type
+        ''', (guild_id,))
+        history_action_counts = dict(cursor.fetchall())
+
+        cursor.execute('''
+            SELECT h.action_by, COUNT(*) as count
+            FROM sanction_history h
+            JOIN sanctions s ON s.sanction_id = h.sanction_id
+            WHERE s.guild_id = ?
+            GROUP BY h.action_by
+            ORDER BY count DESC
+            LIMIT 5
+        ''', (guild_id,))
+        top_staff_activity = cursor.fetchall()
         
         conn.close()
         
         return {
+            "issued_total": summary["historical_count"],
+            "historical_count": summary["historical_count"],
+            "active_count": summary["active_count"],
+            "expired_count": summary["expired_count"],
+            "removed_count": summary["removed_count"],
             "type_counts": type_counts,
             "reason_counts": reason_counts,
             "top_admins": top_admins,
-            "most_sanctioned": most_sanctioned
+            "most_sanctioned": most_sanctioned,
+            "history_action_counts": history_action_counts,
+            "staff_activity_total": sum(history_action_counts.values()),
+            "top_staff_activity": top_staff_activity,
         }
     
     def get_stats_admin(self, guild_id: int, admin_user_id: int) -> dict:
@@ -1664,6 +1702,10 @@ class SanctionsManager(commands.Cog):
         )
         return SanctionsDatabase.summarize_sanctions(sanctions)
 
+    def get_sanction_stats(self, guild_id: int) -> dict:
+        """Public contract for other cogs to read SanctionManager statistics."""
+        return self.db.get_stats_overall(guild_id)
+
     def get_sanction_by_id(self, sanction_id: int) -> Optional[dict]:
         """Public contract for other cogs to read one sanction by ID."""
         return self.db.get_sanction(sanction_id)
@@ -2690,7 +2732,7 @@ class EditNotesModal(discord.ui.Modal, title="Edit Admin Notes"):
     @commands.guild_only()
     async def sanctionstats(self, ctx: commands.Context):
         """View sanction statistics."""
-        stats = self.db.get_stats_overall(ctx.guild.id)
+        stats = self.get_sanction_stats(ctx.guild.id)
         
         embed = discord.Embed(
             title="📊 Sanction Statistics",
@@ -2698,6 +2740,14 @@ class EditNotesModal(discord.ui.Modal, title="Edit Admin Notes"):
             timestamp=datetime.now(timezone.utc)
         )
         
+        status_text = (
+            f"Total issued: {stats['issued_total']}\n"
+            f"Current active: {stats['active_count']}\n"
+            f"Expired: {stats['expired_count']}\n"
+            f"Removed: {stats['removed_count']}\n"
+            f"Staff activity events: {stats['staff_activity_total']}"
+        )
+        embed.add_field(name="Status Summary", value=status_text, inline=False)
         # By type
         type_text = ""
         for stype, count in stats['type_counts'].items():
@@ -2722,6 +2772,12 @@ class EditNotesModal(discord.ui.Modal, title="Edit Admin Notes"):
         if admin_text:
             embed.add_field(name="Most Active Admins", value=admin_text, inline=True)
         
+        activity_text = ""
+        for action_type, count in stats["history_action_counts"].items():
+            activity_text += f"• {action_type}: {count}\n"
+
+        if activity_text:
+            embed.add_field(name="Staff Activity", value=activity_text, inline=False)
         # Most sanctioned
         sanctioned_text = ""
         for username, count in stats['most_sanctioned']:
