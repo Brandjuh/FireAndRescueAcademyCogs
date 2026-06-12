@@ -94,6 +94,17 @@ Integrations:
         await self.config.modlog_channel.set(channel.id)
         await ctx.send(f"✅ Modlog channel set to {channel.mention}")
     
+    @memberset.command(name="panelchannel")
+    async def memberset_panelchannel(
+        self,
+        ctx: commands.Context,
+        channel: discord.TextChannel
+    ):
+        """Set the channel for the MemberManager panel button."""
+        await self.config.panel_channel_id.set(channel.id)
+        await self.config.panel_message_id.set(None)
+        await ctx.send(f"MemberManager panel channel set to {channel.mention}")
+
     @memberset.command(name="adminroles")
     async def memberset_adminroles(
         self,

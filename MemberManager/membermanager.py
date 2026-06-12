@@ -45,11 +45,61 @@ DEFAULTS = {
     "auto_role_drift_check": True,
     "admin_alert_channel": None,
     "modlog_channel": None,
+    "panel_channel_id": 1426226521231589507,
+    "panel_message_id": None,
     "admin_role_ids": [],
     "moderator_role_ids": [],
     "note_expiry_days": 90,
     "dormancy_threshold_days": 30,
 }
+
+
+class MemberPanelView(discord.ui.View):
+    """Persistent entry point for the staff member management panel."""
+
+    def __init__(self, cog: "MemberManager"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(
+        label="Open Member Management",
+        style=discord.ButtonStyle.primary,
+        custom_id="membermanager:open_panel",
+    )
+    async def open_panel(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        del button
+        if not await self.cog._interaction_is_moderator(interaction):
+            await interaction.response.send_message(
+                "You do not have permission to use MemberManager.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_modal(MemberSearchModal(self.cog))
+
+
+class MemberSearchModal(discord.ui.Modal, title="Member Management Search"):
+    """Search modal for opening a private member management profile."""
+
+    query = discord.ui.TextInput(
+        label="Member",
+        placeholder="Discord mention, Discord ID, MC ID, MC name, or Discord name",
+        max_length=100,
+    )
+
+    def __init__(self, cog: "MemberManager"):
+        super().__init__()
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.cog._open_member_profile_from_interaction(
+            interaction,
+            str(self.query.value),
+        )
 
 
 class MemberManager(ConfigCommands, commands.Cog):
@@ -89,6 +139,10 @@ class MemberManager(ConfigCommands, commands.Cog):
         # Automation
         self.contribution_monitor: Optional[ContributionMonitor] = None
         self._automation_task: Optional[asyncio.Task] = None
+        self._member_context_menu = app_commands.ContextMenu(
+            name="Member Management",
+            callback=self._member_context_menu_callback,
+        )
         
         # Persistent views
         self._register_views()
@@ -104,6 +158,7 @@ class MemberManager(ConfigCommands, commands.Cog):
         
         # Detect and connect to other cogs
         await self._connect_integrations()
+        self._register_context_menu()
         
         # Start automation after bot is ready
         asyncio.create_task(self._delayed_start())
@@ -123,12 +178,44 @@ class MemberManager(ConfigCommands, commands.Cog):
         
         if self.db:
             await self.db.close()
+
+        self._unregister_context_menu()
         
         log.info("MemberManager unloaded")
     
     def _register_views(self):
         """Register persistent views for button interactions."""
-        pass
+        add_view = getattr(self.bot, "add_view", None)
+        if add_view:
+            add_view(MemberPanelView(self))
+
+    def _register_context_menu(self):
+        """Register the Discord user context menu if the bot supports app commands."""
+        tree = getattr(self.bot, "tree", None)
+        add_command = getattr(tree, "add_command", None) if tree else None
+        if not add_command:
+            log.warning("App command tree not available; context menu not registered")
+            return
+
+        try:
+            add_command(self._member_context_menu)
+        except Exception as exc:
+            log.warning("Failed to register MemberManager context menu: %s", exc)
+
+    def _unregister_context_menu(self):
+        """Remove the Discord user context menu on unload."""
+        tree = getattr(self.bot, "tree", None)
+        remove_command = getattr(tree, "remove_command", None) if tree else None
+        if not remove_command:
+            return
+
+        try:
+            remove_command(
+                self._member_context_menu.name,
+                type=discord.AppCommandType.user,
+            )
+        except Exception as exc:
+            log.debug("Failed to unregister MemberManager context menu: %s", exc)
     
     async def _delayed_start(self):
         """Start automation after bot is ready."""
@@ -147,6 +234,8 @@ class MemberManager(ConfigCommands, commands.Cog):
                 self.contribution_monitor.run()
             )
             log.info("Contribution monitoring started")
+
+        await self._ensure_panel_message()
     
     async def _connect_integrations(self):
         """Detect and connect to other cogs."""
@@ -190,6 +279,143 @@ class MemberManager(ConfigCommands, commands.Cog):
         
         mod_roles = await self.config.moderator_role_ids()
         return any(role.id in mod_roles for role in member.roles)
+
+    async def _interaction_is_moderator(self, interaction: discord.Interaction) -> bool:
+        """Check whether an interaction user can access MemberManager."""
+        user = getattr(interaction, "user", None)
+        if not user:
+            return False
+        return await self._is_moderator(user)
+
+    def _build_panel_embed(self) -> discord.Embed:
+        """Build the persistent panel embed."""
+        embed = discord.Embed(
+            title="Member Management",
+            description=(
+                "Open a private staff panel to search Discord and MissionChief members, "
+                "review linked data, and manage member information."
+            ),
+            color=discord.Color.blue(),
+        )
+        embed.set_footer(text="Only authorized staff can use this panel.")
+        return embed
+
+    async def _send_panel_message(self, channel: discord.TextChannel) -> discord.Message:
+        """Post the MemberManager panel and store its message ID."""
+        message = await channel.send(
+            embed=self._build_panel_embed(),
+            view=MemberPanelView(self),
+        )
+        await self.config.panel_message_id.set(message.id)
+        return message
+
+    async def _ensure_panel_message(self) -> None:
+        """Post the default panel if the configured panel message is missing."""
+        channel_id = await self.config.panel_channel_id()
+        if not channel_id:
+            return
+
+        channel = self.bot.get_channel(int(channel_id))
+        if not channel:
+            log.warning("MemberManager panel channel not found: %s", channel_id)
+            return
+
+        message_id = await self.config.panel_message_id()
+        if message_id:
+            try:
+                await channel.fetch_message(int(message_id))
+                return
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                log.info("Stored MemberManager panel message is unavailable; reposting")
+
+        try:
+            await self._send_panel_message(channel)
+            log.info("MemberManager panel posted in channel %s", channel_id)
+        except Exception as exc:
+            log.exception("Failed to post MemberManager panel: %s", exc)
+
+    async def _send_member_profile(
+        self,
+        send,
+        guild: discord.Guild,
+        user_id: int,
+        member_data: MemberData,
+    ) -> None:
+        """Send a private member overview through a context or interaction sender."""
+        view = MemberOverviewView(
+            bot=self.bot,
+            db=self.db,
+            config=self.config,
+            member_data=member_data,
+            integrations={
+                "membersync": self.membersync,
+                "alliance_scraper": self.alliance_scraper,
+                "logs_scraper": self.logs_scraper,
+                "sanction_manager": self.sanction_manager,
+            },
+            invoker_id=user_id,
+            guild=guild,
+        )
+        embed = await view.get_overview_embed()
+        await send(embed=embed, view=view)
+
+    async def _open_member_profile_from_interaction(
+        self,
+        interaction: discord.Interaction,
+        target: str,
+    ) -> None:
+        """Resolve and open a private member profile from an interaction."""
+        if not await self._interaction_is_moderator(interaction):
+            await interaction.response.send_message(
+                "You do not have permission to use MemberManager.",
+                ephemeral=True,
+            )
+            return
+
+        member_data = await self._resolve_target(interaction.guild, target.strip())
+        if not member_data:
+            await interaction.response.send_message(
+                f"No member found for `{target}`.",
+                ephemeral=True,
+            )
+            return
+
+        await self._send_member_profile(
+            lambda **kwargs: interaction.response.send_message(
+                **kwargs,
+                ephemeral=True,
+            ),
+            interaction.guild,
+            interaction.user.id,
+            member_data,
+        )
+
+    async def _member_context_menu_callback(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+    ) -> None:
+        """Open MemberManager from Discord's right-click user context menu."""
+        if not await self._interaction_is_moderator(interaction):
+            await interaction.response.send_message(
+                "You do not have permission to use MemberManager.",
+                ephemeral=True,
+            )
+            return
+
+        member_data = await self._build_member_data(
+            guild=interaction.guild,
+            discord_id=member.id,
+        )
+        await self._send_member_profile(
+            lambda **kwargs: interaction.response.send_message(
+                **kwargs,
+                ephemeral=True,
+            ),
+            interaction.guild,
+            interaction.user.id,
+            member_data,
+        )
     
     # ==================== LISTENERS ====================
     
@@ -291,6 +517,55 @@ class MemberManager(ConfigCommands, commands.Cog):
         """Member management commands."""
         if ctx.invoked_subcommand is None:
             await ctx.send_help(ctx.command)
+
+    @commands.group(name="memberpanel")
+    @commands.guild_only()
+    async def memberpanel(self, ctx: commands.Context):
+        """Manage the persistent MemberManager panel."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+
+    @memberpanel.command(name="post")
+    async def memberpanel_post(self, ctx: commands.Context):
+        """Post the MemberManager panel if it is missing."""
+        if not await self._is_moderator(ctx.author):
+            await ctx.send("You need MemberManager permissions to use this command.")
+            return
+
+        channel_id = await self.config.panel_channel_id()
+        channel = self.bot.get_channel(int(channel_id)) if channel_id else ctx.channel
+        if not channel:
+            await ctx.send("MemberManager panel channel not found.")
+            return
+
+        message_id = await self.config.panel_message_id()
+        if message_id:
+            try:
+                await channel.fetch_message(int(message_id))
+                await ctx.send("MemberManager panel already exists.")
+                return
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+        await self._send_panel_message(channel)
+        await ctx.send(f"MemberManager panel posted in {channel.mention}.")
+
+    @memberpanel.command(name="repost")
+    async def memberpanel_repost(self, ctx: commands.Context):
+        """Force-post a new MemberManager panel."""
+        if not await self._is_moderator(ctx.author):
+            await ctx.send("You need MemberManager permissions to use this command.")
+            return
+
+        channel_id = await self.config.panel_channel_id()
+        channel = self.bot.get_channel(int(channel_id)) if channel_id else ctx.channel
+        if not channel:
+            await ctx.send("MemberManager panel channel not found.")
+            return
+
+        await self.config.panel_message_id.set(None)
+        await self._send_panel_message(channel)
+        await ctx.send(f"MemberManager panel reposted in {channel.mention}.")
     
     # ==================== WHOIS COMMAND ====================
     
@@ -471,6 +746,51 @@ class MemberManager(ConfigCommands, commands.Cog):
         embed.description = "\n".join(lines)
         embed.set_footer(text="Use [p]member whois <name/id> to view full details")
         
+        await ctx.send(embed=embed)
+
+    @member.command(name="mcsearch", aliases=["mcs"])
+    @commands.guild_only()
+    async def mcsearch(self, ctx: commands.Context, *, query: str):
+        """Search MissionChief members by name or ID."""
+        if not await self._is_moderator(ctx.author):
+            await ctx.send("You need MemberManager permissions to use this command.")
+            return
+
+        await ctx.typing()
+        results = await self._search_missionchief_members(query)
+        if not results:
+            await ctx.send(f"No MissionChief members found for `{query}`.")
+            return
+
+        embed = discord.Embed(
+            title=f"MissionChief Search: {query}",
+            description=f"Found {len(results)} result(s)",
+            color=discord.Color.blue(),
+        )
+
+        lines = []
+        for result in results[:10]:
+            mc_id = result.get("mc_user_id")
+            name = result.get("name", "Unknown")
+            link = None
+            if self.membersync and mc_id:
+                link = await self.membersync.get_link_for_mc(str(mc_id))
+
+            line = f"- **{name}** | MC ID: `{mc_id}`"
+            if link and link.get("discord_id"):
+                line += f" | Discord: <@{link['discord_id']}>"
+            elif link:
+                line += f" | Link: {link.get('status', 'unknown')}"
+            else:
+                line += " | Link: none"
+            lines.append(line)
+
+        embed.add_field(
+            name="Results",
+            value="\n".join(lines),
+            inline=False,
+        )
+        embed.set_footer(text="Use member whois <MC ID> to open the full profile.")
         await ctx.send(embed=embed)
     
     # ==================== CONTRIBUTION CHECK COMMAND ====================
@@ -1304,6 +1624,52 @@ class MemberManager(ConfigCommands, commands.Cog):
         embed.set_footer(text=f"MemberManager v{__version__}")
         
         await ctx.send(embed=embed)
+
+    async def _search_missionchief_members(self, query: str) -> List[Dict[str, Any]]:
+        """Search MissionChief members by name or MC user ID."""
+        from .utils import fuzzy_match_score
+
+        query_clean = query.strip()
+        query_lower = query_clean.lower()
+        results: List[Dict[str, Any]] = []
+
+        if query_clean.isdigit():
+            mc_data = await self._get_mc_data(query_clean)
+            if mc_data:
+                return [{
+                    "score": 1.0,
+                    "mc_user_id": mc_data.get("user_id") or mc_data.get("mc_user_id") or query_clean,
+                    "name": mc_data.get("name", "Unknown"),
+                }]
+
+        if not self.alliance_scraper:
+            return []
+
+        try:
+            mc_members = await self.alliance_scraper.get_members()
+        except Exception as exc:
+            log.error("Error searching MissionChief members: %s", exc)
+            return []
+
+        for mc_member in mc_members:
+            mc_name = mc_member.get("name", "")
+            mc_id = mc_member.get("user_id") or mc_member.get("mc_user_id")
+            if not mc_id:
+                continue
+
+            score = fuzzy_match_score(query_lower, mc_name)
+            if query_clean.isdigit() and query_clean in str(mc_id):
+                score = max(score, 0.9)
+
+            if score >= 0.5:
+                results.append({
+                    "score": score,
+                    "mc_user_id": str(mc_id),
+                    "name": mc_name,
+                })
+
+        results.sort(key=lambda result: result["score"], reverse=True)
+        return results[:15]
     
     async def _resolve_target(
         self,
