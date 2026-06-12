@@ -1,13 +1,12 @@
 import discord
 from redbot.core import commands, Config, data_manager
-import aiohttp
 import asyncio
 import sqlite3
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
-from pathlib import Path
 import re
 import hashlib
+from zoneinfo import ZoneInfo
 
 class LogsScraper(commands.Cog):
     """Scrapes alliance logs from MissionChief with complete data extraction"""
@@ -18,7 +17,8 @@ class LogsScraper(commands.Cog):
         self.config.register_global(
             debug_mode=False,
             scrape_interval=3600,  # 1 hour
-            last_scrape=None
+            last_scrape=None,
+            event_timezone=None,
         )
         
         # Database path
@@ -53,14 +53,21 @@ class LogsScraper(commands.Cog):
                 affected_url TEXT,
                 description TEXT,
                 scraped_at TEXT,
+                event_timestamp TEXT,
                 contribution_amount INTEGER DEFAULT 0
             )
         ''')
+
+        cursor.execute("PRAGMA table_info(logs)")
+        columns = {column[1] for column in cursor.fetchall()}
+        if "event_timestamp" not in columns:
+            cursor.execute("ALTER TABLE logs ADD COLUMN event_timestamp TEXT")
         
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_hash ON logs(hash)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_action_key ON logs(action_key)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_executed_mc_id ON logs(executed_mc_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_event_timestamp ON logs(event_timestamp)')
         
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS training_courses (
@@ -93,6 +100,29 @@ class LogsScraper(commands.Cog):
         if now >= next_run:
             next_run += timedelta(hours=1)
         return next_run
+
+    @staticmethod
+    def _normalize_event_timestamp(raw_timestamp, scraped_at, event_timezone):
+        """Normalize a recent yearless MissionChief timestamp to UTC."""
+        if scraped_at.tzinfo is None:
+            raise ValueError("scraped_at must be timezone-aware")
+
+        try:
+            parsed = datetime.strptime(raw_timestamp, "%d %b %H:%M")
+            event_tz = ZoneInfo(event_timezone)
+        except (TypeError, ValueError, KeyError):
+            return None
+
+        scraped_local = scraped_at.astimezone(event_tz)
+        candidate = parsed.replace(year=scraped_local.year, tzinfo=event_tz)
+        if candidate > scraped_local + timedelta(minutes=5):
+            candidate = candidate.replace(year=candidate.year - 1)
+
+        age = scraped_local - candidate
+        if age < timedelta(minutes=-5) or age > timedelta(days=7):
+            return None
+
+        return candidate.astimezone(ZoneInfo("UTC")).isoformat()
     
     async def _background_scrape(self):
         """Background task - scrapes every hour at :15"""
@@ -359,7 +389,9 @@ class LogsScraper(commands.Cog):
             await asyncio.sleep(1.5)  # Rate limiting
         
         # Store in database
-        scraped_at = datetime.now().isoformat()
+        scraped_at_dt = datetime.now(ZoneInfo("UTC"))
+        scraped_at = scraped_at_dt.isoformat()
+        event_timezone = await self.config.event_timezone()
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
@@ -368,16 +400,22 @@ class LogsScraper(commands.Cog):
         training_inserted = 0
         
         for log in all_logs:
+            event_timestamp = self._normalize_event_timestamp(
+                log["ts"],
+                scraped_at_dt,
+                event_timezone,
+            )
             try:
                 cursor.execute('''
                     INSERT INTO logs (hash, ts, action_key, action_text, executed_name,
                                     executed_mc_id, executed_url, affected_name, affected_type,
-                                    affected_mc_id, affected_url, description, scraped_at, contribution_amount)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    affected_mc_id, affected_url, description, scraped_at,
+                                    event_timestamp, contribution_amount)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (log['hash'], log['ts'], log['action_key'], log['action_text'], log['executed_name'],
                       log['executed_mc_id'], log['executed_url'], log['affected_name'], log['affected_type'],
                       log['affected_mc_id'], log['affected_url'], log['description'], scraped_at,
-                      log['contribution_amount']))
+                      event_timestamp, log['contribution_amount']))
                 inserted += 1
                 
                 # Count training courses (don't insert separately - data is in logs table)
@@ -385,6 +423,14 @@ class LogsScraper(commands.Cog):
                     training_inserted += 1
                     
             except sqlite3.IntegrityError:
+                if event_timestamp:
+                    cursor.execute(
+                        """
+                        UPDATE logs SET event_timestamp = ?
+                        WHERE hash = ? AND event_timestamp IS NULL
+                        """,
+                        (event_timestamp, log["hash"]),
+                    )
                 duplicates += 1
         
         conn.commit()
@@ -469,7 +515,7 @@ class LogsScraper(commands.Cog):
         success = await self._scrape_all_logs(ctx, max_pages)
         
         if success:
-            await ctx.send(f"✅ Backfill completed!")
+            await ctx.send("✅ Backfill completed!")
         else:
             await ctx.send("❌ Backfill failed")
     
@@ -515,6 +561,23 @@ class LogsScraper(commands.Cog):
         
         await ctx.send(f"🔍 Debug mode: {'ON' if new_state else 'OFF'}")
     
+    @logs_group.command(name="timezone")
+    async def event_timezone(self, ctx, timezone: str = None):
+        """Show or set the timezone used by MissionChief alliance-log timestamps."""
+        if timezone is None:
+            current = await self.config.event_timezone()
+            await ctx.send(f"Log event timezone: {current or 'Not configured'}")
+            return
+
+        try:
+            ZoneInfo(timezone)
+        except (ValueError, KeyError):
+            await ctx.send(f"Invalid timezone: {timezone}")
+            return
+
+        await self.config.event_timezone.set(timezone)
+        await ctx.send(f"Log event timezone set to {timezone}")
+
     @logs_group.command(name="taskstatus")
     async def task_status(self, ctx):
         """Check if background scraping task is running"""
@@ -526,7 +589,7 @@ class LogsScraper(commands.Cog):
                 exc = self.scrape_task.exception()
                 if exc:
                     await ctx.send(f"💥 Task exception: {exc}")
-            except:
+            except Exception:
                 pass
         elif self.scrape_task.cancelled():
             await ctx.send("⚠️ Background task was CANCELLED")
