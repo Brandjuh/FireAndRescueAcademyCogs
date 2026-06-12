@@ -36,9 +36,10 @@ class DataAggregator:
         "sanctions": "sanctions_db_path",
     }
     
-    def __init__(self, config_manager):
+    def __init__(self, config_manager, bot=None):
         """Initialize data aggregator."""
         self.config_manager = config_manager
+        self.bot = bot
         self._db_cache = {}
     
     def _get_db_connection(self, db_name: str) -> Optional[sqlite3.Connection]:
@@ -64,6 +65,54 @@ class DataAggregator:
         
         except Exception as e:
             log.exception(f"Error connecting to {db_name} database: {e}")
+            return None
+
+    def _get_cog(self, *names):
+        """Return the first loaded cog matching one of the provided names."""
+        if not self.bot:
+            return None
+        get_cog = getattr(self.bot, "get_cog", None)
+        if not get_cog:
+            return None
+        for name in names:
+            cog = get_cog(name)
+            if cog:
+                return cog
+        return None
+
+    def _get_primary_guild_id(self) -> Optional[int]:
+        """Return the primary guild ID when the bot context is available."""
+        guilds = getattr(self.bot, "guilds", []) if self.bot else []
+        if guilds:
+            return getattr(guilds[0], "id", None)
+        return None
+
+    def _get_sanction_stats_contract(
+        self,
+        start: datetime,
+        end: datetime,
+    ) -> Optional[Dict]:
+        """Read sanction stats through SanctionManager when the public contract is available."""
+        guild_id = self._get_primary_guild_id()
+        if guild_id is None:
+            return None
+
+        sanction_manager = self._get_cog("SanctionManager", "SanctionsManager")
+        get_sanction_stats = getattr(sanction_manager, "get_sanction_stats", None) if sanction_manager else None
+        if not get_sanction_stats:
+            return None
+
+        try:
+            return get_sanction_stats(
+                guild_id,
+                period_start_ts=int(start.timestamp()),
+                period_end_ts=int(end.timestamp()),
+            )
+        except TypeError:
+            log.warning("Loaded SanctionManager does not support period stats contract yet")
+            return None
+        except Exception as exc:
+            log.exception(f"Error reading SanctionManager stats contract: {exc}")
             return None
 
     @staticmethod
@@ -489,8 +538,19 @@ class DataAggregator:
             return {"error": str(e)}
     
     async def _get_sanctions_data_daily(self, game_day_start: datetime, game_day_end: datetime) -> Dict:
-        """Get sanctions metrics from sanctions.db."""
+        """Get sanctions metrics from SanctionManager contract with database fallback."""
         try:
+            contract_stats = self._get_sanction_stats_contract(game_day_start, game_day_end)
+            if contract_stats:
+                return {
+                    "issued_24h": contract_stats.get("issued_period", 0),
+                    "active_warnings": contract_stats.get("active_warnings", 0),
+                    "active_total": contract_stats.get("active_count", 0),
+                    "expired_total": contract_stats.get("expired_count", 0),
+                    "removed_total": contract_stats.get("removed_count", 0),
+                    "staff_activity_24h": contract_stats.get("staff_activity_period", 0),
+                }
+
             conn = self._get_db_connection("sanctions")
             if not conn:
                 return {"error": "Database not found"}
@@ -562,8 +622,16 @@ class DataAggregator:
             conn.close()
             
             # Sanction actions
-            conn_s = self._get_db_connection("sanctions")
-            sanction_actions = 0
+            contract_stats = self._get_sanction_stats_contract(game_day_start, game_day_end)
+            sanction_actions = (
+                contract_stats.get("staff_activity_period", contract_stats.get("issued_period", 0))
+                if contract_stats
+                else 0
+            )
+            if not contract_stats:
+                conn_s = self._get_db_connection("sanctions")
+            else:
+                conn_s = None
             if conn_s:
                 cursor_s = conn_s.cursor()
                 cursor_s.execute("""
@@ -919,8 +987,19 @@ class DataAggregator:
             return {"error": str(e)}
     
     async def _get_sanctions_data_monthly(self, start: datetime, end: datetime) -> Dict:
-        """Get sanctions metrics for full month."""
+        """Get sanctions metrics for full month through contract with database fallback."""
         try:
+            contract_stats = self._get_sanction_stats_contract(start, end)
+            if contract_stats:
+                return {
+                    "issued_period": contract_stats.get("issued_period", 0),
+                    "by_type": contract_stats.get("by_type_period", {}),
+                    "active_total": contract_stats.get("active_count", 0),
+                    "expired_total": contract_stats.get("expired_count", 0),
+                    "removed_total": contract_stats.get("removed_count", 0),
+                    "staff_activity_period": contract_stats.get("staff_activity_period", 0),
+                }
+
             conn = self._get_db_connection("sanctions")
             if not conn:
                 return {"error": "Database not found"}
@@ -1000,7 +1079,15 @@ class DataAggregator:
             
             conn.close()
             
-            conn_s = self._get_db_connection("sanctions")
+            contract_stats = self._get_sanction_stats_contract(start, end)
+            if contract_stats:
+                total_actions += contract_stats.get(
+                    "staff_activity_period",
+                    contract_stats.get("issued_period", 0),
+                )
+                conn_s = None
+            else:
+                conn_s = self._get_db_connection("sanctions")
             if conn_s:
                 cursor_s = conn_s.cursor()
                 cursor_s.execute("""

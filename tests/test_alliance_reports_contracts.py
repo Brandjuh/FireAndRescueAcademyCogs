@@ -117,6 +117,76 @@ class AllianceReportContractTests(unittest.TestCase):
         self.assertEqual(summer_start, datetime(2026, 6, 1, 4, tzinfo=ZoneInfo("UTC")))
         self.assertEqual(summer_end, datetime(2026, 7, 1, 4, tzinfo=ZoneInfo("UTC")))
 
+    def test_daily_sanctions_uses_sanctionmanager_stats_contract_when_available(self):
+        import asyncio
+
+        calls = {}
+
+        class FakeSanctionManager:
+            def get_sanction_stats(self, guild_id, *, period_start_ts=None, period_end_ts=None):
+                calls["stats"] = (guild_id, period_start_ts, period_end_ts)
+                return {
+                    "issued_period": 3,
+                    "active_warnings": 4,
+                    "active_count": 5,
+                    "expired_count": 6,
+                    "removed_count": 7,
+                    "staff_activity_period": 8,
+                }
+
+        bot = types.SimpleNamespace(
+            guilds=[types.SimpleNamespace(id=1234)],
+            get_cog=lambda name: FakeSanctionManager() if name == "SanctionManager" else None,
+        )
+        aggregator = DataAggregator(types.SimpleNamespace(_db_cache={}), bot)
+        start = datetime(2026, 6, 12, 4, tzinfo=ZoneInfo("UTC"))
+        end = datetime(2026, 6, 12, 12, tzinfo=ZoneInfo("UTC"))
+
+        result = asyncio.run(aggregator._get_sanctions_data_daily(start, end))
+
+        self.assertEqual(result["issued_24h"], 3)
+        self.assertEqual(result["active_warnings"], 4)
+        self.assertEqual(result["active_total"], 5)
+        self.assertEqual(result["expired_total"], 6)
+        self.assertEqual(result["removed_total"], 7)
+        self.assertEqual(result["staff_activity_24h"], 8)
+        self.assertEqual(calls["stats"], (1234, int(start.timestamp()), int(end.timestamp())))
+
+    def test_monthly_sanctions_uses_sanctionmanager_stats_contract_when_available(self):
+        import asyncio
+
+        class FakeSanctionManager:
+            def get_sanction_stats(self, guild_id, *, period_start_ts=None, period_end_ts=None):
+                del guild_id, period_start_ts, period_end_ts
+                return {
+                    "issued_period": 9,
+                    "by_type_period": {"warnings": 4, "kicks": 3, "bans": 1, "other": 1},
+                    "active_count": 10,
+                    "expired_count": 11,
+                    "removed_count": 12,
+                    "staff_activity_period": 13,
+                }
+
+        bot = types.SimpleNamespace(
+            guilds=[types.SimpleNamespace(id=1234)],
+            get_cog=lambda name: FakeSanctionManager() if name == "SanctionsManager" else None,
+        )
+        aggregator = DataAggregator(types.SimpleNamespace(_db_cache={}), bot)
+
+        result = asyncio.run(
+            aggregator._get_sanctions_data_monthly(
+                datetime(2026, 6, 1, 4, tzinfo=ZoneInfo("UTC")),
+                datetime(2026, 7, 1, 4, tzinfo=ZoneInfo("UTC")),
+            )
+        )
+
+        self.assertEqual(result["issued_period"], 9)
+        self.assertEqual(result["by_type"]["warnings"], 4)
+        self.assertEqual(result["active_total"], 10)
+        self.assertEqual(result["expired_total"], 11)
+        self.assertEqual(result["removed_total"], 12)
+        self.assertEqual(result["staff_activity_period"], 13)
+
     def test_monthly_membership_uses_actual_snapshots_for_net_growth(self):
         import asyncio
 

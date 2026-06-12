@@ -18,7 +18,7 @@ class MonthlyAdminReport:
     def __init__(self, bot, config_manager):
         self.bot = bot
         self.config_manager = config_manager
-        self.aggregator = DataAggregator(config_manager)
+        self.aggregator = DataAggregator(config_manager, bot)
 
     async def generate(
         self,
