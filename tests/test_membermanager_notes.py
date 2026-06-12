@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 import tempfile
 import types
 import unittest
@@ -11,6 +12,65 @@ from MemberManager.views import MemberOverviewView, TogglePinNoteModal
 
 
 class MemberManagerNotesTests(unittest.TestCase):
+    def test_initialize_migrates_old_notes_schema_for_current_ui_queries(self):
+        async def run_test():
+            with tempfile.TemporaryDirectory() as temp_dir:
+                db_path = Path(temp_dir) / "membermanager.db"
+                connection = sqlite3.connect(db_path)
+                connection.execute(
+                    """
+                    CREATE TABLE notes (
+                        note_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ref_code TEXT UNIQUE NOT NULL,
+                        guild_id INTEGER NOT NULL,
+                        discord_id INTEGER,
+                        mc_user_id TEXT,
+                        note_text TEXT NOT NULL,
+                        author_id INTEGER NOT NULL,
+                        author_name TEXT NOT NULL,
+                        infraction_ref TEXT,
+                        created_at INTEGER NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO notes (
+                        ref_code, guild_id, discord_id, mc_user_id, note_text,
+                        author_id, author_name, infraction_ref, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "N2026-000001",
+                        1,
+                        123,
+                        "456",
+                        "Legacy note",
+                        999,
+                        "Admin",
+                        None,
+                        1_800_000_000,
+                    ),
+                )
+                connection.commit()
+                connection.close()
+
+                database = MemberDatabase(str(db_path))
+                await database.initialize()
+                try:
+                    notes = await database.get_notes(discord_id=123, mc_user_id="456")
+                finally:
+                    await database.close()
+
+            return notes
+
+        notes = asyncio.run(run_test())
+
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0]["note_text"], "Legacy note")
+        self.assertEqual(notes[0]["status"], "active")
+        self.assertEqual(notes[0]["is_pinned"], 0)
+
     def test_get_notes_matches_discord_or_mc_identity_when_both_are_known(self):
         async def run_test():
             with tempfile.TemporaryDirectory() as temp_dir:

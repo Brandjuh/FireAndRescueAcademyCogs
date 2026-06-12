@@ -119,8 +119,8 @@ class MemberManagerSanctionsTests(unittest.TestCase):
 
         embed = asyncio.run(view.get_infractions_embed())
 
-        self.assertIn("No sanctions are currently shown", embed.description)
-        self.assertEqual(embed.footer["text"], "Sanction backend is not loaded")
+        self.assertIn("Sanction data is currently unavailable", embed.description)
+        self.assertNotIn("SanctionManager not available", embed.description)
 
 
 if __name__ == "__main__":

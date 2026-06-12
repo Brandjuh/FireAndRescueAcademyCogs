@@ -206,6 +206,30 @@ class MemberDatabase:
                 await self._conn.execute("ALTER TABLE notes ADD COLUMN updated_by_name TEXT")
                 await self._conn.commit()
                 log.info("✅ Migration complete: updated_by_name column added")
+            cursor = await self._conn.execute("PRAGMA table_info(notes)")
+            columns = await cursor.fetchall()
+            column_names = [col[1] for col in columns]
+
+            migrations = {
+                "updated_at": "ALTER TABLE notes ADD COLUMN updated_at INTEGER",
+                "updated_by": "ALTER TABLE notes ADD COLUMN updated_by INTEGER",
+                "expires_at": "ALTER TABLE notes ADD COLUMN expires_at INTEGER",
+                "status": "ALTER TABLE notes ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+                "is_pinned": "ALTER TABLE notes ADD COLUMN is_pinned INTEGER DEFAULT 0",
+                "tags": "ALTER TABLE notes ADD COLUMN tags TEXT",
+                "content_hash": "ALTER TABLE notes ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
+            }
+
+            migrated = []
+            for column_name, statement in migrations.items():
+                if column_name not in column_names:
+                    log.info("Migrating notes table: adding %s column", column_name)
+                    await self._conn.execute(statement)
+                    migrated.append(column_name)
+
+            if migrated:
+                await self._conn.commit()
+                log.info("Notes table migration complete: %s", ", ".join(migrated))
         except Exception as e:
             log.error(f"Migration error: {e}")
     
