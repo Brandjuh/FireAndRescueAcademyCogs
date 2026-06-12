@@ -2066,11 +2066,19 @@ class MemberManager(ConfigCommands, commands.Cog):
         # Get sanctions from SanctionManager
         if self.sanction_manager:
             try:
-                sanctions = self.sanction_manager.db.get_user_sanctions(
-                    guild_id=guild.id,
-                    discord_user_id=data.discord_id,
-                    mc_user_id=data.mc_user_id
-                )
+                get_member_sanctions = getattr(self.sanction_manager, "get_member_sanctions", None)
+                if get_member_sanctions:
+                    sanctions = get_member_sanctions(
+                        guild_id=guild.id,
+                        discord_user_id=data.discord_id,
+                        mc_user_id=data.mc_user_id,
+                    )
+                else:
+                    sanctions = self.sanction_manager.db.get_user_sanctions(
+                        guild_id=guild.id,
+                        discord_user_id=data.discord_id,
+                        mc_user_id=data.mc_user_id,
+                    )
                 
                 now = int(datetime.now(timezone.utc).timestamp())
                 thirty_days_ago = now - (30 * 86400)

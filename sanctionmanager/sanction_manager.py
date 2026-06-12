@@ -1441,6 +1441,75 @@ class SanctionsManager(commands.Cog):
     def cog_unload(self):
         pass
 
+    def get_member_sanctions(
+        self,
+        *,
+        guild_id: int,
+        discord_user_id: Optional[int] = None,
+        mc_user_id: Optional[str] = None,
+    ) -> List[dict]:
+        """Public contract for other cogs to read sanctions for one member."""
+        return self.db.get_user_sanctions(
+            guild_id=guild_id,
+            discord_user_id=discord_user_id,
+            mc_user_id=mc_user_id,
+        )
+
+    def create_sanction_for_member(
+        self,
+        *,
+        guild_id: int,
+        discord_user_id: Optional[int],
+        mc_user_id: Optional[str],
+        mc_username: Optional[str],
+        admin_user_id: int,
+        admin_username: str,
+        sanction_type: str,
+        reason_category: str,
+        reason_detail: Optional[str],
+        additional_notes: Optional[str] = None,
+        expires_at: Optional[int] = None,
+    ) -> int:
+        """Public contract for other cogs to create a sanction."""
+        return self.db.add_sanction(
+            guild_id=guild_id,
+            discord_user_id=discord_user_id,
+            mc_user_id=mc_user_id,
+            mc_username=mc_username,
+            admin_user_id=admin_user_id,
+            admin_username=admin_username,
+            sanction_type=sanction_type,
+            reason_category=reason_category,
+            reason_detail=reason_detail,
+            additional_notes=additional_notes,
+            expires_at=expires_at,
+        )
+
+    def edit_member_sanction(
+        self,
+        sanction_id: int,
+        *,
+        admin_user_id: int,
+        **updates,
+    ) -> None:
+        """Public contract for other cogs to edit allowed sanction fields."""
+        self.db.edit_sanction(sanction_id, admin_user_id, **updates)
+
+    def remove_member_sanction(
+        self,
+        sanction_id: int,
+        *,
+        admin_user_id: int,
+        notes: Optional[str] = None,
+    ) -> None:
+        """Public contract for other cogs to mark a sanction as removed."""
+        self.db.update_sanction_status(
+            sanction_id,
+            "removed",
+            admin_user_id,
+            notes,
+        )
+
     async def _is_admin(self, interaction: discord.Interaction) -> bool:
         """Check if user has admin permissions."""
         guild = interaction.guild

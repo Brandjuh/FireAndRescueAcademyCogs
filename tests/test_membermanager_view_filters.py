@@ -95,6 +95,8 @@ class MemberManagerViewFilterTests(unittest.TestCase):
 
             embed = asyncio.run(view.get_events_embed())
 
+        self.assertEqual(embed.kwargs["title"], "Alliance Operations - DiscordUser")
+        self.assertNotIn("?", embed.kwargs["title"])
         self.assertIn("Large scale mission started", embed.description)
         self.assertNotIn("Building constructed", embed.description)
 
@@ -106,6 +108,8 @@ class MemberManagerViewFilterTests(unittest.TestCase):
 
             embed = asyncio.run(view.get_buildings_embed())
 
+        self.assertEqual(embed.kwargs["title"], "Buildings & Extensions - DiscordUser")
+        self.assertNotIn("?", embed.kwargs["title"])
         self.assertIn("Building constructed", embed.description)
         self.assertNotIn("Large scale mission started", embed.description)
 
