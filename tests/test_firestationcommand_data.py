@@ -50,6 +50,11 @@ def test_build_incidents_derives_staff_from_required_vehicles():
                         "required_vehicles": ["engine_basic"],
                         "required_equipment": ["hose"],
                         "description": "A small bin fire in a residential area.",
+                        "dispatch_narrative": "Smoke is showing behind several homes.",
+                        "scene_narrative": "The crew finds fire spreading along a fence.",
+                        "success_narrative": "The fire is knocked down quickly.",
+                        "partial_narrative": "The fire is controlled with minor extension.",
+                        "failure_narrative": "The fire spreads before crews gain control.",
                     }
                 ]
             },
@@ -75,7 +80,11 @@ def test_build_incidents_derives_staff_from_required_vehicles():
             "required_staff": 4,
             "base_credits": 200,
             "hint": "A small bin fire in a residential area.",
-            "detail": "A small bin fire in a residential area.",
+            "detail": "The crew finds fire spreading along a fence.",
+            "dispatch_narrative": "Smoke is showing behind several homes.",
+            "success_narrative": "The fire is knocked down quickly.",
+            "partial_narrative": "The fire is controlled with minor extension.",
+            "failure_narrative": "The fire spreads before crews gain control.",
             "required_vehicles": ["engine_basic"],
             "required_equipment": ["hose"],
         }
@@ -117,6 +126,10 @@ def test_new_mission_state_includes_schema_and_initial_stage():
         "base_credits": 200,
         "hint": "Quick response limits damage.",
         "detail": "A small bin fire in a residential area.",
+        "dispatch_narrative": "Smoke is showing behind several homes.",
+        "success_narrative": "The fire is knocked down quickly.",
+        "partial_narrative": "The fire is controlled with minor extension.",
+        "failure_narrative": "The fire spreads before crews gain control.",
     }
 
     mission = FireStationCommand._new_mission_state(
@@ -134,6 +147,10 @@ def test_new_mission_state_includes_schema_and_initial_stage():
         "base_credits": 200,
         "hint": "Quick response limits damage.",
         "detail": "A small bin fire in a residential area.",
+        "dispatch_narrative": "Smoke is showing behind several homes.",
+        "success_narrative": "The fire is knocked down quickly.",
+        "partial_narrative": "The fire is controlled with minor extension.",
+        "failure_narrative": "The fire spreads before crews gain control.",
         "stage": FireStationCommand.STAGE_ALERT_CHOICE,
         "alert_mode": None,
         "channel_id": 123,

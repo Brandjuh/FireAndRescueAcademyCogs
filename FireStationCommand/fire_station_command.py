@@ -83,6 +83,10 @@ class FireStationCommand(commands.Cog):
                 "base_credits": 1000,
                 "hint": "Reports of smoke from a residential building.",
                 "detail": "On approach you see smoke from the roof and people outside waving.",
+                "dispatch_narrative": "Dispatch reports smoke from a residential roof. Neighbors are gathering outside and the first caller is worried people may still be inside.",
+                "success_narrative": "The crew makes a fast attack and prevents the fire from spreading beyond the roof space.",
+                "partial_narrative": "The fire is contained, but smoke damage spreads through part of the home.",
+                "failure_narrative": "The response falls behind the fire growth and the house takes heavy damage before control is gained.",
             },
             {
                 "id": "car_crash",
@@ -91,6 +95,10 @@ class FireStationCommand(commands.Cog):
                 "base_credits": 1000,
                 "hint": "Multiple calls of a crash at an intersection.",
                 "detail": "Police report two vehicles involved, possible entrapment.",
+                "dispatch_narrative": "Several callers report a crash at an intersection. Dispatch notes possible entrapment and traffic backing up fast.",
+                "success_narrative": "The scene is secured quickly and hazards are controlled before they can escalate.",
+                "partial_narrative": "The incident is handled, but traffic and scene safety remain difficult throughout the response.",
+                "failure_narrative": "The scene stays unstable too long, forcing additional resources to regain control.",
             },
             {
                 "id": "small_fire",
@@ -99,6 +107,10 @@ class FireStationCommand(commands.Cog):
                 "base_credits": 1000,
                 "hint": "Caller reports a small fire near containers.",
                 "detail": "On arrival, smoke visible but no exposures yet.",
+                "dispatch_narrative": "A caller reports flames near a set of containers. It sounds small, but nearby exposures could make it grow quickly.",
+                "success_narrative": "The fire is knocked down before it reaches anything important.",
+                "partial_narrative": "The fire is handled, though it causes avoidable smoke and surface damage.",
+                "failure_narrative": "The fire spreads from the containers and takes extra work to bring under control.",
             },
         ]
 
@@ -188,6 +200,10 @@ class FireStationCommand(commands.Cog):
             "base_credits": incident.get("base_credits", 1000),
             "hint": incident["hint"],
             "detail": incident["detail"],
+            "dispatch_narrative": incident.get("dispatch_narrative", incident["hint"]),
+            "success_narrative": incident.get("success_narrative", ""),
+            "partial_narrative": incident.get("partial_narrative", ""),
+            "failure_narrative": incident.get("failure_narrative", ""),
             "stage": self.STAGE_ALERT_CHOICE,
             "alert_mode": None,
             "channel_id": channel_id,
@@ -279,7 +295,11 @@ class FireStationCommand(commands.Cog):
                     "required_staff": self._required_staff_for_mission(mission),
                     "base_credits": int(mission.get("base_credits", 1000)),
                     "hint": description,
-                    "detail": description,
+                    "detail": mission.get("scene_narrative", description),
+                    "dispatch_narrative": mission.get("dispatch_narrative", description),
+                    "success_narrative": mission.get("success_narrative", ""),
+                    "partial_narrative": mission.get("partial_narrative", ""),
+                    "failure_narrative": mission.get("failure_narrative", ""),
                     "required_vehicles": mission.get("required_vehicles", []),
                     "required_equipment": mission.get("required_equipment", []),
                 }
@@ -604,10 +624,11 @@ class FireStationCommand(commands.Cog):
         view = AlertChoiceView(self, channel, user)
         embed = discord.Embed(
             title=f"🚨 New incident: {incident['name']}",
-            description=incident["hint"],
+            description=incident.get("dispatch_narrative", incident["hint"]),
             color=discord.Color.red(),
         )
         embed.add_field(name="Required staff", value=str(incident["required_staff"]), inline=True)
+        embed.add_field(name="Initial report", value=incident["hint"], inline=False)
         embed.set_footer(text="Choose how to alert your crew below.")
         kwargs = {"ephemeral": True} if ephemeral else {}
         await send(embed=embed, view=view, **kwargs)
@@ -1310,12 +1331,15 @@ class FireStationCommand(commands.Cog):
         if success_score >= 1.0:
             outcome = "✅ Incident successfully handled."
             reward = int(base_reward * success_score)
+            narrative = mission.get("success_narrative") or "The incident is wrapped up cleanly."
         elif success_score >= 0.6:
             outcome = "⚠️ Incident handled with difficulties."
             reward = int(base_reward * 0.5 * success_score)
+            narrative = mission.get("partial_narrative") or "The incident is handled, but the response was stretched."
         else:
             outcome = "❌ Incident not successfully handled."
             reward = int(base_reward * 0.1 * success_score)
+            narrative = mission.get("failure_narrative") or "The incident outcome is poor and needs review."
 
         await self._give(user, reward)
         total_credits = await self._get_credits(user)
@@ -1329,6 +1353,7 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Arrived staff", value=str(arrived), inline=True)
         embed.add_field(name="Vehicles dispatched", value=f"{len(selected)} (cap {total_capacity})", inline=True)
         embed.add_field(name="Outcome", value=outcome, inline=False)
+        embed.add_field(name="Narrative", value=narrative, inline=False)
         embed.add_field(name="Reward", value=f"{reward:,} credits", inline=True)
         embed.add_field(name="Total credits", value=f"{total_credits:,}", inline=True)
 
