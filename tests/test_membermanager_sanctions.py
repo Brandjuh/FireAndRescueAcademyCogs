@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import importlib.util
 import tempfile
 import types
@@ -32,6 +33,11 @@ def load_sanctions_manager_class():
 
 
 class MemberManagerSanctionsTests(unittest.TestCase):
+    def test_sanctionmanager_package_exports_loadable_cog(self):
+        module = importlib.import_module("sanctionmanager")
+
+        self.assertTrue(hasattr(module, "SanctionsManager"))
+
     def test_sanction_database_matches_discord_and_mc_ids_together(self):
         SanctionsDatabase = load_sanctions_database_class()
 

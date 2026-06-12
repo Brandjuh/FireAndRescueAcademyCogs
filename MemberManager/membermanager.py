@@ -275,7 +275,10 @@ class MemberManager(ConfigCommands, commands.Cog):
         self.alliance_scraper = self.bot.get_cog("AllianceScraper")
         self.members_scraper = self.bot.get_cog("MembersScraper")
         self.logs_scraper = self.bot.get_cog("LogsScraper")
-        self.sanction_manager = self.bot.get_cog("SanctionManager")
+        self.sanction_manager = (
+            self.bot.get_cog("SanctionManager")
+            or self.bot.get_cog("SanctionsManager")
+        )
         
         integrations = []
         if self.membersync:

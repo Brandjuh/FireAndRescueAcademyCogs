@@ -1,4 +1,4 @@
-from .sanctions_manager import SanctionsManager
+from .sanction_manager import SanctionsManager
 
 
 async def setup(bot):

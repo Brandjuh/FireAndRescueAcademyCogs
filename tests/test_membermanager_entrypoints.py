@@ -216,6 +216,25 @@ class MemberManagerEntrypointTests(unittest.TestCase):
         self.assertIs(view.member_data, updated_data)
         view._update_view.assert_awaited_once_with(interaction)
 
+    def test_connect_integrations_accepts_sanctionsmanager_cog_name(self):
+        sanction_manager = object()
+        calls = []
+
+        def get_cog(name):
+            calls.append(name)
+            if name == "SanctionsManager":
+                return sanction_manager
+            return None
+
+        cog = MemberManager.__new__(MemberManager)
+        cog.bot = types.SimpleNamespace(get_cog=get_cog)
+
+        asyncio.run(cog._connect_integrations())
+
+        self.assertIs(cog.sanction_manager, sanction_manager)
+        self.assertIn("SanctionManager", calls)
+        self.assertIn("SanctionsManager", calls)
+
 
 if __name__ == "__main__":
     unittest.main()
