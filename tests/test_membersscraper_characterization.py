@@ -207,6 +207,18 @@ class MembersScraperDatabaseCharacterizationTests(unittest.TestCase):
         self.assertEqual(history, [5.0, 5.0])
         self.assertEqual(first_seen, "2026-06-10T12:00:00")
 
+    def test_public_members_contract_returns_current_alliance_members(self):
+        self.scraper._init_database()
+        self.insert_member(1, "Older Member", "2026-06-10T12:00:00")
+        self.insert_member(2, "Latest Member", "2026-06-11T12:00:00")
+
+        members = asyncio.run(self.scraper.get_members())
+
+        self.assertEqual(len(members), 1)
+        self.assertEqual(members[0]["mc_user_id"], 2)
+        self.assertEqual(members[0]["name"], "Latest Member")
+        self.assertEqual(members[0]["scraped_at"], "2026-06-11T12:00:00")
+
 
 if __name__ == "__main__":
     unittest.main()

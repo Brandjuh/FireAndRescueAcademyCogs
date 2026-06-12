@@ -32,6 +32,14 @@ def load_sanctions_manager_class():
     return module.SanctionsManager
 
 
+def load_sanction_manager_module():
+    module_path = Path(__file__).resolve().parents[1] / "sanctionmanager" / "sanction_manager.py"
+    spec = importlib.util.spec_from_file_location("sanction_manager_under_test", module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class MemberManagerSanctionsTests(unittest.TestCase):
     def test_sanctionmanager_package_exports_loadable_cog(self):
         module = importlib.import_module("sanctionmanager")
@@ -376,6 +384,132 @@ class MemberManagerSanctionsTests(unittest.TestCase):
             triggered_by="sanctionmanager",
             actor_id=999,
         )
+
+    def test_sanction_target_search_finds_missionchief_member_by_exact_id(self):
+        SanctionsManager = load_sanctions_manager_class()
+
+        class FakeMembersScraper:
+            async def get_members(self):
+                return [
+                    {"mc_user_id": "456", "name": "DutchFireFighter"},
+                    {"mc_user_id": "789", "name": "Other Member"},
+                ]
+
+        manager = SanctionsManager.__new__(SanctionsManager)
+        manager.bot = types.SimpleNamespace(
+            get_cog=lambda name: FakeMembersScraper() if name == "MembersScraper" else None
+        )
+        guild = types.SimpleNamespace(members=[], get_member=lambda member_id: None)
+
+        results = asyncio.run(manager.search_sanction_targets(guild, "456"))
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["score"], 1.0)
+        self.assertEqual(results[0]["mc_user_id"], "456")
+        self.assertEqual(results[0]["mc_username"], "DutchFireFighter")
+        self.assertEqual(results[0]["source"], "missionchief")
+
+    def test_sanction_target_search_finds_missionchief_member_by_fuzzy_name(self):
+        SanctionsManager = load_sanctions_manager_class()
+
+        class FakeMembersScraper:
+            async def get_members(self):
+                return [
+                    {"mc_user_id": "456", "name": "DutchFireFighter"},
+                    {"mc_user_id": "789", "name": "Franny192"},
+                ]
+
+        manager = SanctionsManager.__new__(SanctionsManager)
+        manager.bot = types.SimpleNamespace(
+            get_cog=lambda name: FakeMembersScraper() if name == "MembersScraper" else None
+        )
+        guild = types.SimpleNamespace(members=[], get_member=lambda member_id: None)
+
+        results = asyncio.run(manager.search_sanction_targets(guild, "DutchFire", threshold=0.5))
+
+        self.assertEqual(results[0]["mc_user_id"], "456")
+        self.assertEqual(results[0]["mc_username"], "DutchFireFighter")
+
+    def test_sanction_target_search_enriches_missionchief_member_with_discord_link(self):
+        SanctionsManager = load_sanctions_manager_class()
+
+        discord_member = types.SimpleNamespace(
+            id=123,
+            name="DiscordUser",
+            nick=None,
+            display_name="Server Nick",
+            bot=False,
+            __str__=lambda self: "DiscordUser#0001",
+        )
+
+        class FakeMembersScraper:
+            async def get_members(self):
+                return [{"mc_user_id": "456", "name": "MCUser"}]
+
+        class FakeMemberSync:
+            async def get_link_for_mc(self, mc_user_id):
+                return {"discord_id": 123, "mc_user_id": mc_user_id}
+
+            async def get_link_for_discord(self, discord_id):
+                return {"discord_id": discord_id, "mc_user_id": "456"}
+
+        def get_cog(name):
+            if name == "MembersScraper":
+                return FakeMembersScraper()
+            if name == "MemberSync":
+                return FakeMemberSync()
+            return None
+
+        manager = SanctionsManager.__new__(SanctionsManager)
+        manager.bot = types.SimpleNamespace(get_cog=get_cog)
+        guild = types.SimpleNamespace(
+            members=[discord_member],
+            get_member=lambda member_id: discord_member if member_id == 123 else None,
+        )
+
+        results = asyncio.run(manager.search_sanction_targets(guild, "MCUser"))
+
+        self.assertEqual(results[0]["mc_user_id"], "456")
+        self.assertEqual(results[0]["discord_id"], 123)
+        self.assertIs(results[0]["discord_member"], discord_member)
+
+    def test_sanction_search_modal_uses_alliance_lookup_contract(self):
+        module = load_sanction_manager_module()
+
+        class FakeCog:
+            async def search_sanction_targets(self, guild, query, limit=5):
+                self.call = (guild, query, limit)
+                return [
+                    {
+                        "score": 1.0,
+                        "discord_id": None,
+                        "discord_member": None,
+                        "mc_user_id": "456",
+                        "mc_username": "MCOnlyUser",
+                        "name": "MCOnlyUser",
+                    }
+                ]
+
+        cog = FakeCog()
+        modal = module.DiscordMemberModal(cog)
+        modal.member_input.value = "MCOnlyUser"
+
+        interaction = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=1),
+            user=types.SimpleNamespace(id=999, __str__=lambda self: "Admin"),
+            response=types.SimpleNamespace(defer=AsyncMock()),
+            followup=types.SimpleNamespace(send=AsyncMock()),
+        )
+
+        asyncio.run(modal.on_submit(interaction))
+
+        self.assertEqual(cog.call, (interaction.guild, "MCOnlyUser", 5))
+        interaction.followup.send.assert_awaited_once()
+        kwargs = interaction.followup.send.await_args.kwargs
+        self.assertEqual(kwargs["content"], "Select the type of sanction:")
+        self.assertEqual(kwargs["view"].target_mc_id, "456")
+        self.assertEqual(kwargs["view"].target_mc_username, "MCOnlyUser")
+        self.assertIsNone(kwargs["view"].target_discord_id)
 
     def test_sanction_manager_audit_hook_is_noop_without_membermanager(self):
         SanctionsManager = load_sanctions_manager_class()

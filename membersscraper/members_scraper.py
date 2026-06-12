@@ -287,6 +287,31 @@ class MembersScraper(commands.Cog):
     async def get_member_first_seen(self, mc_user_id: str) -> Optional[str]:
         """Public API: return when a member was first seen by MembersScraper."""
         return await asyncio.to_thread(self._query_member_first_seen_sync, str(mc_user_id))
+
+    def _query_current_members_sync(self) -> List[Dict[str, Any]]:
+        """Return the latest stored MissionChief alliance member snapshot."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT user_id, mc_user_id, name, role, earned_credits,
+                           contribution_rate, profile_href, scraped_at
+                    FROM members_current
+                    ORDER BY LOWER(name)
+                    """
+                ).fetchall()
+                return [dict(row) for row in rows]
+            finally:
+                conn.close()
+        except Exception as e:
+            log.error(f"Failed to query current members: {e}", exc_info=True)
+            return []
+
+    async def get_members(self) -> List[Dict[str, Any]]:
+        """Public API: return current MissionChief alliance members."""
+        return await asyncio.to_thread(self._query_current_members_sync)
     
     async def _get_cookie_manager(self):
         """Get CookieManager cog instance"""

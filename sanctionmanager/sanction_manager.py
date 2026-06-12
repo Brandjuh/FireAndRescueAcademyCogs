@@ -3,7 +3,8 @@ import logging
 import re
 import sqlite3
 from datetime import datetime, timezone
-from typing import List, Optional
+from difflib import SequenceMatcher
+from typing import Any, Dict, List, Optional
 
 import discord
 from redbot.core import commands, Config
@@ -27,6 +28,19 @@ def fmt_dt(timestamp: int) -> str:
 def _mc_profile_url(mc_id: str) -> str:
     """Generate Missionchief profile URL."""
     return f"https://www.missionchief.com/profile/{mc_id}"
+
+def _fuzzy_match_score(a: str, b: str) -> float:
+    """Return a simple fuzzy match score between 0.0 and 1.0."""
+    if not a or not b:
+        return 0.0
+
+    a_lower = a.lower().strip()
+    b_lower = b.lower().strip()
+    if a_lower == b_lower:
+        return 1.0
+    if a_lower in b_lower or b_lower in a_lower:
+        return 0.9
+    return SequenceMatcher(None, a_lower, b_lower).ratio()
 
 async def safe_update(interaction: discord.Interaction, *, content=None, embed=None, view=None):
     """Robust message updater for component/modal callbacks."""
@@ -605,7 +619,7 @@ class MemberInputView(discord.ui.View):
         super().__init__(timeout=600)
         self.cog = cog
 
-    @discord.ui.button(label="Discord Member", style=discord.ButtonStyle.primary, custom_id="sm:discord_member")
+    @discord.ui.button(label="Search Member", style=discord.ButtonStyle.primary, custom_id="sm:discord_member")
     async def discord_member(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(DiscordMemberModal(self.cog))
 
@@ -613,13 +627,13 @@ class MemberInputView(discord.ui.View):
     async def mc_only(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(MCOnlyModal(self.cog))
 
-class DiscordMemberModal(discord.ui.Modal, title="Discord Member Lookup"):
+class DiscordMemberModal(discord.ui.Modal, title="Sanction Target Search"):
     member_input = discord.ui.TextInput(
-        label="Discord Member (ID, mention, or username)",
+        label="Member search",
         style=discord.TextStyle.short,
         max_length=100,
         required=True,
-        placeholder="@username or 123456789",
+        placeholder="Discord mention, Discord ID, MC ID, or MC name",
     )
 
     def __init__(self, cog: "SanctionsManager"):
@@ -634,6 +648,59 @@ class DiscordMemberModal(discord.ui.Modal, title="Discord Member Lookup"):
             if not guild:
                 await interaction.followup.send("This command must be used in a server.", ephemeral=True)
                 return
+
+            member_str = str(self.member_input.value).strip()
+            results = await self.cog.search_sanction_targets(guild, member_str, limit=5)
+            if not results:
+                await interaction.followup.send(
+                    f"No alliance member found for `{member_str}`. Try an exact MC ID, MC name, Discord ID, or mention.",
+                    ephemeral=True,
+                )
+                return
+
+            if len(results) > 1 and results[0]["score"] - results[1]["score"] < 0.15:
+                lines = []
+                for index, result in enumerate(results, 1):
+                    target_parts = []
+                    if result.get("mc_username"):
+                        target_parts.append(result["mc_username"])
+                    if result.get("mc_user_id"):
+                        target_parts.append(f"MC ID {result['mc_user_id']}")
+                    discord_name = result.get("discord_display_name") or result.get("discord_username")
+                    if discord_name:
+                        target_parts.append(f"Discord {discord_name}")
+                    lines.append(f"{index}. " + " - ".join(target_parts or [result.get("name", "Unknown")]))
+
+                await interaction.followup.send(
+                    "Multiple possible members found. Search again with the exact MC ID or Discord ID:\n"
+                    + "\n".join(lines),
+                    ephemeral=True,
+                )
+                return
+
+            target = results[0]
+            view = SanctionTypeView(
+                self.cog,
+                admin_user_id=interaction.user.id,
+                admin_username=str(interaction.user),
+                target_discord_id=target.get("discord_id"),
+                target_mc_id=target.get("mc_user_id"),
+                target_mc_username=(
+                    target.get("mc_username")
+                    or target.get("name")
+                    or target.get("discord_display_name")
+                    or target.get("discord_username")
+                ),
+                target_discord_user=target.get("discord_member"),
+            )
+
+            await interaction.followup.send(
+                content="Select the type of sanction:",
+                embed=view._create_target_embed(),
+                view=view,
+                ephemeral=True,
+            )
+            return
             
             # Try to find member
             member_str = str(self.member_input.value).strip()
@@ -1531,6 +1598,144 @@ class SanctionsManager(commands.Cog):
     def get_sanction_by_id(self, sanction_id: int) -> Optional[dict]:
         """Public contract for other cogs to read one sanction by ID."""
         return self.db.get_sanction(sanction_id)
+
+    async def _get_alliance_members_for_lookup(self) -> List[Dict[str, Any]]:
+        """Read alliance members through public cog contracts."""
+        for cog_name in ("MembersScraper", "AllianceScraper"):
+            cog = self.bot.get_cog(cog_name)
+            get_members = getattr(cog, "get_members", None) if cog else None
+            if not get_members:
+                continue
+            try:
+                members = await get_members()
+            except Exception as exc:
+                log.error("Failed to read members from %s: %s", cog_name, exc, exc_info=True)
+                continue
+            if members:
+                return list(members)
+        return []
+
+    async def search_sanction_targets(
+        self,
+        guild: discord.Guild,
+        query: str,
+        *,
+        threshold: float = 0.5,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Search Discord and MissionChief alliance members for sanction targets."""
+        query_clean = query.strip()
+        query_lower = query_clean.lower()
+        if not query_lower:
+            return []
+
+        results: List[Dict[str, Any]] = []
+        membersync = self.bot.get_cog("MemberSync")
+
+        mention_match = re.match(r"<@!?(\d+)>", query_clean)
+        discord_id_query = mention_match.group(1) if mention_match else query_clean if query_clean.isdigit() else None
+
+        for member in getattr(guild, "members", []):
+            if getattr(member, "bot", False):
+                continue
+
+            member_id = str(getattr(member, "id", ""))
+            member_name = str(member)
+            display_name = getattr(member, "display_name", None)
+
+            score = 0.0
+            if discord_id_query and discord_id_query == member_id:
+                score = 1.0
+            else:
+                score = max(
+                    _fuzzy_match_score(query_lower, member_name),
+                    _fuzzy_match_score(query_lower, display_name or ""),
+                    _fuzzy_match_score(query_lower, getattr(member, "name", "")),
+                    _fuzzy_match_score(query_lower, getattr(member, "nick", "") or ""),
+                )
+
+            if score < threshold:
+                continue
+
+            mc_user_id = None
+            mc_username = None
+            if membersync:
+                try:
+                    link = await membersync.get_link_for_discord(int(member_id))
+                except Exception as exc:
+                    log.error("MemberSync Discord lookup failed for %s: %s", member_id, exc, exc_info=True)
+                    link = None
+                if link:
+                    mc_user_id = link.get("mc_user_id")
+
+            results.append({
+                "score": score,
+                "discord_id": int(member_id) if member_id else None,
+                "discord_username": member_name,
+                "discord_display_name": display_name,
+                "discord_member": member,
+                "mc_user_id": str(mc_user_id) if mc_user_id else None,
+                "mc_username": mc_username,
+                "name": mc_username or display_name or member_name,
+                "source": "discord",
+            })
+
+        alliance_members = await self._get_alliance_members_for_lookup()
+        for mc_member in alliance_members:
+            mc_name = mc_member.get("name") or mc_member.get("username") or ""
+            mc_id = mc_member.get("user_id") or mc_member.get("mc_user_id") or mc_member.get("member_id")
+            if not mc_id:
+                continue
+
+            mc_id = str(mc_id)
+            score = _fuzzy_match_score(query_lower, mc_name)
+            if query_clean.isdigit() and query_clean == mc_id:
+                score = 1.0
+            elif query_clean.isdigit() and query_clean in mc_id:
+                score = max(score, 0.9)
+
+            if score < threshold:
+                continue
+
+            discord_id = None
+            discord_member = None
+            if membersync:
+                try:
+                    link = await membersync.get_link_for_mc(mc_id)
+                except Exception as exc:
+                    log.error("MemberSync MC lookup failed for %s: %s", mc_id, exc, exc_info=True)
+                    link = None
+                if link:
+                    discord_id = link.get("discord_id")
+                    if discord_id:
+                        discord_member = guild.get_member(int(discord_id))
+
+            results.append({
+                "score": score,
+                "discord_id": int(discord_id) if discord_id else None,
+                "discord_username": str(discord_member) if discord_member else None,
+                "discord_display_name": getattr(discord_member, "display_name", None) if discord_member else None,
+                "discord_member": discord_member,
+                "mc_user_id": mc_id,
+                "mc_username": mc_name,
+                "name": mc_name,
+                "source": "missionchief",
+            })
+
+        seen = set()
+        unique_results = []
+        for result in sorted(results, key=lambda item: item["score"], reverse=True):
+            key = (
+                result.get("discord_id"),
+                result.get("mc_user_id"),
+                (result.get("name") or "").lower(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_results.append(result)
+
+        return unique_results[:limit]
 
     def create_sanction_for_member(
         self,
