@@ -1269,7 +1269,7 @@ class MemberManager(ConfigCommands, commands.Cog):
                     await status_msg.edit(
                         content=f"🔍 Checking members... ({i}/{len(mc_members)})"
                     )
-                except:
+                except Exception:
                     pass
             
             # Check 1: Below threshold?
@@ -1350,7 +1350,7 @@ class MemberManager(ConfigCommands, commands.Cog):
         
         try:
             await status_msg.delete()
-        except:
+        except Exception:
             pass
         
         # Build summary embed
@@ -1657,13 +1657,16 @@ class MemberManager(ConfigCommands, commands.Cog):
         # Fallback: First scrape date
         if self.members_scraper:
             try:
-                db_path = self.members_scraper.db_path
-                
-                first_seen_str = await asyncio.to_thread(
-                    self._query_first_scrape_sync,
-                    Path(db_path),
-                    mc_id
-                )
+                get_first_seen = getattr(self.members_scraper, "get_member_first_seen", None)
+                if get_first_seen:
+                    first_seen_str = await get_first_seen(mc_id)
+                else:
+                    db_path = self.members_scraper.db_path
+                    first_seen_str = await asyncio.to_thread(
+                        self._query_first_scrape_sync,
+                        Path(db_path),
+                        mc_id
+                    )
                 
                 if first_seen_str:
                     if first_seen_str.endswith('Z'):
@@ -1693,13 +1696,16 @@ class MemberManager(ConfigCommands, commands.Cog):
             return []
         
         try:
-            db_path = Path(self.members_scraper.db_path)
-            
-            rates = await asyncio.to_thread(
-                self._query_historical_rates_sync,
-                db_path,
-                mc_id
-            )
+            get_history = getattr(self.members_scraper, "get_member_contribution_history", None)
+            if get_history:
+                rates = await get_history(mc_id, limit=12)
+            else:
+                db_path = Path(self.members_scraper.db_path)
+                rates = await asyncio.to_thread(
+                    self._query_historical_rates_sync,
+                    db_path,
+                    mc_id
+                )
             
             return rates
         
@@ -1718,13 +1724,16 @@ class MemberManager(ConfigCommands, commands.Cog):
             return None
         
         try:
-            db_path = Path(self.members_scraper.db_path)
-            
-            result = await asyncio.to_thread(
-                self._query_mc_data_sync,
-                db_path,
-                mc_user_id
-            )
+            get_snapshot = getattr(self.members_scraper, "get_member_snapshot", None)
+            if get_snapshot:
+                result = await get_snapshot(mc_user_id)
+            else:
+                db_path = Path(self.members_scraper.db_path)
+                result = await asyncio.to_thread(
+                    self._query_mc_data_sync,
+                    db_path,
+                    mc_user_id
+                )
             
             return result
                 
@@ -1806,7 +1815,7 @@ class MemberManager(ConfigCommands, commands.Cog):
         
         db_info = []
         if self.db:
-            db_info.append(f"✅ Database connected")
+            db_info.append("✅ Database connected")
             db_info.append(f"Path: `{self.db_path}`")
         else:
             db_info.append("❌ Database not connected")

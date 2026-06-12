@@ -191,6 +191,22 @@ class MembersScraperDatabaseCharacterizationTests(unittest.TestCase):
 
         self.assertEqual([member["member_id"] for member in exits], [2])
 
+    def test_public_member_contract_returns_snapshot_history_and_first_seen(self):
+        self.scraper._init_database()
+        self.insert_member(1, "Older Member", "2026-06-10T12:00:00")
+        self.insert_member(1, "Latest Member", "2026-06-11T12:00:00")
+
+        snapshot = asyncio.run(self.scraper.get_member_snapshot("1"))
+        history = asyncio.run(self.scraper.get_member_contribution_history("1"))
+        first_seen = asyncio.run(self.scraper.get_member_first_seen("1"))
+
+        self.assertEqual(snapshot["user_id"], 1)
+        self.assertEqual(snapshot["name"], "Latest Member")
+        self.assertEqual(snapshot["snapshot_at"], "2026-06-11T12:00:00")
+        self.assertEqual(snapshot["snapshot_source"], "live")
+        self.assertEqual(history, [5.0, 5.0])
+        self.assertEqual(first_seen, "2026-06-10T12:00:00")
+
 
 if __name__ == "__main__":
     unittest.main()

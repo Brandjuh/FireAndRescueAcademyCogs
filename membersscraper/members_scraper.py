@@ -1,13 +1,12 @@
 import discord
 from redbot.core import commands, Config, data_manager
-import aiohttp
 import asyncio
 import sqlite3
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
-from pathlib import Path
 import re
 import logging
+from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("red.FARA.MembersScraper")
 
@@ -136,7 +135,7 @@ class MembersScraper(commands.Cog):
                 conn.commit()
                 conn.close()
                 break
-            except sqlite3.OperationalError as e:
+            except sqlite3.OperationalError:
                 if attempt < max_retries - 1:
                     print(f"[MembersScraper] Database locked, retrying... ({attempt + 1}/{max_retries})")
                     time.sleep(0.5)
@@ -191,6 +190,103 @@ class MembersScraper(commands.Cog):
                     await channel.send(f"🐛 `{message}`")
             except Exception as e:
                 print(f"[MembersScraper DEBUG] Failed to send to Discord: {e}")
+
+    def _query_member_snapshot_sync(self, mc_user_id: str) -> Optional[Dict[str, Any]]:
+        """Return the latest stored member snapshot for a MissionChief user."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA table_info(members)")
+                columns = {row["name"] for row in cursor.fetchall()}
+                source_select = "snapshot_source" if "snapshot_source" in columns else "'unknown' AS snapshot_source"
+
+                cursor.execute(f"""
+                    SELECT member_id, username, rank, earned_credits, contribution_rate,
+                           timestamp, {source_select}
+                    FROM members
+                    WHERE member_id = ?
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                """, (str(mc_user_id),))
+                row = cursor.fetchone()
+                if not row:
+                    return None
+
+                return {
+                    "user_id": row["member_id"],
+                    "name": row["username"],
+                    "role": row["rank"],
+                    "earned_credits": row["earned_credits"],
+                    "contribution_rate": row["contribution_rate"],
+                    "snapshot_at": row["timestamp"],
+                    "snapshot_source": row["snapshot_source"],
+                }
+            finally:
+                conn.close()
+        except Exception as e:
+            log.error(f"Failed to query member snapshot for {mc_user_id}: {e}", exc_info=True)
+            return None
+
+    def _query_member_contribution_history_sync(self, mc_user_id: str, limit: int = 12) -> List[float]:
+        """Return recent stored contribution rates for a MissionChief user."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT contribution_rate
+                    FROM members
+                    WHERE member_id = ?
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                    """,
+                    (str(mc_user_id), int(limit)),
+                ).fetchall()
+                return [row["contribution_rate"] for row in rows if row["contribution_rate"] is not None]
+            finally:
+                conn.close()
+        except Exception as e:
+            log.error(f"Failed to query contribution history for {mc_user_id}: {e}", exc_info=True)
+            return []
+
+    def _query_member_first_seen_sync(self, mc_user_id: str) -> Optional[str]:
+        """Return the first timestamp where a MissionChief user was seen."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            try:
+                row = conn.execute(
+                    """
+                    SELECT MIN(timestamp) AS first_seen
+                    FROM members
+                    WHERE member_id = ?
+                    """,
+                    (str(mc_user_id),),
+                ).fetchone()
+                return row[0] if row and row[0] else None
+            finally:
+                conn.close()
+        except Exception as e:
+            log.error(f"Failed to query first seen for {mc_user_id}: {e}", exc_info=True)
+            return None
+
+    async def get_member_snapshot(self, mc_user_id: str) -> Optional[Dict[str, Any]]:
+        """Public API: return the latest stored snapshot for a MissionChief user."""
+        return await asyncio.to_thread(self._query_member_snapshot_sync, str(mc_user_id))
+
+    async def get_member_contribution_history(self, mc_user_id: str, limit: int = 12) -> List[float]:
+        """Public API: return recent contribution rates, newest first."""
+        return await asyncio.to_thread(
+            self._query_member_contribution_history_sync,
+            str(mc_user_id),
+            int(limit),
+        )
+
+    async def get_member_first_seen(self, mc_user_id: str) -> Optional[str]:
+        """Public API: return when a member was first seen by MembersScraper."""
+        return await asyncio.to_thread(self._query_member_first_seen_sync, str(mc_user_id))
     
     async def _get_cookie_manager(self):
         """Get CookieManager cog instance"""
@@ -257,7 +353,7 @@ class MembersScraper(commands.Cog):
                     soup = BeautifulSoup(html, 'html.parser')
                     members_data = []
                     
-                    await self._debug_log(f"🔍 Searching for all <tr> tags with links...", ctx)
+                    await self._debug_log("🔍 Searching for all <tr> tags with links...", ctx)
                     
                     for tr in soup.find_all("tr"):
                         a = tr.find("a", href=True)
@@ -300,7 +396,7 @@ class MembersScraper(commands.Cog):
                                             credits = val
                                         else:
                                             credits = -1
-                                    except:
+                                    except Exception:
                                         credits = -1
                             
                             if "%" in txt and rate == 0.0:
@@ -308,7 +404,7 @@ class MembersScraper(commands.Cog):
                                 if match:
                                     try:
                                         rate = float(match.group(1))
-                                    except:
+                                    except Exception:
                                         pass
                         
                         online_status = "online" if tr.find('span', class_='label-success') else "offline"
@@ -451,7 +547,7 @@ class MembersScraper(commands.Cog):
                 cursor.execute("SELECT discord_id FROM links WHERE mc_user_id=? AND status='approved'", (str(mc_id),))
                 result = cursor.fetchone()
                 return int(result[0]) if result else None
-            except:
+            except Exception:
                 return None
         
         for exit_data in exits:
@@ -479,7 +575,7 @@ class MembersScraper(commands.Cog):
                         now_dt = datetime.fromisoformat(now.replace('Z', '+00:00'))
                         hours_since = (now_dt - last_exit_dt).total_seconds() / 3600
                         should_log = hours_since > 24  # Only log if >24h since last exit
-                    except:
+                    except Exception:
                         should_log = True
                 
                 if should_log:
@@ -731,7 +827,7 @@ class MembersScraper(commands.Cog):
             try:
                 print(f"[MembersScraper] Starting automatic scrape at {datetime.utcnow()}")
                 await self._scrape_all_members()
-                print(f"[MembersScraper] Automatic scrape completed")
+                print("[MembersScraper] Automatic scrape completed")
             except Exception as e:
                 print(f"[MembersScraper] Background task error: {e}")
                 log.exception("Background scraper error")
@@ -766,14 +862,14 @@ class MembersScraper(commands.Cog):
             return
         
         await ctx.send(f"🔄 Starting back-fill for {days} days of historical data...")
-        await ctx.send(f"⚠️ Note: This uses current member data with past timestamps to create historical baseline")
+        await ctx.send("⚠️ Note: This uses current member data with past timestamps to create historical baseline")
         
         session = await self._get_session(ctx)
         if not session:
             await ctx.send("❌ Failed to get session. Is CookieManager loaded and logged in?")
             return
         
-        await self._debug_log(f"Fetching current member data for back-fill", ctx)
+        await self._debug_log("Fetching current member data for back-fill", ctx)
         all_members = []
         page = 1
         max_pages = 100
@@ -906,7 +1002,7 @@ class MembersScraper(commands.Cog):
             exit_cursor.execute("SELECT COUNT(*) FROM member_left_alliance")
             exit_count = exit_cursor.fetchone()[0]
             exit_conn.close()
-        except:
+        except Exception:
             exit_count = 0
         
         embed = discord.Embed(title="📊 Members Database Statistics", color=discord.Color.blue())
