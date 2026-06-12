@@ -46,6 +46,33 @@ class MemberManagerSanctionsTests(unittest.TestCase):
 
         self.assertTrue(hasattr(module, "SanctionsManager"))
 
+    def test_sanctionmanager_default_panel_channel_is_configured(self):
+        module = load_sanction_manager_module()
+
+        self.assertEqual(module.DEFAULT_PANEL_CHANNEL_ID, 1426226521231589507)
+
+    def test_sanctionmanager_send_panel_message_stores_message_id(self):
+        module = load_sanction_manager_module()
+        stored = {}
+
+        class GuildConfig:
+            panel_message_id = types.SimpleNamespace(
+                set=AsyncMock(side_effect=lambda value: stored.update({"id": value}))
+            )
+
+        cog = module.SanctionsManager.__new__(module.SanctionsManager)
+        cog.config = types.SimpleNamespace(guild=lambda guild: GuildConfig())
+        guild = types.SimpleNamespace(id=1)
+        channel = types.SimpleNamespace(
+            send=AsyncMock(return_value=types.SimpleNamespace(id=98765))
+        )
+
+        message = asyncio.run(cog._send_panel_message(guild, channel))
+
+        self.assertEqual(message.id, 98765)
+        self.assertEqual(stored["id"], 98765)
+        channel.send.assert_awaited_once()
+
     def test_sanction_database_matches_discord_and_mc_ids_together(self):
         SanctionsDatabase = load_sanctions_database_class()
 

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -14,6 +15,7 @@ from redbot.core.utils.chat_formatting import box
 log = logging.getLogger("red.cog.sanctions_manager")
 
 WARNING_EXPIRY_SECONDS = 30 * 86400
+DEFAULT_PANEL_CHANNEL_ID = 1426226521231589507
 
 # ---------- Utilities ----------
 
@@ -1549,6 +1551,8 @@ class SanctionsManager(commands.Cog):
             "third_warning_action": "Kick",
             "auto_remove_roles_on_kick": [],
             "auto_remove_roles_on_ban": [],
+            "panel_channel_id": DEFAULT_PANEL_CHANNEL_ID,
+            "panel_message_id": None,
         }
         self.config.register_guild(**default_guild)
 
@@ -1556,11 +1560,17 @@ class SanctionsManager(commands.Cog):
         from redbot.core import data_manager
         db_path = str(data_manager.cog_data_path(self) / "sanctions.db")
         self.db = SanctionsDatabase(db_path)
+        self._panel_task: Optional[asyncio.Task] = None
 
         self.bot.add_view(StartView(self))
 
+    async def cog_load(self):
+        """Post persistent panel after the bot is ready."""
+        self._panel_task = asyncio.create_task(self._delayed_panel_start())
+
     def cog_unload(self):
-        pass
+        if self._panel_task:
+            self._panel_task.cancel()
 
     def get_member_sanctions(
         self,
@@ -1736,6 +1746,60 @@ class SanctionsManager(commands.Cog):
             unique_results.append(result)
 
         return unique_results[:limit]
+
+    async def _delayed_panel_start(self):
+        """Post configured persistent panels after startup."""
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(5)
+        for guild in getattr(self.bot, "guilds", []):
+            await self._ensure_panel_message(guild)
+
+    def _build_panel_embed(self) -> discord.Embed:
+        """Build the persistent SanctionManager panel embed."""
+        embed = discord.Embed(
+            title="Sanction Management",
+            description=(
+                "Open a private staff flow to search Discord and MissionChief alliance members "
+                "and create sanctions."
+            ),
+            color=discord.Color.red(),
+        )
+        embed.set_footer(text="Only authorized staff can use this panel.")
+        return embed
+
+    async def _send_panel_message(self, guild: discord.Guild, channel: discord.TextChannel) -> discord.Message:
+        """Post the SanctionManager panel and store its message ID."""
+        message = await channel.send(
+            embed=self._build_panel_embed(),
+            view=StartView(self),
+        )
+        await self.config.guild(guild).panel_message_id.set(message.id)
+        return message
+
+    async def _ensure_panel_message(self, guild: discord.Guild) -> None:
+        """Post the configured panel if its stored message is missing."""
+        channel_id = await self.config.guild(guild).panel_channel_id()
+        if not channel_id:
+            return
+
+        channel = self.bot.get_channel(int(channel_id)) or guild.get_channel(int(channel_id))
+        if not channel:
+            log.warning("SanctionManager panel channel not found: %s", channel_id)
+            return
+
+        message_id = await self.config.guild(guild).panel_message_id()
+        if message_id:
+            try:
+                await channel.fetch_message(int(message_id))
+                return
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                log.info("Stored SanctionManager panel message is unavailable; reposting")
+
+        try:
+            await self._send_panel_message(guild, channel)
+            log.info("SanctionManager panel posted in channel %s", channel_id)
+        except Exception as exc:
+            log.exception("Failed to post SanctionManager panel: %s", exc)
 
     def create_sanction_for_member(
         self,
@@ -2042,6 +2106,48 @@ class SanctionsManager(commands.Cog):
         )
         await ch.send(embed=emb, view=StartView(self))
         await ctx.tick()
+
+    @commands.group(name="sanctionpanel")
+    @commands.admin()
+    @commands.guild_only()
+    async def sanctionpanel(self, ctx: commands.Context):
+        """Manage the persistent SanctionManager panel."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+
+    @sanctionpanel.command(name="post")
+    async def sanctionpanel_post(self, ctx: commands.Context):
+        """Post the SanctionManager panel if it is missing."""
+        channel_id = await self.config.guild(ctx.guild).panel_channel_id()
+        channel = self.bot.get_channel(int(channel_id)) if channel_id else ctx.channel
+        if not channel:
+            await ctx.send("SanctionManager panel channel not found.")
+            return
+
+        message_id = await self.config.guild(ctx.guild).panel_message_id()
+        if message_id:
+            try:
+                await channel.fetch_message(int(message_id))
+                await ctx.send("SanctionManager panel already exists.")
+                return
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+        await self._send_panel_message(ctx.guild, channel)
+        await ctx.send(f"SanctionManager panel posted in {channel.mention}.")
+
+    @sanctionpanel.command(name="repost")
+    async def sanctionpanel_repost(self, ctx: commands.Context):
+        """Force-post a new SanctionManager panel."""
+        channel_id = await self.config.guild(ctx.guild).panel_channel_id()
+        channel = self.bot.get_channel(int(channel_id)) if channel_id else ctx.channel
+        if not channel:
+            await ctx.send("SanctionManager panel channel not found.")
+            return
+
+        await self.config.guild(ctx.guild).panel_message_id.set(None)
+        await self._send_panel_message(ctx.guild, channel)
+        await ctx.send(f"SanctionManager panel reposted in {channel.mention}.")
 
     @commands.hybrid_group(name="sanction", invoke_without_command=True)
     @commands.guild_only()
