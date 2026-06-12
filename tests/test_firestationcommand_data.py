@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import discord
+
 from FireStationCommand.fire_station_command import FireStationCommand
 
 
@@ -47,6 +49,7 @@ def test_build_incidents_derives_staff_from_required_vehicles():
                         "id": "small_bin_fire",
                         "name": "Small Bin Fire",
                         "base_credits": 200,
+                        "image": "Images/Missions/small_bin_fire.png",
                         "required_vehicles": ["engine_basic"],
                         "required_equipment": ["hose"],
                         "description": "A small bin fire in a residential area.",
@@ -79,6 +82,7 @@ def test_build_incidents_derives_staff_from_required_vehicles():
             "name": "Small Bin Fire",
             "required_staff": 4,
             "base_credits": 200,
+            "image": "Images/Missions/small_bin_fire.png",
             "hint": "A small bin fire in a residential area.",
             "detail": "The crew finds fire spreading along a fence.",
             "dispatch_narrative": "Smoke is showing behind several homes.",
@@ -143,6 +147,24 @@ def test_relative_text_rounds_short_positive_waits_up_to_one_minute():
     assert FireStationCommand._make_relative_text(cog, 1.1) == "in 2 minutes"
 
 
+def test_mission_image_helpers_build_raw_urls_and_apply_embed_image():
+    cog = _cog_with_game_data({})
+    mission = {"image": "Images/Missions/small_bin_fire.png"}
+    embed = discord.Embed()
+
+    assert FireStationCommand._mission_image_url(cog, mission) == (
+        "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/"
+        "refs/heads/main/FireStationCommand/Images/Missions/small_bin_fire.png"
+    )
+    FireStationCommand._apply_mission_image(cog, embed, mission)
+    assert embed.image == {
+        "url": (
+            "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/"
+            "refs/heads/main/FireStationCommand/Images/Missions/small_bin_fire.png"
+        )
+    }
+
+
 def test_invalid_yaml_shapes_fall_back_to_static_catalog_and_incidents():
     cog = _cog_with_game_data({"missions": {"missions": "bad"}, "vehicles": {"vehicles": "bad"}})
 
@@ -157,6 +179,7 @@ def test_new_mission_state_includes_schema_and_initial_stage():
         "name": "Small Bin Fire",
         "required_staff": 4,
         "base_credits": 200,
+        "image": "Images/Missions/small_bin_fire.png",
         "hint": "Quick response limits damage.",
         "detail": "A small bin fire in a residential area.",
         "dispatch_narrative": "Smoke is showing behind several homes.",
@@ -178,6 +201,7 @@ def test_new_mission_state_includes_schema_and_initial_stage():
         "title": "Small Bin Fire",
         "required_staff": 4,
         "base_credits": 200,
+        "image": "Images/Missions/small_bin_fire.png",
         "hint": "Quick response limits damage.",
         "detail": "A small bin fire in a residential area.",
         "dispatch_narrative": "Smoke is showing behind several homes.",

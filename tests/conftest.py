@@ -117,6 +117,9 @@ def pytest_configure():
         def set_footer(self, **kwargs):
             self.footer = kwargs
 
+        def set_image(self, **kwargs):
+            self.image = kwargs
+
     discord = types.ModuleType("discord")
     discord.File = lambda path, filename=None: types.SimpleNamespace(
         path=path,

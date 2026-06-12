@@ -4,6 +4,7 @@ missions:
     min_tier: 1
     base_xp: 40
     base_credits: 200
+    image: "Images/Missions/small_bin_fire.png"
     required_vehicles:
       - engine_basic
     required_equipment:
@@ -21,6 +22,7 @@ missions:
     min_tier: 1
     base_xp: 60
     base_credits: 350
+    image: "Images/Missions/vehicle_collision.png"
     required_vehicles:
       - engine_basic
     required_equipment:
@@ -38,6 +40,7 @@ missions:
     min_tier: 1
     base_xp: 80
     base_credits: 500
+    image: "Images/Missions/rescue_call.png"
     required_vehicles:
       - rescue_basic
     required_equipment:
