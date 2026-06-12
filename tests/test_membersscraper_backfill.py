@@ -44,9 +44,43 @@ class MembersScraperBackfillTests(unittest.TestCase):
         connection = sqlite3.connect(self.scraper.db_path)
         try:
             stored_count = connection.execute("SELECT COUNT(*) FROM members").fetchone()[0]
+            snapshot_sources = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT DISTINCT snapshot_source FROM members"
+                ).fetchall()
+            }
         finally:
             connection.close()
         self.assertEqual(stored_count, 1)
+        self.assertEqual(snapshot_sources, {"backfill"})
+
+    def test_live_scrape_marks_snapshot_source_live(self):
+        member = {
+            "member_id": 43,
+            "username": "Live Member",
+            "rank": "Member",
+            "earned_credits": 67890,
+            "contribution_rate": 6.0,
+            "online_status": "online",
+            "timestamp": "2026-06-12T14:00:00",
+        }
+        self.scraper._scrape_members_page = AsyncMock(side_effect=[[member], [], [], []])
+        self.scraper._detect_exits = AsyncMock(return_value=[])
+
+        self.assertTrue(asyncio.run(self.scraper._scrape_all_members()))
+
+        connection = sqlite3.connect(self.scraper.db_path)
+        try:
+            snapshot_sources = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT DISTINCT snapshot_source FROM members"
+                ).fetchall()
+            }
+        finally:
+            connection.close()
+        self.assertEqual(snapshot_sources, {"live"})
 
 
 if __name__ == "__main__":

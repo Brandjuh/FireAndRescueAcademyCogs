@@ -576,20 +576,28 @@ class DataAggregator:
                 return {"error": "Database not found"}
             
             cursor = conn.cursor()
+
+            cursor.execute("PRAGMA table_info(members)")
+            member_columns = {row[1] for row in cursor.fetchall()}
+            if "snapshot_source" not in member_columns:
+                conn.close()
+                return {"error": "Live member snapshot markers are unavailable"}
             
             cursor.execute(
-                "SELECT MAX(timestamp) FROM members WHERE datetime(timestamp) < datetime(?)",
+                "SELECT MAX(timestamp) FROM members "
+                "WHERE snapshot_source = 'live' AND datetime(timestamp) < datetime(?)",
                 (start.isoformat(),),
             )
             starting_snapshot = cursor.fetchone()[0]
             cursor.execute(
-                "SELECT MAX(timestamp) FROM members WHERE datetime(timestamp) < datetime(?)",
+                "SELECT MAX(timestamp) FROM members "
+                "WHERE snapshot_source = 'live' AND datetime(timestamp) < datetime(?)",
                 (end.isoformat(),),
             )
             ending_snapshot = cursor.fetchone()[0]
             if not starting_snapshot or not ending_snapshot:
                 conn.close()
-                return {"error": "Required monthly member snapshots are unavailable"}
+                return {"error": "Required live monthly member snapshots are unavailable"}
 
             # Use actual snapshots for the starting and ending member counts.
             cursor.execute(

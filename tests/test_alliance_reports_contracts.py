@@ -10,7 +10,6 @@ from zoneinfo import ZoneInfo
 from alliance_reports.calculators.activity_score import ActivityScoreCalculator
 from alliance_reports.data_aggregator import DataAggregator
 from alliance_reports.embed_formatter import EmbedFormatter
-from alliance_reports.scheduler import ReportScheduler
 from alliance_reports.templates.daily_admin import DailyAdminReport
 from alliance_reports.templates.monthly_admin import MonthlyAdminReport
 from alliance_reports.templates.monthly_member import MonthlyMemberReport
@@ -127,9 +126,11 @@ class AllianceReportContractTests(unittest.TestCase):
             sanctions_path = temp_path / "sanctions.db"
 
             members = sqlite3.connect(members_path)
-            members.execute("CREATE TABLE members (member_id INTEGER, timestamp TEXT)")
+            members.execute(
+                "CREATE TABLE members (member_id INTEGER, timestamp TEXT, snapshot_source TEXT)"
+            )
             members.executemany(
-                "INSERT INTO members VALUES (?, ?)",
+                "INSERT INTO members VALUES (?, ?, 'live')",
                 [
                     (1, "2026-04-30T23:00:00"),
                     (2, "2026-04-30T23:00:00"),
@@ -181,6 +182,40 @@ class AllianceReportContractTests(unittest.TestCase):
         self.assertEqual(result["net_growth"], 1)
         self.assertEqual(result["new_joins_period"], 2)
         self.assertEqual(result["left_period"], 1)
+
+    def test_monthly_membership_ignores_backfill_snapshots(self):
+        import asyncio
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            members_path = temp_path / "members.db"
+
+            members = sqlite3.connect(members_path)
+            members.execute(
+                "CREATE TABLE members (member_id INTEGER, timestamp TEXT, snapshot_source TEXT)"
+            )
+            members.executemany(
+                "INSERT INTO members VALUES (?, ?, ?)",
+                [
+                    (1, "2026-04-30T23:00:00", "backfill"),
+                    (2, "2026-04-30T23:00:00", "backfill"),
+                    (1, "2026-05-31T23:00:00", "backfill"),
+                ],
+            )
+            members.commit()
+            members.close()
+
+            aggregator = DataAggregator(
+                types.SimpleNamespace(_db_cache={"members_v2_db_path": members_path})
+            )
+            result = asyncio.run(
+                aggregator._get_membership_data_monthly(
+                    datetime(2026, 5, 1),
+                    datetime(2026, 6, 1),
+                )
+            )
+
+        self.assertIn("error", result)
 
     def test_daily_training_uses_event_time_instead_of_scrape_time(self):
         import asyncio
@@ -254,8 +289,10 @@ class AllianceReportContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             members_path = Path(temp_dir) / "members.db"
             members = sqlite3.connect(members_path)
-            members.execute("CREATE TABLE members (member_id INTEGER, timestamp TEXT)")
-            members.execute("INSERT INTO members VALUES (1, '2026-05-31T23:00:00')")
+            members.execute(
+                "CREATE TABLE members (member_id INTEGER, timestamp TEXT, snapshot_source TEXT)"
+            )
+            members.execute("INSERT INTO members VALUES (1, '2026-05-31T23:00:00', 'live')")
             members.commit()
             members.close()
 
