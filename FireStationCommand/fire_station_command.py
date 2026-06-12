@@ -19,6 +19,11 @@ class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
     __version__ = "1.1.2"
+    MISSION_SCHEMA_VERSION = 1
+    STAGE_ALERT_CHOICE = "ALERT_CHOICE"
+    STAGE_STAFF_TURNOUT = "STAFF_TURNOUT"
+    STAGE_VEHICLE_SELECT = "VEHICLE_SELECT"
+    STAGE_TRAVEL = "TRAVEL"
 
     def __init__(self, bot):
         self.bot = bot
@@ -153,6 +158,37 @@ class FireStationCommand(commands.Cog):
 
     def _reward_multiplier(self) -> float:
         return max(0.0, self._balance_float("credits_reward_multiplier", 1.0))
+
+    def _new_mission_state(
+        self,
+        incident: Dict[str, Any],
+        channel_id: int,
+        guild_id: int | None,
+    ) -> Dict[str, Any]:
+        return {
+            "schema_version": self.MISSION_SCHEMA_VERSION,
+            "id": incident["id"],
+            "title": incident["name"],
+            "required_staff": incident["required_staff"],
+            "base_credits": incident.get("base_credits", 1000),
+            "hint": incident["hint"],
+            "detail": incident["detail"],
+            "stage": self.STAGE_ALERT_CHOICE,
+            "alert_mode": None,
+            "channel_id": channel_id,
+            "guild_id": guild_id,
+        }
+
+    def _mission_stage(self, mission: Dict[str, Any]) -> str:
+        stage = mission.get("stage", "")
+        return stage if isinstance(stage, str) else ""
+
+    def _mission_is_stage(self, mission: Dict[str, Any], stage: str) -> bool:
+        return self._mission_stage(mission) == stage
+
+    def _set_mission_stage(self, mission: Dict[str, Any], stage: str) -> None:
+        mission["schema_version"] = self.MISSION_SCHEMA_VERSION
+        mission["stage"] = stage
 
     def _build_vehicle_definitions(self) -> Dict[str, Dict[str, Any]]:
         vehicles = self.game_data.get("vehicles", {}).get("vehicles", [])
@@ -748,18 +784,11 @@ class FireStationCommand(commands.Cog):
             return
 
         incident = self._pick_random_incident()
-        mission = {
-            "id": incident["id"],
-            "title": incident["name"],
-            "required_staff": incident["required_staff"],
-            "base_credits": incident.get("base_credits", 1000),
-            "hint": incident["hint"],
-            "detail": incident["detail"],
-            "stage": "ALERT_CHOICE",
-            "alert_mode": None,
-            "channel_id": ctx.channel.id,
-            "guild_id": ctx.guild.id if ctx.guild else None,
-        }
+        mission = self._new_mission_state(
+            incident,
+            channel_id=ctx.channel.id,
+            guild_id=ctx.guild.id if ctx.guild else None,
+        )
         await user_conf.active_mission.set(mission)
 
         view = AlertChoiceView(self, ctx.channel, ctx.author)
@@ -787,7 +816,7 @@ class FireStationCommand(commands.Cog):
         user_conf = self.config.user(user)
         data = await user_conf.all()
         mission = data.get("active_mission", {}) or {}
-        if mission.get("stage") != "ALERT_CHOICE":
+        if not self._mission_is_stage(mission, self.STAGE_ALERT_CHOICE):
             await interaction.response.send_message("This incident is no longer in the alert stage.", ephemeral=True)
             return
 
@@ -822,7 +851,6 @@ class FireStationCommand(commands.Cog):
 
         mission.update(
             {
-                "stage": "STAFF_TURNOUT",
                 "alert_mode": mode,
                 "turnout_required": required,
                 "turnout_available": available,
@@ -830,6 +858,7 @@ class FireStationCommand(commands.Cog):
                 "turnout_total_arrived": total,
             }
         )
+        self._set_mission_stage(mission, self.STAGE_STAFF_TURNOUT)
         await user_conf.active_mission.set(mission)
 
         await interaction.response.send_message(
@@ -846,7 +875,7 @@ class FireStationCommand(commands.Cog):
         user_conf = self.config.user(user)
         data = await user_conf.all()
         mission = data.get("active_mission", {}) or {}
-        if mission.get("stage") != "STAFF_TURNOUT":
+        if not self._mission_is_stage(mission, self.STAGE_STAFF_TURNOUT):
             return
 
         required = int(mission.get("turnout_required", 0))
@@ -881,7 +910,7 @@ class FireStationCommand(commands.Cog):
         user_conf = self.config.user(user)
         data = await user_conf.all()
         mission = data.get("active_mission", {}) or {}
-        if mission.get("stage") != "STAFF_TURNOUT":
+        if not self._mission_is_stage(mission, self.STAGE_STAFF_TURNOUT):
             await interaction.response.send_message("This incident is no longer in turnout stage.", ephemeral=True)
             return
 
@@ -918,7 +947,7 @@ class FireStationCommand(commands.Cog):
         user_conf = self.config.user(user)
         data = await user_conf.all()
         mission = data.get("active_mission", {}) or {}
-        if mission.get("stage") != "STAFF_TURNOUT":
+        if not self._mission_is_stage(mission, self.STAGE_STAFF_TURNOUT):
             await interaction.response.send_message("This incident is no longer in turnout stage.", ephemeral=True)
             return
 
@@ -929,7 +958,7 @@ class FireStationCommand(commands.Cog):
             )
             return
 
-        mission["stage"] = "VEHICLE_SELECT"
+        self._set_mission_stage(mission, self.STAGE_VEHICLE_SELECT)
         await user_conf.active_mission.set(mission)
 
         vehicles = await self._get_user_vehicles(user)
@@ -962,7 +991,7 @@ class FireStationCommand(commands.Cog):
         user_conf = self.config.user(user)
         data = await user_conf.all()
         mission = data.get("active_mission", {}) or {}
-        if mission.get("stage") != "VEHICLE_SELECT":
+        if not self._mission_is_stage(mission, self.STAGE_VEHICLE_SELECT):
             await interaction.response.send_message("This incident is not in vehicle selection stage.", ephemeral=True)
             return
 
@@ -977,7 +1006,7 @@ class FireStationCommand(commands.Cog):
         rel = self._make_relative_text(minutes)
 
         mission["selected_vehicle_ids"] = [int(v) for v in values]
-        mission["stage"] = "TRAVEL"
+        self._set_mission_stage(mission, self.STAGE_TRAVEL)
         await user_conf.active_mission.set(mission)
 
         await interaction.response.send_message(
@@ -992,7 +1021,7 @@ class FireStationCommand(commands.Cog):
         user_conf = self.config.user(user)
         data = await user_conf.all()
         mission = data.get("active_mission", {}) or {}
-        if mission.get("stage") != "TRAVEL":
+        if not self._mission_is_stage(mission, self.STAGE_TRAVEL):
             return
 
         title = mission.get("title", "Incident")
@@ -1019,7 +1048,7 @@ class FireStationCommand(commands.Cog):
         user_conf = self.config.user(user)
         data = await user_conf.all()
         mission = data.get("active_mission", {}) or {}
-        if mission.get("stage") not in {"TRAVEL", "VEHICLE_SELECT"}:
+        if self._mission_stage(mission) not in {self.STAGE_TRAVEL, self.STAGE_VEHICLE_SELECT}:
             return
 
         required = int(mission.get("required_staff", 0))
