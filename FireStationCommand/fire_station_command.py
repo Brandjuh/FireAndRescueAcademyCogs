@@ -76,6 +76,7 @@ class FireStationCommand(commands.Cog):
                 "success_narrative": "The crew makes a fast attack and prevents the fire from spreading beyond the roof space.",
                 "partial_narrative": "The fire is contained, but smoke damage spreads through part of the home.",
                 "failure_narrative": "The response falls behind the fire growth and the house takes heavy damage before control is gained.",
+                "image": None,
             },
             {
                 "id": "car_crash",
@@ -88,6 +89,7 @@ class FireStationCommand(commands.Cog):
                 "success_narrative": "The scene is secured quickly and hazards are controlled before they can escalate.",
                 "partial_narrative": "The incident is handled, but traffic and scene safety remain difficult throughout the response.",
                 "failure_narrative": "The scene stays unstable too long, forcing additional resources to regain control.",
+                "image": None,
             },
             {
                 "id": "small_fire",
@@ -100,6 +102,7 @@ class FireStationCommand(commands.Cog):
                 "success_narrative": "The fire is knocked down before it reaches anything important.",
                 "partial_narrative": "The fire is handled, though it causes avoidable smoke and surface damage.",
                 "failure_narrative": "The fire spreads from the containers and takes extra work to bring under control.",
+                "image": None,
             },
         ]
 
@@ -212,6 +215,7 @@ class FireStationCommand(commands.Cog):
             "success_narrative": incident.get("success_narrative", ""),
             "partial_narrative": incident.get("partial_narrative", ""),
             "failure_narrative": incident.get("failure_narrative", ""),
+            "image": incident.get("image"),
             "stage": self.STAGE_ALERT_CHOICE,
             "alert_mode": None,
             "channel_id": channel_id,
@@ -308,6 +312,7 @@ class FireStationCommand(commands.Cog):
                     "success_narrative": mission.get("success_narrative", ""),
                     "partial_narrative": mission.get("partial_narrative", ""),
                     "failure_narrative": mission.get("failure_narrative", ""),
+                    "image": mission.get("image"),
                     "required_vehicles": mission.get("required_vehicles", []),
                     "required_equipment": mission.get("required_equipment", []),
                 }
@@ -586,6 +591,7 @@ class FireStationCommand(commands.Cog):
             description=mission.get("dispatch_narrative") or mission.get("hint", guidance),
             color=discord.Color.red(),
         )
+        self._apply_mission_image(embed, mission)
         embed.add_field(name="Stage", value=stage or "Unknown", inline=True)
         embed.add_field(name="Required staff", value=str(mission.get("required_staff", "Unknown")), inline=True)
         embed.add_field(name="Guidance", value=guidance, inline=False)
@@ -685,12 +691,32 @@ class FireStationCommand(commands.Cog):
 
     @staticmethod
     def _station_image_url(max_vehicles: int) -> str | None:
-        base_url = "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/refs/heads/main/FireStationCommand/Images"
         if max_vehicles <= 1:
-            return f"{base_url}/FDT1B1.png"
+            return FireStationCommand._asset_image_url("Images/FDT1B1.png")
         if max_vehicles == 2:
-            return f"{base_url}/FDT1B2.png"
-        return f"{base_url}/FDT1B3.png"
+            return FireStationCommand._asset_image_url("Images/FDT1B2.png")
+        return FireStationCommand._asset_image_url("Images/FDT1B3.png")
+
+    @staticmethod
+    def _asset_image_url(path: str | None) -> str | None:
+        if not path or not isinstance(path, str):
+            return None
+        if path.startswith(("http://", "https://")):
+            return path
+        clean_path = path.removeprefix("FireStationCommand/").lstrip("/")
+        return (
+            "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/"
+            f"refs/heads/main/FireStationCommand/{clean_path}"
+        )
+
+    def _mission_image_url(self, mission: Dict[str, Any]) -> str | None:
+        image = mission.get("image")
+        return self._asset_image_url(image if isinstance(image, str) else None)
+
+    def _apply_mission_image(self, embed: discord.Embed, mission: Dict[str, Any]) -> None:
+        image_url = self._mission_image_url(mission)
+        if image_url:
+            embed.set_image(url=image_url)
 
     async def _send_vehicle_shop(
         self,
@@ -769,6 +795,7 @@ class FireStationCommand(commands.Cog):
             description=incident.get("dispatch_narrative", incident["hint"]),
             color=discord.Color.red(),
         )
+        self._apply_mission_image(embed, mission)
         embed.add_field(name="Required staff", value=str(incident["required_staff"]), inline=True)
         embed.add_field(name="Initial report", value=incident["hint"], inline=False)
         embed.set_footer(text="Choose how to alert your crew below.")
@@ -904,15 +931,7 @@ class FireStationCommand(commands.Cog):
                 inline=False,
             )
 
-        # Choose image by bay capacity (parking places)
-        image_url = None
-        if max_veh <= 1:
-            image_url = "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/refs/heads/main/FireStationCommand/Images/FDT1B1.png"
-        elif max_veh == 2:
-            image_url = "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/refs/heads/main/FireStationCommand/Images/FDT1B2.png"
-        elif max_veh >= 3:
-            image_url = "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/refs/heads/main/FireStationCommand/Images/FDT1B3.png"
-
+        image_url = self._station_image_url(max_veh)
         if image_url:
             embed.set_image(url=image_url)
 
@@ -1195,6 +1214,7 @@ class FireStationCommand(commands.Cog):
             description=incident["hint"],
             color=discord.Color.red(),
         )
+        self._apply_mission_image(embed, mission)
         embed.add_field(name="Required staff", value=str(incident["required_staff"]), inline=True)
         embed.set_footer(text="Choose how to alert your crew below.")
         await ctx.send(embed=embed, view=view)
@@ -1457,6 +1477,7 @@ class FireStationCommand(commands.Cog):
             description=detail,
             color=discord.Color.orange(),
         )
+        self._apply_mission_image(embed, mission)
         embed.add_field(name="Scene work", value=f"Incident result expected {self._make_relative_text(minutes)}.", inline=False)
         embed.set_footer(text="Use this information to judge if your dispatch was sufficient.")
 
@@ -1519,6 +1540,7 @@ class FireStationCommand(commands.Cog):
             title=f"Incident result – {mission.get('title', 'Unknown')}",
             color=discord.Color.green() if success_score >= 1.0 else discord.Color.orange(),
         )
+        self._apply_mission_image(embed, mission)
         embed.add_field(name="Required staff", value=str(required), inline=True)
         embed.add_field(name="Arrived staff", value=str(arrived), inline=True)
         embed.add_field(name="Vehicles dispatched", value=f"{len(selected)} (cap {total_capacity})", inline=True)
@@ -1727,6 +1749,7 @@ class FscDashboardView(discord.ui.View):
             description=incident.get("dispatch_narrative", incident["hint"]),
             color=discord.Color.red(),
         )
+        self.cog._apply_mission_image(embed, mission)
         embed.add_field(name="Required staff", value=str(incident["required_staff"]), inline=True)
         embed.add_field(name="Initial report", value=incident["hint"], inline=False)
         embed.set_footer(text="Choose how to alert your crew below.")
