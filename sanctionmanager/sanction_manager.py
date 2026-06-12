@@ -12,6 +12,8 @@ from redbot.core.utils.chat_formatting import box
 
 log = logging.getLogger("red.cog.sanctions_manager")
 
+WARNING_EXPIRY_SECONDS = 30 * 86400
+
 # ---------- Utilities ----------
 
 def ts() -> int:
@@ -202,6 +204,46 @@ class SanctionsDatabase:
         conn.close()
         
         return results
+
+    @staticmethod
+    def effective_status(sanction: dict, now: Optional[int] = None) -> str:
+        """Return the current sanction status without changing stored history."""
+        status = sanction.get("status") or "active"
+        if status != "active":
+            return status
+
+        now = ts() if now is None else now
+        expires_at = sanction.get("expires_at")
+        if expires_at and int(expires_at) <= now:
+            return "expired"
+
+        sanction_type = sanction.get("sanction_type") or ""
+        created_at = sanction.get("created_at") or 0
+        if "Warning" in sanction_type and created_at and int(created_at) < now - WARNING_EXPIRY_SECONDS:
+            return "expired"
+
+        return "active"
+
+    @classmethod
+    def normalize_sanction(cls, sanction: dict, now: Optional[int] = None) -> dict:
+        """Return a display-safe sanction dict with SanctionManager-owned status metadata."""
+        normalized = dict(sanction)
+        effective_status = cls.effective_status(normalized, now=now)
+        normalized["effective_status"] = effective_status
+        normalized["_display_expired"] = effective_status == "expired"
+        return normalized
+
+    @classmethod
+    def summarize_sanctions(cls, sanctions: List[dict], now: Optional[int] = None) -> dict:
+        """Return normalized sanctions and clear counts for active, expired, removed and history."""
+        normalized = [cls.normalize_sanction(sanction, now=now) for sanction in sanctions]
+        return {
+            "sanctions": normalized,
+            "active_count": len([s for s in normalized if s.get("effective_status") == "active"]),
+            "expired_count": len([s for s in normalized if s.get("effective_status") == "expired"]),
+            "removed_count": len([s for s in normalized if s.get("effective_status") == "removed"]),
+            "historical_count": len(normalized),
+        }
     
     def get_active_warnings(self, guild_id: int, discord_user_id: Optional[int] = None,
                            mc_user_id: Optional[str] = None) -> List[dict]:
@@ -1459,13 +1501,32 @@ class SanctionsManager(commands.Cog):
         guild_id: int,
         discord_user_id: Optional[int] = None,
         mc_user_id: Optional[str] = None,
+        normalize: bool = True,
     ) -> List[dict]:
         """Public contract for other cogs to read sanctions for one member."""
-        return self.db.get_user_sanctions(
+        sanctions = self.db.get_user_sanctions(
             guild_id=guild_id,
             discord_user_id=discord_user_id,
             mc_user_id=mc_user_id,
         )
+        if not normalize:
+            return sanctions
+        return [SanctionsDatabase.normalize_sanction(sanction) for sanction in sanctions]
+
+    def get_member_sanction_summary(
+        self,
+        *,
+        guild_id: int,
+        discord_user_id: Optional[int] = None,
+        mc_user_id: Optional[str] = None,
+    ) -> dict:
+        """Public contract for other cogs to read member sanctions with clear status counts."""
+        sanctions = self.db.get_user_sanctions(
+            guild_id=guild_id,
+            discord_user_id=discord_user_id,
+            mc_user_id=mc_user_id,
+        )
+        return SanctionsDatabase.summarize_sanctions(sanctions)
 
     def get_sanction_by_id(self, sanction_id: int) -> Optional[dict]:
         """Public contract for other cogs to read one sanction by ID."""
