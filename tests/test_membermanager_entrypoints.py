@@ -4,6 +4,8 @@ import unittest
 from unittest.mock import AsyncMock
 
 from MemberManager.membermanager import DEFAULTS, MemberManager
+from MemberManager.models import MemberData
+from MemberManager.views import MemberOverviewView, RefreshButton
 
 
 class MemberManagerEntrypointTests(unittest.TestCase):
@@ -94,6 +96,67 @@ class MemberManagerEntrypointTests(unittest.TestCase):
         self.assertEqual(calls["added"], ("Member Management", 111))
         self.assertEqual(calls["synced"], 111)
         self.assertEqual(cog._context_menu_guild.id, 111)
+
+    def test_send_member_profile_refreshes_integrations_before_building_view(self):
+        payload = {
+            "membersync": object(),
+            "alliance_scraper": object(),
+            "logs_scraper": object(),
+            "sanction_manager": object(),
+        }
+        cog = MemberManager.__new__(MemberManager)
+        cog.bot = types.SimpleNamespace()
+        cog.db = object()
+        cog.config = object()
+        cog._connect_integrations = AsyncMock()
+        cog._get_integrations_payload = lambda: payload
+        send = AsyncMock()
+
+        asyncio.run(
+            cog._send_member_profile(
+                send,
+                types.SimpleNamespace(id=1),
+                999,
+                MemberData(discord_id=123, discord_username="DiscordUser"),
+            )
+        )
+
+        cog._connect_integrations.assert_awaited_once()
+        view = send.await_args.kwargs["view"]
+        self.assertEqual(view.integrations, payload)
+
+    def test_refresh_button_refreshes_integrations_for_existing_view(self):
+        payload = {
+            "membersync": object(),
+            "alliance_scraper": object(),
+            "logs_scraper": object(),
+            "sanction_manager": object(),
+        }
+        updated_data = MemberData(discord_id=123, discord_username="Updated")
+        cog = types.SimpleNamespace(
+            db=object(),
+            _connect_integrations=AsyncMock(),
+            _get_integrations_payload=lambda: payload,
+            _build_member_data=AsyncMock(return_value=updated_data),
+        )
+        view = MemberOverviewView.__new__(MemberOverviewView)
+        view.bot = types.SimpleNamespace(get_cog=lambda name: cog if name == "MemberManager" else None)
+        view.member_data = MemberData(discord_id=123, mc_user_id="456")
+        view.integrations = {}
+        view._update_view = AsyncMock()
+        button = RefreshButton(view, row=4)
+        interaction = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=1),
+            response=types.SimpleNamespace(defer=AsyncMock()),
+        )
+
+        asyncio.run(button.callback(interaction))
+
+        cog._connect_integrations.assert_awaited_once()
+        self.assertEqual(view.integrations, payload)
+        self.assertIs(view.db, cog.db)
+        self.assertIs(view.member_data, updated_data)
+        view._update_view.assert_awaited_once_with(interaction)
 
 
 if __name__ == "__main__":

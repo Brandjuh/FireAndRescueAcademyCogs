@@ -1064,6 +1064,9 @@ class RefreshButton(discord.ui.Button):
         if guild:
             cog = self.parent_view.bot.get_cog("MemberManager")
             if cog:
+                await cog._connect_integrations()
+                self.parent_view.integrations = cog._get_integrations_payload()
+                self.parent_view.db = cog.db
                 self.parent_view.member_data = await cog._build_member_data(
                     guild=guild,
                     discord_id=self.parent_view.member_data.discord_id,
