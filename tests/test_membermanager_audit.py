@@ -42,6 +42,11 @@ class MemberManagerAuditTests(unittest.TestCase):
         self.assertFalse(should_include_log_row({"action_key": "course_completed"}))
         self.assertFalse(should_include_log_row({"action_key": "course_created"}))
         self.assertFalse(should_include_log_row({"action_key": "building_constructed"}))
+        self.assertFalse(should_include_log_row({"action_key": "extension_started"}))
+        self.assertFalse(should_include_log_row({"action_key": "expansion_finished"}))
+        self.assertFalse(should_include_log_row({"action_key": "large_mission_started"}))
+        self.assertFalse(should_include_log_row({"action_key": "alliance_event_started"}))
+        self.assertTrue(should_include_log_row({"action_key": "kicked_from_alliance"}))
         self.assertTrue(should_include_log_row({"action_key": "chat_ban_set"}))
 
     def test_identity_filter_uses_id_and_name_without_former_member_label(self):
@@ -147,6 +152,30 @@ class MemberManagerAuditTests(unittest.TestCase):
                         1,
                     ),
                     (
+                        "2026-06-12T10:01:00+00:00",
+                        "2026-06-12T10:01:00+00:00",
+                        "building_constructed",
+                        "Building constructed",
+                        "MCUser",
+                        "456",
+                        "Station #1",
+                        "",
+                        "Building log",
+                        2,
+                    ),
+                    (
+                        "2026-06-12T10:02:00+00:00",
+                        "2026-06-12T10:02:00+00:00",
+                        "large_mission_started",
+                        "Large scale alliance mission started",
+                        "MCUser",
+                        "456",
+                        "Mission",
+                        "",
+                        "Operation log",
+                        3,
+                    ),
+                    (
                         "2026-06-12T10:00:00+00:00",
                         "2026-06-12T10:00:00+00:00",
                         "chat_ban_set",
@@ -156,7 +185,7 @@ class MemberManagerAuditTests(unittest.TestCase):
                         "Academy #1",
                         "",
                         "Hotshot Crew Training",
-                        2,
+                        4,
                     ),
                 ],
             )
@@ -230,6 +259,27 @@ class MemberManagerAuditTests(unittest.TestCase):
                     1,
                 ),
             )
+            connection.execute(
+                """
+                INSERT INTO logs (
+                    ts, event_timestamp, action_key, action_text, executed_name,
+                    executed_mc_id, affected_name, affected_mc_id, description,
+                    occurrence_index
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "2026-06-12T11:00:00+00:00",
+                    "2026-06-12T11:00:00+00:00",
+                    "building_constructed",
+                    "Building constructed",
+                    "MCUser",
+                    "456",
+                    "Station #1",
+                    "",
+                    "Building log",
+                    2,
+                ),
+            )
             connection.commit()
             connection.close()
 
@@ -257,6 +307,7 @@ class MemberManagerAuditTests(unittest.TestCase):
         self.assertIn("Chat ban set", result.description)
         self.assertIn("Note Created", result.description)
         self.assertIn("Admin Nick", result.description)
+        self.assertNotIn("Building constructed", result.description)
 
 
 if __name__ == "__main__":

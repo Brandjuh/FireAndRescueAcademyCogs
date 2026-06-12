@@ -580,8 +580,10 @@ class MemberOverviewView(discord.ui.View):
                 embed.description = "⚠️ Error loading sanctions"
                 return embed
         else:
-            embed.description = "*No sanctions are currently shown for this member.*"
-            embed.set_footer(text="Sanction backend is not loaded")
+            embed.description = (
+                "*Sanction data is currently unavailable.*\n\n"
+                "Load SanctionManager and refresh this profile to view or manage sanctions."
+            )
             embed.color = discord.Color.green()
             return embed
         
