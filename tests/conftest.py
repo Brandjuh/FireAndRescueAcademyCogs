@@ -178,6 +178,7 @@ def pytest_configure():
     chat_formatting = types.ModuleType("redbot.core.utils.chat_formatting")
     commands = types.ModuleType("redbot.core.commands")
     checks = types.ModuleType("redbot.core.checks")
+    bank = types.ModuleType("redbot.core.bank")
 
     commands.Cog = _Cog
     commands.Context = object
@@ -194,6 +195,7 @@ def pytest_configure():
     redbot_core.commands = commands
     redbot_core.checks = checks
     redbot_core.Config = object
+    redbot_core.bank = bank
     redbot_core.data_manager = object
     redbot_core_bot.Red = object
     redbot_core_data_manager.cog_data_path = lambda *args, **kwargs: None
@@ -207,6 +209,7 @@ def pytest_configure():
     sys.modules.setdefault("redbot.core", redbot_core)
     sys.modules.setdefault("redbot.core.commands", commands)
     sys.modules.setdefault("redbot.core.checks", checks)
+    sys.modules.setdefault("redbot.core.bank", bank)
     sys.modules.setdefault("redbot.core.bot", redbot_core_bot)
     sys.modules.setdefault("redbot.core.data_manager", redbot_core_data_manager)
     sys.modules.setdefault("redbot.core.utils", redbot_core_utils)
