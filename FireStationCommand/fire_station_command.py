@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -24,6 +25,8 @@ class FireStationCommand(commands.Cog):
     STAGE_STAFF_TURNOUT = "STAFF_TURNOUT"
     STAGE_VEHICLE_SELECT = "VEHICLE_SELECT"
     STAGE_TRAVEL = "TRAVEL"
+    ACTION_SHOW_TURNOUT_RESULT = "SHOW_TURNOUT_RESULT"
+    ACTION_SHOW_TRAVEL_UPDATE = "SHOW_TRAVEL_UPDATE"
 
     def __init__(self, bot):
         self.bot = bot
@@ -159,12 +162,24 @@ class FireStationCommand(commands.Cog):
     def _reward_multiplier(self) -> float:
         return max(0.0, self._balance_float("credits_reward_multiplier", 1.0))
 
+    def _utcnow(self) -> datetime:
+        return datetime.now(timezone.utc)
+
+    @staticmethod
+    def _format_timestamp(value: datetime) -> str:
+        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _timestamp_after_minutes(self, minutes: float) -> str:
+        delay = max(0.0, minutes)
+        return self._format_timestamp(self._utcnow() + timedelta(minutes=delay))
+
     def _new_mission_state(
         self,
         incident: Dict[str, Any],
         channel_id: int,
         guild_id: int | None,
     ) -> Dict[str, Any]:
+        now = self._format_timestamp(self._utcnow())
         return {
             "schema_version": self.MISSION_SCHEMA_VERSION,
             "id": incident["id"],
@@ -177,6 +192,10 @@ class FireStationCommand(commands.Cog):
             "alert_mode": None,
             "channel_id": channel_id,
             "guild_id": guild_id,
+            "created_at": now,
+            "updated_at": now,
+            "next_action": None,
+            "next_action_at": None,
         }
 
     def _mission_stage(self, mission: Dict[str, Any]) -> str:
@@ -189,6 +208,22 @@ class FireStationCommand(commands.Cog):
     def _set_mission_stage(self, mission: Dict[str, Any], stage: str) -> None:
         mission["schema_version"] = self.MISSION_SCHEMA_VERSION
         mission["stage"] = stage
+        mission["updated_at"] = self._format_timestamp(self._utcnow())
+
+    def _set_mission_due(
+        self,
+        mission: Dict[str, Any],
+        action: str,
+        minutes: float,
+    ) -> None:
+        mission["next_action"] = action
+        mission["next_action_at"] = self._timestamp_after_minutes(minutes)
+        mission["updated_at"] = self._format_timestamp(self._utcnow())
+
+    def _clear_mission_due(self, mission: Dict[str, Any]) -> None:
+        mission["next_action"] = None
+        mission["next_action_at"] = None
+        mission["updated_at"] = self._format_timestamp(self._utcnow())
 
     def _build_vehicle_definitions(self) -> Dict[str, Dict[str, Any]]:
         vehicles = self.game_data.get("vehicles", {}).get("vehicles", [])
@@ -859,6 +894,7 @@ class FireStationCommand(commands.Cog):
             }
         )
         self._set_mission_stage(mission, self.STAGE_STAFF_TURNOUT)
+        self._set_mission_due(mission, self.ACTION_SHOW_TURNOUT_RESULT, minutes)
         await user_conf.active_mission.set(mission)
 
         await interaction.response.send_message(
@@ -877,6 +913,8 @@ class FireStationCommand(commands.Cog):
         mission = data.get("active_mission", {}) or {}
         if not self._mission_is_stage(mission, self.STAGE_STAFF_TURNOUT):
             return
+        self._clear_mission_due(mission)
+        await user_conf.active_mission.set(mission)
 
         required = int(mission.get("turnout_required", 0))
         arrived = int(mission.get("turnout_total_arrived", 0))
@@ -928,6 +966,7 @@ class FireStationCommand(commands.Cog):
         minutes = random.uniform(min_minutes, max_minutes)
         rel = self._make_relative_text(minutes)
 
+        self._set_mission_due(mission, self.ACTION_SHOW_TURNOUT_RESULT, minutes)
         await user_conf.active_mission.set(mission)
 
         await interaction.response.send_message(
@@ -1007,6 +1046,7 @@ class FireStationCommand(commands.Cog):
 
         mission["selected_vehicle_ids"] = [int(v) for v in values]
         self._set_mission_stage(mission, self.STAGE_TRAVEL)
+        self._set_mission_due(mission, self.ACTION_SHOW_TRAVEL_UPDATE, minutes)
         await user_conf.active_mission.set(mission)
 
         await interaction.response.send_message(
@@ -1023,6 +1063,8 @@ class FireStationCommand(commands.Cog):
         mission = data.get("active_mission", {}) or {}
         if not self._mission_is_stage(mission, self.STAGE_TRAVEL):
             return
+        self._clear_mission_due(mission)
+        await user_conf.active_mission.set(mission)
 
         title = mission.get("title", "Incident")
         detail = mission.get("detail", "Units report additional information en route.")
