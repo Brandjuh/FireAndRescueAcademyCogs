@@ -731,6 +731,25 @@ class IncomeScraper(commands.Cog):
         
         cursor.execute("SELECT MIN(timestamp), MAX(timestamp) FROM income")
         min_time, max_time = cursor.fetchone()
+
+        cursor.execute("SELECT COUNT(*) FROM expenses")
+        preserved_expense_count = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM expenses WHERE event_timestamp IS NOT NULL")
+        timestamped_expense_count = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM expenses WHERE occurrence_index > 1")
+        repeated_expense_count = cursor.fetchone()[0]
+
+        cursor.execute("SELECT MAX(scraped_at) FROM expenses")
+        latest_expense_scrape = cursor.fetchone()[0]
+
+        cursor.execute(
+            "SELECT period, MAX(timestamp) FROM income "
+            "WHERE entry_type='income' AND period IN ('daily', 'monthly') "
+            "GROUP BY period"
+        )
+        latest_income_snapshots = dict(cursor.fetchall())
         
         conn.close()
         
@@ -744,6 +763,35 @@ class IncomeScraper(commands.Cog):
         
         if min_time and max_time:
             embed.add_field(name="Data Range", value=f"{min_time[:10]} to {max_time[:10]}", inline=False)
+
+        embed.add_field(
+            name="Preserved Expense Entries",
+            value=f"{preserved_expense_count:,}",
+            inline=True,
+        )
+        embed.add_field(
+            name="Timestamped Expenses",
+            value=f"{timestamped_expense_count:,} / {preserved_expense_count:,}",
+            inline=True,
+        )
+        embed.add_field(
+            name="Repeated Expenses Preserved",
+            value=f"{repeated_expense_count:,}",
+            inline=True,
+        )
+        embed.add_field(
+            name="Latest Expense Scrape (UTC)",
+            value=latest_expense_scrape or "None",
+            inline=False,
+        )
+        embed.add_field(
+            name="Latest Income Snapshots",
+            value=(
+                f"Daily: {latest_income_snapshots.get('daily', 'None')}\n"
+                f"Monthly: {latest_income_snapshots.get('monthly', 'None')}"
+            ),
+            inline=False,
+        )
         
         embed.set_footer(text=f"Database: {self.db_path.name}")
         
