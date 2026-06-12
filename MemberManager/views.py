@@ -144,6 +144,75 @@ class MemberOverviewView(discord.ui.View):
         """Check if pagination/search is needed."""
         return self.member_data.infractions_count > 1
 
+    def _build_triage_summary(self) -> tuple[str, List[str], Any]:
+        """Return a compact status summary for the simple overview."""
+        data = self.member_data
+        issues = []
+        priority = "Normal"
+        color = discord.Color.green()
+
+        def escalate(next_priority: str, next_color: Any) -> None:
+            nonlocal priority, color
+            levels = {"Normal": 0, "Attention": 1, "High Priority": 2}
+            if levels[next_priority] > levels[priority]:
+                priority = next_priority
+                color = next_color
+
+        if not data.has_discord():
+            issues.append("Missing Discord identity")
+            escalate("Attention", discord.Color.orange())
+        if not data.has_mc():
+            issues.append("Missing MissionChief identity")
+            escalate("Attention", discord.Color.orange())
+
+        if data.has_discord() and data.has_mc() and data.link_status != "approved":
+            issues.append(f"MemberSync link is {data.link_status or 'missing'}")
+            escalate("Attention", discord.Color.orange())
+        if not data.is_verified:
+            issues.append("Member is not verified")
+            escalate("Attention", discord.Color.orange())
+        if data.member_sync_conflict:
+            issues.append(data.member_sync_conflict)
+            escalate("High Priority", discord.Color.red())
+        if data.verified_role_present is False:
+            issues.append("Verified Discord role is missing")
+            escalate("Attention", discord.Color.orange())
+
+        if data.mc_username and "Former member" in data.mc_username:
+            issues.append("MissionChief member is marked as former member")
+            escalate("High Priority", discord.Color.red())
+        if data.mc_role and "Left alliance" in data.mc_role:
+            issues.append("MissionChief role indicates the member left the alliance")
+            escalate("High Priority", discord.Color.red())
+
+        if data.infractions_count:
+            issues.append(f"{data.infractions_count} active sanction(s)")
+            if data.severity_score >= 7:
+                escalate("High Priority", discord.Color.red())
+            else:
+                escalate("Attention", discord.Color.orange())
+        if data.notes_count:
+            issues.append(f"{data.notes_count} active note(s)")
+            escalate("Attention", discord.Color.orange())
+        if data.on_watchlist:
+            issues.append(f"Watchlist: {data.watchlist_reason or 'active'}")
+            escalate("High Priority", discord.Color.red())
+
+        if data.contribution_rate is None:
+            issues.append("Contribution data unavailable")
+            escalate("Attention", discord.Color.orange())
+        elif data.contribution_rate < 5:
+            issues.append(f"Low contribution: {data.contribution_rate:.1f}%")
+            escalate("Attention", discord.Color.orange())
+        if data.contribution_trend == "down":
+            issues.append("Contribution trend is down")
+            escalate("Attention", discord.Color.orange())
+
+        if not issues:
+            issues.append("No immediate issues detected")
+
+        return priority, issues[:6], color
+
     def _note_belongs_to_member(self, note: Dict[str, Any]) -> bool:
         """Return whether a note is linked to the member currently open in the panel."""
         data = self.member_data
@@ -404,10 +473,11 @@ class MemberOverviewView(discord.ui.View):
     def _build_simple_overview_embed(self) -> discord.Embed:
         """Build a compact overview for quick member triage."""
         data = self.member_data
+        triage_status, triage_lines, color = self._build_triage_summary()
 
         embed = discord.Embed(
             title=f"👤 Member Overview: {data.get_display_name()}",
-            color=discord.Color.blue() if data.is_verified else discord.Color.orange()
+            color=color if triage_status != "Normal" else discord.Color.blue()
         )
 
         identity_lines = []
@@ -442,6 +512,11 @@ class MemberOverviewView(discord.ui.View):
         else:
             risk_lines.append("**Contribution:** no data")
 
+        embed.add_field(
+            name=f"Triage: {triage_status}",
+            value="\n".join(f"- {line}" for line in triage_lines),
+            inline=False,
+        )
         embed.add_field(name="Identity", value="\n".join(identity_lines), inline=False)
         embed.add_field(name="Status", value="\n".join(status_lines), inline=False)
         embed.add_field(name="Risk Snapshot", value="\n".join(risk_lines), inline=False)
