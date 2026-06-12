@@ -1753,29 +1753,36 @@ class MemberManager(ConfigCommands, commands.Cog):
                     verified_role_id = await self.membersync.config.verified_role_id()
                     if verified_role_id:
                         verified_role = guild.get_role(verified_role_id)
-                        if verified_role and verified_role in member.roles:
-                            data.is_verified = True
+                        data.verified_role_present = bool(verified_role and verified_role in member.roles)
         
         # Get MC data and link status
         if self.membersync:
             link = None
+            get_status = getattr(self.membersync, "get_verification_status", None)
+            if get_status:
+                link = await get_status(discord_id=discord_id, mc_user_id=mc_user_id)
             
-            if discord_id and not mc_user_id:
-                link = await self.membersync.get_link_for_discord(discord_id)
-                if link:
-                    data.mc_user_id = link.get("mc_user_id")
-                    data.link_status = link.get("status", "none")
-            elif mc_user_id and not discord_id:
-                link = await self.membersync.get_link_for_mc(mc_user_id)
-                if link:
+            if not link:
+                if discord_id and not mc_user_id:
+                    link = await self.membersync.get_link_for_discord(discord_id)
+                elif mc_user_id and not discord_id:
+                    link = await self.membersync.get_link_for_mc(mc_user_id)
+                elif discord_id and mc_user_id:
+                    link = await self.membersync.get_link_for_discord(discord_id)
+
+            if link:
+                if link.get("mc_user_id") and not data.mc_user_id:
+                    data.mc_user_id = str(link.get("mc_user_id"))
+                if link.get("discord_id") and not data.discord_id:
                     data.discord_id = int(link.get("discord_id"))
-                    data.link_status = link.get("status", "none")
-            elif discord_id and mc_user_id:
-                link = await self.membersync.get_link_for_discord(discord_id)
-                if link:
-                    data.link_status = link.get("status", "none")
+
+                data.link_status = link.get("status", "none")
+                data.link_updated = link.get("updated_at")
+                reviewer_id = link.get("reviewer_id")
+                if reviewer_id is not None:
+                    data.link_reviewer_id = int(reviewer_id)
             
-            if link and link.get("status") == "approved":
+            if data.link_status == "approved":
                 data.is_verified = True
                 
                 if discord_id:
@@ -1785,10 +1792,21 @@ class MemberManager(ConfigCommands, commands.Cog):
                         if verified_role_id:
                             verified_role = guild.get_role(verified_role_id)
                             if verified_role and verified_role not in member.roles:
+                                data.member_sync_conflict = "Approved link but missing verified role"
                                 log.warning(f"Member {discord_id} is linked but missing verified role")
             else:
                 data.is_verified = False
                 data.link_status = link.get("status", "none") if link else "none"
+
+            if data.verified_role_present and data.link_status != "approved":
+                data.member_sync_conflict = "Verified role present without approved MemberSync link"
+
+        if data.discord_id and not data.discord_username:
+            member = guild.get_member(data.discord_id)
+            if member:
+                data.discord_username = str(member)
+                data.discord_roles = [r.name for r in member.roles if r.name != "@everyone"]
+                data.discord_joined = member.joined_at
         
         # Get MC data from MembersScraper
         mc_in_alliance = False

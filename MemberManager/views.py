@@ -230,6 +230,32 @@ class MemberOverviewView(discord.ui.View):
             inline=False
         )
         
+        sync_lines = [
+            f"**Link Status:** {data.link_status or 'none'}",
+        ]
+        if data.mc_user_id:
+            sync_lines.append(f"**MC ID:** `{data.mc_user_id}`")
+        if data.discord_id:
+            sync_lines.append(f"**Discord ID:** `{data.discord_id}`")
+        if data.verified_role_present is True:
+            sync_lines.append("**Verified Role:** Present")
+        elif data.verified_role_present is False:
+            sync_lines.append("**Verified Role:** Missing")
+        else:
+            sync_lines.append("**Verified Role:** Unknown")
+        if data.link_updated:
+            sync_lines.append(f"**Updated:** {data.link_updated}")
+        if data.link_reviewer_id:
+            sync_lines.append(f"**Reviewer:** <@{data.link_reviewer_id}>")
+        if data.member_sync_conflict:
+            sync_lines.append(f"**Conflict:** {data.member_sync_conflict}")
+
+        embed.add_field(
+            name="MemberSync",
+            value="\n".join(sync_lines),
+            inline=False
+        )
+
         # MissionChief Information
         mc_lines = []
         if data.has_mc():
