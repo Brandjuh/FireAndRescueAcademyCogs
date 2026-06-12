@@ -32,6 +32,61 @@ class _GroupDecorator:
 _Group.group = _GroupDecorator()
 
 
+class _Cog:
+    @classmethod
+    def listener(cls, *args, **kwargs):
+        del args, kwargs
+        return _Decorator()
+
+
+class _View:
+    def __init__(self, *args, **kwargs):
+        del args, kwargs
+        self.children = []
+
+    def add_item(self, item):
+        self.children.append(item)
+
+    def clear_items(self):
+        self.children.clear()
+
+
+class _Button:
+    def __init__(self, *args, **kwargs):
+        del args
+        self.disabled = False
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+
+class _Modal:
+    def __init_subclass__(cls, **kwargs):
+        del kwargs
+        return super().__init_subclass__()
+
+    def __init__(self, *args, **kwargs):
+        del args, kwargs
+
+
+class _TextInput:
+    def __init__(self, *args, **kwargs):
+        del args
+        self.value = ""
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+
+def _ui_button(*args, **kwargs):
+    del args, kwargs
+    return lambda function: function
+
+
+class _ContextMenu:
+    def __init__(self, *, name, callback):
+        self.name = name
+        self.callback = callback
+
+
 def pytest_configure():
     """Provide the minimal Redbot import surface required by isolated cog tests."""
     class _Embed:
@@ -53,6 +108,10 @@ def pytest_configure():
     )
     discord.TextChannel = object
     discord.Role = object
+    discord.Member = object
+    discord.Guild = object
+    discord.Message = object
+    discord.Interaction = object
     discord.Embed = _Embed
     discord.Color = types.SimpleNamespace(
         blue=lambda: "blue",
@@ -63,7 +122,33 @@ def pytest_configure():
         orange=lambda: "orange",
         red=lambda: "red",
     )
+    discord.ButtonStyle = types.SimpleNamespace(
+        primary="primary",
+        secondary="secondary",
+        success="success",
+        danger="danger",
+    )
+    discord.TextStyle = types.SimpleNamespace(
+        short="short",
+        paragraph="paragraph",
+    )
+    discord.AppCommandType = types.SimpleNamespace(user="user")
+    discord.NotFound = type("NotFound", (Exception,), {})
+    discord.HTTPException = type("HTTPException", (Exception,), {})
     discord.Forbidden = type("Forbidden", (Exception,), {})
+    discord.errors = types.SimpleNamespace(
+        InteractionResponded=type("InteractionResponded", (Exception,), {})
+    )
+    discord.ui = types.SimpleNamespace(
+        View=_View,
+        Button=_Button,
+        Modal=_Modal,
+        TextInput=_TextInput,
+        button=_ui_button,
+    )
+    app_commands = types.ModuleType("discord.app_commands")
+    app_commands.ContextMenu = _ContextMenu
+    discord.app_commands = app_commands
     redbot = types.ModuleType("redbot")
     redbot_core = types.ModuleType("redbot.core")
     redbot_core_bot = types.ModuleType("redbot.core.bot")
@@ -73,10 +158,13 @@ def pytest_configure():
     commands = types.ModuleType("redbot.core.commands")
     checks = types.ModuleType("redbot.core.checks")
 
-    commands.Cog = object
+    commands.Cog = _Cog
     commands.Context = object
     commands.command = _CommandDecorator()
     commands.group = _GroupDecorator()
+    commands.hybrid_group = _GroupDecorator()
+    commands.guild_only = _CommandDecorator()
+    commands.admin = _CommandDecorator()
     commands.is_owner = _CommandDecorator()
     commands.admin_or_permissions = _CommandDecorator()
     checks.is_owner = _CommandDecorator()
@@ -92,6 +180,7 @@ def pytest_configure():
     redbot.core = redbot_core
 
     sys.modules.setdefault("discord", discord)
+    sys.modules.setdefault("discord.app_commands", app_commands)
     sys.modules.setdefault("redbot", redbot)
     sys.modules.setdefault("redbot.core", redbot_core)
     sys.modules.setdefault("redbot.core.commands", commands)
