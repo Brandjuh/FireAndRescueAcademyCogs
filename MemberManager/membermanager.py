@@ -143,6 +143,7 @@ class MemberManager(ConfigCommands, commands.Cog):
             name="Member Management",
             callback=self._member_context_menu_callback,
         )
+        self._context_menu_guild: Optional[discord.Object] = None
         
         # Persistent views
         self._register_views()
@@ -158,7 +159,6 @@ class MemberManager(ConfigCommands, commands.Cog):
         
         # Detect and connect to other cogs
         await self._connect_integrations()
-        self._register_context_menu()
         
         # Start automation after bot is ready
         asyncio.create_task(self._delayed_start())
@@ -189,16 +189,47 @@ class MemberManager(ConfigCommands, commands.Cog):
         if add_view:
             add_view(MemberPanelView(self))
 
-    def _register_context_menu(self):
-        """Register the Discord user context menu if the bot supports app commands."""
+    async def _get_context_menu_guild(self) -> Optional[discord.Object]:
+        """Resolve the guild where the context menu should be synced."""
+        channel_id = await self.config.panel_channel_id()
+        if channel_id:
+            channel = self.bot.get_channel(int(channel_id))
+            guild = getattr(channel, "guild", None) if channel else None
+            if guild:
+                return discord.Object(id=guild.id)
+
+        guilds = getattr(self.bot, "guilds", [])
+        if guilds:
+            return discord.Object(id=guilds[0].id)
+
+        return None
+
+    async def _register_context_menu(self):
+        """Register and sync the Discord user context menu for this guild."""
         tree = getattr(self.bot, "tree", None)
         add_command = getattr(tree, "add_command", None) if tree else None
-        if not add_command:
+        sync = getattr(tree, "sync", None) if tree else None
+        if not add_command or not sync:
             log.warning("App command tree not available; context menu not registered")
             return
 
+        guild = await self._get_context_menu_guild()
+        if not guild:
+            log.warning("No guild available; context menu not registered")
+            return
+
         try:
-            add_command(self._member_context_menu)
+            remove_command = getattr(tree, "remove_command", None)
+            if remove_command:
+                remove_command(
+                    self._member_context_menu.name,
+                    type=discord.AppCommandType.user,
+                    guild=guild,
+                )
+            add_command(self._member_context_menu, guild=guild)
+            await sync(guild=guild)
+            self._context_menu_guild = guild
+            log.info("MemberManager context menu synced for guild %s", guild.id)
         except Exception as exc:
             log.warning("Failed to register MemberManager context menu: %s", exc)
 
@@ -213,6 +244,7 @@ class MemberManager(ConfigCommands, commands.Cog):
             remove_command(
                 self._member_context_menu.name,
                 type=discord.AppCommandType.user,
+                guild=self._context_menu_guild,
             )
         except Exception as exc:
             log.debug("Failed to unregister MemberManager context menu: %s", exc)
@@ -221,6 +253,7 @@ class MemberManager(ConfigCommands, commands.Cog):
         """Start automation after bot is ready."""
         await self.bot.wait_until_ready()
         await asyncio.sleep(5)
+        await self._register_context_menu()
         
         # Initialize contribution monitor
         if await self.config.auto_contribution_alert():
