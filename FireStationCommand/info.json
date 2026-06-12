@@ -1,0 +1,31 @@
+{
+    "author": [
+        "Brandjuh"
+    ],
+    "description": "Fire station management and incident response mini-game for Red Discord Bot.",
+    "install_msg": "Thanks for installing FireStationCommand.\n\nUse `[p]fsc start` to create your first station, then use `[p]fsc status`, `[p]fsc station`, `[p]fsc recruit`, `[p]fsc shop`, and `[p]fsc mission` to play.\n\nThis cog is still in active development. Check the changelog for known issues and upcoming work.",
+    "short": "Fire station management and incident response mini-game",
+    "name": "FireStationCommand",
+    "tags": [
+        "game",
+        "fire",
+        "firefighter",
+        "incident",
+        "management",
+        "economy"
+    ],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores user IDs, station progress, vehicles, staff counts, active mission state, and local fallback credits when the bank cog cannot be used.",
+    "required_cogs": {},
+    "requirements": [
+        "PyYAML"
+    ],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "min_python_version": [
+        3,
+        8,
+        0
+    ]
+}

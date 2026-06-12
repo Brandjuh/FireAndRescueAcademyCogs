@@ -3,16 +3,22 @@ from __future__ import annotations
 
 import asyncio
 import random
+from pathlib import Path
 from typing import Any, Dict, List
 
 import discord
 from redbot.core import commands, Config, bank
 
+try:
+    import yaml
+except ImportError:  # pragma: no cover - dependency is declared in info.json
+    yaml = None
+
 
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.1.1"
+    __version__ = "1.1.2"
 
     def __init__(self, bot):
         self.bot = bot
@@ -48,11 +54,23 @@ class FireStationCommand(commands.Cog):
         self.config.register_global(**default_global)
         self.config.register_user(**default_user)
 
-        self.INCIDENTS: List[Dict[str, Any]] = [
+        self.game_data = self._load_game_data()
+        self.vehicle_definitions = self._build_vehicle_definitions()
+        self.INCIDENTS = self._build_incidents()
+        self.VEHICLE_CATALOG = self._build_vehicle_catalog()
+
+    # --------------------------------------------------
+    # Static fallback data
+    # --------------------------------------------------
+
+    @staticmethod
+    def _fallback_incidents() -> List[Dict[str, Any]]:
+        return [
             {
                 "id": "house_fire",
                 "name": "House Fire",
                 "required_staff": 8,
+                "base_credits": 1000,
                 "hint": "Reports of smoke from a residential building.",
                 "detail": "On approach you see smoke from the roof and people outside waving.",
             },
@@ -60,6 +78,7 @@ class FireStationCommand(commands.Cog):
                 "id": "car_crash",
                 "name": "Traffic Collision",
                 "required_staff": 6,
+                "base_credits": 1000,
                 "hint": "Multiple calls of a crash at an intersection.",
                 "detail": "Police report two vehicles involved, possible entrapment.",
             },
@@ -67,10 +86,122 @@ class FireStationCommand(commands.Cog):
                 "id": "small_fire",
                 "name": "Trash Fire",
                 "required_staff": 4,
+                "base_credits": 1000,
                 "hint": "Caller reports a small fire near containers.",
                 "detail": "On arrival, smoke visible but no exposures yet.",
             },
         ]
+
+    @staticmethod
+    def _fallback_vehicle_catalog() -> Dict[str, Dict[str, Any]]:
+        return {
+            "pumper": {"name": "Fire Engine", "crew_capacity": 6, "price": 50_000},
+            "ladder": {"name": "Aerial Ladder", "crew_capacity": 3, "price": 75_000},
+            "rescue": {"name": "Rescue Unit", "crew_capacity": 4, "price": 65_000},
+        }
+
+    # --------------------------------------------------
+    # Data loading
+    # --------------------------------------------------
+
+    def _load_yaml_config(self, filename: str) -> Dict[str, Any]:
+        if yaml is None:
+            return {}
+
+        path = Path(__file__).parent / "data" / "config" / filename
+        try:
+            with path.open("r", encoding="utf-8") as fp:
+                data = yaml.safe_load(fp) or {}
+        except (OSError, yaml.YAMLError):
+            return {}
+
+        return data if isinstance(data, dict) else {}
+
+    def _load_game_data(self) -> Dict[str, Dict[str, Any]]:
+        return {
+            "balance": self._load_yaml_config("balance.yaml"),
+            "missions": self._load_yaml_config("missions.yaml"),
+            "vehicles": self._load_yaml_config("vehicles.yaml"),
+            "equipment": self._load_yaml_config("equipment.yaml"),
+            "trainings": self._load_yaml_config("trainings.yaml"),
+            "expansions": self._load_yaml_config("expansions.yaml"),
+        }
+
+    def _build_vehicle_definitions(self) -> Dict[str, Dict[str, Any]]:
+        vehicles = self.game_data.get("vehicles", {}).get("vehicles", [])
+        if not isinstance(vehicles, list):
+            return {}
+
+        definitions: Dict[str, Dict[str, Any]] = {}
+        for vehicle in vehicles:
+            if not isinstance(vehicle, dict):
+                continue
+            vehicle_id = vehicle.get("id")
+            if isinstance(vehicle_id, str) and vehicle_id:
+                definitions[vehicle_id] = vehicle
+
+        return definitions
+
+    def _required_staff_for_mission(self, mission: Dict[str, Any]) -> int:
+        explicit = mission.get("required_staff")
+        if isinstance(explicit, int) and explicit > 0:
+            return explicit
+
+        required_vehicles = mission.get("required_vehicles", [])
+        if not isinstance(required_vehicles, list):
+            return 4
+
+        total = 0
+        for vehicle_id in required_vehicles:
+            vehicle = self.vehicle_definitions.get(vehicle_id)
+            if vehicle:
+                total += int(vehicle.get("required_staff", 0))
+
+        return total if total > 0 else 4
+
+    def _build_incidents(self) -> List[Dict[str, Any]]:
+        missions = self.game_data.get("missions", {}).get("missions", [])
+        if not isinstance(missions, list):
+            return self._fallback_incidents()
+
+        incidents: List[Dict[str, Any]] = []
+        for mission in missions:
+            if not isinstance(mission, dict):
+                continue
+            mission_id = mission.get("id")
+            name = mission.get("name")
+            if not isinstance(mission_id, str) or not isinstance(name, str):
+                continue
+
+            description = mission.get("description", "No further details available.")
+            incidents.append(
+                {
+                    "id": mission_id,
+                    "name": name,
+                    "required_staff": self._required_staff_for_mission(mission),
+                    "base_credits": int(mission.get("base_credits", 1000)),
+                    "hint": description,
+                    "detail": description,
+                    "required_vehicles": mission.get("required_vehicles", []),
+                    "required_equipment": mission.get("required_equipment", []),
+                }
+            )
+
+        return incidents or self._fallback_incidents()
+
+    def _build_vehicle_catalog(self) -> Dict[str, Dict[str, Any]]:
+        catalog: Dict[str, Dict[str, Any]] = {}
+        for vehicle_id, vehicle in self.vehicle_definitions.items():
+            name = vehicle.get("name")
+            if not isinstance(name, str):
+                continue
+            catalog[vehicle_id] = {
+                "name": name,
+                "crew_capacity": int(vehicle.get("required_staff", 1)),
+                "price": int(vehicle.get("base_cost", 0)),
+            }
+
+        return catalog or self._fallback_vehicle_catalog()
 
     # --------------------------------------------------
     # Helpers
@@ -594,6 +725,7 @@ class FireStationCommand(commands.Cog):
             "id": incident["id"],
             "title": incident["name"],
             "required_staff": incident["required_staff"],
+            "base_credits": incident.get("base_credits", 1000),
             "hint": incident["hint"],
             "detail": incident["detail"],
             "stage": "ALERT_CHOICE",
@@ -876,16 +1008,17 @@ class FireStationCommand(commands.Cog):
 
         success_score = (ratio_staff * 0.6) + (ratio_capacity * 0.4)
         success_score = max(0.0, min(1.5, success_score))
+        base_reward = int(mission.get("base_credits", 1000))
 
         if success_score >= 1.0:
             outcome = "✅ Incident successfully handled."
-            reward = int(1_000 * success_score)
+            reward = int(base_reward * success_score)
         elif success_score >= 0.6:
             outcome = "⚠️ Incident handled with difficulties."
-            reward = int(500 * success_score)
+            reward = int(base_reward * 0.5 * success_score)
         else:
             outcome = "❌ Incident not successfully handled."
-            reward = int(100 * success_score)
+            reward = int(base_reward * 0.1 * success_score)
 
         await self._give(user, reward)
         total_credits = await self._get_credits(user)
@@ -924,7 +1057,7 @@ class FireStationCommand(commands.Cog):
         user_conf = self.config.user(user)
         data = await user_conf.all()
 
-        catalog = VehicleShopSelect.CATALOG
+        catalog = self.VEHICLE_CATALOG
         if vehicle_id not in catalog:
             await interaction.response.send_message("Unknown vehicle type.", ephemeral=True)
             return
@@ -1077,19 +1210,13 @@ class VehicleSelectView(discord.ui.View):
 
 
 class VehicleShopSelect(discord.ui.Select):
-    CATALOG = {
-        "pumper": {"name": "Fire Engine", "crew_capacity": 6, "price": 50_000},
-        "ladder": {"name": "Aerial Ladder", "crew_capacity": 3, "price": 75_000},
-        "rescue": {"name": "Rescue Unit", "crew_capacity": 4, "price": 65_000},
-    }
-
     def __init__(self, cog: FireStationCommand, channel: discord.abc.Messageable, user: discord.abc.User):
         self.cog = cog
         self.channel = channel
         self.user = user
 
         options: List[discord.SelectOption] = []
-        for vid, v in self.CATALOG.items():
+        for vid, v in self.cog.VEHICLE_CATALOG.items():
             label = f"{v['name']} ({v['price']:,} cr, cap {v['crew_capacity']})"
             options.append(discord.SelectOption(label=label, value=vid))
 
@@ -1102,7 +1229,7 @@ class VehicleShopSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         choice = self.values[0]
-        vdef = self.CATALOG.get(choice)
+        vdef = self.cog.VEHICLE_CATALOG.get(choice)
         if not vdef:
             await interaction.response.send_message("Unknown vehicle type.", ephemeral=True)
             return
