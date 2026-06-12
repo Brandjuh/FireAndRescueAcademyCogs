@@ -194,3 +194,37 @@ def test_set_and_clear_mission_due_tracks_next_action():
     assert mission["next_action"] is None
     assert mission["next_action_at"] is None
     assert mission["updated_at"] == "2026-06-12T12:00:00Z"
+
+
+def test_alert_narrative_includes_expected_turnout(monkeypatch):
+    cog = _cog_with_game_data({})
+    monkeypatch.setattr(
+        "FireStationCommand.fire_station_command.random.choice",
+        lambda options: options[0],
+    )
+
+    narrative = FireStationCommand._alert_narrative(cog, "emergency", "volunteer", 5.0)
+
+    assert "pagers" in narrative
+    assert "Turnout expected in 5 minutes." in narrative
+
+
+def test_turnout_result_narrative_reflects_staffing_level():
+    cog = _cog_with_game_data({})
+
+    assert "confident first move" in FireStationCommand._turnout_result_narrative(cog, 4, 4, 6)
+    assert "turnout is thin" in FireStationCommand._turnout_result_narrative(cog, 2, 4, 6)
+    assert "No one makes it in" in FireStationCommand._turnout_result_narrative(cog, 0, 4, 6)
+
+
+def test_realert_and_travel_narratives_include_eta(monkeypatch):
+    cog = _cog_with_game_data({})
+    monkeypatch.setattr(
+        "FireStationCommand.fire_station_command.random.choice",
+        lambda options: options[0],
+    )
+
+    assert "Additional turnout expected in 2 minutes." in FireStationCommand._realert_narrative(
+        cog, 2.0
+    )
+    assert "ETA in 3 minutes." in FireStationCommand._travel_narrative(cog, 3.0)

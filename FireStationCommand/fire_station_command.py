@@ -454,6 +454,60 @@ class FireStationCommand(commands.Cog):
             "total_arrived": current_total + second_arrived,
         }
 
+    def _alert_narrative(self, mode: str, station_type: str, minutes: float) -> str:
+        if station_type == "career":
+            options = [
+                "The watch room lights up as the call drops. Boots hit the floor almost immediately and the crew moves as one toward the bay.",
+                "From the dispatch desk, the assignment is clean: tones, address, incident type. The career crew is already moving before the last detail is read out.",
+            ]
+        elif mode == "emergency":
+            options = [
+                "Across town, pagers cut through dinner, work, and quiet living rooms. Volunteers grab keys, leave half-finished tasks behind, and head for the station.",
+                "The alert tone lands hard. One firefighter steps away from a workbench, another leaves the house still pulling on a jacket, all converging on the station.",
+                "Dispatch marks it urgent. Phones buzz, pagers chirp, and the first volunteers start moving before the message has finished scrolling.",
+            ]
+        else:
+            options = [
+                "The call is toned as routine, but the station still begins to stir. Volunteers acknowledge from home, work, and the road as they make their way in.",
+                "Dispatch sends the details calmly. Around the district, responders wrap up what they are doing and start toward the station.",
+                "A steady alert rolls out over the pagers. It is not panic, but it is movement: doors closing, engines starting, and crew members checking in.",
+            ]
+        return f"{random.choice(options)} Turnout expected {self._make_relative_text(minutes)}."
+
+    def _realert_narrative(self, minutes: float) -> str:
+        options = [
+            "The first turnout is not enough, so dispatch sends a second tone. The message is sharper this time: more hands are needed.",
+            "A re-alert goes out across the district. Anyone who missed the first call gets a second chance to make the bay.",
+            "The incident commander asks for more crew. Dispatch repeats the call, and late responders start checking in.",
+        ]
+        return f"{random.choice(options)} Additional turnout expected {self._make_relative_text(minutes)}."
+
+    def _turnout_result_narrative(self, arrived: int, required: int, available: int) -> str:
+        if arrived >= required:
+            return (
+                "The bay fills with enough crew to make a confident first move. "
+                "The incident can proceed with the planned staffing."
+            )
+        if arrived > 0:
+            return (
+                "The turnout is thin. A small crew is ready, but the incident may stretch them "
+                "unless more personnel arrive or the dispatch is kept tight."
+            )
+        if available > 0:
+            return (
+                "The station stays quiet after the tones. No one makes it in fast enough, "
+                "leaving the call without a crew ready to roll."
+            )
+        return "There is no available staff to answer the call."
+
+    def _travel_narrative(self, minutes: float) -> str:
+        options = [
+            "The bay doors lift and the unit rolls out into traffic. Dispatch keeps the channel open while the crew builds the first picture from the notes.",
+            "The engine clears the station and turns toward the incident. In the cab, the crew reviews the call details and starts planning the first action.",
+            "Sirens carry down the street as the unit goes en route. The address is set, the crew is briefed, and the scene is coming closer.",
+        ]
+        return f"{random.choice(options)} ETA {self._make_relative_text(minutes)}."
+
     async def _build_dashboard_embed(self, user: discord.abc.User) -> discord.Embed:
         data = await self.config.user(user).all()
         if not data["started"]:
@@ -1102,8 +1156,6 @@ class FireStationCommand(commands.Cog):
                 first_arrived = sim["arrived"]
                 total = first_arrived
 
-        rel = self._make_relative_text(minutes)
-
         mission.update(
             {
                 "alert_mode": mode,
@@ -1117,10 +1169,15 @@ class FireStationCommand(commands.Cog):
         self._set_mission_due(mission, self.ACTION_SHOW_TURNOUT_RESULT, minutes)
         await user_conf.active_mission.set(mission)
 
-        await interaction.response.send_message(
-            f"📟 Crew alerted with **{mode}** mode. Turnout expected {rel}.",
-            ephemeral=False,
+        embed = discord.Embed(
+            title="Crew alerted",
+            description=self._alert_narrative(mode, stype, minutes),
+            color=discord.Color.orange(),
         )
+        embed.add_field(name="Alert mode", value=mode.capitalize(), inline=True)
+        embed.add_field(name="Expected turnout", value=self._make_relative_text(minutes), inline=True)
+        embed.add_field(name="Required staff", value=str(required), inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=False)
 
         if minutes > 0:
             await asyncio.sleep(int(minutes * 60))
@@ -1147,6 +1204,11 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Required staff", value=str(required), inline=True)
         embed.add_field(name="Available staff", value=str(available), inline=True)
         embed.add_field(name="Arrived staff", value=str(arrived), inline=True)
+        embed.add_field(
+            name="Narrative",
+            value=self._turnout_result_narrative(arrived, required, available),
+            inline=False,
+        )
         embed.set_footer(text="Re-alert for more crew, proceed with current crew, or cancel the call.")
 
         view = TurnoutDecisionView(self, channel, user)
@@ -1184,15 +1246,18 @@ class FireStationCommand(commands.Cog):
         min_minutes = float(glb.get("realert_minutes_min", 1.0))
         max_minutes = float(glb.get("realert_minutes_max", 3.0))
         minutes = random.uniform(min_minutes, max_minutes)
-        rel = self._make_relative_text(minutes)
-
         self._set_mission_due(mission, self.ACTION_SHOW_TURNOUT_RESULT, minutes)
         await user_conf.active_mission.set(mission)
 
-        await interaction.response.send_message(
-            f"📟 Re-alert sent. Additional turnout expected {rel}.",
-            ephemeral=False,
+        embed = discord.Embed(
+            title="Re-alert sent",
+            description=self._realert_narrative(minutes),
+            color=discord.Color.orange(),
         )
+        embed.add_field(name="Current turnout", value=str(current_total), inline=True)
+        embed.add_field(name="Available staff", value=str(available), inline=True)
+        embed.add_field(name="Additional ETA", value=self._make_relative_text(minutes), inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=False)
 
         await asyncio.sleep(int(minutes * 60))
         await self._show_turnout_result(channel, user)
@@ -1225,7 +1290,10 @@ class FireStationCommand(commands.Cog):
 
         embed = discord.Embed(
             title="Vehicle selection",
-            description=f"{arrived} personnel available. Select vehicles to dispatch.",
+            description=(
+                f"{arrived} personnel are ready in the bay. Select the vehicles that best match "
+                "the incident picture and available crew."
+            ),
             color=discord.Color.blue(),
         )
         await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
@@ -1262,17 +1330,19 @@ class FireStationCommand(commands.Cog):
         min_minutes = float(glb.get("travel_minutes_min", 3.0))
         max_minutes = float(glb.get("travel_minutes_max", 8.0))
         minutes = random.uniform(min_minutes, max_minutes)
-        rel = self._make_relative_text(minutes)
-
         mission["selected_vehicle_ids"] = [int(v) for v in values]
         self._set_mission_stage(mission, self.STAGE_TRAVEL)
         self._set_mission_due(mission, self.ACTION_SHOW_TRAVEL_UPDATE, minutes)
         await user_conf.active_mission.set(mission)
 
-        await interaction.response.send_message(
-            f"🚨 Units are en route. ETA {rel}.",
-            ephemeral=False,
+        embed = discord.Embed(
+            title="Units en route",
+            description=self._travel_narrative(minutes),
+            color=discord.Color.blue(),
         )
+        embed.add_field(name="ETA", value=self._make_relative_text(minutes), inline=True)
+        embed.add_field(name="Vehicles dispatched", value=str(len(values)), inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=False)
 
         await asyncio.sleep(int(minutes * 60))
         await self._send_travel_update(channel, user)
