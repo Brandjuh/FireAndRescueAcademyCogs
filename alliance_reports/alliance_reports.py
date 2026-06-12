@@ -5,12 +5,10 @@ Comprehensive reporting system for Fire & Rescue Academy alliance data.
 
 import asyncio
 import logging
-from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import Optional
 
 import discord
-from redbot.core import commands, checks, Config
+from redbot.core import commands, Config
 from redbot.core.bot import Red
 from redbot.core.utils.chat_formatting import box, pagify
 
@@ -126,19 +124,19 @@ class AllianceReports(commands.Cog):
             
             # Add scheduler status
             next_runs = await self.scheduler.get_next_run_times()
-            scheduler_status = f"\n⏰ NEXT SCHEDULED RUNS\n"
+            scheduler_status = "\n⏰ NEXT SCHEDULED RUNS\n"
             
             if next_runs.get("daily"):
                 daily_str = next_runs["daily"].strftime("%Y-%m-%d %H:%M:%S %Z")
                 scheduler_status += f"  Daily: {daily_str}\n"
             else:
-                scheduler_status += f"  Daily: Not scheduled\n"
+                scheduler_status += "  Daily: Not scheduled\n"
             
             if next_runs.get("monthly"):
                 monthly_str = next_runs["monthly"].strftime("%Y-%m-%d %H:%M:%S %Z")
                 scheduler_status += f"  Monthly: {monthly_str}\n"
             else:
-                scheduler_status += f"  Monthly: Not scheduled\n"
+                scheduler_status += "  Monthly: Not scheduled\n"
             
             scheduler_status += f"\n  Scheduler: {'🟢 Running' if self.scheduler.is_running() else '🔴 Stopped'}"
             
@@ -479,7 +477,8 @@ class AllianceReports(commands.Cog):
             from .templates.monthly_member import MonthlyMemberReport
             
             report_gen = MonthlyMemberReport(self.bot, self.config_manager)
-            embeds = await report_gen.generate()
+            report_month = self.scheduler._current_game_month()
+            embeds = await report_gen.generate(report_month=report_month)
             
             if not embeds:
                 await ctx.send("❌ Failed to generate report")
@@ -498,7 +497,7 @@ class AllianceReports(commands.Cog):
                 await ctx.send(f"❌ Configured channel not found (ID: {channel_id})")
                 return
             
-            success = await report_gen.post(channel)
+            success = await report_gen.post(channel, report_month=report_month)
             
             if success:
                 await ctx.send(f"✅ Monthly member report posted to {channel.mention}")
@@ -509,6 +508,50 @@ class AllianceReports(commands.Cog):
             log.exception(f"Error generating monthly member report: {e}")
             await ctx.send(f"❌ Error: {e}")
     
+    @report_group.command(name="monthlyadmin")
+    async def report_monthly_admin(self, ctx: commands.Context):
+        """Generate monthly admin report now."""
+        if not await self._is_authorized(ctx):
+            await ctx.send("You don't have permission to use this command.")
+            return
+
+        await ctx.send("Generating monthly admin report...")
+
+        try:
+            from .templates.monthly_admin import MonthlyAdminReport
+
+            report_gen = MonthlyAdminReport(self.bot, self.config_manager)
+            report_month = self.scheduler._current_game_month()
+            embeds = await report_gen.generate(report_month=report_month)
+
+            if not embeds:
+                await ctx.send("Failed to generate report")
+                return
+
+            channel_id = await self.config.monthly_admin_channel()
+            if not channel_id:
+                await ctx.send("No channel configured, posting here:")
+                for embed in embeds:
+                    await ctx.send(embed=embed)
+                await ctx.send("Set channel with `[p]reportset channel monthlyadmin #channel`")
+                return
+
+            channel = self.bot.get_channel(int(channel_id))
+            if not channel:
+                await ctx.send(f"Configured channel not found (ID: {channel_id})")
+                return
+
+            success = await report_gen.post(channel, report_month=report_month)
+
+            if success:
+                await ctx.send(f"Monthly admin report posted to {channel.mention}")
+            else:
+                await ctx.send("Failed to post report (check logs)")
+
+        except Exception as e:
+            log.exception(f"Error generating monthly admin report: {e}")
+            await ctx.send(f"Error: {e}")
+
     @report_group.command(name="debug")
     async def report_debug(self, ctx: commands.Context):
         """Debug data aggregation."""

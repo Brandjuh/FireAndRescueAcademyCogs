@@ -4,10 +4,11 @@ import types
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
 from alliance_reports.calculators.activity_score import ActivityScoreCalculator
+from alliance_reports.alliance_reports import AllianceReports
 from alliance_reports.data_aggregator import DataAggregator
 from alliance_reports.embed_formatter import EmbedFormatter
 from alliance_reports.templates.daily_admin import DailyAdminReport
@@ -590,6 +591,62 @@ class AllianceReportContractTests(unittest.TestCase):
         asyncio.run(report.generate(report_month=report_month))
 
         report.aggregator.get_monthly_data.assert_awaited_once_with(report_month)
+
+    def test_manual_monthly_member_uses_scheduler_game_month(self):
+        import asyncio
+
+        report_month = datetime(2026, 6, 30, 23, 55, tzinfo=ZoneInfo("America/New_York"))
+        channel = types.SimpleNamespace(mention="#monthly")
+        report_instance = types.SimpleNamespace(
+            generate=AsyncMock(return_value=[object()]),
+            post=AsyncMock(return_value=True),
+        )
+        cog = AllianceReports.__new__(AllianceReports)
+        cog._is_authorized = AsyncMock(return_value=True)
+        cog.scheduler = types.SimpleNamespace(_current_game_month=lambda: report_month)
+        cog.bot = types.SimpleNamespace(get_channel=lambda channel_id: channel)
+        cog.config_manager = object()
+        cog.config = types.SimpleNamespace(
+            monthly_member_channel=AsyncMock(return_value="123"),
+        )
+        ctx = types.SimpleNamespace(send=AsyncMock())
+
+        with patch(
+            "alliance_reports.templates.monthly_member.MonthlyMemberReport",
+            return_value=report_instance,
+        ):
+            asyncio.run(cog.report_monthly_member(ctx))
+
+        report_instance.generate.assert_awaited_once_with(report_month=report_month)
+        report_instance.post.assert_awaited_once_with(channel, report_month=report_month)
+
+    def test_manual_monthly_admin_command_uses_scheduler_game_month(self):
+        import asyncio
+
+        report_month = datetime(2026, 6, 30, 23, 55, tzinfo=ZoneInfo("America/New_York"))
+        channel = types.SimpleNamespace(mention="#admin-monthly")
+        report_instance = types.SimpleNamespace(
+            generate=AsyncMock(return_value=[object()]),
+            post=AsyncMock(return_value=True),
+        )
+        cog = AllianceReports.__new__(AllianceReports)
+        cog._is_authorized = AsyncMock(return_value=True)
+        cog.scheduler = types.SimpleNamespace(_current_game_month=lambda: report_month)
+        cog.bot = types.SimpleNamespace(get_channel=lambda channel_id: channel)
+        cog.config_manager = object()
+        cog.config = types.SimpleNamespace(
+            monthly_admin_channel=AsyncMock(return_value="456"),
+        )
+        ctx = types.SimpleNamespace(send=AsyncMock())
+
+        with patch(
+            "alliance_reports.templates.monthly_admin.MonthlyAdminReport",
+            return_value=report_instance,
+        ):
+            asyncio.run(cog.report_monthly_admin(ctx))
+
+        report_instance.generate.assert_awaited_once_with(report_month=report_month)
+        report_instance.post.assert_awaited_once_with(channel, report_month=report_month)
 
 
 if __name__ == "__main__":
