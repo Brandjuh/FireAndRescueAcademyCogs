@@ -65,6 +65,25 @@ class DataAggregator:
         except Exception as e:
             log.exception(f"Error connecting to {db_name} database: {e}")
             return None
+
+    @staticmethod
+    def _has_log_event_coverage(
+        connection: sqlite3.Connection,
+        start: datetime,
+        end: datetime,
+    ) -> bool:
+        """Return whether confirmed log event timestamps exist in the period."""
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            SELECT 1 FROM logs
+            WHERE datetime(event_timestamp) >= datetime(?)
+            AND datetime(event_timestamp) < datetime(?)
+            LIMIT 1
+            """,
+            (start.isoformat(), end.isoformat()),
+        )
+        return cursor.fetchone() is not None
     
     @staticmethod
     def _get_game_day_window(utc_now: datetime) -> tuple[datetime, datetime]:
@@ -610,9 +629,11 @@ class DataAggregator:
             conn_logs = self._get_db_connection("logs_v2")
             new_joins = 0
             left = 0
+            log_activity_available = False
             
             if conn_logs:
                 cursor_logs = conn_logs.cursor()
+                log_activity_available = self._has_log_event_coverage(conn_logs, start, end)
                 
                 cursor_logs.execute("""
                     SELECT COUNT(*) FROM logs 
@@ -655,6 +676,7 @@ class DataAggregator:
                 "left_period": left,
                 "kicked_period": kicked,
                 "net_growth": net_growth,
+                "log_activity_available": log_activity_available,
             }
         
         except Exception as e:
@@ -669,6 +691,9 @@ class DataAggregator:
                 return {"error": "Database not found"}
             
             cursor = conn.cursor()
+            if not self._has_log_event_coverage(conn, start, end):
+                conn.close()
+                return {"error": "Log event timestamps are unavailable for this period"}
             
             # Courses started
             cursor.execute("""
@@ -750,9 +775,15 @@ class DataAggregator:
             conn_logs = self._get_db_connection("logs_v2")
             ext_started = 0
             ext_completed = 0
+            extension_activity_available = False
             
             if conn_logs:
                 cursor_logs = conn_logs.cursor()
+                extension_activity_available = self._has_log_event_coverage(
+                    conn_logs,
+                    start,
+                    end,
+                )
                 
                 cursor_logs.execute("""
                     SELECT COUNT(*) FROM logs 
@@ -778,6 +809,7 @@ class DataAggregator:
                 "extensions_started_period": ext_started,
                 "extensions_completed_period": ext_completed,
                 "by_type_counts": by_type,
+                "extension_activity_available": extension_activity_available,
             }
         
         except Exception as e:
@@ -792,6 +824,9 @@ class DataAggregator:
                 return {"error": "Database not found"}
             
             cursor = conn.cursor()
+            if not self._has_log_event_coverage(conn, start, end):
+                conn.close()
+                return {"error": "Log event timestamps are unavailable for this period"}
             
             # Large missions
             cursor.execute("""
