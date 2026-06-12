@@ -211,6 +211,76 @@ class MemberSync(commands.Cog):
                 con.close()
         return await asyncio.get_running_loop().run_in_executor(None, _run)
 
+    async def get_verification_status(
+        self,
+        discord_id: Optional[int] = None,
+        mc_user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Public API: return the current verification row for any status."""
+        if discord_id is None and mc_user_id is None:
+            return None
+
+        def _run():
+            con = sqlite3.connect(self.links_db)
+            con.row_factory = sqlite3.Row
+            try:
+                if discord_id is not None:
+                    row = con.execute(
+                        "SELECT * FROM links WHERE discord_id=? ORDER BY updated_at DESC LIMIT 1",
+                        (str(discord_id),),
+                    ).fetchone()
+                    if row:
+                        return dict(row)
+
+                if mc_user_id is not None:
+                    row = con.execute(
+                        "SELECT * FROM links WHERE mc_user_id=? ORDER BY updated_at DESC LIMIT 1",
+                        (str(mc_user_id),),
+                    ).fetchone()
+                    if row:
+                        return dict(row)
+
+                return None
+            finally:
+                con.close()
+
+        return await asyncio.get_running_loop().run_in_executor(None, _run)
+
+    async def get_verification_history(
+        self,
+        discord_id: Optional[int] = None,
+        mc_user_id: Optional[str] = None,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Public API: return known verification rows for audit/profile use."""
+        if discord_id is None and mc_user_id is None:
+            return []
+
+        def _run():
+            con = sqlite3.connect(self.links_db)
+            con.row_factory = sqlite3.Row
+            try:
+                clauses = []
+                params = []
+                if discord_id is not None:
+                    clauses.append("discord_id=?")
+                    params.append(str(discord_id))
+                if mc_user_id is not None:
+                    clauses.append("mc_user_id=?")
+                    params.append(str(mc_user_id))
+
+                sql = (
+                    "SELECT * FROM links "
+                    f"WHERE {' OR '.join(clauses)} "
+                    "ORDER BY updated_at DESC LIMIT ?"
+                )
+                params.append(int(limit))
+                return [dict(row) for row in con.execute(sql, tuple(params)).fetchall()]
+            finally:
+                con.close()
+
+        return await asyncio.get_running_loop().run_in_executor(None, _run)
+
     async def _find_member_in_db(self, candidate_name: Optional[str], candidate_mc_id: Optional[str]) -> Optional[Dict[str, Any]]:
         """Search for member in alliance database by name or MC ID"""
         name = _lower(candidate_name) if candidate_name else None

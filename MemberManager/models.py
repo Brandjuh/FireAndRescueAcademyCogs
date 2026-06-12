@@ -35,6 +35,10 @@ class MemberData:
     # Link status
     link_status: Optional[str] = None  # "approved", "pending", "denied", "none"
     link_created: Optional[datetime] = None
+    link_updated: Optional[str] = None
+    link_reviewer_id: Optional[int] = None
+    verified_role_present: Optional[bool] = None
+    member_sync_conflict: Optional[str] = None
     
     # Stats
     notes_count: int = 0
