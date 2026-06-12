@@ -14,7 +14,7 @@ import discord
 import aiosqlite
 from typing import Optional, Dict, Any, List
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 
 from .audit import (
     BUILDING_ACTIVITY_ACTION_KEYS,
@@ -625,40 +625,34 @@ class MemberOverviewView(discord.ui.View):
         
         # Get all sanctions from SanctionManager
         all_sanctions = []
+        sanction_summary = None
         sanction_manager = self.integrations.get("sanction_manager")
         
         if sanction_manager and self.guild:
             try:
+                get_member_sanction_summary = getattr(sanction_manager, "get_member_sanction_summary", None)
                 get_member_sanctions = getattr(sanction_manager, "get_member_sanctions", None)
-                if get_member_sanctions:
+                if get_member_sanction_summary:
+                    sanction_summary = get_member_sanction_summary(
+                        guild_id=self.guild.id,
+                        discord_user_id=data.discord_id,
+                        mc_user_id=data.mc_user_id,
+                    )
+                    all_sanctions = sanction_summary.get("sanctions", [])
+                elif get_member_sanctions:
                     sanctions = get_member_sanctions(
                         guild_id=self.guild.id,
                         discord_user_id=data.discord_id,
                         mc_user_id=data.mc_user_id,
                     )
+                    all_sanctions = list(sanctions)
                 else:
                     sanctions = sanction_manager.db.get_user_sanctions(
                         guild_id=self.guild.id,
                         discord_user_id=data.discord_id,
                         mc_user_id=data.mc_user_id,
                     )
-                
-                # Check expiry status
-                now = int(datetime.now(timezone.utc).timestamp())
-                thirty_days_ago = now - (30 * 86400)
-                
-                for sanction in sanctions:
-                    is_warning = "Warning" in sanction.get("sanction_type", "")
-                    created_at = sanction.get("created_at", 0)
-                    status = sanction.get("status", "active")
-                    
-                    # Mark warnings as expired if older than 30 days
-                    if is_warning and status == "active" and created_at < thirty_days_ago:
-                        sanction["_display_expired"] = True
-                    else:
-                        sanction["_display_expired"] = False
-                    
-                    all_sanctions.append(sanction)
+                    all_sanctions = list(sanctions)
             
             except Exception as e:
                 log.error(f"Error fetching sanctions: {e}")
@@ -684,23 +678,34 @@ class MemberOverviewView(discord.ui.View):
         all_sanctions.sort(key=lambda x: x.get("created_at", 0), reverse=True)
         
         # SMART VIEW LOGIC
-        active_sanctions = [s for s in all_sanctions if s.get("status") == "active" and not s.get("_display_expired")]
+        active_sanctions = [
+            s for s in all_sanctions
+            if s.get("effective_status", s.get("status", "active")) == "active"
+        ]
         
         # MODE 1: Single sanction - show full details
         if len(active_sanctions) == 1:
-            return self._build_single_sanction_embed(active_sanctions[0], data, all_sanctions)
+            return self._build_single_sanction_embed(active_sanctions[0], data, all_sanctions, sanction_summary)
         
         # MODE 2: Multiple sanctions - show list with pagination
         elif len(active_sanctions) > 1:
-            return self._build_sanctions_list_embed(all_sanctions, data)
+            return self._build_sanctions_list_embed(all_sanctions, data, sanction_summary)
         
         # MODE 3: No active sanctions but historical ones exist
         else:
             embed.description = "✅ No active sanctions"
             embed.color = discord.Color.green()
             
-            expired_count = len([s for s in all_sanctions if s.get("_display_expired")])
-            removed_count = len([s for s in all_sanctions if s.get("status") != "active"])
+            expired_count = (
+                sanction_summary.get("expired_count", 0)
+                if sanction_summary
+                else len([s for s in all_sanctions if s.get("effective_status") == "expired" or s.get("_display_expired")])
+            )
+            removed_count = (
+                sanction_summary.get("removed_count", 0)
+                if sanction_summary
+                else len([s for s in all_sanctions if s.get("effective_status", s.get("status")) == "removed"])
+            )
             
             if expired_count or removed_count:
                 embed.add_field(
@@ -719,7 +724,8 @@ class MemberOverviewView(discord.ui.View):
         self,
         sanction: Dict[str, Any],
         member_data: MemberData,
-        all_sanctions: List[Dict[str, Any]]
+        all_sanctions: List[Dict[str, Any]],
+        sanction_summary: Optional[Dict[str, Any]] = None,
     ) -> discord.Embed:
         """Detailed view for single active sanction."""
         embed = discord.Embed(
@@ -763,7 +769,11 @@ class MemberOverviewView(discord.ui.View):
         
         # Historical summary
         total = len(all_sanctions)
-        active_count = len([s for s in all_sanctions if s.get("status") == "active" and not s.get("_display_expired")])
+        active_count = (
+            sanction_summary.get("active_count", 0)
+            if sanction_summary
+            else len([s for s in all_sanctions if s.get("effective_status", s.get("status", "active")) == "active"])
+        )
         
         embed.set_footer(text=f"Active: {active_count} • Total historical: {total} • Use buttons to manage")
         
@@ -772,7 +782,8 @@ class MemberOverviewView(discord.ui.View):
     def _build_sanctions_list_embed(
         self,
         all_sanctions: List[Dict[str, Any]],
-        member_data: MemberData
+        member_data: MemberData,
+        sanction_summary: Optional[Dict[str, Any]] = None,
     ) -> discord.Embed:
         """List view for multiple sanctions with pagination."""
         embed = discord.Embed(
@@ -795,7 +806,7 @@ class MemberOverviewView(discord.ui.View):
             sanction_type = sanction.get("sanction_type", "Unknown")
             reason = truncate_text(sanction.get("reason_detail", ""), 50)
             created = format_timestamp(sanction.get("created_at", 0), "R")
-            status = sanction.get("status", "active")
+            status = sanction.get("effective_status", sanction.get("status", "active"))
             
             # Status emoji
             if status != "active":
@@ -813,6 +824,11 @@ class MemberOverviewView(discord.ui.View):
             lines.append("")
         
         embed.description = "\n".join(lines) if lines else "*No sanctions on this page*"
+
+        if sanction_summary:
+            active_count = sanction_summary.get("active_count", active_count)
+            expired_count = sanction_summary.get("expired_count", expired_count)
+            removed_count = sanction_summary.get("removed_count", removed_count)
         
         # Footer with stats
         total_count = len(all_sanctions)
