@@ -90,8 +90,8 @@ class AllianceReportContractTests(unittest.TestCase):
 
         self.assertNotIn("activity_score", data)
         self.assertNotIn("treasury", data)
-        expected_start = datetime(2026, 5, 1)
-        expected_end = datetime(2026, 6, 1)
+        expected_start = datetime(2026, 5, 1, 4, tzinfo=ZoneInfo("UTC"))
+        expected_end = datetime(2026, 6, 1, 4, tzinfo=ZoneInfo("UTC"))
         aggregator._get_membership_data_monthly.assert_awaited_once_with(expected_start, expected_end)
 
     def test_game_day_window_uses_eastern_dst_rules(self):
@@ -104,10 +104,18 @@ class AllianceReportContractTests(unittest.TestCase):
         self.assertEqual(winter_start.hour, 5)
         self.assertEqual(summer_start.hour, 4)
 
-    def test_scheduler_current_game_month_uses_new_york_timezone(self):
-        report_month = ReportScheduler._current_game_month()
+    def test_game_month_window_uses_eastern_dst_rules(self):
+        winter_start, winter_end = DataAggregator._get_game_month_window(
+            datetime(2026, 1, 15)
+        )
+        summer_start, summer_end = DataAggregator._get_game_month_window(
+            datetime(2026, 6, 15)
+        )
 
-        self.assertEqual(str(report_month.tzinfo), "America/New_York")
+        self.assertEqual(winter_start, datetime(2026, 1, 1, 5, tzinfo=ZoneInfo("UTC")))
+        self.assertEqual(winter_end, datetime(2026, 2, 1, 5, tzinfo=ZoneInfo("UTC")))
+        self.assertEqual(summer_start, datetime(2026, 6, 1, 4, tzinfo=ZoneInfo("UTC")))
+        self.assertEqual(summer_end, datetime(2026, 7, 1, 4, tzinfo=ZoneInfo("UTC")))
 
     def test_monthly_membership_uses_actual_snapshots_for_net_growth(self):
         import asyncio
@@ -134,13 +142,15 @@ class AllianceReportContractTests(unittest.TestCase):
             members.close()
 
             logs = sqlite3.connect(logs_path)
-            logs.execute("CREATE TABLE logs (action_key TEXT, scraped_at TEXT)")
+            logs.execute(
+                "CREATE TABLE logs (action_key TEXT, scraped_at TEXT, event_timestamp TEXT)"
+            )
             logs.executemany(
-                "INSERT INTO logs VALUES (?, ?)",
+                "INSERT INTO logs VALUES (?, ?, ?)",
                 [
-                    ("added_to_alliance", "2026-05-10T12:00:00"),
-                    ("added_to_alliance", "2026-05-11T12:00:00"),
-                    ("left_alliance", "2026-05-12T12:00:00"),
+                    ("added_to_alliance", "2026-06-12T12:00:00", "2026-05-10T12:00:00"),
+                    ("added_to_alliance", "2026-06-12T12:00:00", "2026-05-11T12:00:00"),
+                    ("left_alliance", "2026-06-12T12:00:00", "2026-05-12T12:00:00"),
                 ],
             )
             logs.commit()
@@ -171,6 +181,72 @@ class AllianceReportContractTests(unittest.TestCase):
         self.assertEqual(result["net_growth"], 1)
         self.assertEqual(result["new_joins_period"], 2)
         self.assertEqual(result["left_period"], 1)
+
+    def test_daily_training_uses_event_time_instead_of_scrape_time(self):
+        import asyncio
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs_path = Path(temp_dir) / "logs.db"
+            logs = sqlite3.connect(logs_path)
+            logs.execute(
+                "CREATE TABLE logs (action_key TEXT, scraped_at TEXT, event_timestamp TEXT)"
+            )
+            logs.executemany(
+                "INSERT INTO logs VALUES (?, ?, ?)",
+                [
+                    ("created_course", "2026-06-12T12:00:00+00:00", "2026-06-12T05:00:00+00:00"),
+                    ("course_completed", "2026-06-12T12:00:00+00:00", "2026-06-11T23:59:00+00:00"),
+                    ("created_course", "2026-06-12T12:00:00+00:00", None),
+                ],
+            )
+            logs.commit()
+            logs.close()
+
+            aggregator = DataAggregator(
+                types.SimpleNamespace(_db_cache={"logs_v2_db_path": logs_path})
+            )
+            result = asyncio.run(
+                aggregator._get_training_data_daily(
+                    datetime(2026, 6, 12, 4, 0, tzinfo=ZoneInfo("UTC")),
+                    datetime(2026, 6, 12, 13, 0, tzinfo=ZoneInfo("UTC")),
+                )
+            )
+
+        self.assertEqual(result["started_24h"], 1)
+        self.assertEqual(result["completed_24h"], 0)
+
+    def test_monthly_operations_use_event_time_instead_of_scrape_time(self):
+        import asyncio
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs_path = Path(temp_dir) / "logs.db"
+            logs = sqlite3.connect(logs_path)
+            logs.execute(
+                "CREATE TABLE logs (action_key TEXT, scraped_at TEXT, event_timestamp TEXT)"
+            )
+            logs.executemany(
+                "INSERT INTO logs VALUES (?, ?, ?)",
+                [
+                    ("large_mission_started", "2026-06-01T00:01:00", "2026-05-31T23:59:00"),
+                    ("alliance_event_started", "2026-05-31T23:59:00", "2026-06-01T00:01:00"),
+                    ("alliance_event_started", "2026-05-10T12:00:00", None),
+                ],
+            )
+            logs.commit()
+            logs.close()
+
+            aggregator = DataAggregator(
+                types.SimpleNamespace(_db_cache={"logs_v2_db_path": logs_path})
+            )
+            result = asyncio.run(
+                aggregator._get_operations_data_monthly(
+                    datetime(2026, 5, 1),
+                    datetime(2026, 6, 1),
+                )
+            )
+
+        self.assertEqual(result["large_missions_period"], 1)
+        self.assertEqual(result["alliance_events_period"], 0)
 
     def test_monthly_membership_does_not_publish_zero_without_start_snapshot(self):
         import asyncio

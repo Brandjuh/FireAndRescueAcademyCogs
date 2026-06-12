@@ -58,6 +58,7 @@ def pytest_configure():
         blue=lambda: "blue",
         dark_blue=lambda: "dark_blue",
         dark_gold=lambda: "dark_gold",
+        gold=lambda: "gold",
         green=lambda: "green",
         orange=lambda: "orange",
         red=lambda: "red",

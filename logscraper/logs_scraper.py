@@ -578,14 +578,46 @@ class LogsScraper(commands.Cog):
         
         cursor.execute("SELECT MIN(ts), MAX(ts) FROM logs")
         date_range = cursor.fetchone()
+
+        cursor.execute("SELECT COUNT(*) FROM logs WHERE event_timestamp IS NOT NULL")
+        timestamped_logs = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM logs WHERE occurrence_index > 1")
+        repeated_logs = cursor.fetchone()[0]
+
+        cursor.execute("SELECT MAX(event_timestamp) FROM logs")
+        latest_event_timestamp = cursor.fetchone()[0]
         
         conn.close()
         
         embed = discord.Embed(title="📊 Logs Statistics", color=discord.Color.blue())
         embed.add_field(name="Total Logs", value=f"{total_logs:,}", inline=True)
         embed.add_field(name="Training Courses", value=f"{total_courses:,}", inline=True)
-        embed.add_field(name="Max Log ID", value=f"{max_id:,}", inline=True)
-        embed.add_field(name="Data Range", value=f"{date_range[0]} to {date_range[1]}", inline=False)
+        embed.add_field(name="Max Log ID", value=f"{max_id or 0:,}", inline=True)
+        embed.add_field(
+            name="Event Timestamps",
+            value=f"{timestamped_logs:,} / {total_logs:,}",
+            inline=True,
+        )
+        embed.add_field(
+            name="Repeated Actions Preserved",
+            value=f"{repeated_logs:,}",
+            inline=True,
+        )
+        embed.add_field(
+            name="Latest Event (UTC)",
+            value=latest_event_timestamp or "None",
+            inline=False,
+        )
+        embed.add_field(
+            name="Source Data Range",
+            value=(
+                f"{date_range[0]} to {date_range[1]}"
+                if date_range[0] and date_range[1]
+                else "None"
+            ),
+            inline=False,
+        )
         embed.set_footer(text=f"Database: {self.db_path.name}")
         
         await ctx.send(embed=embed)
