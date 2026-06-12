@@ -114,6 +114,7 @@ class MemberManagerMemberSyncTests(unittest.TestCase):
         )
         view = MemberOverviewView.__new__(MemberOverviewView)
         view.member_data = data
+        view.overview_mode = "advanced"
 
         embed = asyncio.run(view.get_overview_embed())
 

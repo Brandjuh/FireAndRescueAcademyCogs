@@ -11,11 +11,19 @@ VERSION v2.1 - IMPROVEMENTS:
 """
 
 import discord
+import aiosqlite
 from typing import Optional, Dict, Any, List
 import logging
 from datetime import datetime, timezone
 
-from .audit import EVENT_EMOJI, fetch_missionchief_events, merge_timeline_events
+from .audit import (
+    BUILDING_ACTIVITY_ACTION_KEYS,
+    EVENT_EMOJI,
+    OPERATIONS_ACTION_KEYS,
+    build_identity_filters,
+    fetch_missionchief_events,
+    merge_timeline_events,
+)
 from .models import MemberData
 from .utils import (
     format_timestamp,
@@ -66,10 +74,13 @@ class MemberOverviewView(discord.ui.View):
         self.audit_page = 0
         self.audit_per_page = 10
         self.audit_search_query: Optional[str] = None
+        self.overview_mode = "simple"
         
         # 🔧 NEW: Events pagination
         self.events_page = 0
         self.events_per_page = 10
+        self.buildings_page = 0
+        self.buildings_per_page = 10
         
         # Initialize with correct buttons
         self._rebuild_buttons()
@@ -77,51 +88,54 @@ class MemberOverviewView(discord.ui.View):
     def _rebuild_buttons(self):
         """Rebuild buttons based on current tab."""
         self.clear_items()
-        
-        # Row 0: Tab buttons (always visible)
+
         self.add_item(TabButton("Overview", "overview", self, row=0))
         self.add_item(TabButton("Notes", "notes", self, row=0))
         self.add_item(TabButton("Sanctions", "infractions", self, row=0))
         self.add_item(TabButton("Events", "events", self, row=0))
         self.add_item(TabButton("Audit", "audit", self, row=0))
-        
-        # Row 1: Context-specific action buttons
-        if self.current_tab == "notes":
-            self.add_item(AddNoteButton(self, row=1))
-            self.add_item(ViewNoteButton(self, row=1))
-            self.add_item(TogglePinNoteButton(self, row=1))
-            self.add_item(EditNoteButton(self, row=1))
-            self.add_item(DeleteNoteButton(self, row=1))
-        
+        self.add_item(TabButton("Buildings", "buildings", self, row=1))
+
+        if self.current_tab == "overview":
+            self.add_item(ToggleOverviewModeButton(self, row=2))
+
+        elif self.current_tab == "notes":
+            self.add_item(AddNoteButton(self, row=2))
+            self.add_item(ViewNoteButton(self, row=2))
+            self.add_item(TogglePinNoteButton(self, row=2))
+            self.add_item(EditNoteButton(self, row=2))
+            self.add_item(DeleteNoteButton(self, row=2))
+
         elif self.current_tab == "infractions":
-            self.add_item(AddSanctionButton(self, row=1))
-            
+            self.add_item(AddSanctionButton(self, row=2))
+
             if self._has_sanctions():
-                self.add_item(EditSanctionButton(self, row=1))
-                self.add_item(RemoveSanctionButton(self, row=1))
-            
+                self.add_item(EditSanctionButton(self, row=2))
+                self.add_item(RemoveSanctionButton(self, row=2))
+
             if self._has_multiple_sanctions():
-                self.add_item(SearchSanctionButton(self, row=2))
-                self.add_item(PreviousPageButton(self, "infraction", row=2))
-                self.add_item(NextPageButton(self, "infraction", row=2))
-        
-        # 🔧 NEW: Audit buttons
+                self.add_item(SearchSanctionButton(self, row=3))
+                self.add_item(PreviousPageButton(self, "infraction", row=3))
+                self.add_item(NextPageButton(self, "infraction", row=3))
+
         elif self.current_tab == "audit":
-            self.add_item(SearchAuditButton(self, row=1))
+            self.add_item(SearchAuditButton(self, row=2))
             if self.audit_search_query:
-                self.add_item(ClearAuditSearchButton(self, row=1))
-            self.add_item(PreviousPageButton(self, "audit", row=2))
-            self.add_item(NextPageButton(self, "audit", row=2))
-        
-        # 🔧 NEW: Events pagination
+                self.add_item(ClearAuditSearchButton(self, row=2))
+            self.add_item(PreviousPageButton(self, "audit", row=3))
+            self.add_item(NextPageButton(self, "audit", row=3))
+
         elif self.current_tab == "events":
-            self.add_item(PreviousPageButton(self, "events", row=2))
-            self.add_item(NextPageButton(self, "events", row=2))
-        
-        # Row 3: Always visible utilities
-        self.add_item(RefreshButton(self, row=3))
-        self.add_item(CloseButton(self, row=3))
-    
+            self.add_item(PreviousPageButton(self, "events", row=3))
+            self.add_item(NextPageButton(self, "events", row=3))
+
+        elif self.current_tab == "buildings":
+            self.add_item(PreviousPageButton(self, "buildings", row=3))
+            self.add_item(NextPageButton(self, "buildings", row=3))
+
+        self.add_item(RefreshButton(self, row=4))
+        self.add_item(CloseButton(self, row=4))
+
     def _has_sanctions(self) -> bool:
         """Check if member has any sanctions."""
         return self.member_data.infractions_count > 0
@@ -194,6 +208,8 @@ class MemberOverviewView(discord.ui.View):
             embed = await self.get_infractions_embed()
         elif self.current_tab == "events":
             embed = await self.get_events_embed()
+        elif self.current_tab == "buildings":
+            embed = await self.get_buildings_embed()
         elif self.current_tab == "audit":
             embed = await self.get_audit_embed()
         else:
@@ -231,6 +247,9 @@ class MemberOverviewView(discord.ui.View):
     
     async def get_overview_embed(self) -> discord.Embed:
         """Build the overview embed."""
+        if getattr(self, "overview_mode", "simple") == "simple":
+            return self._build_simple_overview_embed()
+
         data = self.member_data
         
         embed = discord.Embed(
@@ -381,6 +400,53 @@ class MemberOverviewView(discord.ui.View):
             embed.set_footer(text="❌ Incomplete information")
         
         return embed
+
+    def _build_simple_overview_embed(self) -> discord.Embed:
+        """Build a compact overview for quick member triage."""
+        data = self.member_data
+
+        embed = discord.Embed(
+            title=f"👤 Member Overview: {data.get_display_name()}",
+            color=discord.Color.blue() if data.is_verified else discord.Color.orange()
+        )
+
+        identity_lines = []
+        if data.discord_username:
+            identity_lines.append(f"**Discord:** {data.discord_username}")
+        if data.discord_id:
+            identity_lines.append(f"**Discord ID:** `{data.discord_id}`")
+        if data.mc_username:
+            identity_lines.append(f"**MissionChief:** {data.mc_username}")
+        if data.mc_user_id:
+            identity_lines.append(f"**MC ID:** `{data.mc_user_id}`")
+        if data.mc_user_id:
+            identity_lines.append(f"**Profile:** [View Profile]({build_mc_profile_url(data.mc_user_id)})")
+        if not identity_lines:
+            identity_lines.append("*No identity data available*")
+
+        status_lines = [
+            f"**Link:** {data.link_status or 'none'}",
+            f"**Verified:** {'yes' if data.is_verified else 'no'}",
+            f"**MC Role:** {data.mc_role or 'unknown'}",
+        ]
+        if data.member_sync_conflict:
+            status_lines.append(f"**Conflict:** {data.member_sync_conflict}")
+
+        risk_lines = [
+            f"**Active sanctions:** {data.infractions_count}",
+            f"**Notes:** {data.notes_count}",
+            f"**Severity:** {data.severity_score}",
+        ]
+        if data.contribution_rate is not None:
+            risk_lines.append(f"**Contribution:** {data.contribution_rate:.1f}%")
+        else:
+            risk_lines.append("**Contribution:** no data")
+
+        embed.add_field(name="Identity", value="\n".join(identity_lines), inline=False)
+        embed.add_field(name="Status", value="\n".join(status_lines), inline=False)
+        embed.add_field(name="Risk Snapshot", value="\n".join(risk_lines), inline=False)
+        embed.set_footer(text="Simple overview • Use Advanced Overview for full details")
+        return embed
     
     async def get_notes_embed(self) -> discord.Embed:
         """Build the notes embed."""
@@ -514,7 +580,9 @@ class MemberOverviewView(discord.ui.View):
                 embed.description = "⚠️ Error loading sanctions"
                 return embed
         else:
-            embed.description = "⚠️ SanctionManager not available"
+            embed.description = "*No sanctions are currently shown for this member.*"
+            embed.set_footer(text="Sanction backend is not loaded")
+            embed.color = discord.Color.green()
             return embed
         
         if not all_sanctions:
@@ -676,163 +744,95 @@ class MemberOverviewView(discord.ui.View):
         return embed
     
     async def get_events_embed(self) -> discord.Embed:
-        """
-        Build the events embed showing alliance logs.
-        
-        🔧 UPDATED: Uses LogsScraper instead of AllianceScraper
-        """
-        data = self.member_data
-        
-        embed = discord.Embed(
-            title=f"📅 Alliance Activity - {data.get_display_name()}",
-            color=discord.Color.purple()
+        """Build the operations embed for alliance storms and large alliance missions."""
+        return await self._build_filtered_logs_embed(
+            title=f"?? Alliance Operations - {self.member_data.get_display_name()}",
+            empty_text="No alliance storm or large alliance mission logs found for this member.",
+            action_keys=OPERATIONS_ACTION_KEYS,
+            page=self.events_page,
+            per_page=self.events_per_page,
+            footer_label="operations",
+            color=discord.Color.purple(),
         )
-        
-        # Need either MC username or MC ID
-        if not data.mc_username and not data.mc_user_id:
-            embed.description = "*No MC account linked - cannot show alliance activity.*"
-            return embed
-        
-        # Get logs from LogsScraper
-        logs_scraper = self.integrations.get("logs_scraper")
-        if not logs_scraper:
-            embed.description = "⚠️ LogsScraper not available - make sure it's loaded with `[p]load logsscraper`"
-            return embed
-        
+
+    async def get_buildings_embed(self) -> discord.Embed:
+        """Build the building and extension activity embed."""
+        return await self._build_filtered_logs_embed(
+            title=f"??? Buildings & Extensions - {self.member_data.get_display_name()}",
+            empty_text="No building or extension logs found for this member.",
+            action_keys=BUILDING_ACTIVITY_ACTION_KEYS,
+            page=self.buildings_page,
+            per_page=self.buildings_per_page,
+            footer_label="building logs",
+            color=discord.Color.dark_gold(),
+        )
+
+    async def _build_filtered_logs_embed(
+        self,
+        *,
+        title: str,
+        empty_text: str,
+        action_keys: set[str],
+        page: int,
+        per_page: int,
+        footer_label: str,
+        color,
+    ) -> discord.Embed:
+        """Build a filtered LogsScraper embed for a specific action category."""
+        embed = discord.Embed(title=title, color=color)
+
         try:
-            import aiosqlite
-            
-            # LogsScraper uses logs_v3.db in scraper_databases folder
-            db_path = logs_scraper.db_path
-            
-            if not db_path.exists():
-                embed.description = f"⚠️ Database not found: {db_path}"
-                return embed
-            
-            # Query logs where this user is involved (executed or affected)
-            async with aiosqlite.connect(db_path) as db:
-                db.row_factory = aiosqlite.Row
-                
-                # Calculate pagination
-                offset = self.events_page * self.events_per_page
-                
-                # Build query - search by BOTH name and ID
-                # Clean username (remove "Former member" prefix if present)
-                mc_username = data.mc_username
-                if mc_username and "Former member" in mc_username:
-                    # Extract ID from "Former member (12345)"
-                    import re
-                    match = re.search(r'\((\d+)\)', mc_username)
-                    if match:
-                        mc_username = None  # Only search by ID
-                    else:
-                        mc_username = None
-                
-                # Build WHERE clause
-                where_parts = []
-                params = []
-                
-                if data.mc_user_id:
-                    where_parts.append("(executed_mc_id = ? OR affected_mc_id = ?)")
-                    params.extend([data.mc_user_id, data.mc_user_id])
-                
-                if mc_username:
-                    where_parts.append("(executed_name = ? OR affected_name = ?)")
-                    params.extend([mc_username, mc_username])
-                
-                if not where_parts:
-                    embed.description = "*Cannot determine member identity for log search.*"
-                    return embed
-                
-                where_clause = " OR ".join(where_parts)
-                
-                # Get logs for this user
-                sql = f"""
-                SELECT id, ts, action_key, action_text, executed_name, executed_mc_id,
-                       affected_name, affected_mc_id, description, contribution_amount
-                FROM logs 
-                WHERE {where_clause}
-                ORDER BY ts DESC
-                LIMIT ? OFFSET ?
-                """
-                params.extend([self.events_per_page, offset])
-                
-                cursor = await db.execute(sql, params)
-                logs = await cursor.fetchall()
-                
-                # Count total for pagination
-                count_sql = f"SELECT COUNT(*) FROM logs WHERE {where_clause}"
-                count_params = params[:-2]  # Remove LIMIT and OFFSET params
-                count_cursor = await db.execute(count_sql, count_params)
-                total_count = (await count_cursor.fetchone())[0]
-        
-        except Exception as e:
-            log.error(f"Error fetching alliance logs: {e}", exc_info=True)
-            embed.description = f"⚠️ Error loading alliance activity: {str(e)}"
-            return embed
-        
-        if not logs:
-            embed.description = (
-                f"*No alliance activity found for {data.mc_username or data.mc_user_id}.*\n\n"
-                f"💡 **Tip:** This searches for logs where this member was the executor or was affected.\n"
-                f"Searching for: "
+            logs, total_count, error = await self._fetch_member_log_rows(
+                action_keys,
+                page=page,
+                per_page=per_page,
             )
-            if mc_username:
-                embed.description += f"Name: `{mc_username}` "
-            if data.mc_user_id:
-                embed.description += f"ID: `{data.mc_user_id}`"
-            
-            embed.description += f"\n\n🔧 **Debug:** Database path: `{db_path}`"
+        except Exception as e:
+            log.error(f"Error fetching filtered member logs: {e}", exc_info=True)
+            embed.description = f"?? Error loading logs: {str(e)}"
             return embed
-        
+
+        if error:
+            embed.description = empty_text
+            embed.set_footer(text=error)
+            return embed
+
+        if not logs:
+            embed.description = f"*{empty_text}*"
+            return embed
+
         lines = []
         for log_entry in logs:
-            ts = log_entry["ts"]
-            action_text = log_entry["action_text"] or log_entry["action_key"]
-            description = log_entry["description"]
-            executed_name = log_entry["executed_name"]
-            affected_name = log_entry["affected_name"]
-            
-            # Format timestamp
+            ts = log_entry.get("event_timestamp") or log_entry.get("ts")
+            action_text = log_entry.get("action_text") or log_entry.get("action_key")
+            description = log_entry.get("description")
+            executed_name = log_entry.get("executed_name")
+            affected_name = log_entry.get("affected_name")
+
             try:
-                dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
                 timestamp_formatted = format_timestamp(int(dt.timestamp()), "R")
-            except:
-                timestamp_formatted = ts
-            
-            # Build line with actor info
-            emoji = self._get_action_emoji(log_entry["action_key"])
-            
-            # Show who did what to whom (if different from member)
+            except Exception:
+                timestamp_formatted = ts or "Unknown time"
+
             actor_info = ""
-            if executed_name and executed_name != mc_username:
+            if executed_name:
                 actor_info = f" by {executed_name}"
-            if affected_name and affected_name != mc_username and affected_name != executed_name:
-                actor_info += f" → {affected_name}"
-            
+            if affected_name and affected_name != executed_name:
+                actor_info += f" -> {affected_name}"
+
+            emoji = self._get_action_emoji(log_entry.get("action_key"))
             lines.append(f"{emoji} **{action_text}**{actor_info} | {timestamp_formatted}")
-            
             if description:
                 lines.append(f"  *{truncate_text(description, 100)}*")
-            
-            # Show contribution if present
-            if log_entry["contribution_amount"]:
-                lines.append(f"  💰 Contribution: ${log_entry['contribution_amount']:,}")
-            
             lines.append("")
-        
+
         embed.description = "\n".join(lines)
-        
-        # Pagination footer
-        total_pages = (total_count + self.events_per_page - 1) // self.events_per_page
-        current_page = self.events_page + 1
-        
-        embed.set_footer(
-            text=f"Page {current_page}/{total_pages} • Total activity: {total_count} events"
-        )
-        
+        total_pages = max(1, (total_count + per_page - 1) // per_page)
+        current_page = min(page + 1, total_pages)
+        embed.set_footer(text=f"Page {current_page}/{total_pages} - Total {footer_label}: {total_count}")
         return embed
-    
+
     def _get_action_emoji(self, action_key: str) -> str:
         """Get emoji for alliance action."""
         emoji_map = {
@@ -850,6 +850,63 @@ class MemberOverviewView(discord.ui.View):
         }
         return emoji_map.get(action_key, "•")
     
+    async def _fetch_member_log_rows(
+        self,
+        action_keys: set[str],
+        *,
+        page: int,
+        per_page: int,
+    ) -> tuple[List[Dict[str, Any]], int, Optional[str]]:
+        """Fetch stored LogsScraper rows for this member and action category."""
+        data = self.member_data
+        logs_scraper = self.integrations.get("logs_scraper")
+        if not logs_scraper:
+            return [], 0, "LogsScraper is not loaded."
+
+        db_path = logs_scraper.db_path
+        if not db_path.exists():
+            return [], 0, f"Database not found: {db_path}"
+
+        where_clause, params = build_identity_filters(
+            mc_user_id=data.mc_user_id,
+            mc_username=data.mc_username,
+        )
+        if not where_clause:
+            return [], 0, "Cannot determine member identity for log search."
+
+        action_key_list = sorted(action_keys)
+        placeholders = ", ".join("?" for _ in action_key_list)
+        offset = page * per_page
+        query_params = [*params, *action_key_list]
+
+        async with aiosqlite.connect(db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                f"""
+                SELECT id, ts, event_timestamp, action_key, action_text,
+                       executed_name, executed_mc_id, affected_name, affected_mc_id,
+                       description, contribution_amount
+                FROM logs
+                WHERE ({where_clause}) AND action_key IN ({placeholders})
+                ORDER BY COALESCE(event_timestamp, ts) DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                [*query_params, per_page, offset],
+            )
+            rows = [dict(row) for row in await cursor.fetchall()]
+
+            count_cursor = await db.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM logs
+                WHERE ({where_clause}) AND action_key IN ({placeholders})
+                """,
+                query_params,
+            )
+            total_count = (await count_cursor.fetchone())[0]
+
+        return rows, total_count, None
+
     async def get_audit_embed(self) -> discord.Embed:
         """
         Build the audit log embed with search and pagination.
@@ -966,6 +1023,7 @@ class TabButton(discord.ui.Button):
         self.parent_view.infraction_page = 0
         self.parent_view.audit_page = 0  # Reset audit page
         self.parent_view.events_page = 0  # Reset events page
+        self.parent_view.buildings_page = 0
         await self.parent_view._update_view(interaction)
 
 
@@ -1012,6 +1070,26 @@ class RefreshButton(discord.ui.Button):
                     mc_user_id=self.parent_view.member_data.mc_user_id
                 )
         
+        await self.parent_view._update_view(interaction)
+
+
+class ToggleOverviewModeButton(discord.ui.Button):
+    """Toggle between simple and advanced overview modes."""
+
+    def __init__(self, parent_view: MemberOverviewView, row: int):
+        next_mode = "Advanced" if parent_view.overview_mode == "simple" else "Simple"
+        super().__init__(
+            label=f"{next_mode} Overview",
+            style=discord.ButtonStyle.secondary,
+            custom_id="mm:toggle_overview_mode",
+            row=row
+        )
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction):
+        self.parent_view.overview_mode = (
+            "advanced" if self.parent_view.overview_mode == "simple" else "simple"
+        )
         await self.parent_view._update_view(interaction)
 
 
@@ -1205,6 +1283,8 @@ class PreviousPageButton(discord.ui.Button):
             disabled = parent_view.infraction_page == 0
         elif page_type == "audit":
             disabled = parent_view.audit_page == 0
+        elif page_type == "buildings":
+            disabled = parent_view.buildings_page == 0
         else:  # events
             disabled = parent_view.events_page == 0
         
@@ -1225,6 +1305,9 @@ class PreviousPageButton(discord.ui.Button):
         elif self.page_type == "audit":
             if self.parent_view.audit_page > 0:
                 self.parent_view.audit_page -= 1
+        elif self.page_type == "buildings":
+            if self.parent_view.buildings_page > 0:
+                self.parent_view.buildings_page -= 1
         else:  # events
             if self.parent_view.events_page > 0:
                 self.parent_view.events_page -= 1
@@ -1250,6 +1333,8 @@ class NextPageButton(discord.ui.Button):
             self.parent_view.infraction_page += 1
         elif self.page_type == "audit":
             self.parent_view.audit_page += 1
+        elif self.page_type == "buildings":
+            self.parent_view.buildings_page += 1
         else:  # events
             self.parent_view.events_page += 1
         

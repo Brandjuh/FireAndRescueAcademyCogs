@@ -139,6 +139,7 @@ def pytest_configure():
         gold=lambda: "gold",
         green=lambda: "green",
         orange=lambda: "orange",
+        purple=lambda: "purple",
         red=lambda: "red",
     )
     discord.ButtonStyle = types.SimpleNamespace(

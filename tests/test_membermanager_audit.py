@@ -40,7 +40,9 @@ class MemberManagerAuditTests(unittest.TestCase):
 
     def test_course_completed_logs_are_not_member_audit_entries(self):
         self.assertFalse(should_include_log_row({"action_key": "course_completed"}))
-        self.assertTrue(should_include_log_row({"action_key": "course_created"}))
+        self.assertFalse(should_include_log_row({"action_key": "course_created"}))
+        self.assertFalse(should_include_log_row({"action_key": "building_constructed"}))
+        self.assertTrue(should_include_log_row({"action_key": "chat_ban_set"}))
 
     def test_identity_filter_uses_id_and_name_without_former_member_label(self):
         where_clause, params = build_identity_filters(
@@ -147,8 +149,8 @@ class MemberManagerAuditTests(unittest.TestCase):
                     (
                         "2026-06-12T10:00:00+00:00",
                         "2026-06-12T10:00:00+00:00",
-                        "course_created",
-                        "Created a course",
+                        "chat_ban_set",
+                        "Chat ban set",
                         "MCUser",
                         "456",
                         "Academy #1",
@@ -171,7 +173,7 @@ class MemberManagerAuditTests(unittest.TestCase):
 
         self.assertEqual(len(events), 1)
         self.assertTrue(all(event.source == "MissionChief" for event in events))
-        self.assertEqual(events[0].title, "Created a course")
+        self.assertEqual(events[0].title, "Chat ban set")
 
     def test_audit_embed_combines_membermanager_and_missionchief_events(self):
         class FakeDB:
@@ -218,8 +220,8 @@ class MemberManagerAuditTests(unittest.TestCase):
                 (
                     "2026-06-12T10:00:00+00:00",
                     "2026-06-12T10:00:00+00:00",
-                    "course_created",
-                    "Created a course",
+                    "chat_ban_set",
+                    "Chat ban set",
                     "MCUser",
                     "456",
                     "Academy #1",
@@ -252,7 +254,7 @@ class MemberManagerAuditTests(unittest.TestCase):
             embed = discord.Embed(title="Audit", color=discord.Color.dark_gray())
             result = asyncio.run(view._build_audit_timeline_embed(embed))
 
-        self.assertIn("Created a course", result.description)
+        self.assertIn("Chat ban set", result.description)
         self.assertIn("Note Created", result.description)
         self.assertIn("Admin Nick", result.description)
 
