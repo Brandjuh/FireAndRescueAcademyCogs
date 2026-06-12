@@ -287,6 +287,7 @@ class MemberManagerSanctionsTests(unittest.TestCase):
                         "reason_category": "Conduct",
                         "reason_detail": "Needs attention",
                         "admin_username": "Admin",
+                        "mc_username": "SanctionMCUser",
                         "created_at": 1_800_000_000,
                         "status": "active",
                     }
@@ -309,6 +310,8 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         embed = asyncio.run(view.get_infractions_embed())
 
         self.assertIn("Active Sanction", embed.kwargs["title"])
+        self.assertIn("SanctionMCUser", embed.kwargs["title"])
+        self.assertNotIn("DiscordUser", embed.kwargs["title"])
         self.assertEqual(
             sanction_db.call,
             {
@@ -335,6 +338,7 @@ class MemberManagerSanctionsTests(unittest.TestCase):
                         "reason_category": "Conduct",
                         "reason_detail": "Needs attention",
                         "admin_username": "Admin",
+                        "mc_username": "SanctionMCUser",
                         "created_at": 1_800_000_000,
                         "status": "active",
                     }
@@ -356,6 +360,8 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         embed = asyncio.run(view.get_infractions_embed())
 
         self.assertIn("Active Sanction", embed.kwargs["title"])
+        self.assertIn("SanctionMCUser", embed.kwargs["title"])
+        self.assertNotIn("DiscordUser", embed.kwargs["title"])
         self.assertEqual(
             sanction_manager.call,
             {

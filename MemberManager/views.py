@@ -619,7 +619,7 @@ class MemberOverviewView(discord.ui.View):
         data = self.member_data
         
         embed = discord.Embed(
-            title=f"🚨 Sanctions - {data.get_display_name()}",
+            title=f"🚨 Sanctions - {self._get_sanction_display_name([], data)}",
             color=discord.Color.red()
         )
         
@@ -729,7 +729,7 @@ class MemberOverviewView(discord.ui.View):
     ) -> discord.Embed:
         """Detailed view for single active sanction."""
         embed = discord.Embed(
-            title=f"🚨 Active Sanction - {member_data.get_display_name()}",
+            title=f"🚨 Active Sanction - {self._get_sanction_display_name(all_sanctions, member_data)}",
             color=discord.Color.red()
         )
         
@@ -787,7 +787,7 @@ class MemberOverviewView(discord.ui.View):
     ) -> discord.Embed:
         """List view for multiple sanctions with pagination."""
         embed = discord.Embed(
-            title=f"🚨 Sanctions List - {member_data.get_display_name()}",
+            title=f"🚨 Sanctions List - {self._get_sanction_display_name(all_sanctions, member_data)}",
             color=discord.Color.red()
         )
         
@@ -845,6 +845,27 @@ class MemberOverviewView(discord.ui.View):
         )
         
         return embed
+
+    def _get_sanction_display_name(
+        self,
+        sanctions: List[Dict[str, Any]],
+        member_data: MemberData,
+    ) -> str:
+        """Return the best member identity for sanction context."""
+        for sanction in sanctions:
+            mc_username = sanction.get("mc_username")
+            if mc_username:
+                return str(mc_username)
+
+        if member_data.mc_username:
+            return member_data.mc_username
+        if member_data.discord_username:
+            return member_data.discord_username
+        if member_data.mc_user_id:
+            return f"MC User {member_data.mc_user_id}"
+        if member_data.discord_id:
+            return f"Discord User {member_data.discord_id}"
+        return "Unknown User"
     
     async def get_events_embed(self) -> discord.Embed:
         """Build the operations embed for alliance storms and large alliance missions."""
