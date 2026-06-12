@@ -103,3 +103,47 @@ def test_invalid_yaml_shapes_fall_back_to_static_catalog_and_incidents():
 
     assert FireStationCommand._build_incidents(cog) == FireStationCommand._fallback_incidents()
     assert FireStationCommand._build_vehicle_catalog(cog) == FireStationCommand._fallback_vehicle_catalog()
+
+
+def test_new_mission_state_includes_schema_and_initial_stage():
+    cog = _cog_with_game_data({})
+    incident = {
+        "id": "small_bin_fire",
+        "name": "Small Bin Fire",
+        "required_staff": 4,
+        "base_credits": 200,
+        "hint": "Quick response limits damage.",
+        "detail": "A small bin fire in a residential area.",
+    }
+
+    mission = FireStationCommand._new_mission_state(
+        cog,
+        incident,
+        channel_id=123,
+        guild_id=456,
+    )
+
+    assert mission == {
+        "schema_version": FireStationCommand.MISSION_SCHEMA_VERSION,
+        "id": "small_bin_fire",
+        "title": "Small Bin Fire",
+        "required_staff": 4,
+        "base_credits": 200,
+        "hint": "Quick response limits damage.",
+        "detail": "A small bin fire in a residential area.",
+        "stage": FireStationCommand.STAGE_ALERT_CHOICE,
+        "alert_mode": None,
+        "channel_id": 123,
+        "guild_id": 456,
+    }
+
+
+def test_set_mission_stage_preserves_schema_version():
+    cog = _cog_with_game_data({})
+    mission = {"stage": FireStationCommand.STAGE_ALERT_CHOICE}
+
+    FireStationCommand._set_mission_stage(cog, mission, FireStationCommand.STAGE_TRAVEL)
+
+    assert mission["schema_version"] == FireStationCommand.MISSION_SCHEMA_VERSION
+    assert mission["stage"] == FireStationCommand.STAGE_TRAVEL
+    assert FireStationCommand._mission_is_stage(cog, mission, FireStationCommand.STAGE_TRAVEL)
