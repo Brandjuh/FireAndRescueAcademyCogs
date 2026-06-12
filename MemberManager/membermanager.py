@@ -29,7 +29,7 @@ from redbot.core.data_manager import cog_data_path
 from .database import MemberDatabase
 from .models import MemberData
 from .views import MemberOverviewView
-from .utils import fuzzy_search_member
+from .utils import fuzzy_match_score, fuzzy_search_member
 from .automation import ContributionMonitor
 from .config_commands import ConfigCommands
 
@@ -396,6 +396,133 @@ class MemberManager(ConfigCommands, commands.Cog):
         embed = await view.get_overview_embed()
         await send(embed=embed, view=view)
 
+    async def _search_member_candidates(
+        self,
+        guild: discord.Guild,
+        query: str,
+        *,
+        threshold: float = 0.5,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Search Discord and MissionChief members and return ranked candidates."""
+        query_clean = query.lower().strip()
+        results: List[Dict[str, Any]] = []
+
+        for member in getattr(guild, "members", []):
+            if getattr(member, "bot", False):
+                continue
+
+            member_name = str(member)
+            score = fuzzy_match_score(query_clean, member_name)
+            if score >= threshold:
+                results.append({
+                    "score": score,
+                    "discord_id": member.id,
+                    "mc_user_id": None,
+                    "name": member_name,
+                    "display_name": getattr(member, "display_name", None),
+                    "source": "discord",
+                })
+
+            display_name = getattr(member, "display_name", None)
+            if display_name and display_name != member_name:
+                score = fuzzy_match_score(query_clean, display_name)
+                if score >= threshold:
+                    results.append({
+                        "score": score,
+                        "discord_id": member.id,
+                        "mc_user_id": None,
+                        "name": member_name,
+                        "display_name": display_name,
+                        "source": "discord",
+                    })
+
+        if self.alliance_scraper:
+            try:
+                mc_members = await self.alliance_scraper.get_members()
+            except Exception as exc:
+                log.error("Error searching MC members: %s", exc)
+                mc_members = []
+
+            for mc_member in mc_members:
+                mc_name = mc_member.get("name", "")
+                mc_id = mc_member.get("user_id") or mc_member.get("mc_user_id")
+                if not mc_id:
+                    continue
+
+                score = fuzzy_match_score(query_clean, mc_name)
+                if query_clean.isdigit() and query_clean in str(mc_id):
+                    score = max(score, 0.8)
+
+                if score >= threshold:
+                    discord_id = None
+                    if self.membersync:
+                        link = await self.membersync.get_link_for_mc(str(mc_id))
+                        if link:
+                            discord_id = link.get("discord_id")
+
+                    results.append({
+                        "score": score,
+                        "discord_id": discord_id,
+                        "mc_user_id": str(mc_id),
+                        "name": mc_name,
+                        "source": "missionchief",
+                    })
+
+        seen = set()
+        unique_results = []
+        for result in sorted(results, key=lambda item: item["score"], reverse=True):
+            key = (result.get("discord_id"), result.get("mc_user_id"), result.get("name"))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_results.append(result)
+
+        return unique_results[:limit]
+
+    def _build_member_search_results_embed(
+        self,
+        query: str,
+        results: List[Dict[str, Any]],
+    ) -> discord.Embed:
+        """Build a compact private search result embed for ambiguous panel searches."""
+        embed = discord.Embed(
+            title=f"Member Search: {query}",
+            description="Multiple possible matches found. Open again with a Discord ID or MC ID.",
+            color=discord.Color.blue(),
+        )
+
+        lines = []
+        for index, result in enumerate(results[:5], 1):
+            name = result.get("name", "Unknown")
+            display_name = result.get("display_name")
+            discord_id = result.get("discord_id")
+            mc_id = result.get("mc_user_id")
+            score = result.get("score", 0)
+            source = result.get("source", "unknown")
+
+            line = f"{index}. **{name}**"
+            if display_name and display_name != name:
+                line += f" ({display_name})"
+            if discord_id:
+                line += f" | Discord ID: `{discord_id}`"
+            if mc_id:
+                line += f" | MC ID: `{mc_id}`"
+            line += f" | {source} | {score:.0%}"
+            lines.append(line)
+
+        embed.add_field(name="Matches", value="\n".join(lines), inline=False)
+        return embed
+
+    def _search_is_ambiguous(self, results: List[Dict[str, Any]]) -> bool:
+        """Return whether a fuzzy search should show choices instead of opening one."""
+        if len(results) < 2:
+            return False
+
+        best = results[0].get("score", 0)
+        second = results[1].get("score", 0)
+        return best < 1.0 and second >= best - 0.05
+
     async def _open_member_profile_from_interaction(
         self,
         interaction: discord.Interaction,
@@ -409,7 +536,17 @@ class MemberManager(ConfigCommands, commands.Cog):
             )
             return
 
-        member_data = await self._resolve_target(interaction.guild, target.strip())
+        target = target.strip()
+        if not target.startswith("<@") and not target.isdigit():
+            candidates = await self._search_member_candidates(interaction.guild, target, limit=5)
+            if self._search_is_ambiguous(candidates):
+                await interaction.response.send_message(
+                    embed=self._build_member_search_results_embed(target, candidates),
+                    ephemeral=True,
+                )
+                return
+
+        member_data = await self._resolve_target(interaction.guild, target)
         if not member_data:
             await interaction.response.send_message(
                 f"No member found for `{target}`.",

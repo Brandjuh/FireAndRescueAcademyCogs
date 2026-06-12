@@ -45,6 +45,64 @@ class MemberManagerEntrypointTests(unittest.TestCase):
         self.assertEqual(results[0]["mc_user_id"], "222")
         self.assertEqual(results[0]["name"], "DutchFireFighter")
 
+    def test_member_candidate_search_returns_ranked_discord_and_mc_matches(self):
+        class FakeMember:
+            bot = False
+
+            def __init__(self, member_id, username, display_name):
+                self.id = member_id
+                self.username = username
+                self.display_name = display_name
+
+            def __str__(self):
+                return self.username
+
+        cog = MemberManager.__new__(MemberManager)
+        cog.membersync = types.SimpleNamespace(get_link_for_mc=AsyncMock(return_value=None))
+        cog.alliance_scraper = types.SimpleNamespace(
+            get_members=AsyncMock(
+                return_value=[
+                    {"user_id": "456", "name": "DutchFireFighter"},
+                ]
+            )
+        )
+        guild = types.SimpleNamespace(
+            members=[
+                FakeMember(123, "DutchFireFighter#0001", "Dutch"),
+                FakeMember(999, "Other#0001", "Other"),
+            ]
+        )
+
+        results = asyncio.run(cog._search_member_candidates(guild, "Dutch"))
+
+        self.assertGreaterEqual(len(results), 2)
+        self.assertEqual(results[0]["discord_id"], 123)
+        self.assertTrue(any(result.get("mc_user_id") == "456" for result in results))
+
+    def test_panel_search_shows_choices_for_ambiguous_fuzzy_matches(self):
+        cog = MemberManager.__new__(MemberManager)
+        cog._interaction_is_moderator = AsyncMock(return_value=True)
+        cog._search_member_candidates = AsyncMock(
+            return_value=[
+                {"score": 0.9, "discord_id": 123, "name": "Franny192", "source": "discord"},
+                {"score": 0.88, "mc_user_id": "456", "name": "Franny", "source": "missionchief"},
+            ]
+        )
+        cog._resolve_target = AsyncMock()
+        interaction = types.SimpleNamespace(
+            guild=types.SimpleNamespace(),
+            user=types.SimpleNamespace(id=999),
+            response=types.SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        asyncio.run(cog._open_member_profile_from_interaction(interaction, "Franny"))
+
+        cog._resolve_target.assert_not_awaited()
+        interaction.response.send_message.assert_awaited_once()
+        kwargs = interaction.response.send_message.await_args.kwargs
+        self.assertTrue(kwargs["ephemeral"])
+        self.assertEqual(kwargs["embed"].kwargs["title"], "Member Search: Franny")
+
     def test_send_panel_message_stores_message_id(self):
         stored = {}
         cog = MemberManager.__new__(MemberManager)
