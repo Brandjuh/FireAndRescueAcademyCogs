@@ -283,6 +283,90 @@ class AllianceReportContractTests(unittest.TestCase):
         self.assertEqual(result["large_missions_period"], 1)
         self.assertEqual(result["alliance_events_period"], 0)
 
+    def test_monthly_training_reports_unavailable_without_event_coverage(self):
+        import asyncio
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs_path = Path(temp_dir) / "logs.db"
+            logs = sqlite3.connect(logs_path)
+            logs.execute(
+                "CREATE TABLE logs (action_key TEXT, scraped_at TEXT, event_timestamp TEXT)"
+            )
+            logs.executemany(
+                "INSERT INTO logs VALUES (?, ?, ?)",
+                [
+                    ("created_course", "2026-05-10T12:00:00", None),
+                    ("course_completed", "2026-05-11T12:00:00", None),
+                ],
+            )
+            logs.commit()
+            logs.close()
+
+            aggregator = DataAggregator(
+                types.SimpleNamespace(_db_cache={"logs_v2_db_path": logs_path})
+            )
+            result = asyncio.run(
+                aggregator._get_training_data_monthly(
+                    datetime(2026, 5, 1),
+                    datetime(2026, 6, 1),
+                )
+            )
+
+        self.assertIn("error", result)
+
+    def test_monthly_membership_marks_log_activity_unavailable_without_coverage(self):
+        import asyncio
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            members_path = temp_path / "members.db"
+            logs_path = temp_path / "logs.db"
+            sanctions_path = temp_path / "sanctions.db"
+
+            members = sqlite3.connect(members_path)
+            members.execute("CREATE TABLE members (member_id INTEGER, timestamp TEXT)")
+            members.executemany(
+                "INSERT INTO members VALUES (?, ?)",
+                [
+                    (1, "2026-04-30T23:00:00"),
+                    (1, "2026-05-31T23:00:00"),
+                    (2, "2026-05-31T23:00:00"),
+                ],
+            )
+            members.commit()
+            members.close()
+
+            logs = sqlite3.connect(logs_path)
+            logs.execute(
+                "CREATE TABLE logs (action_key TEXT, scraped_at TEXT, event_timestamp TEXT)"
+            )
+            logs.execute("INSERT INTO logs VALUES ('added_to_alliance', '2026-05-10T12:00:00', NULL)")
+            logs.commit()
+            logs.close()
+
+            sanctions = sqlite3.connect(sanctions_path)
+            sanctions.execute("CREATE TABLE sanctions (sanction_type TEXT, created_at INTEGER)")
+            sanctions.commit()
+            sanctions.close()
+
+            aggregator = DataAggregator(
+                types.SimpleNamespace(
+                    _db_cache={
+                        "members_v2_db_path": members_path,
+                        "logs_v2_db_path": logs_path,
+                        "sanctions_db_path": sanctions_path,
+                    }
+                )
+            )
+            result = asyncio.run(
+                aggregator._get_membership_data_monthly(
+                    datetime(2026, 5, 1),
+                    datetime(2026, 6, 1),
+                )
+            )
+
+        self.assertFalse(result["log_activity_available"])
+
     def test_monthly_membership_does_not_publish_zero_without_start_snapshot(self):
         import asyncio
 
@@ -432,6 +516,50 @@ class AllianceReportContractTests(unittest.TestCase):
             self.assertNotIn("Treasury", output)
             self.assertNotIn("Activity Score", output)
             self.assertNotIn("Prediction", output)
+
+    def test_monthly_outputs_omit_log_lines_without_event_coverage(self):
+        from datetime import datetime
+
+        data = {
+            "membership": {
+                "starting_members": 10,
+                "ending_members": 12,
+                "new_joins_period": 0,
+                "left_period": 0,
+                "kicked_period": 1,
+                "net_growth": 2,
+                "log_activity_available": False,
+            },
+            "training": {"error": "Log event timestamps are unavailable"},
+            "buildings": {
+                "approved_period": 3,
+                "denied_period": 1,
+                "extensions_started_period": 0,
+                "extensions_completed_period": 0,
+                "extension_activity_available": False,
+            },
+            "operations": {"error": "Log event timestamps are unavailable"},
+            "sanctions": {"issued_period": 1},
+            "admin_activity": {"error": "unavailable"},
+        }
+        now = datetime(2026, 6, 12)
+
+        admin_embed = MonthlyAdminReport._create_overview(data, "May 2026", now, "Europe/Amsterdam")
+        member_embed = MonthlyMemberReport._create_overview(data, "May 2026", now, "Europe/Amsterdam")
+        output = "\n".join(
+            field["name"] + "\n" + field["value"]
+            for embed in (admin_embed, member_embed)
+            for field in embed.fields
+        )
+
+        self.assertIn("Starting members: 10", output)
+        self.assertIn("Kicked: 1", output)
+        self.assertIn("Requests approved: 3", output)
+        self.assertNotIn("Join logs recorded", output)
+        self.assertNotIn("Leave logs recorded", output)
+        self.assertNotIn("Courses started", output)
+        self.assertNotIn("Extensions started", output)
+        self.assertNotIn("Large missions started", output)
 
     def test_monthly_member_uses_explicit_scheduled_report_month(self):
         import asyncio
