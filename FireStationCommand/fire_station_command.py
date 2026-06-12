@@ -354,6 +354,41 @@ class FireStationCommand(commands.Cog):
         data = await self.config.user(user).all()
         return data.get("vehicles", [])
 
+    async def _create_station(self, user: discord.abc.User) -> bool:
+        user_conf = self.config.user(user)
+        data = await user_conf.all()
+        if data["started"]:
+            return False
+
+        starter_vehicle = {
+            "id": 1,
+            "name": "Starter Fire Engine",
+            "crew_capacity": 6,
+        }
+        await user_conf.started.set(True)
+        await user_conf.vehicles.set([starter_vehicle])
+        await user_conf.next_vehicle_id.set(2)
+        await user_conf.station_level.set(1)
+        await user_conf.station_type.set("volunteer")
+        await user_conf.staff_total.set(6)
+        await user_conf.staff_trained.set(0)
+        await user_conf.active_mission.set({})
+
+        await self._give(user, 100_000)
+        return True
+
+    async def _build_station_created_embed(self, user: discord.abc.User) -> discord.Embed:
+        credits = await self._get_credits(user)
+        embed = discord.Embed(
+            title="Station created",
+            description="You are now the commander of a small **volunteer** station.",
+            color=discord.Color.red(),
+        )
+        embed.add_field(name="Starter vehicle", value="🚒 Starter Fire Engine (crew 6)", inline=False)
+        embed.add_field(name="Staff", value="6 volunteers (untrained)", inline=True)
+        embed.add_field(name="Credits", value=f"{credits:,}", inline=True)
+        return embed
+
     def _max_staff(self, level: int) -> int:
         if level < 1:
             level = 1
@@ -399,6 +434,193 @@ class FireStationCommand(commands.Cog):
             "total_arrived": current_total + second_arrived,
         }
 
+    async def _build_dashboard_embed(self, user: discord.abc.User) -> discord.Embed:
+        data = await self.config.user(user).all()
+        if not data["started"]:
+            return discord.Embed(
+                title="Fire Station Command",
+                description="Create your first station to start managing incidents.",
+                color=discord.Color.red(),
+            )
+
+        vehicles = data.get("vehicles", [])
+        credits = await self._get_credits(user)
+        lvl = int(data.get("station_level", 1))
+        stype = data.get("station_type", "volunteer")
+        staff_total = int(data.get("staff_total", 0))
+        staff_trained = int(data.get("staff_trained", 0))
+        active = data.get("active_mission", {}) or {}
+
+        embed = discord.Embed(
+            title="Fire Station Command",
+            description="Station dashboard",
+            color=discord.Color.red(),
+        )
+        embed.add_field(name="Credits", value=f"{credits:,}", inline=True)
+        embed.add_field(name="Level", value=str(lvl), inline=True)
+        embed.add_field(name="Type", value=stype.capitalize(), inline=True)
+        embed.add_field(
+            name="Staff",
+            value=f"{staff_total} total ({staff_trained} trained) / max {self._max_staff(lvl)}",
+            inline=False,
+        )
+        embed.add_field(
+            name="Vehicles",
+            value=f"{len(vehicles)} / max {self._max_vehicles(lvl)}",
+            inline=False,
+        )
+        if active:
+            embed.add_field(
+                name="Active incident",
+                value=f"{active.get('title', 'Unknown')} (stage: `{active.get('stage', 'unknown')}`)",
+                inline=False,
+            )
+        else:
+            embed.add_field(name="Active incident", value="None", inline=False)
+        return embed
+
+    def _build_station_overview_embed(self, data: Dict[str, Any]) -> discord.Embed:
+        lvl = int(data.get("station_level", 1))
+        stype = data.get("station_type", "volunteer")
+        staff_total = int(data.get("staff_total", 0))
+        staff_trained = int(data.get("staff_trained", 0))
+        vehicles = data.get("vehicles", [])
+
+        max_staff = self._max_staff(lvl)
+        max_veh = self._max_vehicles(lvl)
+
+        embed = discord.Embed(
+            title="Station overview",
+            color=discord.Color.dark_red(),
+        )
+        embed.add_field(name="Level", value=str(lvl), inline=True)
+        embed.add_field(name="Type", value=stype.capitalize(), inline=True)
+        embed.add_field(name="Vehicle capacity", value=f"{len(vehicles)} / {max_veh}", inline=True)
+
+        embed.add_field(
+            name="Staff",
+            value=f"{staff_total} total ({staff_trained} trained) / max {max_staff}",
+            inline=False,
+        )
+
+        if stype == "volunteer":
+            embed.add_field(
+                name="Turnout profile",
+                value="Volunteer: slower turnout, chance of no-shows.",
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Turnout profile",
+                value="Career: instant turnout (in-game), full crew expected.",
+                inline=False,
+            )
+
+        image_url = self._station_image_url(max_veh)
+        if image_url:
+            embed.set_image(url=image_url)
+        return embed
+
+    @staticmethod
+    def _station_image_url(max_vehicles: int) -> str | None:
+        base_url = "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/refs/heads/main/FireStationCommand/Images"
+        if max_vehicles <= 1:
+            return f"{base_url}/FDT1B1.png"
+        if max_vehicles == 2:
+            return f"{base_url}/FDT1B2.png"
+        return f"{base_url}/FDT1B3.png"
+
+    async def _send_vehicle_shop(
+        self,
+        send,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        *,
+        ephemeral: bool = False,
+    ) -> None:
+        data = await self.config.user(user).all()
+        lvl = int(data.get("station_level", 1))
+        vehicles = data.get("vehicles", [])
+        max_veh = self._max_vehicles(lvl)
+        if len(vehicles) >= max_veh:
+            kwargs = {"ephemeral": True} if ephemeral else {}
+            await send(
+                "You are at maximum vehicle capacity. Upgrade your station to buy more vehicles.",
+                **kwargs,
+            )
+            return
+
+        view = VehicleShopView(self, channel, user)
+        embed = discord.Embed(
+            title="Vehicle shop",
+            description="Select a vehicle to purchase from the menu below.",
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(
+            name="Capacity",
+            value=f"{len(vehicles)} / {max_veh} vehicles currently in your station.",
+            inline=False,
+        )
+        kwargs = {"ephemeral": True} if ephemeral else {}
+        await send(embed=embed, view=view, **kwargs)
+
+    async def _start_mission_for_user(
+        self,
+        send,
+        channel: discord.abc.Messageable,
+        guild: discord.Guild | None,
+        user: discord.abc.User,
+        *,
+        ephemeral: bool = False,
+    ) -> None:
+        user_conf = self.config.user(user)
+        data = await user_conf.all()
+        active = data.get("active_mission", {}) or {}
+        if active:
+            kwargs = {"ephemeral": True} if ephemeral else {}
+            await send(
+                "You already have an active incident. Finish or cancel it first.",
+                **kwargs,
+            )
+            return
+
+        staff_total = int(data.get("staff_total", 0))
+        if staff_total <= 0:
+            kwargs = {"ephemeral": True} if ephemeral else {}
+            await send(
+                "You have no staff at your station. Recruit staff before taking incidents.",
+                **kwargs,
+            )
+            return
+
+        incident = self._pick_random_incident()
+        mission = self._new_mission_state(
+            incident,
+            channel_id=channel.id,
+            guild_id=guild.id if guild else None,
+        )
+        await user_conf.active_mission.set(mission)
+
+        view = AlertChoiceView(self, channel, user)
+        embed = discord.Embed(
+            title=f"🚨 New incident: {incident['name']}",
+            description=incident["hint"],
+            color=discord.Color.red(),
+        )
+        embed.add_field(name="Required staff", value=str(incident["required_staff"]), inline=True)
+        embed.set_footer(text="Choose how to alert your crew below.")
+        kwargs = {"ephemeral": True} if ephemeral else {}
+        await send(embed=embed, view=view, **kwargs)
+
+    async def _send_dashboard(self, ctx: commands.Context) -> None:
+        data = await self.config.user(ctx.author).all()
+        embed = await self._build_dashboard_embed(ctx.author)
+        if data["started"]:
+            view = FscDashboardView(self, ctx.author, ctx.channel, ctx.guild)
+        else:
+            view = FscStartView(self, ctx.author)
+        await ctx.send(embed=embed, view=view)
+
     # --------------------------------------------------
     # Commands
     # --------------------------------------------------
@@ -407,7 +629,7 @@ class FireStationCommand(commands.Cog):
     async def fsc_group(self, ctx: commands.Context):
         """Fire Station Command main group."""
         if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
+            await self._send_dashboard(ctx)
 
     @fsc_group.command(name="start")
     async def fsc_start(self, ctx: commands.Context):
@@ -418,31 +640,8 @@ class FireStationCommand(commands.Cog):
             await ctx.send("You already started.")
             return
 
-        starter_vehicle = {
-            "id": 1,
-            "name": "Starter Fire Engine",
-            "crew_capacity": 6,
-        }
-        await user_conf.started.set(True)
-        await user_conf.vehicles.set([starter_vehicle])
-        await user_conf.next_vehicle_id.set(2)
-        await user_conf.station_level.set(1)
-        await user_conf.station_type.set("volunteer")
-        await user_conf.staff_total.set(6)
-        await user_conf.staff_trained.set(0)
-        await user_conf.active_mission.set({})
-
-        await self._give(ctx.author, 100_000)
-
-        credits = await self._get_credits(ctx.author)
-        embed = discord.Embed(
-            title="Station created",
-            description="You are now the commander of a small **volunteer** station.",
-            color=discord.Color.red(),
-        )
-        embed.add_field(name="Starter vehicle", value="🚒 Starter Fire Engine (crew 6)", inline=False)
-        embed.add_field(name="Staff", value="6 volunteers (untrained)", inline=True)
-        embed.add_field(name="Credits", value=f"{credits:,}", inline=True)
+        await self._create_station(ctx.author)
+        embed = await self._build_station_created_embed(ctx.author)
         try:
             await ctx.send(embed=embed)
         except Exception:
@@ -1196,6 +1395,98 @@ class FireStationCommand(commands.Cog):
             f"Purchased **{vdef['name']}** for {price:,} credits. It has been added to your fleet.",
             ephemeral=False,
         )
+
+
+class FscStartView(discord.ui.View):
+    def __init__(self, cog: FireStationCommand, user: discord.abc.User):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.user = user
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Create station", style=discord.ButtonStyle.success)
+    async def create_station(self, interaction: discord.Interaction, button: discord.ui.Button):
+        created = await self.cog._create_station(self.user)
+        embed = await self.cog._build_dashboard_embed(self.user)
+        view = FscDashboardView(self.cog, self.user, interaction.channel, interaction.guild)
+        if created:
+            await interaction.response.edit_message(embed=embed, view=view)
+        else:
+            await interaction.response.send_message("You already started.", ephemeral=True)
+        self.stop()
+
+
+class FscDashboardView(discord.ui.View):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        user: discord.abc.User,
+        channel: discord.abc.Messageable,
+        guild: discord.Guild | None,
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.user = user
+        self.channel = channel
+        self.guild = guild
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.primary)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = await self.cog._build_dashboard_embed(self.user)
+        view = FscDashboardView(self.cog, self.user, self.channel, self.guild)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    @discord.ui.button(label="Station", style=discord.ButtonStyle.secondary)
+    async def station(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.config.user(self.user).all()
+        if not data["started"]:
+            await interaction.response.send_message("Create a station first.", ephemeral=True)
+            return
+        embed = self.cog._build_station_overview_embed(data)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Shop", style=discord.ButtonStyle.secondary)
+    async def shop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.config.user(self.user).all()
+        if not data["started"]:
+            await interaction.response.send_message("Create a station first.", ephemeral=True)
+            return
+        await self.cog._send_vehicle_shop(
+            interaction.response.send_message,
+            self.channel,
+            self.user,
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Mission", style=discord.ButtonStyle.danger)
+    async def mission(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.config.user(self.user).all()
+        if not data["started"]:
+            await interaction.response.send_message("Create a station first.", ephemeral=True)
+            return
+        await self.cog._start_mission_for_user(
+            interaction.response.send_message,
+            self.channel,
+            self.guild,
+            self.user,
+        )
+
+    @discord.ui.button(label="Commands", style=discord.ButtonStyle.secondary)
+    async def commands(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="Fire Station Command options",
+            description="Some options need extra input and are still command-based.",
+            color=discord.Color.red(),
+        )
+        embed.add_field(name="Recruit", value="`[p]fsc recruit <amount>`", inline=False)
+        embed.add_field(name="Upgrade", value="`[p]fsc upgrade`", inline=False)
+        embed.add_field(name="Career station", value="`[p]fsc career`", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 class AlertChoiceView(discord.ui.View):
