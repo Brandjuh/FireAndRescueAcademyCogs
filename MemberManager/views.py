@@ -1521,7 +1521,10 @@ class AddNoteModal(discord.ui.Modal, title="Add Note"):
                 discord_id=self.parent_view.member_data.discord_id,
                 mc_user_id=self.parent_view.member_data.mc_user_id,
                 event_type="note_created",
-                event_data={"ref_code": ref_code},
+                event_data={
+                    "ref_code": ref_code,
+                    "note": truncate_text(self.note_text.value, 120),
+                },
                 triggered_by="admin",
                 actor_id=interaction.user.id
             )
@@ -1592,7 +1595,11 @@ class EditNoteModal(discord.ui.Modal, title="Edit Note"):
                     discord_id=self.parent_view.member_data.discord_id,
                     mc_user_id=self.parent_view.member_data.mc_user_id,
                     event_type="note_edited",
-                    event_data={"ref_code": self.ref_code.value},
+                    event_data={
+                        "ref_code": note.get("ref_code", self.ref_code.value),
+                        "old_value": truncate_text(note.get("note_text", ""), 120),
+                        "new_value": truncate_text(self.new_text.value, 120),
+                    },
                     triggered_by="admin",
                     actor_id=interaction.user.id
                 )
@@ -1667,7 +1674,10 @@ class DeleteNoteModal(discord.ui.Modal, title="Delete Note"):
                     discord_id=self.parent_view.member_data.discord_id,
                     mc_user_id=self.parent_view.member_data.mc_user_id,
                     event_type="note_deleted",
-                    event_data={"ref_code": self.ref_code.value},
+                    event_data={
+                        "ref_code": note.get("ref_code", self.ref_code.value),
+                        "note": truncate_text(note.get("note_text", ""), 120),
+                    },
                     triggered_by="admin",
                     actor_id=interaction.user.id
                 )
@@ -1747,7 +1757,10 @@ class TogglePinNoteModal(discord.ui.Modal, title="Pin or Unpin Note"):
                     discord_id=self.parent_view.member_data.discord_id,
                     mc_user_id=self.parent_view.member_data.mc_user_id,
                     event_type=event_type,
-                    event_data={"ref_code": self.ref_code.value},
+                    event_data={
+                        "ref_code": note.get("ref_code", self.ref_code.value),
+                        "status": "pinned" if pinned else "unpinned",
+                    },
                     triggered_by="admin",
                     actor_id=interaction.user.id
                 )
