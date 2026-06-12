@@ -2,8 +2,10 @@ import sqlite3
 import tempfile
 import types
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
 
 from alliance_reports.calculators.activity_score import ActivityScoreCalculator
 from alliance_reports.data_aggregator import DataAggregator
@@ -78,19 +80,114 @@ class AllianceReportContractTests(unittest.TestCase):
         aggregator._get_training_data_monthly = AsyncMock(return_value={})
         aggregator._get_buildings_data_monthly = AsyncMock(return_value={})
         aggregator._get_operations_data_monthly = AsyncMock(return_value={})
-        aggregator._get_treasury_data_monthly = AsyncMock(return_value={})
         aggregator._get_sanctions_data_monthly = AsyncMock(return_value={})
         aggregator._get_admin_activity_monthly = AsyncMock(return_value={})
 
         import asyncio
-        from datetime import datetime
 
         data = asyncio.run(aggregator.get_monthly_data(datetime(2026, 5, 1)))
 
-        self.assertIsNone(data["activity_score"])
+        self.assertNotIn("activity_score", data)
+        self.assertNotIn("treasury", data)
         expected_start = datetime(2026, 5, 1)
         expected_end = datetime(2026, 6, 1)
         aggregator._get_membership_data_monthly.assert_awaited_once_with(expected_start, expected_end)
+
+    def test_game_day_window_uses_eastern_dst_rules(self):
+        winter_now = datetime(2026, 1, 12, 12, tzinfo=ZoneInfo("UTC"))
+        summer_now = datetime(2026, 6, 12, 12, tzinfo=ZoneInfo("UTC"))
+
+        winter_start, _ = DataAggregator._get_game_day_window(winter_now)
+        summer_start, _ = DataAggregator._get_game_day_window(summer_now)
+
+        self.assertEqual(winter_start.hour, 5)
+        self.assertEqual(summer_start.hour, 4)
+
+    def test_monthly_membership_uses_actual_snapshots_for_net_growth(self):
+        import asyncio
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            members_path = temp_path / "members.db"
+            logs_path = temp_path / "logs.db"
+            sanctions_path = temp_path / "sanctions.db"
+
+            members = sqlite3.connect(members_path)
+            members.execute("CREATE TABLE members (member_id INTEGER, timestamp TEXT)")
+            members.executemany(
+                "INSERT INTO members VALUES (?, ?)",
+                [
+                    (1, "2026-04-30T23:00:00"),
+                    (2, "2026-04-30T23:00:00"),
+                    (1, "2026-05-31T23:00:00"),
+                    (2, "2026-05-31T23:00:00"),
+                    (3, "2026-05-31T23:00:00"),
+                ],
+            )
+            members.commit()
+            members.close()
+
+            logs = sqlite3.connect(logs_path)
+            logs.execute("CREATE TABLE logs (action_key TEXT, scraped_at TEXT)")
+            logs.executemany(
+                "INSERT INTO logs VALUES (?, ?)",
+                [
+                    ("added_to_alliance", "2026-05-10T12:00:00"),
+                    ("added_to_alliance", "2026-05-11T12:00:00"),
+                    ("left_alliance", "2026-05-12T12:00:00"),
+                ],
+            )
+            logs.commit()
+            logs.close()
+
+            sanctions = sqlite3.connect(sanctions_path)
+            sanctions.execute("CREATE TABLE sanctions (sanction_type TEXT, created_at INTEGER)")
+            sanctions.commit()
+            sanctions.close()
+
+            config_manager = types.SimpleNamespace(
+                _db_cache={
+                    "members_v2_db_path": members_path,
+                    "logs_v2_db_path": logs_path,
+                    "sanctions_db_path": sanctions_path,
+                }
+            )
+            aggregator = DataAggregator(config_manager)
+            result = asyncio.run(
+                aggregator._get_membership_data_monthly(
+                    datetime(2026, 5, 1),
+                    datetime(2026, 6, 1),
+                )
+            )
+
+        self.assertEqual(result["starting_members"], 2)
+        self.assertEqual(result["ending_members"], 3)
+        self.assertEqual(result["net_growth"], 1)
+        self.assertEqual(result["new_joins_period"], 2)
+        self.assertEqual(result["left_period"], 1)
+
+    def test_monthly_membership_does_not_publish_zero_without_start_snapshot(self):
+        import asyncio
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            members_path = Path(temp_dir) / "members.db"
+            members = sqlite3.connect(members_path)
+            members.execute("CREATE TABLE members (member_id INTEGER, timestamp TEXT)")
+            members.execute("INSERT INTO members VALUES (1, '2026-05-31T23:00:00')")
+            members.commit()
+            members.close()
+
+            aggregator = DataAggregator(
+                types.SimpleNamespace(_db_cache={"members_v2_db_path": members_path})
+            )
+            result = asyncio.run(
+                aggregator._get_membership_data_monthly(
+                    datetime(2026, 5, 1),
+                    datetime(2026, 6, 1),
+                )
+            )
+
+        self.assertIn("error", result)
 
     def test_daily_member_output_contains_only_recorded_metrics(self):
         data = {
@@ -122,7 +219,8 @@ class AllianceReportContractTests(unittest.TestCase):
         embed = EmbedFormatter.create_daily_member_embed(data)
         output = "\n".join(field["value"] for field in embed.fields)
 
-        self.assertIn("New members joined:** 2", output)
+        self.assertIn("Join logs recorded:** 2", output)
+        self.assertNotIn("(+1)", output)
         self.assertIn("Courses started:** 3", output)
         self.assertNotIn("ACTIVITY SCORE", output.upper())
         self.assertNotIn("vs yesterday", output)

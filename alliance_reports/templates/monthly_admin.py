@@ -62,8 +62,8 @@ class MonthlyAdminReport:
                 value=(
                 f"• Starting members: {membership.get('starting_members', 0)}\n"
                 f"• Ending members: {membership.get('ending_members', 0)}\n"
-                f"• Joined: {membership.get('new_joins_period', 0)}\n"
-                f"• Left: {membership.get('left_period', 0)}\n"
+                f"• Join logs recorded: {membership.get('new_joins_period', 0)}\n"
+                f"• Leave logs recorded: {membership.get('left_period', 0)}\n"
                 f"• Kicked: {membership.get('kicked_period', 0)}\n"
                 f"• Net growth: {membership.get('net_growth', 0):+d}"
                 ),

@@ -42,14 +42,13 @@ class EmbedFormatter:
         joined = data.get("new_joins_24h", 0)
         left = data.get("left_24h", 0)
         kicked = data.get("kicked_24h", 0)
-        net = joined - left - kicked
         lines = [
-            f"• **New members joined:** {joined}",
+            f"• **Join logs recorded:** {joined}",
             f"• **Verifications approved:** {data.get('verifications_approved_24h', 0)}",
-            f"• **Total current members:** {data.get('total_members', 0)} ({net:+d})",
+            f"• **Total current members:** {data.get('total_members', 0)}",
         ]
         if left or kicked:
-            lines.append(f"• **Departures:** {left} left, {kicked} kicked")
+            lines.append(f"• **Recorded departures:** {left} leave logs, {kicked} kicks")
         return "\n".join(lines)
 
     @staticmethod

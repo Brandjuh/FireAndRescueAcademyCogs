@@ -61,10 +61,9 @@ class DailyAdminReport:
             name="👥 Membership - Current Reporting Window",
             value=(
                 f"• Current members: {data.get('total_members', 0)}\n"
-                f"• Joined: {joined}\n"
-                f"• Left: {left}\n"
+                f"• Join logs recorded: {joined}\n"
+                f"• Leave logs recorded: {left}\n"
                 f"• Kicked: {kicked}\n"
-                f"• Net change: {joined - left - kicked:+d}\n"
                 f"• Verifications approved: {data.get('verifications_approved_24h', 0)}\n"
                 f"• Verifications pending: {data.get('verifications_pending', 0)}"
             ),

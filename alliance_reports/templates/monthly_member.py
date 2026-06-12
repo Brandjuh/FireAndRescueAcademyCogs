@@ -60,8 +60,9 @@ class MonthlyMemberReport:
                 value=(
                 f"• Starting members: {membership.get('starting_members', 0)}\n"
                 f"• Ending members: {membership.get('ending_members', 0)}\n"
-                f"• Joined: {membership.get('new_joins_period', 0)}\n"
-                f"• Departures: {membership.get('left_period', 0) + membership.get('kicked_period', 0)}\n"
+                f"• Join logs recorded: {membership.get('new_joins_period', 0)}\n"
+                f"• Recorded departures: {membership.get('left_period', 0)} leave logs, "
+                f"{membership.get('kicked_period', 0)} kicks\n"
                 f"• Net growth: {membership.get('net_growth', 0):+d}"
                 ),
                 inline=False,

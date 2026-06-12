@@ -7,7 +7,6 @@ V2 Database Structure:
 - logs_v2.db: logs table (id, hash, ts, action_key, executed_name, affected_name, description, contribution_amount, scraped_at)
 - income_v2.db: income table (entry_type, period, username, amount, description, timestamp)
 - buildings_v2.db: buildings table (building_id, owner_name, building_type, classrooms, timestamp)
-- alliance.db: treasury_balance, treasury_income, treasury_expenses (LEGACY - STILL USED)
 - membersync.db: links (LEGACY)
 - building_manager.db: building_requests, building_actions (LEGACY)
 - sanctions.db: sanctions (LEGACY)
@@ -15,7 +14,7 @@ V2 Database Structure:
 
 import logging
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 from zoneinfo import ZoneInfo
@@ -67,23 +66,20 @@ class DataAggregator:
             log.exception(f"Error connecting to {db_name} database: {e}")
             return None
     
+    @staticmethod
+    def _get_game_day_window(utc_now: datetime) -> tuple[datetime, datetime]:
+        """Return the current MissionChief US game day as UTC datetimes."""
+        eastern = ZoneInfo("America/New_York")
+        local_now = utc_now.astimezone(eastern)
+        local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        return local_start.astimezone(ZoneInfo("UTC")), utc_now
+
     async def get_daily_data(self) -> Dict:
-        """Get aggregated data for daily reports (last 24 hours GAME TIME)."""
+        """Get aggregated data for the current MissionChief US game day."""
         try:
-            log.info("Aggregating daily data (EDT Game Day)...")
-            
-            # Calculate EDT game day boundaries
+            log.info("Aggregating daily data (US Eastern game day)...")
             utc_now = datetime.now(ZoneInfo("UTC"))
-            
-            # Game day starts at 04:00 UTC (00:00 EDT)
-            # Find the most recent 04:00 UTC mark
-            if utc_now.hour >= 4:
-                game_day_start = utc_now.replace(hour=4, minute=0, second=0, microsecond=0)
-            else:
-                game_day_start = (utc_now - timedelta(days=1)).replace(hour=4, minute=0, second=0, microsecond=0)
-            
-            # Game day ends NOW (include all logs up to this moment)
-            game_day_end = utc_now
+            game_day_start, game_day_end = self._get_game_day_window(utc_now)
             
             log.info(f"Game Day: {game_day_start.isoformat()} to {game_day_end.isoformat()} (UTC)")
             
@@ -92,7 +88,6 @@ class DataAggregator:
                 "training": await self._get_training_data_daily(game_day_start, game_day_end),
                 "buildings": await self._get_buildings_data_daily(game_day_start, game_day_end),
                 "operations": await self._get_operations_data_daily(game_day_start, game_day_end),
-                "treasury": await self._get_treasury_data_daily(game_day_start, game_day_end),
                 "sanctions": await self._get_sanctions_data_daily(game_day_start, game_day_end),
                 "admin_activity": await self._get_admin_activity_daily(game_day_start, game_day_end),
             }
@@ -121,10 +116,8 @@ class DataAggregator:
                 "training": await self._get_training_data_monthly(first_day, period_end),
                 "buildings": await self._get_buildings_data_monthly(first_day, period_end),
                 "operations": await self._get_operations_data_monthly(first_day, period_end),
-                "treasury": await self._get_treasury_data_monthly(first_day, period_end),
                 "sanctions": await self._get_sanctions_data_monthly(first_day, period_end),
                 "admin_activity": await self._get_admin_activity_monthly(first_day, period_end),
-                "activity_score": None,
             }
             
             log.info("Monthly data aggregation complete")
@@ -578,13 +571,31 @@ class DataAggregator:
             
             cursor = conn.cursor()
             
-            # Ending members from the latest snapshot inside the requested month.
-            cursor.execute("""
-                SELECT COUNT(DISTINCT member_id) FROM members
-                WHERE timestamp = (
-                    SELECT MAX(timestamp) FROM members WHERE datetime(timestamp) < datetime(?)
-                )
-            """, (end.isoformat(),))
+            cursor.execute(
+                "SELECT MAX(timestamp) FROM members WHERE datetime(timestamp) < datetime(?)",
+                (start.isoformat(),),
+            )
+            starting_snapshot = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT MAX(timestamp) FROM members WHERE datetime(timestamp) < datetime(?)",
+                (end.isoformat(),),
+            )
+            ending_snapshot = cursor.fetchone()[0]
+            if not starting_snapshot or not ending_snapshot:
+                conn.close()
+                return {"error": "Required monthly member snapshots are unavailable"}
+
+            # Use actual snapshots for the starting and ending member counts.
+            cursor.execute(
+                "SELECT COUNT(DISTINCT member_id) FROM members WHERE timestamp = ?",
+                (starting_snapshot,),
+            )
+            starting_members = cursor.fetchone()[0]
+
+            cursor.execute(
+                "SELECT COUNT(DISTINCT member_id) FROM members WHERE timestamp = ?",
+                (ending_snapshot,),
+            )
             ending_members = cursor.fetchone()[0]
             
             conn.close()
@@ -629,10 +640,7 @@ class DataAggregator:
                 kicked = cursor_s.fetchone()[0]
                 conn_s.close()
             
-            net_growth = new_joins - left - kicked
-            starting_members = ending_members - net_growth
-            net_growth_pct = (net_growth / starting_members * 100) if starting_members > 0 else 0
-            retention_rate = ((starting_members - left - kicked) / starting_members * 100) if starting_members > 0 else 0
+            net_growth = ending_members - starting_members
             
             return {
                 "starting_members": starting_members,
@@ -641,8 +649,6 @@ class DataAggregator:
                 "left_period": left,
                 "kicked_period": kicked,
                 "net_growth": net_growth,
-                "net_growth_pct": net_growth_pct,
-                "retention_rate": retention_rate,
             }
         
         except Exception as e:
