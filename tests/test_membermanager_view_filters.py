@@ -126,6 +126,9 @@ class MemberManagerViewFilterTests(unittest.TestCase):
         view._update_view = AsyncMock()
 
         simple = asyncio.run(view.get_overview_embed())
+        self.assertEqual(simple.fields[0]["name"], "Triage: Attention")
+        self.assertIn("1 active sanction(s)", simple.fields[0]["value"])
+        self.assertIn("2 active note(s)", simple.fields[0]["value"])
         self.assertEqual(simple.footer["text"], "Simple overview • Use Advanced Overview for full details")
 
         button = ToggleOverviewModeButton(view, row=2)
@@ -134,6 +137,73 @@ class MemberManagerViewFilterTests(unittest.TestCase):
 
         self.assertEqual(view.overview_mode, "advanced")
         view._update_view.assert_awaited_once_with(interaction)
+
+    def test_simple_overview_triage_can_show_clean_profile(self):
+        view = MemberOverviewView.__new__(MemberOverviewView)
+        view.member_data = MemberData(
+            discord_id=123,
+            mc_user_id="456",
+            discord_username="DiscordUser",
+            mc_username="MCUser",
+            mc_role="Member",
+            link_status="approved",
+            verified_role_present=True,
+            is_verified=True,
+            contribution_rate=10.0,
+        )
+        view.overview_mode = "simple"
+
+        embed = asyncio.run(view.get_overview_embed())
+
+        self.assertEqual(embed.fields[0]["name"], "Triage: Normal")
+        self.assertEqual(embed.fields[0]["value"], "- No immediate issues detected")
+        self.assertEqual(embed.kwargs["color"], "blue")
+
+    def test_simple_overview_triage_marks_unverified_profiles(self):
+        view = MemberOverviewView.__new__(MemberOverviewView)
+        view.member_data = MemberData(
+            discord_id=123,
+            mc_user_id="456",
+            discord_username="DiscordUser",
+            mc_username="MCUser",
+            mc_role="Member",
+            link_status="pending",
+            verified_role_present=False,
+            is_verified=False,
+            contribution_rate=10.0,
+        )
+        view.overview_mode = "simple"
+
+        embed = asyncio.run(view.get_overview_embed())
+
+        self.assertEqual(embed.fields[0]["name"], "Triage: Attention")
+        self.assertIn("Member is not verified", embed.fields[0]["value"])
+        self.assertEqual(embed.kwargs["color"], "orange")
+
+    def test_simple_overview_triage_marks_high_priority_profiles(self):
+        view = MemberOverviewView.__new__(MemberOverviewView)
+        view.member_data = MemberData(
+            discord_id=123,
+            mc_user_id="456",
+            discord_username="DiscordUser",
+            mc_username="Former member (456)",
+            mc_role="Left alliance",
+            link_status="approved",
+            verified_role_present=False,
+            is_verified=True,
+            infractions_count=2,
+            severity_score=8,
+            contribution_rate=2.5,
+            contribution_trend="down",
+        )
+        view.overview_mode = "simple"
+
+        embed = asyncio.run(view.get_overview_embed())
+
+        self.assertEqual(embed.fields[0]["name"], "Triage: High Priority")
+        self.assertIn("MissionChief member is marked as former member", embed.fields[0]["value"])
+        self.assertIn("2 active sanction(s)", embed.fields[0]["value"])
+        self.assertEqual(embed.kwargs["color"], "red")
 
 
 if __name__ == "__main__":
