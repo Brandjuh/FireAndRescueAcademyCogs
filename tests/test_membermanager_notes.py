@@ -8,7 +8,13 @@ from unittest.mock import AsyncMock
 
 from MemberManager.database import MemberDatabase
 from MemberManager.models import MemberData
-from MemberManager.views import MemberOverviewView, TogglePinNoteModal
+from MemberManager.views import (
+    AddNoteModal,
+    DeleteNoteModal,
+    EditNoteModal,
+    MemberOverviewView,
+    TogglePinNoteModal,
+)
 
 
 class MemberManagerNotesTests(unittest.TestCase):
@@ -174,7 +180,153 @@ class MemberManagerNotesTests(unittest.TestCase):
 
         self.assertEqual(fake_db.pinned, ("N2026-000001", True))
         self.assertEqual(fake_db.event["event_type"], "note_pinned")
-        self.assertEqual(fake_db.event["event_data"], {"ref_code": "N2026-000001"})
+        self.assertEqual(
+            fake_db.event["event_data"],
+            {"ref_code": "N2026-000001", "status": "pinned"},
+        )
+        view._update_view.assert_awaited_once_with(interaction)
+
+    def test_add_note_records_note_preview_in_audit_event(self):
+        class FakeDB:
+            def __init__(self):
+                self.event = None
+
+            async def add_note(self, **kwargs):
+                self.note = kwargs
+                return "N2026-000002"
+
+            async def add_event(self, **kwargs):
+                self.event = kwargs
+
+        fake_db = FakeDB()
+        view = MemberOverviewView.__new__(MemberOverviewView)
+        view.member_data = MemberData(discord_id=123, mc_user_id="456")
+        view.member_data.notes_count = 0
+        view.db = fake_db
+        view._update_view = AsyncMock()
+
+        modal = AddNoteModal(view)
+        modal.note_text.value = "This is a staff note"
+        modal.infraction_ref.value = ""
+        modal.expires_days.value = ""
+
+        interaction = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=1),
+            user=types.SimpleNamespace(id=999, __str__=lambda self: "Admin"),
+            response=types.SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        asyncio.run(modal.on_submit(interaction))
+
+        self.assertEqual(fake_db.event["event_type"], "note_created")
+        self.assertEqual(
+            fake_db.event["event_data"],
+            {"ref_code": "N2026-000002", "note": "This is a staff note"},
+        )
+        self.assertEqual(view.member_data.notes_count, 1)
+        view._update_view.assert_awaited_once_with(interaction)
+
+    def test_edit_note_records_old_and_new_note_preview_in_audit_event(self):
+        class FakeDB:
+            def __init__(self):
+                self.event = None
+                self.updated = None
+
+            async def get_notes(self, **kwargs):
+                return [
+                    {
+                        "ref_code": "N2026-000003",
+                        "discord_id": 123,
+                        "mc_user_id": "456",
+                        "note_text": "Old note text",
+                    }
+                ]
+
+            async def update_note(self, **kwargs):
+                self.updated = kwargs
+                return True
+
+            async def add_event(self, **kwargs):
+                self.event = kwargs
+
+        fake_db = FakeDB()
+        view = MemberOverviewView.__new__(MemberOverviewView)
+        view.member_data = MemberData(discord_id=123, mc_user_id="456")
+        view.db = fake_db
+        view._update_view = AsyncMock()
+
+        modal = EditNoteModal(view)
+        modal.ref_code.value = "N2026-000003"
+        modal.new_text.value = "Updated note text"
+
+        interaction = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=1),
+            user=types.SimpleNamespace(id=999, __str__=lambda self: "Admin"),
+            response=types.SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        asyncio.run(modal.on_submit(interaction))
+
+        self.assertEqual(fake_db.event["event_type"], "note_edited")
+        self.assertEqual(
+            fake_db.event["event_data"],
+            {
+                "ref_code": "N2026-000003",
+                "old_value": "Old note text",
+                "new_value": "Updated note text",
+            },
+        )
+        view._update_view.assert_awaited_once_with(interaction)
+
+    def test_delete_note_records_note_preview_in_audit_event(self):
+        class FakeDB:
+            def __init__(self):
+                self.event = None
+                self.deleted = None
+
+            async def get_notes(self, **kwargs):
+                return [
+                    {
+                        "ref_code": "N2026-000004",
+                        "discord_id": 123,
+                        "mc_user_id": "456",
+                        "note_text": "Note to remove",
+                    }
+                ]
+
+            async def delete_note(self, ref_code):
+                self.deleted = ref_code
+                return True
+
+            async def add_event(self, **kwargs):
+                self.event = kwargs
+
+        fake_db = FakeDB()
+        view = MemberOverviewView.__new__(MemberOverviewView)
+        view.member_data = MemberData(discord_id=123, mc_user_id="456")
+        view.member_data.notes_count = 1
+        view.db = fake_db
+        view._update_view = AsyncMock()
+
+        modal = DeleteNoteModal(view)
+        modal.ref_code.value = "N2026-000004"
+        modal.confirm.value = "DELETE"
+
+        interaction = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=1),
+            user=types.SimpleNamespace(id=999),
+            response=types.SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        asyncio.run(modal.on_submit(interaction))
+
+        self.assertEqual(fake_db.deleted, "N2026-000004")
+        self.assertEqual(fake_db.event["event_type"], "note_deleted")
+        self.assertEqual(
+            fake_db.event["event_data"],
+            {"ref_code": "N2026-000004", "note": "Note to remove"},
+        )
+        self.assertEqual(view.member_data.notes_count, 0)
         view._update_view.assert_awaited_once_with(interaction)
 
 
