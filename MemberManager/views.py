@@ -627,11 +627,19 @@ class MemberOverviewView(discord.ui.View):
         
         if sanction_manager and self.guild:
             try:
-                sanctions = sanction_manager.db.get_user_sanctions(
-                    guild_id=self.guild.id,
-                    discord_user_id=data.discord_id,
-                    mc_user_id=data.mc_user_id
-                )
+                get_member_sanctions = getattr(sanction_manager, "get_member_sanctions", None)
+                if get_member_sanctions:
+                    sanctions = get_member_sanctions(
+                        guild_id=self.guild.id,
+                        discord_user_id=data.discord_id,
+                        mc_user_id=data.mc_user_id,
+                    )
+                else:
+                    sanctions = sanction_manager.db.get_user_sanctions(
+                        guild_id=self.guild.id,
+                        discord_user_id=data.discord_id,
+                        mc_user_id=data.mc_user_id,
+                    )
                 
                 # Check expiry status
                 now = int(datetime.now(timezone.utc).timestamp())
@@ -823,7 +831,7 @@ class MemberOverviewView(discord.ui.View):
     async def get_events_embed(self) -> discord.Embed:
         """Build the operations embed for alliance storms and large alliance missions."""
         return await self._build_filtered_logs_embed(
-            title=f"?? Alliance Operations - {self.member_data.get_display_name()}",
+            title=f"Alliance Operations - {self.member_data.get_display_name()}",
             empty_text="No alliance storm or large alliance mission logs found for this member.",
             action_keys=OPERATIONS_ACTION_KEYS,
             page=self.events_page,
@@ -835,7 +843,7 @@ class MemberOverviewView(discord.ui.View):
     async def get_buildings_embed(self) -> discord.Embed:
         """Build the building and extension activity embed."""
         return await self._build_filtered_logs_embed(
-            title=f"??? Buildings & Extensions - {self.member_data.get_display_name()}",
+            title=f"Buildings & Extensions - {self.member_data.get_display_name()}",
             empty_text="No building or extension logs found for this member.",
             action_keys=BUILDING_ACTIVITY_ACTION_KEYS,
             page=self.buildings_page,

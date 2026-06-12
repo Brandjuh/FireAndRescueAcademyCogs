@@ -17,6 +17,14 @@ def load_sanctions_database_class():
     return module.SanctionsDatabase
 
 
+def load_sanctions_manager_class():
+    module_path = Path(__file__).resolve().parents[1] / "sanctionmanager" / "sanction_manager.py"
+    spec = importlib.util.spec_from_file_location("sanction_manager_under_test", module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.SanctionsManager
+
+
 class MemberManagerSanctionsTests(unittest.TestCase):
     def test_sanction_database_matches_discord_and_mc_ids_together(self):
         SanctionsDatabase = load_sanctions_database_class()
@@ -110,6 +118,102 @@ class MemberManagerSanctionsTests(unittest.TestCase):
                 "mc_user_id": "456",
             },
         )
+
+    def test_sanctions_embed_prefers_public_sanction_contract(self):
+        class FakeSanctionManager:
+            def __init__(self):
+                self.call = None
+                self.db = types.SimpleNamespace(
+                    get_user_sanctions=lambda **kwargs: (_ for _ in ()).throw(AssertionError("db fallback used"))
+                )
+
+            def get_member_sanctions(self, **kwargs):
+                self.call = kwargs
+                return [
+                    {
+                        "sanction_id": 1,
+                        "sanction_type": "Warning - Official 1st",
+                        "reason_category": "Conduct",
+                        "reason_detail": "Needs attention",
+                        "admin_username": "Admin",
+                        "created_at": 1_800_000_000,
+                        "status": "active",
+                    }
+                ]
+
+        sanction_manager = FakeSanctionManager()
+        view = MemberOverviewView.__new__(MemberOverviewView)
+        view.member_data = MemberData(
+            discord_id=123,
+            mc_user_id="456",
+            discord_username="DiscordUser",
+            mc_username="MCUser",
+        )
+        view.integrations = {"sanction_manager": sanction_manager}
+        view.guild = types.SimpleNamespace(id=1)
+        view.infraction_page = 0
+        view.infractions_per_page = 5
+
+        embed = asyncio.run(view.get_infractions_embed())
+
+        self.assertIn("Active Sanction", embed.kwargs["title"])
+        self.assertEqual(
+            sanction_manager.call,
+            {
+                "guild_id": 1,
+                "discord_user_id": 123,
+                "mc_user_id": "456",
+            },
+        )
+
+    def test_sanction_manager_public_contract_delegates_to_database(self):
+        SanctionsManager = load_sanctions_manager_class()
+        calls = {}
+
+        class FakeDB:
+            def get_user_sanctions(self, **kwargs):
+                calls["get"] = kwargs
+                return [{"sanction_id": 1}]
+
+            def add_sanction(self, **kwargs):
+                calls["add"] = kwargs
+                return 42
+
+            def edit_sanction(self, sanction_id, admin_user_id, **updates):
+                calls["edit"] = (sanction_id, admin_user_id, updates)
+
+            def update_sanction_status(self, sanction_id, status, admin_user_id, notes):
+                calls["remove"] = (sanction_id, status, admin_user_id, notes)
+
+        manager = SanctionsManager.__new__(SanctionsManager)
+        manager.db = FakeDB()
+
+        sanctions = manager.get_member_sanctions(
+            guild_id=1,
+            discord_user_id=123,
+            mc_user_id="456",
+        )
+        sanction_id = manager.create_sanction_for_member(
+            guild_id=1,
+            discord_user_id=123,
+            mc_user_id="456",
+            mc_username="MCUser",
+            admin_user_id=999,
+            admin_username="Admin",
+            sanction_type="Warning",
+            reason_category="Conduct",
+            reason_detail="Reason",
+            additional_notes="Notes",
+        )
+        manager.edit_member_sanction(42, admin_user_id=999, reason_detail="Updated")
+        manager.remove_member_sanction(42, admin_user_id=999, notes="Resolved")
+
+        self.assertEqual(sanctions, [{"sanction_id": 1}])
+        self.assertEqual(sanction_id, 42)
+        self.assertEqual(calls["get"]["mc_user_id"], "456")
+        self.assertEqual(calls["add"]["sanction_type"], "Warning")
+        self.assertEqual(calls["edit"], (42, 999, {"reason_detail": "Updated"}))
+        self.assertEqual(calls["remove"], (42, "removed", 999, "Resolved"))
 
     def test_sanctions_embed_has_quiet_fallback_without_backend(self):
         view = MemberOverviewView.__new__(MemberOverviewView)
