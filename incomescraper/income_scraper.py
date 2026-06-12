@@ -1,12 +1,12 @@
 import discord
 from redbot.core import commands, Config, data_manager
-import aiohttp
 import asyncio
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
-from pathlib import Path
 import re
+import hashlib
+from zoneinfo import ZoneInfo
 
 # SQLite INTEGER limits
 INT64_MAX = 9223372036854775807
@@ -27,9 +27,11 @@ class IncomeScraper(commands.Cog):
         
         self.income_url = "https://www.missionchief.com/verband/kasse"
         self.debug_mode = False
+        self._scrape_lock = asyncio.Lock()
         
         self._init_database()
         self.scrape_task = self.bot.loop.create_task(self._background_scraper())
+        self.pre_reset_task = self.bot.loop.create_task(self._pre_reset_snapshot_loop())
     
     def _init_database(self):
         """Initialize SQLite database with schema"""
@@ -52,6 +54,24 @@ class IncomeScraper(commands.Cog):
                         PRIMARY KEY (entry_type, period, username, timestamp)
                     )
                 ''')
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS expenses (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        signature TEXT NOT NULL,
+                        occurrence_index INTEGER NOT NULL,
+                        username TEXT NOT NULL,
+                        amount INTEGER NOT NULL,
+                        description TEXT,
+                        source_date TEXT NOT NULL,
+                        event_timestamp TEXT,
+                        scraped_at TEXT NOT NULL,
+                        UNIQUE(signature, occurrence_index)
+                    )
+                ''')
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_expenses_event_timestamp "
+                    "ON expenses(event_timestamp)"
+                )
                 conn.commit()
                 conn.close()
                 return
@@ -65,6 +85,79 @@ class IncomeScraper(commands.Cog):
         """Cancel background task on unload"""
         if hasattr(self, 'scrape_task'):
             self.scrape_task.cancel()
+        if hasattr(self, 'pre_reset_task'):
+            self.pre_reset_task.cancel()
+
+    @staticmethod
+    def _next_pre_reset_snapshot(now):
+        """Return the next 23:55 America/New_York snapshot time."""
+        target = now.replace(hour=23, minute=55, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        return target
+
+    async def _pre_reset_snapshot_loop(self):
+        """Capture daily/monthly income immediately before the New York reset."""
+        await self.bot.wait_until_ready()
+        eastern = ZoneInfo("America/New_York")
+
+        while not self.bot.is_closed():
+            try:
+                now = datetime.now(eastern)
+                target = self._next_pre_reset_snapshot(now)
+                await asyncio.sleep((target - now).total_seconds())
+                await self._scrape_all_income(
+                    ctx=None,
+                    include_expenses=False,
+                    max_expense_pages=0,
+                )
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"[IncomeScraper] Pre-reset snapshot error: {e}")
+                await asyncio.sleep(60)
+
+    @staticmethod
+    def _normalize_expense_timestamp(source_date, scraped_at):
+        """Normalize only recent, unambiguous yearless expense dates."""
+        eastern = ZoneInfo("America/New_York")
+        scraped_local = scraped_at.astimezone(eastern)
+        try:
+            parsed = datetime.strptime(source_date, "%d %b %H:%M")
+        except (TypeError, ValueError):
+            return None
+
+        candidate = parsed.replace(year=scraped_local.year, tzinfo=eastern)
+        if candidate > scraped_local + timedelta(minutes=5):
+            candidate = candidate.replace(year=candidate.year - 1)
+        if not timedelta() <= scraped_local - candidate <= timedelta(days=7):
+            return None
+        return candidate.astimezone(ZoneInfo("UTC")).isoformat()
+
+    @staticmethod
+    def _assign_expense_occurrences(entries, scraped_at):
+        """Assign stable occurrence indexes to identical visible expenses."""
+        occurrences = {}
+        for entry in entries:
+            event_timestamp = IncomeScraper._normalize_expense_timestamp(
+                entry["source_date"],
+                scraped_at,
+            )
+            entry["event_timestamp"] = event_timestamp
+            signature_text = "|".join(
+                (
+                    event_timestamp or entry["source_date"],
+                    entry["username"],
+                    str(entry["amount"]),
+                    entry.get("description", ""),
+                )
+            )
+            signature = hashlib.sha256(signature_text.encode()).hexdigest()
+            occurrence = occurrences.get(signature, 0) + 1
+            occurrences[signature] = occurrence
+            entry["signature"] = signature
+            entry["occurrence_index"] = occurrence
+        return entries
     
     async def _background_scraper(self):
         """Background task that scrapes income/expenses every hour"""
@@ -115,7 +208,7 @@ class IncomeScraper(commands.Cog):
         if self.debug_mode and ctx:
             try:
                 await ctx.send(message)
-            except:
+            except Exception:
                 pass
     
     async def _check_logged_in(self, html_content, ctx=None):
@@ -160,7 +253,7 @@ class IncomeScraper(commands.Cog):
                 
                 # Check login
                 if not await self._check_logged_in(html_content, ctx):
-                    await self._debug_log(f"❌ Session expired", ctx)
+                    await self._debug_log("❌ Session expired", ctx)
                     return []
                 
                 # Parse HTML
@@ -222,7 +315,7 @@ class IncomeScraper(commands.Cog):
                     # Typically: Column 0 = Name, Column 1 = Credits
                     if name_col_idx is None and credits_col_idx is None:
                         if len(headers) >= 2:
-                            await self._debug_log(f"⚠️ No clear headers, using positional: col0=name, col1=credits", ctx)
+                            await self._debug_log("⚠️ No clear headers, using positional: col0=name, col1=credits", ctx)
                             name_col_idx = 0
                             credits_col_idx = 1
                         else:
@@ -338,17 +431,20 @@ class IncomeScraper(commands.Cog):
                         
                         # Check header row for expense table signature
                         headers = [th.get_text(strip=True).lower() for th in rows[0].find_all('th')]
+                        if headers[:4] != ["credits", "name", "description", "date"]:
+                            continue
                         
                         # Parse data rows
                         for row in rows[1:]:
                             cols = row.find_all('td')
-                            if len(cols) < 3: 
+                            if len(cols) < 4:
                                 continue
                             
                             # Column order: Credits, Name, Description, Date
                             credits_col = cols[0].get_text(strip=True)
                             name_col = cols[1].get_text(strip=True) if len(cols) > 1 else ""
                             desc_col = cols[2].get_text(strip=True) if len(cols) > 2 else ""
+                            date_col = cols[3].get_text(strip=True) if len(cols) > 3 else ""
                             
                             # Parse credits
                             credits_match = re.search(r'([\d,]+)', credits_col)
@@ -371,13 +467,14 @@ class IncomeScraper(commands.Cog):
                                 'period': 'paginated',
                                 'username': username,
                                 'amount': amount,
-                                'description': desc_col
+                                'description': desc_col,
+                                'source_date': date_col,
                             })
                     
                     if not page_entries:
                         empty_count += 1
                         if empty_count >= 3:
-                            await self._debug_log(f"⛔ Stopped after 3 empty pages", ctx)
+                            await self._debug_log("⛔ Stopped after 3 empty pages", ctx)
                             break
                     else:
                         await self._debug_log(f"✅ Page {page}: {len(page_entries)} expenses", ctx)
@@ -395,6 +492,15 @@ class IncomeScraper(commands.Cog):
         return all_entries
     
     async def _scrape_all_income(self, ctx=None, include_expenses=True, max_expense_pages=100):
+        """Serialize income scrapes so scheduled tasks cannot overlap."""
+        async with self._scrape_lock:
+            return await self._scrape_all_income_unlocked(
+                ctx,
+                include_expenses,
+                max_expense_pages,
+            )
+
+    async def _scrape_all_income_unlocked(self, ctx=None, include_expenses=True, max_expense_pages=100):
         """Scrape daily income, monthly income, and expenses from the treasury page"""
         session = await self._get_session(ctx)
         if not session:
@@ -404,47 +510,96 @@ class IncomeScraper(commands.Cog):
         
         await self._debug_log("🚀 Starting income/expense scrape", ctx)
         
-        all_data = []
+        income_data = []
+        expenses_data = []
         
         # 1. Scrape daily income/expense tab
         await self._debug_log("📅 Scraping DAILY income tab...", ctx)
         daily_data = await self._scrape_income_tab(session, 'daily', ctx)
-        all_data.extend(daily_data)
+        income_data.extend(daily_data)
         
         await asyncio.sleep(1.5)
         
         # 2. Scrape monthly income/expense tab
         await self._debug_log("📆 Scraping MONTHLY income tab...", ctx)
         monthly_data = await self._scrape_income_tab(session, 'monthly', ctx)
-        all_data.extend(monthly_data)
+        income_data.extend(monthly_data)
         
         await asyncio.sleep(1.5)
         
         # 3. Scrape expenses with pagination
         if include_expenses:
             expenses_data = await self._scrape_expenses_pages(session, ctx, max_expense_pages)
-            all_data.extend(expenses_data)
         
         # Store in database
-        if not all_data:
+        if not income_data and not expenses_data:
             if ctx:
                 await ctx.send("❌ No income/expense data found")
             return False
         
-        timestamp = datetime.now().isoformat()
+        scraped_at_dt = datetime.now(ZoneInfo("UTC"))
+        timestamp = scraped_at_dt.isoformat()
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
         inserted = 0
         duplicates = 0
         
-        for entry in all_data:
+        for entry in income_data:
             try:
                 cursor.execute('''
                     INSERT INTO income (entry_type, period, username, amount, description, timestamp)
                     VALUES (?, ?, ?, ?, ?, ?)
                 ''', (entry['entry_type'], entry['period'], entry['username'], 
                       entry['amount'], entry.get('description', ''), timestamp))
+                inserted += 1
+            except sqlite3.IntegrityError:
+                duplicates += 1
+
+        # Preserve the existing legacy table contract for current commands/readers.
+        for entry in expenses_data:
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO income (
+                        entry_type, period, username, amount, description, timestamp
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        entry["entry_type"],
+                        entry["period"],
+                        entry["username"],
+                        entry["amount"],
+                        entry.get("description", ""),
+                        timestamp,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                pass
+
+        self._assign_expense_occurrences(expenses_data, scraped_at_dt)
+        for entry in expenses_data:
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO expenses (
+                        signature, occurrence_index, username, amount, description,
+                        source_date, event_timestamp, scraped_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        entry["signature"],
+                        entry["occurrence_index"],
+                        entry["username"],
+                        entry["amount"],
+                        entry.get("description", ""),
+                        entry["source_date"],
+                        entry["event_timestamp"],
+                        timestamp,
+                    ),
+                )
                 inserted += 1
             except sqlite3.IntegrityError:
                 duplicates += 1
@@ -455,7 +610,7 @@ class IncomeScraper(commands.Cog):
         await self._debug_log(f"💾 Database: {inserted} inserted, {duplicates} duplicates", ctx)
         
         if ctx:
-            await ctx.send(f"✅ Scraped {len(all_data)} income/expense entries\n"
+            await ctx.send(f"✅ Scraped {len(income_data) + len(expenses_data)} income/expense entries\n"
                           f"💾 Database: {inserted} new records, {duplicates} duplicates")
         
         return True
@@ -541,13 +696,19 @@ class IncomeScraper(commands.Cog):
         cursor = conn.cursor()
         
         cursor.execute("SELECT COUNT(*) FROM income WHERE entry_type='expense' AND period='paginated'")
-        count = cursor.fetchone()[0]
+        legacy_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM expenses")
+        expense_count = cursor.fetchone()[0]
         
         cursor.execute("DELETE FROM income WHERE entry_type='expense' AND period='paginated'")
+        cursor.execute("DELETE FROM expenses")
         conn.commit()
         conn.close()
         
-        await ctx.send(f"✅ Deleted {count} paginated expense records. Ready for backfill!")
+        await ctx.send(
+            f"✅ Deleted {legacy_count + expense_count} paginated expense records. "
+            "Ready for backfill!"
+        )
     
     @income_group.command(name="stats")
     async def show_stats(self, ctx):
