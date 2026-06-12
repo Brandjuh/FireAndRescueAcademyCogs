@@ -576,17 +576,14 @@ class LogsScraper(commands.Cog):
         cursor.execute("SELECT MAX(id) FROM logs")
         max_id = cursor.fetchone()[0]
         
-        cursor.execute("SELECT MIN(ts), MAX(ts) FROM logs")
-        date_range = cursor.fetchone()
-
         cursor.execute("SELECT COUNT(*) FROM logs WHERE event_timestamp IS NOT NULL")
         timestamped_logs = cursor.fetchone()[0]
 
         cursor.execute("SELECT COUNT(*) FROM logs WHERE occurrence_index > 1")
         repeated_logs = cursor.fetchone()[0]
 
-        cursor.execute("SELECT MAX(event_timestamp) FROM logs")
-        latest_event_timestamp = cursor.fetchone()[0]
+        cursor.execute("SELECT MIN(event_timestamp), MAX(event_timestamp) FROM logs")
+        event_range = cursor.fetchone()
         
         conn.close()
         
@@ -605,15 +602,10 @@ class LogsScraper(commands.Cog):
             inline=True,
         )
         embed.add_field(
-            name="Latest Event (UTC)",
-            value=latest_event_timestamp or "None",
-            inline=False,
-        )
-        embed.add_field(
-            name="Source Data Range",
+            name="Event Range (UTC)",
             value=(
-                f"{date_range[0]} to {date_range[1]}"
-                if date_range[0] and date_range[1]
+                f"{event_range[0]} to {event_range[1]}"
+                if event_range[0] and event_range[1]
                 else "None"
             ),
             inline=False,

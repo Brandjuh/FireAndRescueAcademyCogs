@@ -58,7 +58,10 @@ class ScraperStorageStatsTests(unittest.TestCase):
         values = field_values(embed)
         self.assertEqual(values["Event Timestamps"], "2 / 3")
         self.assertEqual(values["Repeated Actions Preserved"], "1")
-        self.assertEqual(values["Latest Event (UTC)"], "2026-06-12T10:52:00+00:00")
+        self.assertEqual(
+            values["Event Range (UTC)"],
+            "2026-06-12T10:52:00+00:00 to 2026-06-12T10:52:00+00:00",
+        )
 
     def test_income_stats_reports_new_expense_storage_and_snapshots(self):
         with tempfile.TemporaryDirectory() as temp_dir:
