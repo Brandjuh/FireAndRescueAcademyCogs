@@ -88,7 +88,8 @@ class MemberOverviewView(discord.ui.View):
         # Row 1: Context-specific action buttons
         if self.current_tab == "notes":
             self.add_item(AddNoteButton(self, row=1))
-            self.add_item(ViewNoteButton(self, row=1))  # 🔧 NEW: View full note
+            self.add_item(ViewNoteButton(self, row=1))
+            self.add_item(TogglePinNoteButton(self, row=1))
             self.add_item(EditNoteButton(self, row=1))
             self.add_item(DeleteNoteButton(self, row=1))
         
@@ -128,6 +129,36 @@ class MemberOverviewView(discord.ui.View):
     def _has_multiple_sanctions(self) -> bool:
         """Check if pagination/search is needed."""
         return self.member_data.infractions_count > 1
+
+    def _note_belongs_to_member(self, note: Dict[str, Any]) -> bool:
+        """Return whether a note is linked to the member currently open in the panel."""
+        data = self.member_data
+        note_discord_id = note.get("discord_id")
+        note_mc_user_id = note.get("mc_user_id")
+
+        discord_matches = (
+            data.discord_id is not None
+            and note_discord_id is not None
+            and str(note_discord_id) == str(data.discord_id)
+        )
+        mc_matches = (
+            data.mc_user_id is not None
+            and note_mc_user_id is not None
+            and str(note_mc_user_id) == str(data.mc_user_id)
+        )
+        return discord_matches or mc_matches
+
+    async def _get_member_note(self, ref_code: str) -> Optional[Dict[str, Any]]:
+        """Fetch a note by reference code only if it belongs to this member."""
+        notes = await self.db.get_notes(ref_code=ref_code)
+        if not notes:
+            return None
+
+        note = notes[0]
+        if not self._note_belongs_to_member(note):
+            return None
+
+        return note
     
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Only allow the command invoker to use buttons."""
@@ -1016,6 +1047,23 @@ class DeleteNoteButton(discord.ui.Button):
         await interaction.response.send_modal(modal)
 
 
+class TogglePinNoteButton(discord.ui.Button):
+    """Pin or unpin a note button."""
+
+    def __init__(self, parent_view: MemberOverviewView, row: int):
+        super().__init__(
+            label="Pin/Unpin",
+            style=discord.ButtonStyle.secondary,
+            emoji="📌",
+            row=row
+        )
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction):
+        modal = TogglePinNoteModal(self.parent_view)
+        await interaction.response.send_modal(modal)
+
+
 class ViewNoteButton(discord.ui.Button):
     """View full note button."""
     
@@ -1322,6 +1370,14 @@ class EditNoteModal(discord.ui.Modal, title="Edit Note"):
     async def on_submit(self, interaction: discord.Interaction):
         """Handle note edit."""
         try:
+            note = await self.parent_view._get_member_note(self.ref_code.value)
+            if not note:
+                await interaction.response.send_message(
+                    f"❌ Note `{self.ref_code.value}` not found for this member.",
+                    ephemeral=True
+                )
+                return
+
             success = await self.parent_view.db.update_note(
                 ref_code=self.ref_code.value,
                 new_text=self.new_text.value,
@@ -1394,6 +1450,14 @@ class DeleteNoteModal(discord.ui.Modal, title="Delete Note"):
             return
         
         try:
+            note = await self.parent_view._get_member_note(self.ref_code.value)
+            if not note:
+                await interaction.response.send_message(
+                    f"❌ Note `{self.ref_code.value}` not found for this member.",
+                    ephemeral=True
+                )
+                return
+
             success = await self.parent_view.db.delete_note(self.ref_code.value)
             
             if success:
@@ -1430,6 +1494,83 @@ class DeleteNoteModal(discord.ui.Modal, title="Delete Note"):
             )
 
 
+class TogglePinNoteModal(discord.ui.Modal, title="Pin or Unpin Note"):
+    """Modal for pinning or unpinning a note."""
+
+    ref_code = discord.ui.TextInput(
+        label="Note Reference Code",
+        style=discord.TextStyle.short,
+        placeholder="e.g., N2025-000123",
+        required=True,
+        max_length=50
+    )
+
+    action = discord.ui.TextInput(
+        label="Action",
+        style=discord.TextStyle.short,
+        placeholder="PIN or UNPIN",
+        required=True,
+        max_length=10
+    )
+
+    def __init__(self, parent_view: MemberOverviewView):
+        super().__init__()
+        self.parent_view = parent_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        """Handle note pin or unpin."""
+        action = self.action.value.strip().upper()
+        if action not in {"PIN", "UNPIN"}:
+            await interaction.response.send_message(
+                "Action must be PIN or UNPIN.",
+                ephemeral=True
+            )
+            return
+
+        try:
+            note = await self.parent_view._get_member_note(self.ref_code.value)
+            if not note:
+                await interaction.response.send_message(
+                    f"Note `{self.ref_code.value}` not found for this member.",
+                    ephemeral=True
+                )
+                return
+
+            pinned = action == "PIN"
+            success = await self.parent_view.db.pin_note(self.ref_code.value, pinned=pinned)
+
+            if success:
+                event_type = "note_pinned" if pinned else "note_unpinned"
+                await self.parent_view.db.add_event(
+                    guild_id=interaction.guild.id,
+                    discord_id=self.parent_view.member_data.discord_id,
+                    mc_user_id=self.parent_view.member_data.mc_user_id,
+                    event_type=event_type,
+                    event_data={"ref_code": self.ref_code.value},
+                    triggered_by="admin",
+                    actor_id=interaction.user.id
+                )
+
+                await interaction.response.send_message(
+                    f"Note `{self.ref_code.value}` {'pinned' if pinned else 'unpinned'} successfully!",
+                    ephemeral=True
+                )
+
+                self.parent_view.current_tab = "notes"
+                await self.parent_view._update_view(interaction)
+            else:
+                await interaction.response.send_message(
+                    f"Note `{self.ref_code.value}` not found.",
+                    ephemeral=True
+                )
+
+        except Exception as e:
+            log.error(f"Error pinning note: {e}", exc_info=True)
+            await interaction.response.send_message(
+                f"Error pinning note: {str(e)}",
+                ephemeral=True
+            )
+
 class ViewNoteModal(discord.ui.Modal, title="View Full Note"):
     """Modal to view the full text of a note."""
     
@@ -1448,19 +1589,14 @@ class ViewNoteModal(discord.ui.Modal, title="View Full Note"):
     async def on_submit(self, interaction: discord.Interaction):
         """Display the full note."""
         try:
-            # Get the note
-            notes = await self.parent_view.db.get_notes(
-                ref_code=self.ref_code.value
-            )
-            
-            if not notes:
+            note = await self.parent_view._get_member_note(self.ref_code.value)
+
+            if not note:
                 await interaction.response.send_message(
-                    f"❌ Note `{self.ref_code.value}` not found.",
+                    f"Note `{self.ref_code.value}` not found for this member.",
                     ephemeral=True
                 )
                 return
-            
-            note = notes[0]
             
             # Build detailed embed
             embed = discord.Embed(
