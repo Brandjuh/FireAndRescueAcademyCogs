@@ -23,6 +23,8 @@ from .audit import (
     build_identity_filters,
     fetch_missionchief_events,
     merge_timeline_events,
+    normalize_log_row,
+    should_include_log_row,
 )
 from .models import MemberData
 from .utils import (
@@ -261,7 +263,7 @@ class MemberOverviewView(discord.ui.View):
         if self.message:
             try:
                 await self.message.edit(view=self)
-            except:
+            except Exception:
                 pass
     
     async def _update_view(self, interaction: discord.Interaction):
@@ -300,14 +302,14 @@ class MemberOverviewView(discord.ui.View):
                 embed=None,
                 view=self
             )
-        except:
+        except Exception:
             try:
                 await interaction.edit_original_response(
                     content="✅ Member panel closed.",
                     embed=None,
                     view=self
                 )
-            except:
+            except Exception:
                 pass
         
         self.stop()
@@ -401,11 +403,11 @@ class MemberOverviewView(discord.ui.View):
                 mc_lines.append("**Contribution:** *No data*")
             
             if "Left alliance" in (data.mc_role or ""):
-                mc_lines.append(f"**Status:** ❌ Not in alliance")
+                mc_lines.append("**Status:** ❌ Not in alliance")
             elif data.mc_username and "Former member" not in data.mc_username:
-                mc_lines.append(f"**Status:** ✅ Active in alliance")
+                mc_lines.append("**Status:** ✅ Active in alliance")
             else:
-                mc_lines.append(f"**Status:** ⚠️ Unknown")
+                mc_lines.append("**Status:** ⚠️ Unknown")
         else:
             mc_lines.append("*No MissionChief information available*")
         
@@ -948,6 +950,19 @@ class MemberOverviewView(discord.ui.View):
         if not logs_scraper:
             return [], 0, "LogsScraper is not loaded."
 
+        get_member_logs = getattr(logs_scraper, "get_member_logs", None)
+        if get_member_logs:
+            offset = page * per_page
+            result = await get_member_logs(
+                mc_user_id=data.mc_user_id,
+                mc_username=data.mc_username,
+                action_keys=action_keys,
+                limit=per_page,
+                offset=offset,
+                include_total=True,
+            )
+            return result.get("rows", []), result.get("total", 0) or 0, None
+
         db_path = logs_scraper.db_path
         if not db_path.exists():
             return [], 0, f"Database not found: {db_path}"
@@ -1020,12 +1035,25 @@ class MemberOverviewView(discord.ui.View):
             missionchief_events = []
             logs_scraper = self.integrations.get("logs_scraper")
             if logs_scraper:
-                missionchief_events = await fetch_missionchief_events(
-                    logs_scraper.db_path,
-                    mc_user_id=data.mc_user_id,
-                    mc_username=data.mc_username,
-                    limit=250,
-                )
+                get_member_logs = getattr(logs_scraper, "get_member_logs", None)
+                if get_member_logs:
+                    result = await get_member_logs(
+                        mc_user_id=data.mc_user_id,
+                        mc_username=data.mc_username,
+                        limit=250,
+                    )
+                    missionchief_events = [
+                        normalize_log_row(row)
+                        for row in result.get("rows", [])
+                        if should_include_log_row(row)
+                    ]
+                else:
+                    missionchief_events = await fetch_missionchief_events(
+                        logs_scraper.db_path,
+                        mc_user_id=data.mc_user_id,
+                        mc_username=data.mc_username,
+                        limit=250,
+                    )
 
             audit_events = merge_timeline_events(
                 member_events,
@@ -1845,7 +1873,7 @@ class ViewNoteModal(discord.ui.Modal, title="View Full Note"):
                             value=tag_str,
                             inline=False
                         )
-                except:
+                except Exception:
                     pass
             
             await interaction.response.send_message(embed=embed, ephemeral=True)

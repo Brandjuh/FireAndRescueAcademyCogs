@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 import re
 import hashlib
 from zoneinfo import ZoneInfo
+from typing import Any, Dict, Iterable, Optional
 
 class LogsScraper(commands.Cog):
     """Scrapes alliance logs from MissionChief with complete data extraction"""
@@ -101,6 +102,114 @@ class LogsScraper(commands.Cog):
         """Cancel background task on unload"""
         if self.scrape_task:
             self.scrape_task.cancel()
+
+    @staticmethod
+    def _build_member_identity_filter(
+        *,
+        mc_user_id: Optional[str],
+        mc_username: Optional[str],
+    ) -> tuple[str, list[str]]:
+        """Build a WHERE clause for matching stored log rows to a member."""
+        where_parts = []
+        params = []
+
+        if mc_user_id:
+            where_parts.append("(executed_mc_id = ? OR affected_mc_id = ?)")
+            params.extend([str(mc_user_id), str(mc_user_id)])
+
+        clean_username = mc_username
+        if clean_username and "Former member" in clean_username:
+            clean_username = None
+
+        if clean_username:
+            where_parts.append("(executed_name = ? OR affected_name = ?)")
+            params.extend([clean_username, clean_username])
+
+        if not where_parts:
+            return "", []
+
+        return " OR ".join(where_parts), params
+
+    def _query_member_logs_sync(
+        self,
+        *,
+        mc_user_id: Optional[str],
+        mc_username: Optional[str],
+        action_keys: Optional[Iterable[str]] = None,
+        limit: int = 250,
+        offset: int = 0,
+        include_total: bool = False,
+    ) -> Dict[str, Any]:
+        """Return stored LogsScraper rows for a MissionChief member."""
+        where_clause, params = self._build_member_identity_filter(
+            mc_user_id=mc_user_id,
+            mc_username=mc_username,
+        )
+        if not where_clause:
+            return {"rows": [], "total": 0 if include_total else None}
+
+        action_key_list = sorted({str(key) for key in (action_keys or [])})
+        query_params = list(params)
+        action_filter = ""
+        if action_key_list:
+            placeholders = ", ".join("?" for _ in action_key_list)
+            action_filter = f" AND action_key IN ({placeholders})"
+            query_params.extend(action_key_list)
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    f"""
+                    SELECT id, ts, event_timestamp, action_key, action_text,
+                           executed_name, executed_mc_id, affected_name, affected_mc_id,
+                           description, occurrence_index, contribution_amount
+                    FROM logs
+                    WHERE ({where_clause}){action_filter}
+                    ORDER BY COALESCE(event_timestamp, ts) DESC, id DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    [*query_params, int(limit), int(offset)],
+                ).fetchall()
+            ]
+
+            total = None
+            if include_total:
+                total = conn.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM logs
+                    WHERE ({where_clause}){action_filter}
+                    """,
+                    query_params,
+                ).fetchone()[0]
+
+            return {"rows": rows, "total": total}
+        finally:
+            conn.close()
+
+    async def get_member_logs(
+        self,
+        *,
+        mc_user_id: Optional[str],
+        mc_username: Optional[str],
+        action_keys: Optional[Iterable[str]] = None,
+        limit: int = 250,
+        offset: int = 0,
+        include_total: bool = False,
+    ) -> Dict[str, Any]:
+        """Public API: return stored MissionChief log rows for one member."""
+        return await asyncio.to_thread(
+            self._query_member_logs_sync,
+            mc_user_id=mc_user_id,
+            mc_username=mc_username,
+            action_keys=action_keys,
+            limit=limit,
+            offset=offset,
+            include_total=include_total,
+        )
 
     @staticmethod
     def _next_scrape_time(now):

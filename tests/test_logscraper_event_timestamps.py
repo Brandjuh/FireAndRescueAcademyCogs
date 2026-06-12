@@ -187,6 +187,69 @@ class LogsScraperEventTimestampTests(unittest.TestCase):
         self.assertTrue(result)
         self.assertIsNotNone(event_timestamp)
 
+    def test_public_member_logs_contract_filters_identity_and_actions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "logs.db"
+            scraper = LogsScraper.__new__(LogsScraper)
+            scraper.db_path = db_path
+            scraper._init_database()
+
+            connection = sqlite3.connect(db_path)
+            connection.executemany(
+                """
+                INSERT INTO logs (
+                    hash, ts, event_timestamp, action_key, action_text,
+                    executed_name, executed_mc_id, affected_name, affected_mc_id,
+                    description, occurrence_index, contribution_amount
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        "chat-ban",
+                        "2026-06-12T10:00:00+00:00",
+                        "2026-06-12T10:00:00+00:00",
+                        "chat_ban_set",
+                        "Chat ban set",
+                        "Admin",
+                        "999",
+                        "MCUser",
+                        "456",
+                        "Personal audit log",
+                        1,
+                        0,
+                    ),
+                    (
+                        "building",
+                        "2026-06-12T11:00:00+00:00",
+                        "2026-06-12T11:00:00+00:00",
+                        "building_constructed",
+                        "Building constructed",
+                        "MCUser",
+                        "456",
+                        "Station",
+                        "",
+                        "Building log",
+                        1,
+                        0,
+                    ),
+                ],
+            )
+            connection.commit()
+            connection.close()
+
+            result = asyncio.run(
+                scraper.get_member_logs(
+                    mc_user_id="456",
+                    mc_username="MCUser",
+                    action_keys={"chat_ban_set"},
+                    include_total=True,
+                )
+            )
+
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(len(result["rows"]), 1)
+        self.assertEqual(result["rows"][0]["action_key"], "chat_ban_set")
+
 
 if __name__ == "__main__":
     unittest.main()
