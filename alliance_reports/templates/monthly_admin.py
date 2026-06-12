@@ -60,16 +60,26 @@ class MonthlyAdminReport:
             timestamp=now,
         )
         if "error" not in membership:
+            membership_lines = [
+                f"• Starting members: {membership.get('starting_members', 0)}",
+                f"• Ending members: {membership.get('ending_members', 0)}",
+            ]
+            if membership.get("log_activity_available", True):
+                membership_lines.extend(
+                    [
+                        f"• Join logs recorded: {membership.get('new_joins_period', 0)}",
+                        f"• Leave logs recorded: {membership.get('left_period', 0)}",
+                    ]
+                )
+            membership_lines.extend(
+                [
+                    f"• Kicked: {membership.get('kicked_period', 0)}",
+                    f"• Net growth: {membership.get('net_growth', 0):+d}",
+                ]
+            )
             embed.add_field(
                 name="👥 Membership",
-                value=(
-                f"• Starting members: {membership.get('starting_members', 0)}\n"
-                f"• Ending members: {membership.get('ending_members', 0)}\n"
-                f"• Join logs recorded: {membership.get('new_joins_period', 0)}\n"
-                f"• Leave logs recorded: {membership.get('left_period', 0)}\n"
-                f"• Kicked: {membership.get('kicked_period', 0)}\n"
-                f"• Net growth: {membership.get('net_growth', 0):+d}"
-                ),
+                value="\n".join(membership_lines),
                 inline=False,
             )
         if "error" not in training:
@@ -82,14 +92,20 @@ class MonthlyAdminReport:
                 inline=False,
             )
         if "error" not in buildings:
+            building_lines = [
+                f"• Requests approved: {buildings.get('approved_period', 0)}",
+                f"• Requests denied: {buildings.get('denied_period', 0)}",
+            ]
+            if buildings.get("extension_activity_available", True):
+                building_lines.extend(
+                    [
+                        f"• Extensions started: {buildings.get('extensions_started_period', 0)}",
+                        f"• Extensions completed: {buildings.get('extensions_completed_period', 0)}",
+                    ]
+                )
             embed.add_field(
                 name="🏗️ Buildings",
-                value=(
-                f"• Requests approved: {buildings.get('approved_period', 0)}\n"
-                f"• Requests denied: {buildings.get('denied_period', 0)}\n"
-                f"• Extensions started: {buildings.get('extensions_started_period', 0)}\n"
-                f"• Extensions completed: {buildings.get('extensions_completed_period', 0)}"
-                ),
+                value="\n".join(building_lines),
                 inline=False,
             )
         if "error" not in operations:
