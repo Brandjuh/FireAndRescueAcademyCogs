@@ -330,6 +330,7 @@ class FireStationCommand(commands.Cog):
                 "name": name,
                 "crew_capacity": int(vehicle.get("required_staff", 1)),
                 "price": int(vehicle.get("base_cost", 0)),
+                "image": vehicle.get("image"),
             }
 
         return catalog or self._fallback_vehicle_catalog()
@@ -395,8 +396,10 @@ class FireStationCommand(commands.Cog):
 
         starter_vehicle = {
             "id": 1,
+            "catalog_id": "engine_basic",
             "name": "Starter Fire Engine",
             "crew_capacity": 6,
+            "image": "Images/Vehicles/engine_basic.png",
         }
         await user_conf.started.set(True)
         await user_conf.vehicles.set([starter_vehicle])
@@ -715,6 +718,15 @@ class FireStationCommand(commands.Cog):
 
     def _apply_mission_image(self, embed: discord.Embed, mission: Dict[str, Any]) -> None:
         image_url = self._mission_image_url(mission)
+        if image_url:
+            embed.set_image(url=image_url)
+
+    def _vehicle_image_url(self, vehicle: Dict[str, Any]) -> str | None:
+        image = vehicle.get("image")
+        return self._asset_image_url(image if isinstance(image, str) else None)
+
+    def _apply_vehicle_image(self, embed: discord.Embed, vehicle: Dict[str, Any]) -> None:
+        image_url = self._vehicle_image_url(vehicle)
         if image_url:
             embed.set_image(url=image_url)
 
@@ -1600,18 +1612,24 @@ class FireStationCommand(commands.Cog):
         next_id = int(data.get("next_vehicle_id", 1))
         new_vehicle = {
             "id": next_id,
+            "catalog_id": vehicle_id,
             "name": vdef["name"],
             "crew_capacity": int(vdef["crew_capacity"]),
+            "image": vdef.get("image"),
         }
         vehicles.append(new_vehicle)
 
         await user_conf.vehicles.set(vehicles)
         await user_conf.next_vehicle_id.set(next_id + 1)
 
-        await interaction.response.send_message(
-            f"Purchased **{vdef['name']}** for {price:,} credits. It has been added to your fleet.",
-            ephemeral=False,
+        embed = discord.Embed(
+            title="Vehicle purchased",
+            description=f"Purchased **{vdef['name']}** for **{price:,}** credits.",
+            color=discord.Color.green(),
         )
+        embed.add_field(name="Crew capacity", value=str(vdef["crew_capacity"]), inline=True)
+        self._apply_vehicle_image(embed, vdef)
+        await interaction.response.send_message(embed=embed, ephemeral=False)
 
 
 class FscStartView(discord.ui.View):
@@ -2016,6 +2034,7 @@ class VehicleShopSelect(discord.ui.Select):
             color=discord.Color.blurple(),
         )
         embed.add_field(name="Crew capacity", value=str(vdef["crew_capacity"]), inline=True)
+        self.cog._apply_vehicle_image(embed, vdef)
 
         view = ConfirmVehiclePurchaseView(self.cog, self.channel, self.user, choice)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)

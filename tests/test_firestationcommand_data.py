@@ -23,6 +23,7 @@ def test_build_vehicle_catalog_uses_yaml_vehicle_data():
                         "name": "Standard Fire Engine",
                         "required_staff": 4,
                         "base_cost": 50000,
+                        "image": "Images/Vehicles/engine_basic.png",
                     }
                 ]
             }
@@ -36,6 +37,7 @@ def test_build_vehicle_catalog_uses_yaml_vehicle_data():
             "name": "Standard Fire Engine",
             "crew_capacity": 4,
             "price": 50000,
+            "image": "Images/Vehicles/engine_basic.png",
         }
     }
 
@@ -161,6 +163,24 @@ def test_mission_image_helpers_build_raw_urls_and_apply_embed_image():
         "url": (
             "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/"
             "refs/heads/main/FireStationCommand/Images/Missions/small_bin_fire.png"
+        )
+    }
+
+
+def test_vehicle_image_helpers_build_raw_urls_and_apply_embed_image():
+    cog = _cog_with_game_data({})
+    vehicle = {"image": "Images/Vehicles/engine_basic.png"}
+    embed = discord.Embed()
+
+    assert FireStationCommand._vehicle_image_url(cog, vehicle) == (
+        "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/"
+        "refs/heads/main/FireStationCommand/Images/Vehicles/engine_basic.png"
+    )
+    FireStationCommand._apply_vehicle_image(cog, embed, vehicle)
+    assert embed.image == {
+        "url": (
+            "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/"
+            "refs/heads/main/FireStationCommand/Images/Vehicles/engine_basic.png"
         )
     }
 

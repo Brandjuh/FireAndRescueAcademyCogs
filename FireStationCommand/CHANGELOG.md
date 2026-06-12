@@ -18,6 +18,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added richer story narrative fields for mission dispatches, scene updates, and outcomes.
 - Added narrative alert, re-alert, turnout, and en-route messages with dispatch and responder perspectives.
 - Added generated mission images for the initial incident set.
+- Added generated vehicle images for the initial vehicle catalog.
 
 ### Changed
 
@@ -25,6 +26,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - Vehicle shop options now come from `data/config/vehicles.yaml` when available.
 - Mission definitions now come from `data/config/missions.yaml` when available.
 - Mission embeds now show configured mission images when available.
+- Vehicle purchase embeds now show configured vehicle images when available.
 - Mission rewards now use each mission's `base_credits` value when available.
 - Career conversion cost and career turnout time now use matching `balance.yaml` values when available.
 - New missions now store a mission state schema version.
