@@ -12,6 +12,7 @@ from MemberManager.audit import (
     fetch_missionchief_events,
     merge_timeline_events,
     normalize_member_event,
+    should_include_log_row,
 )
 from MemberManager.models import MemberData
 from MemberManager.views import MemberOverviewView
@@ -36,6 +37,10 @@ class MemberManagerAuditTests(unittest.TestCase):
         self.assertIn("Needs follow-up", event.details)
 
         self.assertIsNone(normalize_member_event({"event_type": "profile_viewed"}))
+
+    def test_course_completed_logs_are_not_member_audit_entries(self):
+        self.assertFalse(should_include_log_row({"action_key": "course_completed"}))
+        self.assertTrue(should_include_log_row({"action_key": "course_created"}))
 
     def test_identity_filter_uses_id_and_name_without_former_member_label(self):
         where_clause, params = build_identity_filters(
@@ -130,8 +135,8 @@ class MemberManagerAuditTests(unittest.TestCase):
                     (
                         "2026-06-12T10:00:00+00:00",
                         "2026-06-12T10:00:00+00:00",
-                        "course_created",
-                        "Created a course",
+                        "course_completed",
+                        "Completed a course",
                         "MCUser",
                         "456",
                         "Academy #1",
@@ -164,7 +169,7 @@ class MemberManagerAuditTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(len(events), 2)
+        self.assertEqual(len(events), 1)
         self.assertTrue(all(event.source == "MissionChief" for event in events))
         self.assertEqual(events[0].title, "Created a course")
 

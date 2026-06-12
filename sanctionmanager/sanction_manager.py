@@ -1,18 +1,14 @@
-import asyncio
-import aiohttp
 import json
 import logging
 import re
 import sqlite3
-import time
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple, Any
-from urllib.parse import quote
+from typing import List, Optional
 
 import discord
 from redbot.core import commands, Config
 from redbot.core.bot import Red
-from redbot.core.utils.chat_formatting import box, pagify
+from redbot.core.utils.chat_formatting import box
 
 log = logging.getLogger("red.cog.sanctions_manager")
 
@@ -181,7 +177,13 @@ class SanctionsDatabase:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
-        if discord_user_id:
+        if discord_user_id and mc_user_id:
+            cursor.execute('''
+                SELECT * FROM sanctions
+                WHERE guild_id = ? AND (discord_user_id = ? OR mc_user_id = ?)
+                ORDER BY created_at DESC
+            ''', (guild_id, discord_user_id, mc_user_id))
+        elif discord_user_id:
             cursor.execute('''
                 SELECT * FROM sanctions 
                 WHERE guild_id = ? AND discord_user_id = ?
@@ -214,7 +216,10 @@ class SanctionsDatabase:
             AND sanction_type LIKE 'Warning - Official%'
         '''
         
-        if discord_user_id:
+        if discord_user_id and mc_user_id:
+            query += ' AND (discord_user_id = ? OR mc_user_id = ?)'
+            params = (guild_id, discord_user_id, mc_user_id)
+        elif discord_user_id:
             query += ' AND discord_user_id = ?'
             params = (guild_id, discord_user_id)
         elif mc_user_id:
