@@ -10,7 +10,7 @@ class LogsScraperCommandTests(unittest.TestCase):
     def setUp(self):
         self.scraper = LogsScraper.__new__(LogsScraper)
         self.scraper._scrape_all_logs = AsyncMock()
-        event_timezone = AsyncMock(return_value=None)
+        event_timezone = AsyncMock(return_value="America/New_York")
         event_timezone.set = AsyncMock()
         self.scraper.config = types.SimpleNamespace(event_timezone=event_timezone)
         self.ctx = types.SimpleNamespace(send=AsyncMock())
@@ -34,9 +34,9 @@ class LogsScraperCommandTests(unittest.TestCase):
         self.assertIn("Invalid timezone", self.ctx.send.await_args.args[0])
 
     def test_timezone_saves_valid_zone(self):
-        asyncio.run(self.scraper.event_timezone(self.ctx, "Europe/Amsterdam"))
+        asyncio.run(self.scraper.event_timezone(self.ctx, "America/New_York"))
 
-        self.scraper.config.event_timezone.set.assert_awaited_once_with("Europe/Amsterdam")
+        self.scraper.config.event_timezone.set.assert_awaited_once_with("America/New_York")
 
 
 if __name__ == "__main__":

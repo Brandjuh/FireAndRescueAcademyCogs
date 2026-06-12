@@ -12,6 +12,17 @@ from logscraper.logs_scraper import LogsScraper
 
 
 class LogsScraperEventTimestampTests(unittest.TestCase):
+    def test_normalizes_full_missionchief_timestamp_to_utc(self):
+        scraped_at = datetime(2026, 6, 13, 14, 0, tzinfo=ZoneInfo("UTC"))
+
+        result = LogsScraper._normalize_event_timestamp(
+            "June 12, 2026 06:52",
+            scraped_at,
+            "America/New_York",
+        )
+
+        self.assertEqual(result, "2026-06-12T10:52:00+00:00")
+
     def test_normalizes_recent_summer_timestamp_to_utc(self):
         scraped_at = datetime(2026, 6, 12, 14, 0, tzinfo=ZoneInfo("UTC"))
 
@@ -103,7 +114,24 @@ class LogsScraperEventTimestampTests(unittest.TestCase):
             connection.close()
 
         self.assertIn("event_timestamp", columns)
+        self.assertIn("signature", columns)
+        self.assertIn("occurrence_index", columns)
         self.assertIn("idx_logs_event_timestamp", indexes)
+
+    def test_identical_visible_rows_receive_distinct_stable_hashes(self):
+        signature = "same-visible-row"
+        logs = [
+            {"hash": signature},
+            {"hash": signature},
+            {"hash": signature},
+            {"hash": signature},
+        ]
+
+        LogsScraper._assign_occurrence_hashes(logs)
+
+        self.assertEqual([entry["occurrence_index"] for entry in logs], [1, 2, 3, 4])
+        self.assertEqual(len({entry["hash"] for entry in logs}), 4)
+        self.assertEqual(logs[0]["hash"], signature)
 
     def test_recent_duplicate_backfills_missing_event_timestamp(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -120,7 +148,7 @@ class LogsScraperEventTimestampTests(unittest.TestCase):
             connection.commit()
             connection.close()
 
-            raw_timestamp = datetime.now(ZoneInfo("Europe/Amsterdam")).strftime("%d %b %H:%M")
+            raw_timestamp = datetime.now(ZoneInfo("America/New_York")).strftime("%d %b %H:%M")
             scraped_log = {
                 "hash": "existing-hash",
                 "ts": raw_timestamp,
@@ -136,7 +164,7 @@ class LogsScraperEventTimestampTests(unittest.TestCase):
                 "description": "left the alliance",
                 "contribution_amount": 0,
             }
-            event_timezone = AsyncMock(return_value="Europe/Amsterdam")
+            event_timezone = AsyncMock(return_value="America/New_York")
             last_scrape = types.SimpleNamespace(set=AsyncMock())
             scraper.config = types.SimpleNamespace(
                 event_timezone=event_timezone,

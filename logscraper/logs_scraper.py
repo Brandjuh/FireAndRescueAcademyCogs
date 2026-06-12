@@ -18,7 +18,7 @@ class LogsScraper(commands.Cog):
             debug_mode=False,
             scrape_interval=3600,  # 1 hour
             last_scrape=None,
-            event_timezone=None,
+            event_timezone="America/New_York",
         )
         
         # Database path
@@ -54,6 +54,8 @@ class LogsScraper(commands.Cog):
                 description TEXT,
                 scraped_at TEXT,
                 event_timestamp TEXT,
+                signature TEXT,
+                occurrence_index INTEGER NOT NULL DEFAULT 1,
                 contribution_amount INTEGER DEFAULT 0
             )
         ''')
@@ -62,12 +64,19 @@ class LogsScraper(commands.Cog):
         columns = {column[1] for column in cursor.fetchall()}
         if "event_timestamp" not in columns:
             cursor.execute("ALTER TABLE logs ADD COLUMN event_timestamp TEXT")
+        if "signature" not in columns:
+            cursor.execute("ALTER TABLE logs ADD COLUMN signature TEXT")
+        if "occurrence_index" not in columns:
+            cursor.execute(
+                "ALTER TABLE logs ADD COLUMN occurrence_index INTEGER NOT NULL DEFAULT 1"
+            )
         
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_hash ON logs(hash)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_action_key ON logs(action_key)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_executed_mc_id ON logs(executed_mc_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_event_timestamp ON logs(event_timestamp)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_logs_signature ON logs(signature)')
         
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS training_courses (
@@ -103,14 +112,24 @@ class LogsScraper(commands.Cog):
 
     @staticmethod
     def _normalize_event_timestamp(raw_timestamp, scraped_at, event_timezone):
-        """Normalize a recent yearless MissionChief timestamp to UTC."""
+        """Normalize a MissionChief alliance-log timestamp to UTC."""
         if scraped_at.tzinfo is None:
             raise ValueError("scraped_at must be timezone-aware")
 
         try:
-            parsed = datetime.strptime(raw_timestamp, "%d %b %H:%M")
             event_tz = ZoneInfo(event_timezone)
         except (TypeError, ValueError, KeyError):
+            return None
+
+        try:
+            parsed = datetime.strptime(raw_timestamp, "%B %d, %Y %H:%M")
+            return parsed.replace(tzinfo=event_tz).astimezone(ZoneInfo("UTC")).isoformat()
+        except (TypeError, ValueError):
+            pass
+
+        try:
+            parsed = datetime.strptime(raw_timestamp, "%d %b %H:%M")
+        except (TypeError, ValueError):
             return None
 
         scraped_local = scraped_at.astimezone(event_tz)
@@ -123,6 +142,24 @@ class LogsScraper(commands.Cog):
             return None
 
         return candidate.astimezone(ZoneInfo("UTC")).isoformat()
+
+    @staticmethod
+    def _assign_occurrence_hashes(logs):
+        """Assign stable hashes without collapsing identical visible rows."""
+        occurrences = {}
+        for log_entry in logs:
+            signature = log_entry.get("signature") or log_entry["hash"]
+            occurrence = occurrences.get(signature, 0) + 1
+            occurrences[signature] = occurrence
+            log_entry["signature"] = signature
+            log_entry["occurrence_index"] = occurrence
+            if occurrence == 1:
+                log_entry["hash"] = signature
+            else:
+                log_entry["hash"] = hashlib.sha256(
+                    f"{signature}:{occurrence}".encode()
+                ).hexdigest()
+        return logs
     
     async def _background_scrape(self):
         """Background task - scrapes every hour at :15"""
@@ -348,6 +385,7 @@ class LogsScraper(commands.Cog):
                     
                     logs.append({
                         'hash': log_hash,
+                        'signature': log_hash,
                         'ts': timestamp,
                         'action_key': action_key,
                         'action_text': description,
@@ -387,6 +425,8 @@ class LogsScraper(commands.Cog):
                 await self._debug_log(f"📊 Progress: {page}/{max_pages} pages, {len(all_logs)} logs collected", ctx)
             
             await asyncio.sleep(1.5)  # Rate limiting
+
+        self._assign_occurrence_hashes(all_logs)
         
         # Store in database
         scraped_at_dt = datetime.now(ZoneInfo("UTC"))
@@ -410,12 +450,14 @@ class LogsScraper(commands.Cog):
                     INSERT INTO logs (hash, ts, action_key, action_text, executed_name,
                                     executed_mc_id, executed_url, affected_name, affected_type,
                                     affected_mc_id, affected_url, description, scraped_at,
-                                    event_timestamp, contribution_amount)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    event_timestamp, signature, occurrence_index,
+                                    contribution_amount)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (log['hash'], log['ts'], log['action_key'], log['action_text'], log['executed_name'],
                       log['executed_mc_id'], log['executed_url'], log['affected_name'], log['affected_type'],
                       log['affected_mc_id'], log['affected_url'], log['description'], scraped_at,
-                      event_timestamp, log['contribution_amount']))
+                      event_timestamp, log['signature'], log['occurrence_index'],
+                      log['contribution_amount']))
                 inserted += 1
                 
                 # Count training courses (don't insert separately - data is in logs table)
