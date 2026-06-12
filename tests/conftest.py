@@ -59,6 +59,10 @@ class _Button:
             setattr(self, key, value)
 
 
+class _Select(_Button):
+    pass
+
+
 class _Modal:
     def __init_subclass__(cls, **kwargs):
         del kwargs
@@ -92,6 +96,13 @@ class _Object:
         self.id = id
 
 
+class _SelectOption:
+    def __init__(self, *args, **kwargs):
+        del args
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+
 def pytest_configure():
     """Provide the minimal Redbot import surface required by isolated cog tests."""
     class _Embed:
@@ -118,6 +129,7 @@ def pytest_configure():
     discord.Message = object
     discord.Interaction = object
     discord.Object = _Object
+    discord.SelectOption = _SelectOption
     discord.Embed = _Embed
     discord.Color = types.SimpleNamespace(
         blue=lambda: "blue",
@@ -149,6 +161,7 @@ def pytest_configure():
     discord.ui = types.SimpleNamespace(
         View=_View,
         Button=_Button,
+        Select=_Select,
         Modal=_Modal,
         TextInput=_TextInput,
         button=_ui_button,
@@ -170,6 +183,7 @@ def pytest_configure():
     commands.command = _CommandDecorator()
     commands.group = _GroupDecorator()
     commands.hybrid_group = _GroupDecorator()
+    commands.hybrid_command = _CommandDecorator()
     commands.guild_only = _CommandDecorator()
     commands.admin = _CommandDecorator()
     commands.is_owner = _CommandDecorator()

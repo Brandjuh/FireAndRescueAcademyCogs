@@ -33,6 +33,12 @@ ADMIN_EVENT_TYPES = {
     "role_restored",
 }
 
+EXCLUDED_PERSON_AUDIT_ACTION_KEYS = {
+    # Course completions are course-level alliance logs, not member-specific
+    # records. Keeping them in a member audit creates false personal activity.
+    "course_completed",
+}
+
 EVENT_EMOJI = {
     "membermanager": "🛠️",
     "missionchief": "🎮",
@@ -174,6 +180,11 @@ def normalize_log_row(row: dict[str, Any]) -> AuditTimelineEvent:
     )
 
 
+def should_include_log_row(row: dict[str, Any]) -> bool:
+    """Return whether a LogsScraper row belongs in a member audit timeline."""
+    return (row.get("action_key") or "") not in EXCLUDED_PERSON_AUDIT_ACTION_KEYS
+
+
 def build_identity_filters(
     *,
     mc_user_id: Optional[str],
@@ -232,7 +243,13 @@ async def fetch_missionchief_events(
         )
         rows = await cursor.fetchall()
 
-    return [normalize_log_row(dict(row)) for row in rows]
+    events = []
+    for row in rows:
+        log_row = dict(row)
+        if should_include_log_row(log_row):
+            events.append(normalize_log_row(log_row))
+
+    return events
 
 
 def merge_timeline_events(

@@ -453,10 +453,10 @@ class MemberOverviewView(discord.ui.View):
         all_sanctions = []
         sanction_manager = self.integrations.get("sanction_manager")
         
-        if sanction_manager and self.message and self.message.guild:
+        if sanction_manager and self.guild:
             try:
                 sanctions = sanction_manager.db.get_user_sanctions(
-                    guild_id=self.message.guild.id,
+                    guild_id=self.guild.id,
                     discord_user_id=data.discord_id,
                     mc_user_id=data.mc_user_id
                 )
