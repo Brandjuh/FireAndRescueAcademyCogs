@@ -20,19 +20,22 @@ class MonthlyAdminReport:
         self.config_manager = config_manager
         self.aggregator = DataAggregator(config_manager)
 
-    async def generate(self) -> Optional[List[discord.Embed]]:
+    async def generate(
+        self,
+        report_month: Optional[datetime] = None,
+    ) -> Optional[List[discord.Embed]]:
         try:
             tz_str = await self.config_manager.config.timezone()
             now = datetime.now(ZoneInfo(tz_str))
-            last_month = now.replace(day=1) - timedelta(days=1)
-            data = await self.aggregator.get_monthly_data(last_month)
+            selected_month = report_month or (now.replace(day=1) - timedelta(days=1))
+            data = await self.aggregator.get_monthly_data(selected_month)
             if not data:
                 log.error("No data available for monthly admin report")
                 return None
 
             embed = self._create_overview(
                 data,
-                last_month.strftime("%B %Y"),
+                selected_month.strftime("%B %Y"),
                 now,
                 tz_str,
             )
@@ -118,9 +121,13 @@ class MonthlyAdminReport:
         embed.set_footer(text=f"Report generated: {now.strftime('%B %d, %Y %H:%M')} {tz_str}")
         return embed
 
-    async def post(self, channel: discord.TextChannel) -> bool:
+    async def post(
+        self,
+        channel: discord.TextChannel,
+        report_month: Optional[datetime] = None,
+    ) -> bool:
         try:
-            embeds = await self.generate()
+            embeds = await self.generate(report_month=report_month)
             if not embeds:
                 return False
             await channel.send(embeds=embeds)

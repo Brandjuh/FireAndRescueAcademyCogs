@@ -5,7 +5,7 @@ Handles time-based report generation with timezone support and smart month-end s
 
 import asyncio
 import logging
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional, Dict
 import calendar
@@ -58,6 +58,11 @@ class ReportScheduler:
         # Regular day: ensure it exists in this month
         last_day = self._get_last_day_of_month(now.year, now.month)
         return min(config_day, last_day)
+
+    @staticmethod
+    def _current_game_month() -> datetime:
+        """Return the current MissionChief month in New York time."""
+        return datetime.now(ZoneInfo("America/New_York"))
     
     async def start(self):
         """Start the scheduler."""
@@ -402,6 +407,7 @@ class ReportScheduler:
             error_channel_id = await self.config_manager.config.error_channel()
             
             test_mode = await self.config_manager.config.test_mode()
+            report_month = self._current_game_month()
             
             # Monthly Member Report
             if member_channel_id and await self.config_manager.config.monthly_member_enabled():
@@ -411,7 +417,7 @@ class ReportScheduler:
                     report_gen = MonthlyMemberReport(self.bot, self.config_manager)
                     
                     if test_mode:
-                        embeds = await report_gen.generate()
+                        embeds = await report_gen.generate(report_month=report_month)
                         if embeds:
                             log.info(f"Monthly member report generated ({len(embeds)} embeds, test mode - not posted)")
                         else:
@@ -419,7 +425,10 @@ class ReportScheduler:
                     else:
                         channel = self.bot.get_channel(int(member_channel_id))
                         if channel:
-                            success = await report_gen.post(channel)
+                            success = await report_gen.post(
+                                channel,
+                                report_month=report_month,
+                            )
                             if success:
                                 log.info("Monthly member report posted successfully")
                             else:
@@ -446,7 +455,7 @@ class ReportScheduler:
                     report_gen = MonthlyAdminReport(self.bot, self.config_manager)
                     
                     if test_mode:
-                        embeds = await report_gen.generate()
+                        embeds = await report_gen.generate(report_month=report_month)
                         if embeds:
                             log.info(f"Monthly admin report generated ({len(embeds)} embeds, test mode - not posted)")
                         else:
@@ -454,7 +463,10 @@ class ReportScheduler:
                     else:
                         channel = self.bot.get_channel(int(admin_channel_id))
                         if channel:
-                            success = await report_gen.post(channel)
+                            success = await report_gen.post(
+                                channel,
+                                report_month=report_month,
+                            )
                             if success:
                                 log.info("Monthly admin report posted successfully")
                             else:

@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from alliance_reports.calculators.activity_score import ActivityScoreCalculator
 from alliance_reports.data_aggregator import DataAggregator
 from alliance_reports.embed_formatter import EmbedFormatter
+from alliance_reports.scheduler import ReportScheduler
 from alliance_reports.templates.daily_admin import DailyAdminReport
 from alliance_reports.templates.monthly_admin import MonthlyAdminReport
 from alliance_reports.templates.monthly_member import MonthlyMemberReport
@@ -394,6 +395,34 @@ class AllianceReportContractTests(unittest.TestCase):
             self.assertNotIn("Treasury", output)
             self.assertNotIn("Activity Score", output)
             self.assertNotIn("Prediction", output)
+
+    def test_monthly_member_uses_explicit_scheduled_report_month(self):
+        import asyncio
+
+        report = MonthlyMemberReport.__new__(MonthlyMemberReport)
+        report.config_manager = types.SimpleNamespace(
+            config=types.SimpleNamespace(timezone=AsyncMock(return_value="Europe/Amsterdam"))
+        )
+        report.aggregator = types.SimpleNamespace(get_monthly_data=AsyncMock(return_value={}))
+        report_month = datetime(2026, 6, 30, 23, 55, tzinfo=ZoneInfo("America/New_York"))
+
+        asyncio.run(report.generate(report_month=report_month))
+
+        report.aggregator.get_monthly_data.assert_awaited_once_with(report_month)
+
+    def test_monthly_admin_uses_explicit_scheduled_report_month(self):
+        import asyncio
+
+        report = MonthlyAdminReport.__new__(MonthlyAdminReport)
+        report.config_manager = types.SimpleNamespace(
+            config=types.SimpleNamespace(timezone=AsyncMock(return_value="Europe/Amsterdam"))
+        )
+        report.aggregator = types.SimpleNamespace(get_monthly_data=AsyncMock(return_value={}))
+        report_month = datetime(2026, 6, 30, 23, 55, tzinfo=ZoneInfo("America/New_York"))
+
+        asyncio.run(report.generate(report_month=report_month))
+
+        report.aggregator.get_monthly_data.assert_awaited_once_with(report_month)
 
 
 if __name__ == "__main__":
