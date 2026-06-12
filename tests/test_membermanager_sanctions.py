@@ -118,6 +118,78 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         duplicate.delete.assert_awaited_once()
         unrelated.delete.assert_not_awaited()
 
+    def test_sanctionmanager_context_menu_registration_syncs_panel_guild(self):
+        module = load_sanction_manager_module()
+        calls = {}
+
+        class Tree:
+            def remove_command(self, name, *, type=None, guild=None):
+                calls["removed"] = (name, type, guild.id)
+
+            def add_command(self, command, *, guild=None):
+                calls["added"] = (command.name, guild.id)
+
+            async def sync(self, *, guild=None):
+                calls["synced"] = guild.id
+
+        cog = module.SanctionsManager.__new__(module.SanctionsManager)
+        cog._sanction_context_menu = types.SimpleNamespace(name="Sanction Member")
+        cog.bot = types.SimpleNamespace(
+            tree=Tree(),
+            guilds=[types.SimpleNamespace(id=111)],
+        )
+
+        asyncio.run(cog._register_context_menu())
+
+        self.assertEqual(calls["removed"][0], "Sanction Member")
+        self.assertEqual(calls["added"], ("Sanction Member", 111))
+        self.assertEqual(calls["synced"], 111)
+        self.assertEqual(cog._context_menu_guild.id, 111)
+
+    def test_sanctionmanager_context_menu_opens_sanction_flow_for_discord_member(self):
+        module = load_sanction_manager_module()
+
+        member = types.SimpleNamespace(
+            id=123,
+            display_name="Server Nick",
+            mention="<@123>",
+            __str__=lambda self: "DiscordUser#0001",
+        )
+        target = {
+            "score": 1.0,
+            "discord_id": 123,
+            "discord_username": "DiscordUser#0001",
+            "discord_display_name": "Server Nick",
+            "discord_member": member,
+            "mc_user_id": "456",
+            "mc_username": "MCUser",
+            "name": "MCUser",
+        }
+
+        cog = module.SanctionsManager.__new__(module.SanctionsManager)
+        cog._is_admin = AsyncMock(return_value=True)
+        cog.search_sanction_targets = AsyncMock(return_value=[target])
+        interaction = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=1),
+            user=types.SimpleNamespace(id=999, __str__=lambda self: "Admin"),
+            response=types.SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        asyncio.run(cog._sanction_context_menu_callback(interaction, member))
+
+        cog.search_sanction_targets.assert_awaited_once_with(
+            interaction.guild,
+            "123",
+            threshold=1.0,
+            limit=1,
+        )
+        interaction.response.send_message.assert_awaited_once()
+        kwargs = interaction.response.send_message.await_args.kwargs
+        self.assertTrue(kwargs["ephemeral"])
+        self.assertEqual(kwargs["content"], "Select the type of sanction:")
+        self.assertEqual(kwargs["view"].target_discord_id, 123)
+        self.assertEqual(kwargs["view"].target_mc_id, "456")
+
     def test_sanction_database_matches_discord_and_mc_ids_together(self):
         SanctionsDatabase = load_sanctions_database_class()
 
