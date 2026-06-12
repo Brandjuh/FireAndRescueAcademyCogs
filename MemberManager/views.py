@@ -1912,18 +1912,23 @@ class CreateSanctionModal(discord.ui.Modal, title="Create Sanction"):
             
             data = self.parent_view.member_data
             
-            sanction_id = sanction_manager.db.add_sanction(
-                guild_id=interaction.guild.id,
-                discord_user_id=data.discord_id,
-                mc_user_id=data.mc_user_id,
-                mc_username=data.mc_username or data.discord_username or "Unknown",
-                admin_user_id=interaction.user.id,
-                admin_username=str(interaction.user),
-                sanction_type=self.sanction_type.value,
-                reason_category=self.reason_category.value,
-                reason_detail=self.reason_detail.value,
-                additional_notes=self.admin_notes.value or None
-            )
+            create_sanction = getattr(sanction_manager, "create_sanction_for_member", None)
+            sanction_args = {
+                "guild_id": interaction.guild.id,
+                "discord_user_id": data.discord_id,
+                "mc_user_id": data.mc_user_id,
+                "mc_username": data.mc_username or data.discord_username or "Unknown",
+                "admin_user_id": interaction.user.id,
+                "admin_username": str(interaction.user),
+                "sanction_type": self.sanction_type.value,
+                "reason_category": self.reason_category.value,
+                "reason_detail": self.reason_detail.value,
+                "additional_notes": self.admin_notes.value or None,
+            }
+            if create_sanction:
+                sanction_id = create_sanction(**sanction_args)
+            else:
+                sanction_id = sanction_manager.db.add_sanction(**sanction_args)
             
             await self.parent_view.db.add_event(
                 guild_id=interaction.guild.id,
@@ -2007,7 +2012,8 @@ class EditSanctionModal(discord.ui.Modal, title="Edit Sanction"):
                 )
                 return
             
-            sanction = sanction_manager.db.get_sanction(sid)
+            get_sanction = getattr(sanction_manager, "get_sanction_by_id", None)
+            sanction = get_sanction(sid) if get_sanction else sanction_manager.db.get_sanction(sid)
             if not sanction or sanction['guild_id'] != interaction.guild.id:
                 await interaction.response.send_message(
                     f"❌ Sanction #{sid} not found",
@@ -2028,7 +2034,11 @@ class EditSanctionModal(discord.ui.Modal, title="Edit Sanction"):
                 )
                 return
             
-            sanction_manager.db.edit_sanction(sid, interaction.user.id, **updates)
+            edit_sanction = getattr(sanction_manager, "edit_member_sanction", None)
+            if edit_sanction:
+                edit_sanction(sid, admin_user_id=interaction.user.id, **updates)
+            else:
+                sanction_manager.db.edit_sanction(sid, interaction.user.id, **updates)
             
             await self.parent_view.db.add_event(
                 guild_id=interaction.guild.id,
@@ -2113,7 +2123,8 @@ class RemoveSanctionModal(discord.ui.Modal, title="Remove Sanction"):
                 )
                 return
             
-            sanction = sanction_manager.db.get_sanction(sid)
+            get_sanction = getattr(sanction_manager, "get_sanction_by_id", None)
+            sanction = get_sanction(sid) if get_sanction else sanction_manager.db.get_sanction(sid)
             if not sanction or sanction['guild_id'] != interaction.guild.id:
                 await interaction.response.send_message(
                     f"❌ Sanction #{sid} not found",
@@ -2121,12 +2132,21 @@ class RemoveSanctionModal(discord.ui.Modal, title="Remove Sanction"):
                 )
                 return
             
-            sanction_manager.db.update_sanction_status(
-                sid,
-                'removed',
-                interaction.user.id,
-                f"Removed by {interaction.user}: {self.reason.value}"
-            )
+            removal_note = f"Removed by {interaction.user}: {self.reason.value}"
+            remove_sanction = getattr(sanction_manager, "remove_member_sanction", None)
+            if remove_sanction:
+                remove_sanction(
+                    sid,
+                    admin_user_id=interaction.user.id,
+                    notes=removal_note,
+                )
+            else:
+                sanction_manager.db.update_sanction_status(
+                    sid,
+                    'removed',
+                    interaction.user.id,
+                    removal_note,
+                )
             
             await self.parent_view.db.add_event(
                 guild_id=interaction.guild.id,
@@ -2192,7 +2212,8 @@ class SearchSanctionModal(discord.ui.Modal, title="Search Sanction by ID"):
                 )
                 return
             
-            sanction = sanction_manager.db.get_sanction(sid)
+            get_sanction = getattr(sanction_manager, "get_sanction_by_id", None)
+            sanction = get_sanction(sid) if get_sanction else sanction_manager.db.get_sanction(sid)
             if not sanction or sanction['guild_id'] != interaction.guild.id:
                 await interaction.response.send_message(
                     f"❌ Sanction #{sid} not found",

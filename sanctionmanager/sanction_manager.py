@@ -1455,6 +1455,10 @@ class SanctionsManager(commands.Cog):
             mc_user_id=mc_user_id,
         )
 
+    def get_sanction_by_id(self, sanction_id: int) -> Optional[dict]:
+        """Public contract for other cogs to read one sanction by ID."""
+        return self.db.get_sanction(sanction_id)
+
     def create_sanction_for_member(
         self,
         *,

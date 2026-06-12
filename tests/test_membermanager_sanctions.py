@@ -4,9 +4,15 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 from MemberManager.models import MemberData
-from MemberManager.views import MemberOverviewView
+from MemberManager.views import (
+    CreateSanctionModal,
+    EditSanctionModal,
+    MemberOverviewView,
+    RemoveSanctionModal,
+)
 
 
 def load_sanctions_database_class():
@@ -171,6 +177,10 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         calls = {}
 
         class FakeDB:
+            def get_sanction(self, sanction_id):
+                calls["get_one"] = sanction_id
+                return {"sanction_id": sanction_id}
+
             def get_user_sanctions(self, **kwargs):
                 calls["get"] = kwargs
                 return [{"sanction_id": 1}]
@@ -188,6 +198,7 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         manager = SanctionsManager.__new__(SanctionsManager)
         manager.db = FakeDB()
 
+        sanction = manager.get_sanction_by_id(42)
         sanctions = manager.get_member_sanctions(
             guild_id=1,
             discord_user_id=123,
@@ -208,12 +219,108 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         manager.edit_member_sanction(42, admin_user_id=999, reason_detail="Updated")
         manager.remove_member_sanction(42, admin_user_id=999, notes="Resolved")
 
+        self.assertEqual(sanction, {"sanction_id": 42})
+        self.assertEqual(calls["get_one"], 42)
         self.assertEqual(sanctions, [{"sanction_id": 1}])
         self.assertEqual(sanction_id, 42)
         self.assertEqual(calls["get"]["mc_user_id"], "456")
         self.assertEqual(calls["add"]["sanction_type"], "Warning")
         self.assertEqual(calls["edit"], (42, 999, {"reason_detail": "Updated"}))
         self.assertEqual(calls["remove"], (42, "removed", 999, "Resolved"))
+
+    def test_create_sanction_modal_uses_public_contract(self):
+        calls = {}
+
+        class FakeSanctionManager:
+            db = types.SimpleNamespace(
+                add_sanction=lambda **kwargs: (_ for _ in ()).throw(AssertionError("db fallback used"))
+            )
+
+            def create_sanction_for_member(self, **kwargs):
+                calls["create"] = kwargs
+                return 42
+
+        parent = types.SimpleNamespace(
+            integrations={"sanction_manager": FakeSanctionManager()},
+            member_data=MemberData(
+                discord_id=123,
+                mc_user_id="456",
+                discord_username="DiscordUser",
+                mc_username="MCUser",
+            ),
+            db=types.SimpleNamespace(add_event=AsyncMock()),
+            _update_view=AsyncMock(),
+        )
+        modal = CreateSanctionModal(parent)
+        modal.sanction_type.value = "Warning"
+        modal.reason_category.value = "Conduct"
+        modal.reason_detail.value = "Reason"
+        modal.admin_notes.value = "Internal"
+        interaction = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=1),
+            user=types.SimpleNamespace(id=999, __str__=lambda self: "Admin"),
+            response=types.SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        asyncio.run(modal.on_submit(interaction))
+
+        self.assertEqual(calls["create"]["discord_user_id"], 123)
+        self.assertEqual(calls["create"]["mc_user_id"], "456")
+        self.assertEqual(calls["create"]["sanction_type"], "Warning")
+        parent.db.add_event.assert_awaited_once()
+        parent._update_view.assert_awaited_once_with(interaction)
+
+    def test_edit_and_remove_sanction_modals_use_public_contracts(self):
+        calls = {}
+
+        class FakeSanctionManager:
+            db = types.SimpleNamespace(
+                get_sanction=lambda sanction_id: (_ for _ in ()).throw(AssertionError("db fallback used")),
+                edit_sanction=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("db fallback used")),
+                update_sanction_status=lambda *args, **kwargs: (_ for _ in ()).throw(
+                    AssertionError("db fallback used")
+                ),
+            )
+
+            def get_sanction_by_id(self, sanction_id):
+                calls.setdefault("get", []).append(sanction_id)
+                return {"sanction_id": sanction_id, "guild_id": 1}
+
+            def edit_member_sanction(self, sanction_id, *, admin_user_id, **updates):
+                calls["edit"] = (sanction_id, admin_user_id, updates)
+
+            def remove_member_sanction(self, sanction_id, *, admin_user_id, notes=None):
+                calls["remove"] = (sanction_id, admin_user_id, notes)
+
+        parent = types.SimpleNamespace(
+            integrations={"sanction_manager": FakeSanctionManager()},
+            member_data=MemberData(discord_id=123, mc_user_id="456"),
+            db=types.SimpleNamespace(add_event=AsyncMock()),
+            _update_view=AsyncMock(),
+        )
+        interaction = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=1),
+            user=types.SimpleNamespace(id=999, __str__=lambda self: "Admin"),
+            response=types.SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        edit_modal = EditSanctionModal(parent)
+        edit_modal.sanction_id.value = "42"
+        edit_modal.new_reason.value = "Updated reason"
+        edit_modal.new_notes.value = ""
+        asyncio.run(edit_modal.on_submit(interaction))
+
+        remove_modal = RemoveSanctionModal(parent)
+        remove_modal.sanction_id.value = "42"
+        remove_modal.reason.value = "Resolved"
+        remove_modal.confirm.value = "REMOVE"
+        asyncio.run(remove_modal.on_submit(interaction))
+
+        self.assertEqual(calls["get"], [42, 42])
+        self.assertEqual(calls["edit"], (42, 999, {"reason_detail": "Updated reason"}))
+        self.assertEqual(calls["remove"][0], 42)
+        self.assertEqual(calls["remove"][1], 999)
+        self.assertIn("Resolved", calls["remove"][2])
 
     def test_sanctions_embed_has_quiet_fallback_without_backend(self):
         view = MemberOverviewView.__new__(MemberOverviewView)
