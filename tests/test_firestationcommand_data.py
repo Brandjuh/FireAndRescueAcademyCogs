@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from FireStationCommand.fire_station_command import FireStationCommand
 
 
@@ -5,6 +7,7 @@ def _cog_with_game_data(game_data):
     cog = object.__new__(FireStationCommand)
     cog.game_data = game_data
     cog.vehicle_definitions = FireStationCommand._build_vehicle_definitions(cog)
+    cog._utcnow = lambda: datetime(2026, 6, 12, 12, 0, tzinfo=timezone.utc)
     return cog
 
 
@@ -135,6 +138,10 @@ def test_new_mission_state_includes_schema_and_initial_stage():
         "alert_mode": None,
         "channel_id": 123,
         "guild_id": 456,
+        "created_at": "2026-06-12T12:00:00Z",
+        "updated_at": "2026-06-12T12:00:00Z",
+        "next_action": None,
+        "next_action_at": None,
     }
 
 
@@ -146,4 +153,27 @@ def test_set_mission_stage_preserves_schema_version():
 
     assert mission["schema_version"] == FireStationCommand.MISSION_SCHEMA_VERSION
     assert mission["stage"] == FireStationCommand.STAGE_TRAVEL
+    assert mission["updated_at"] == "2026-06-12T12:00:00Z"
     assert FireStationCommand._mission_is_stage(cog, mission, FireStationCommand.STAGE_TRAVEL)
+
+
+def test_set_and_clear_mission_due_tracks_next_action():
+    cog = _cog_with_game_data({})
+    mission = {"stage": FireStationCommand.STAGE_STAFF_TURNOUT}
+
+    FireStationCommand._set_mission_due(
+        cog,
+        mission,
+        FireStationCommand.ACTION_SHOW_TURNOUT_RESULT,
+        minutes=2.5,
+    )
+
+    assert mission["next_action"] == FireStationCommand.ACTION_SHOW_TURNOUT_RESULT
+    assert mission["next_action_at"] == "2026-06-12T12:02:30Z"
+    assert mission["updated_at"] == "2026-06-12T12:00:00Z"
+
+    FireStationCommand._clear_mission_due(cog, mission)
+
+    assert mission["next_action"] is None
+    assert mission["next_action_at"] is None
+    assert mission["updated_at"] == "2026-06-12T12:00:00Z"
