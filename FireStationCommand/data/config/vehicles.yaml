@@ -3,6 +3,7 @@ vehicles:
     name: "Standard Fire Engine"
     category: "fire"
     tier_min: 1
+    image: "Images/Vehicles/engine_basic.png"
     base_cost: 50000
     maintenance_cost: 500
     response_speed: 1.0
@@ -19,6 +20,7 @@ vehicles:
     name: "Basic Rescue Truck"
     category: "rescue"
     tier_min: 1
+    image: "Images/Vehicles/rescue_basic.png"
     base_cost: 75000
     maintenance_cost: 700
     response_speed: 0.9
