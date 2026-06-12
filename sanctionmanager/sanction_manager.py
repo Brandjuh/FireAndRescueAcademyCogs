@@ -1776,6 +1776,63 @@ class SanctionsManager(commands.Cog):
         await self.config.guild(guild).panel_message_id.set(message.id)
         return message
 
+    def _is_panel_message(self, message: discord.Message) -> bool:
+        """Return whether a message looks like the persistent SanctionManager panel."""
+        embeds = getattr(message, "embeds", []) or []
+        if embeds:
+            title = getattr(embeds[0], "title", None)
+            if title == "Sanction Management":
+                return True
+
+        components = getattr(message, "components", []) or []
+        for row in components:
+            for component in getattr(row, "children", []) or []:
+                if getattr(component, "custom_id", None) == "sm:start":
+                    return True
+
+        return False
+
+    async def _find_existing_panel_messages(self, channel: discord.TextChannel, limit: int = 50) -> List[discord.Message]:
+        """Find recent SanctionManager panel messages in the configured channel."""
+        history = getattr(channel, "history", None)
+        if not history:
+            return []
+
+        messages = []
+        async for message in history(limit=limit):
+            author = getattr(message, "author", None)
+            if getattr(author, "id", None) != getattr(self.bot.user, "id", None):
+                continue
+            if self._is_panel_message(message):
+                messages.append(message)
+        return messages
+
+    async def _deduplicate_panel_messages(
+        self,
+        guild: discord.Guild,
+        channel: discord.TextChannel,
+        preferred_message: Optional[discord.Message] = None,
+    ) -> Optional[discord.Message]:
+        """Keep one SanctionManager panel in a channel and delete duplicate panels when possible."""
+        existing_messages = await self._find_existing_panel_messages(channel)
+        if preferred_message and preferred_message not in existing_messages:
+            existing_messages.insert(0, preferred_message)
+
+        if not existing_messages:
+            return None
+
+        keep = preferred_message or existing_messages[0]
+        for message in existing_messages:
+            if message.id == keep.id:
+                continue
+            try:
+                await message.delete()
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+                log.info("Could not delete duplicate SanctionManager panel %s: %s", message.id, exc)
+
+        await self.config.guild(guild).panel_message_id.set(keep.id)
+        return keep
+
     async def _ensure_panel_message(self, guild: discord.Guild) -> None:
         """Post the configured panel if its stored message is missing."""
         channel_id = await self.config.guild(guild).panel_channel_id()
@@ -1790,10 +1847,15 @@ class SanctionsManager(commands.Cog):
         message_id = await self.config.guild(guild).panel_message_id()
         if message_id:
             try:
-                await channel.fetch_message(int(message_id))
+                message = await channel.fetch_message(int(message_id))
+                await self._deduplicate_panel_messages(guild, channel, message)
                 return
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 log.info("Stored SanctionManager panel message is unavailable; reposting")
+
+        existing_message = await self._deduplicate_panel_messages(guild, channel)
+        if existing_message:
+            return
 
         try:
             await self._send_panel_message(guild, channel)
@@ -2124,17 +2186,14 @@ class SanctionsManager(commands.Cog):
             await ctx.send("SanctionManager panel channel not found.")
             return
 
-        message_id = await self.config.guild(ctx.guild).panel_message_id()
-        if message_id:
-            try:
-                await channel.fetch_message(int(message_id))
-                await ctx.send("SanctionManager panel already exists.")
-                return
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                pass
+        before_message_id = await self.config.guild(ctx.guild).panel_message_id()
+        await self._ensure_panel_message(ctx.guild)
+        after_message_id = await self.config.guild(ctx.guild).panel_message_id()
 
-        await self._send_panel_message(ctx.guild, channel)
-        await ctx.send(f"SanctionManager panel posted in {channel.mention}.")
+        if before_message_id and before_message_id == after_message_id:
+            await ctx.send("SanctionManager panel already exists.")
+        else:
+            await ctx.send(f"SanctionManager panel posted in {channel.mention}.")
 
     @sanctionpanel.command(name="repost")
     async def sanctionpanel_repost(self, ctx: commands.Context):
@@ -2145,7 +2204,13 @@ class SanctionsManager(commands.Cog):
             await ctx.send("SanctionManager panel channel not found.")
             return
 
-        await self.config.guild(ctx.guild).panel_message_id.set(None)
+        existing_messages = await self._find_existing_panel_messages(channel, limit=100)
+        for message in existing_messages:
+            try:
+                await message.delete()
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                pass
+
         await self._send_panel_message(ctx.guild, channel)
         await ctx.send(f"SanctionManager panel reposted in {channel.mention}.")
 

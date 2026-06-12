@@ -73,6 +73,51 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         self.assertEqual(stored["id"], 98765)
         channel.send.assert_awaited_once()
 
+    def test_sanctionmanager_deduplicates_existing_panel_messages(self):
+        module = load_sanction_manager_module()
+        stored = {}
+
+        class GuildConfig:
+            panel_message_id = types.SimpleNamespace(
+                set=AsyncMock(side_effect=lambda value: stored.update({"id": value}))
+            )
+
+        def make_panel_message(message_id):
+            return types.SimpleNamespace(
+                id=message_id,
+                author=types.SimpleNamespace(id=555),
+                embeds=[types.SimpleNamespace(title="Sanction Management")],
+                components=[],
+                delete=AsyncMock(),
+            )
+
+        keep = make_panel_message(300)
+        duplicate = make_panel_message(200)
+        unrelated = types.SimpleNamespace(
+            id=100,
+            author=types.SimpleNamespace(id=555),
+            embeds=[types.SimpleNamespace(title="Other")],
+            components=[],
+            delete=AsyncMock(),
+        )
+
+        class Channel:
+            async def history(self, limit=50):
+                for message in [keep, duplicate, unrelated]:
+                    yield message
+
+        cog = module.SanctionsManager.__new__(module.SanctionsManager)
+        cog.bot = types.SimpleNamespace(user=types.SimpleNamespace(id=555))
+        cog.config = types.SimpleNamespace(guild=lambda guild: GuildConfig())
+        guild = types.SimpleNamespace(id=1)
+
+        result = asyncio.run(cog._deduplicate_panel_messages(guild, Channel()))
+
+        self.assertIs(result, keep)
+        self.assertEqual(stored["id"], 300)
+        duplicate.delete.assert_awaited_once()
+        unrelated.delete.assert_not_awaited()
+
     def test_sanction_database_matches_discord_and_mc_ids_together(self):
         SanctionsDatabase = load_sanctions_database_class()
 
