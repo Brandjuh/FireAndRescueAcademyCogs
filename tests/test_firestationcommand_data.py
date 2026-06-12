@@ -110,6 +110,37 @@ def test_balance_helpers_read_values_with_fallbacks():
     assert FireStationCommand._balance_int(cog, "missing", 7) == 7
 
 
+def test_default_global_config_keeps_manual_gameplay_timers_short():
+    cog = _cog_with_game_data(
+        {
+            "balance": {
+                "balance": {
+                    "career_turnout_seconds": 30,
+                    "career_upgrade_cost": 250000,
+                }
+            }
+        }
+    )
+
+    config = FireStationCommand._build_default_global_config(cog)
+
+    assert config["volunteer_normal_minutes"] == 2.0
+    assert config["volunteer_emergency_minutes"] == 0.5
+    assert config["career_turnout_minutes"] == 0.5
+    assert config["realert_minutes_min"] == 0.25
+    assert config["realert_minutes_max"] == 0.75
+    assert config["travel_minutes_min"] == 1.0
+    assert config["travel_minutes_max"] == 2.0
+
+
+def test_relative_text_rounds_short_positive_waits_up_to_one_minute():
+    cog = _cog_with_game_data({})
+
+    assert FireStationCommand._make_relative_text(cog, 0.0) == "now"
+    assert FireStationCommand._make_relative_text(cog, 0.5) == "in 1 minute"
+    assert FireStationCommand._make_relative_text(cog, 1.1) == "in 2 minutes"
+
+
 def test_invalid_yaml_shapes_fall_back_to_static_catalog_and_incidents():
     cog = _cog_with_game_data({"missions": {"missions": "bad"}, "vehicles": {"vehicles": "bad"}})
 

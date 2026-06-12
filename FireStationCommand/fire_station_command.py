@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import random
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -34,21 +35,7 @@ class FireStationCommand(commands.Cog):
         self.config = Config.get_conf(self, identifier=0xF15704, force_registration=True)
         self.game_data = self._load_game_data()
 
-        default_global: Dict[str, Any] = {
-            "volunteer_normal_minutes": 15.0,
-            "volunteer_emergency_minutes": 5.0,
-            "career_turnout_minutes": self._balance_seconds_as_minutes(
-                "career_turnout_seconds", 0.0
-            ),
-            "realert_minutes_min": 1.0,
-            "realert_minutes_max": 3.0,
-            "travel_minutes_min": 3.0,
-            "travel_minutes_max": 8.0,
-            "staff_cost": 2000,
-            "upgrade_base_cost": 50000,
-            "career_convert_cost": self._balance_int("career_upgrade_cost", 250000),
-            "max_station_level": 5,
-        }
+        default_global = self._build_default_global_config()
 
         default_user: Dict[str, Any] = {
             "started": False,
@@ -173,6 +160,23 @@ class FireStationCommand(commands.Cog):
 
     def _reward_multiplier(self) -> float:
         return max(0.0, self._balance_float("credits_reward_multiplier", 1.0))
+
+    def _build_default_global_config(self) -> Dict[str, Any]:
+        return {
+            "volunteer_normal_minutes": 2.0,
+            "volunteer_emergency_minutes": 0.5,
+            "career_turnout_minutes": self._balance_seconds_as_minutes(
+                "career_turnout_seconds", 0.0
+            ),
+            "realert_minutes_min": 0.25,
+            "realert_minutes_max": 0.75,
+            "travel_minutes_min": 1.0,
+            "travel_minutes_max": 2.0,
+            "staff_cost": 2000,
+            "upgrade_base_cost": 50000,
+            "career_convert_cost": self._balance_int("career_upgrade_cost", 250000),
+            "max_station_level": 5,
+        }
 
     def _utcnow(self) -> datetime:
         return datetime.now(timezone.utc)
@@ -423,9 +427,9 @@ class FireStationCommand(commands.Cog):
         return random.choice(self.INCIDENTS)
 
     def _make_relative_text(self, minutes: float) -> str:
-        mins = int(round(minutes))
-        if mins <= 0:
+        if minutes <= 0:
             return "now"
+        mins = max(1, int(math.ceil(minutes)))
         if mins == 1:
             return "in 1 minute"
         return f"in {mins} minutes"

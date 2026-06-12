@@ -29,11 +29,17 @@ All notable changes to FireStationCommand will be documented in this file.
 - `[p]fsc` now opens the station dashboard instead of showing command help.
 - Mission embeds now use narrative text from mission config when available.
 - Crew alert, turnout result, re-alert, vehicle selection, and en-route updates now use richer embeds instead of short plain status messages.
+- Early manual gameplay timers are shorter until automatic dispatch is implemented.
+- Short positive wait times now display as at least `in 1 minute` instead of `now`.
 
 ### Fixed
 
 - Prevented Red help from appearing after the `[p]fsc` dashboard.
 - Dashboard buttons now update the existing dashboard message instead of opening private responses.
+
+### Planned
+
+- Add automatic dispatch later, after the manual mission flow is more complete.
 
 ### Known Issues
 
