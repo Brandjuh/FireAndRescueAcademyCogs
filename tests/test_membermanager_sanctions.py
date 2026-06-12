@@ -111,6 +111,17 @@ class MemberManagerSanctionsTests(unittest.TestCase):
             },
         )
 
+    def test_sanctions_embed_has_quiet_fallback_without_backend(self):
+        view = MemberOverviewView.__new__(MemberOverviewView)
+        view.member_data = MemberData(discord_id=123, mc_user_id="456", discord_username="DiscordUser")
+        view.integrations = {"sanction_manager": None}
+        view.guild = types.SimpleNamespace(id=1)
+
+        embed = asyncio.run(view.get_infractions_embed())
+
+        self.assertIn("No sanctions are currently shown", embed.description)
+        self.assertEqual(embed.footer["text"], "Sanction backend is not loaded")
+
 
 if __name__ == "__main__":
     unittest.main()

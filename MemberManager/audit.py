@@ -41,6 +41,36 @@ EXCLUDED_PERSON_AUDIT_ACTION_KEYS = {
     "course_completed",
 }
 
+PERSON_AUDIT_ACTION_KEYS = {
+    "added_to_alliance",
+    "left_alliance",
+    "kicked_from_alliance",
+    "chat_ban_removed",
+    "chat_ban_set",
+    "set_admin",
+    "removed_admin",
+    "set_co_admin",
+    "removed_co_admin",
+    "set_mod_action_admin",
+    "removed_mod_action_admin",
+    "set_as_staff",
+    "removed_as_staff",
+    "promoted_to_event_manager",
+    "removed_event_manager",
+}
+
+OPERATIONS_ACTION_KEYS = {
+    "large_mission_started",
+    "alliance_event_started",
+}
+
+BUILDING_ACTIVITY_ACTION_KEYS = {
+    "building_constructed",
+    "building_destroyed",
+    "extension_started",
+    "expansion_finished",
+}
+
 EVENT_EMOJI = {
     "membermanager": "🛠️",
     "missionchief": "🎮",
@@ -186,7 +216,8 @@ def normalize_log_row(row: dict[str, Any]) -> AuditTimelineEvent:
 
 def should_include_log_row(row: dict[str, Any]) -> bool:
     """Return whether a LogsScraper row belongs in a member audit timeline."""
-    return (row.get("action_key") or "") not in EXCLUDED_PERSON_AUDIT_ACTION_KEYS
+    action_key = row.get("action_key") or ""
+    return action_key in PERSON_AUDIT_ACTION_KEYS and action_key not in EXCLUDED_PERSON_AUDIT_ACTION_KEYS
 
 
 def build_identity_filters(
