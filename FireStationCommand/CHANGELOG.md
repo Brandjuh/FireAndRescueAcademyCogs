@@ -40,10 +40,11 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added the full imported MissionChief possible-missions catalog as FireStationCommand mission content.
 - Added expanded vehicle and equipment catalogs derived from MissionChief mission requirements.
 - Added generated flat-style mission, vehicle, and equipment images for the expanded catalogs.
+- Added catalog quality tests for imported mission XP, narrative coverage, and referenced vehicle/equipment IDs.
 
 ### Changed
 
-- Bumped the cog version to `1.2.0`.
+- Bumped the cog version to `1.2.1`.
 - Vehicle shop options now come from `data/config/vehicles.yaml` when available.
 - Mission definitions now come from `data/config/missions.yaml` when available.
 - Mission embeds now show configured mission images when available.
@@ -86,6 +87,8 @@ All notable changes to FireStationCommand will be documented in this file.
 - Dashboard, status, and station embeds now show reputation and maintenance information.
 - Mission control refresh now advances overdue turnout, travel, and result steps instead of only showing stale timers.
 - Vehicle and equipment shops now paginate catalog options so large catalogs stay within Discord select-menu limits.
+- Rebalanced imported mission unlock levels and XP using mission credits, requirement complexity, and capability weight.
+- Rewrote every imported mission narrative field with category-aware dispatch, scene, success, partial, and failure text.
 
 ### Fixed
 
