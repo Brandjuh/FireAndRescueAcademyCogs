@@ -260,6 +260,25 @@ def test_vehicle_image_helpers_build_raw_urls_and_apply_embed_image():
     }
 
 
+def test_equipment_display_text_uses_configured_names_and_fallback_ids():
+    cog = _cog_with_game_data(
+        {
+            "equipment": {
+                "equipment": [
+                    {"id": "hose", "name": "Fire Hose Set"},
+                    {"id": "basic_tools", "name": "Basic Hand Tools"},
+                ]
+            }
+        }
+    )
+
+    assert FireStationCommand._equipment_display_text(cog, ["hose", "missing_tool", "basic_tools"]) == (
+        "Fire Hose Set, missing_tool, Basic Hand Tools"
+    )
+    assert FireStationCommand._equipment_display_text(cog, []) is None
+    assert FireStationCommand._equipment_display_text(cog, "hose") is None
+
+
 def test_recruitment_embed_shows_hireable_staff():
     user = object()
     cog = _cog_with_game_data({})
@@ -536,10 +555,20 @@ def test_build_mission_control_embed_guides_alert_choice():
 
 
 def test_build_mission_control_embed_shows_turnout_and_next_update():
-    cog = _cog_with_game_data({})
+    cog = _cog_with_game_data(
+        {
+            "equipment": {
+                "equipment": [
+                    {"id": "hose", "name": "Fire Hose Set"},
+                    {"id": "basic_tools", "name": "Basic Hand Tools"},
+                ]
+            }
+        }
+    )
     mission = {
         "title": "Traffic Collision",
         "required_staff": 6,
+        "required_equipment": ["hose", "basic_tools"],
         "stage": FireStationCommand.STAGE_STAFF_TURNOUT,
         "turnout_total_arrived": 3,
         "turnout_available": 6,
@@ -550,6 +579,7 @@ def test_build_mission_control_embed_shows_turnout_and_next_update():
     embed = FireStationCommand._build_mission_control_embed(cog, mission)
 
     fields = {field["name"]: field["value"] for field in embed.fields}
+    assert fields["Required equipment"] == "Fire Hose Set, Basic Hand Tools"
     assert fields["Guidance"] == "Crew turnout is in progress. Refresh this panel after the expected turnout time."
     assert fields["Turnout"] == "3 / 6 arrived"
     assert fields["Next update"] == "2026-06-12T12:01:00Z"

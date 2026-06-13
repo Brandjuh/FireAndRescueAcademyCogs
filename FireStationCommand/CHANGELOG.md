@@ -31,6 +31,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - Mission embeds now show configured mission images when available.
 - Vehicle purchase embeds now show configured vehicle images when available.
 - Mission images now use the same flat illustrated fire-station style as vehicle assets.
+- Mission embeds now show configured required equipment names when available.
 - Mission rewards now use each mission's `base_credits` value when available.
 - Career conversion cost and career turnout time now use matching `balance.yaml` values when available.
 - New missions now store a mission state schema version.
