@@ -21,6 +21,7 @@ DEFAULT_REMINDER_CHANNEL_ID = 1421625293130567690
 DEFAULT_MANAGEMENT_CHANNEL_ID = 1426226521231589507
 DEFAULT_LOG_CHANNEL_ID = 668919729762730004
 LOCAL_TIMEZONE_NAME = "Europe/Amsterdam"
+MANAGEMENT_PANEL_TITLE = "Admin timer management"
 
 try:
     LOCAL_TIMEZONE = ZoneInfo(LOCAL_TIMEZONE_NAME)
@@ -73,6 +74,35 @@ DEFAULT_GUILD = {
     "log_channel_id": DEFAULT_LOG_CHANNEL_ID,
     "reminders": [],
 }
+
+
+def _embed_title(embed: Any) -> Optional[str]:
+    title = getattr(embed, "title", None)
+    if title:
+        return str(title)
+    kwargs = getattr(embed, "kwargs", None)
+    if isinstance(kwargs, dict) and kwargs.get("title"):
+        return str(kwargs["title"])
+    return None
+
+
+def is_management_panel_message(message: Any, *, bot_user_id: Optional[int] = None) -> bool:
+    author_id = getattr(getattr(message, "author", None), "id", None)
+    if bot_user_id is not None and author_id is not None and int(author_id) != int(bot_user_id):
+        return False
+    return any(_embed_title(embed) == MANAGEMENT_PANEL_TITLE for embed in getattr(message, "embeds", []) or [])
+
+
+def format_channel_reference(channel: Any, fallback_id: Optional[int]) -> str:
+    if channel:
+        channel_id = getattr(channel, "id", fallback_id)
+        name = getattr(channel, "name", None)
+        if name:
+            return f"#{name} (`{channel_id}`)"
+        mention = getattr(channel, "mention", None)
+        if mention:
+            return f"{mention} (`{channel_id}`)"
+    return f"Missing channel `{fallback_id}`"
 
 
 def parse_title_body(raw: str, *, default_title: str = "Admin reminder") -> tuple[str, str]:
@@ -706,7 +736,7 @@ class AdminTimedNotifications(commands.Cog):
                 reminder_id = reminder.get("id")
                 if reminder_id:
                     self.bot.add_view(ReminderActionView(self, int(reminder_id)))
-            await self.ensure_management_panel(guild)
+            await self.ensure_management_panel(guild, create=False)
 
     async def reminder_loop(self):
         await self.bot.wait_until_red_ready()
@@ -760,6 +790,12 @@ class AdminTimedNotifications(commands.Cog):
 
     async def management_menu_text(self, guild: discord.Guild) -> str:
         reminders = await self.config.guild(guild).reminders()
+        reminder_channel_id = await self.configured_channel_id(
+            guild,
+            "admin_channel_id",
+            DEFAULT_REMINDER_CHANNEL_ID,
+        )
+        log_channel_id = await self.configured_channel_id(guild, "log_channel_id", DEFAULT_LOG_CHANNEL_ID)
         reminder_channel = await self.reminder_channel(guild)
         log_channel = await self.log_channel(guild)
         return "\n".join(
@@ -767,27 +803,71 @@ class AdminTimedNotifications(commands.Cog):
                 "Timer management",
                 "",
                 f"Active timers: {len(reminders)}",
-                f"Reminder channel: {reminder_channel.mention if reminder_channel else DEFAULT_REMINDER_CHANNEL_ID}",
-                f"Log channel: {log_channel.mention if log_channel else DEFAULT_LOG_CHANNEL_ID}",
+                f"Reminder channel: {format_channel_reference(reminder_channel, reminder_channel_id)}",
+                f"Log channel: {format_channel_reference(log_channel, log_channel_id)}",
             ]
         )
 
-    def build_management_embed(self, guild: discord.Guild, reminders: list[dict[str, Any]]) -> discord.Embed:
+    async def build_management_embed(
+        self,
+        guild: discord.Guild,
+        reminders: list[dict[str, Any]],
+    ) -> discord.Embed:
+        reminder_channel_id = await self.configured_channel_id(
+            guild,
+            "admin_channel_id",
+            DEFAULT_REMINDER_CHANNEL_ID,
+        )
+        log_channel_id = await self.configured_channel_id(guild, "log_channel_id", DEFAULT_LOG_CHANNEL_ID)
+        reminder_channel = await self.reminder_channel(guild)
+        log_channel = await self.log_channel(guild)
         embed = discord.Embed(
-            title="Admin timer management",
+            title=MANAGEMENT_PANEL_TITLE,
             description="Use the button below to create, list, or remove admin timers.",
             color=discord.Color.orange(),
         )
         embed.add_field(name="Active timers", value=str(len(reminders)), inline=True)
-        embed.add_field(name="Reminder channel", value=f"<#{DEFAULT_REMINDER_CHANNEL_ID}>", inline=True)
+        embed.add_field(
+            name="Reminder channel",
+            value=format_channel_reference(reminder_channel, reminder_channel_id),
+            inline=True,
+        )
+        embed.add_field(
+            name="Log channel",
+            value=format_channel_reference(log_channel, log_channel_id),
+            inline=True,
+        )
         return embed
 
-    async def ensure_management_panel(self, guild: discord.Guild):
+    async def find_existing_management_panel(self, channel: Any):
+        history = getattr(channel, "history", None)
+        if not history:
+            return None
+
+        bot_user_id = getattr(getattr(self.bot, "user", None), "id", None)
+        found = []
+        try:
+            async for message in channel.history(limit=50):
+                if is_management_panel_message(message, bot_user_id=bot_user_id):
+                    found.append(message)
+        except (discord.Forbidden, discord.HTTPException):
+            return None
+
+        if not found:
+            return None
+
+        keep = found[0]
+        for duplicate in found[1:]:
+            with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                await duplicate.delete()
+        return keep
+
+    async def ensure_management_panel(self, guild: discord.Guild, *, create: bool = True):
         channel = await self.management_channel(guild)
         if not channel:
             return None
         reminders = await self.config.guild(guild).reminders()
-        embed = self.build_management_embed(guild, reminders)
+        embed = await self.build_management_embed(guild, reminders)
         view = AdminTimerPanelView(self)
         message_id = await self.config.guild(guild).management_message_id()
         if message_id and hasattr(channel, "fetch_message"):
@@ -795,6 +875,15 @@ class AdminTimedNotifications(commands.Cog):
                 message = await channel.fetch_message(int(message_id))
                 await message.edit(embed=embed, view=view)
                 return message
+
+        existing = await self.find_existing_management_panel(channel)
+        if existing:
+            await existing.edit(embed=embed, view=view)
+            await self.config.guild(guild).management_message_id.set(existing.id)
+            return existing
+
+        if not create:
+            return None
 
         message = await channel.send(embed=embed, view=view)
         await self.config.guild(guild).management_message_id.set(message.id)
@@ -857,7 +946,7 @@ class AdminTimedNotifications(commands.Cog):
         async with self.config.guild(guild).reminders() as reminders:
             reminders.append(reminder)
         self.bot.add_view(ReminderActionView(self, int(reminder["id"])))
-        await self.ensure_management_panel(guild)
+        await self.ensure_management_panel(guild, create=False)
         await self.log_timer_action(guild, "created", reminder, actor=actor)
 
     async def remove_reminder(self, guild: discord.Guild, reminder_id: int, *, actor: Any) -> bool:
@@ -871,7 +960,7 @@ class AdminTimedNotifications(commands.Cog):
                     kept.append(reminder)
             reminders[:] = kept
         if removed:
-            await self.ensure_management_panel(guild)
+            await self.ensure_management_panel(guild, create=False)
             await self.log_timer_action(guild, "removed", removed, actor=actor)
             return True
         return False
