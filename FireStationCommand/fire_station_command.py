@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - dependency is declared in info.json
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.3.0"
+    __version__ = "1.3.1"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
@@ -186,6 +186,12 @@ class FireStationCommand(commands.Cog):
     def _maintenance_multiplier(self) -> float:
         return max(0.0, self._balance_float("maintenance_cost_multiplier", 1.0))
 
+    def _maintenance_out_of_service_threshold(self) -> int:
+        return max(0, min(100, self._balance_int("maintenance_out_of_service_condition", 25)))
+
+    def _maintenance_out_of_service_minutes(self) -> int:
+        return max(1, self._balance_int("maintenance_out_of_service_minutes", 30))
+
     def _economy_scaled_cost(self, base_cost: int, credits: int) -> int:
         base = max(0, int(base_cost))
         if base <= 0:
@@ -214,6 +220,36 @@ class FireStationCommand(commands.Cog):
             ),
             inline=False,
         )
+
+    def _command_level_from_data(self, data: Dict[str, Any]) -> int:
+        xp = int(data.get("xp", 0))
+        return int(data.get("command_level", self._command_level_for_xp(xp)))
+
+    def _feature_available(self, data: Dict[str, Any], feature: str) -> bool:
+        command_level = self._command_level_from_data(data)
+        expansions = self._expansion_inventory_set(data.get("expansions", []))
+        station_level = int(data.get("station_level", 1))
+
+        if feature == "career_conversion":
+            return station_level >= 2 and data.get("station_type", "volunteer") != "career"
+        if feature == "expansions":
+            return command_level >= 4 or bool(expansions)
+        if feature == "maintenance":
+            return command_level >= 4 or "workshop" in expansions
+        if feature == "training":
+            return command_level >= 5 or "training_facility" in expansions
+        return True
+
+    def _feature_locked_text(self, feature: str) -> str:
+        if feature == "career_conversion":
+            return "Career conversion unlocks at station level 2."
+        if feature == "expansions":
+            return "Station expansions unlock at command level 4."
+        if feature == "maintenance":
+            return "Maintenance bay unlocks at command level 4 or after building the workshop expansion."
+        if feature == "training":
+            return "Training desk unlocks at command level 5 or after building the training facility expansion."
+        return "This feature is not available yet."
 
     def _reputation_delta_for_outcome(self, outcome_key: str) -> int:
         if outcome_key == "success":
@@ -449,6 +485,34 @@ class FireStationCommand(commands.Cog):
             condition = 100
         return max(0, min(100, condition))
 
+    def _vehicle_out_of_service_until(self, vehicle: Dict[str, Any]) -> datetime | None:
+        return self._parse_timestamp(vehicle.get("out_of_service_until"))
+
+    def _vehicle_is_out_of_service(self, vehicle: Dict[str, Any]) -> bool:
+        until = self._vehicle_out_of_service_until(vehicle)
+        return until is not None and until > self._utcnow()
+
+    def _available_vehicles(self, vehicles: Any) -> List[Dict[str, Any]]:
+        if not isinstance(vehicles, list):
+            return []
+        return [
+            vehicle
+            for vehicle in vehicles
+            if isinstance(vehicle, dict) and not self._vehicle_is_out_of_service(vehicle)
+        ]
+
+    def _out_of_service_vehicle_text(self, vehicles: Any) -> str | None:
+        if not isinstance(vehicles, list):
+            return None
+        rows: List[str] = []
+        for vehicle in vehicles:
+            if not isinstance(vehicle, dict) or not self._vehicle_is_out_of_service(vehicle):
+                continue
+            name = vehicle.get("name", "Vehicle")
+            until = self._vehicle_out_of_service_until(vehicle)
+            rows.append(f"{name}: unavailable until {until.isoformat() if until else 'maintenance clears'}")
+        return "\n".join(rows[:10]) if rows else None
+
     def _vehicle_maintenance_cost(self, vehicle: Dict[str, Any]) -> int:
         condition = self._vehicle_condition(vehicle)
         if condition >= 100:
@@ -499,6 +563,7 @@ class FireStationCommand(commands.Cog):
         vehicles: Any,
         selected_ids: Any,
         outcome_key: str,
+        data: Dict[str, Any] | None = None,
     ) -> List[Dict[str, Any]]:
         if not isinstance(vehicles, list):
             return []
@@ -516,10 +581,17 @@ class FireStationCommand(commands.Cog):
             except (TypeError, ValueError):
                 vehicle_id = -1
             if vehicle_id in selected:
-                current["condition"] = max(
+                condition = max(
                     0,
                     self._vehicle_condition(current) - self._vehicle_wear_for_outcome(outcome_key),
                 )
+                current["condition"] = condition
+                if data is not None and self._feature_available(data, "maintenance") and (
+                    condition <= self._maintenance_out_of_service_threshold()
+                ):
+                    current["out_of_service_until"] = self._timestamp_after_minutes(
+                        self._maintenance_out_of_service_minutes()
+                    )
             updated.append(current)
         return updated
 
@@ -531,6 +603,8 @@ class FireStationCommand(commands.Cog):
         totals: Dict[str, float] = {}
         for owned in vehicles:
             if not isinstance(owned, dict):
+                continue
+            if self._vehicle_is_out_of_service(owned):
                 continue
             vehicle_id = owned.get("catalog_id")
             vehicle = self.vehicle_definitions.get(str(vehicle_id))
@@ -618,6 +692,8 @@ class FireStationCommand(commands.Cog):
             "scene_backup_window_minutes_max": 1.0,
             "scene_backup_travel_minutes_min": 0.5,
             "scene_backup_travel_minutes_max": 1.5,
+            "maintenance_out_of_service_condition": self._maintenance_out_of_service_threshold(),
+            "maintenance_out_of_service_minutes": self._maintenance_out_of_service_minutes(),
             "staff_cost": 2000,
             "upgrade_base_cost": 50000,
             "career_convert_cost": self._balance_int("career_upgrade_cost", 250000),
@@ -1447,6 +1523,7 @@ class FireStationCommand(commands.Cog):
             )
 
         vehicles = data.get("vehicles", [])
+        available_vehicles = self._available_vehicles(vehicles)
         equipment_count = sum(self._equipment_inventory_counts(data.get("equipment", [])).values())
         training_count = len(self._training_inventory_set(data.get("trainings", [])))
         expansion_count = len(self._expansion_inventory_set(data.get("expansions", [])))
@@ -1477,17 +1554,22 @@ class FireStationCommand(commands.Cog):
         )
         embed.add_field(
             name="Vehicles",
-            value=f"{len(vehicles)} / max {self._max_vehicles_for_data(data)}",
+            value=f"{len(vehicles)} / max {self._max_vehicles_for_data(data)} ({len(available_vehicles)} available)",
             inline=False,
         )
         embed.add_field(name="Equipment", value=f"{equipment_count} item(s)", inline=True)
-        embed.add_field(name="Training", value=f"{training_count} certification(s)", inline=True)
+        if self._feature_available(data, "training"):
+            embed.add_field(name="Training", value=f"{training_count} certification(s)", inline=True)
         embed.add_field(name="Expansions", value=f"{expansion_count} built", inline=True)
-        embed.add_field(
-            name="Maintenance",
-            value=f"Repair estimate: {self._fleet_maintenance_cost(vehicles):,} credits",
-            inline=False,
-        )
+        if self._feature_available(data, "maintenance"):
+            embed.add_field(
+                name="Maintenance",
+                value=f"Repair estimate: {self._fleet_maintenance_cost(vehicles):,} credits",
+                inline=False,
+            )
+        out_of_service_text = self._out_of_service_vehicle_text(vehicles)
+        if out_of_service_text:
+            embed.add_field(name="Out of service", value=out_of_service_text, inline=False)
         if active:
             embed.add_field(
                 name="Active incident",
@@ -1645,13 +1727,16 @@ class FireStationCommand(commands.Cog):
     def _build_maintenance_embed(self, data: Dict[str, Any]) -> discord.Embed:
         vehicles = data.get("vehicles", [])
         total_cost = self._fleet_maintenance_cost(vehicles)
+        out_of_service = self._out_of_service_vehicle_text(vehicles)
 
         embed = discord.Embed(
             title="Maintenance bay",
-            description="Vehicle condition affects mission readiness and capability output.",
+            description="Vehicle condition affects mission readiness, capability output, and temporary availability.",
             color=discord.Color.dark_gray(),
         )
         embed.add_field(name="Fleet condition", value=self._fleet_condition_text(vehicles), inline=False)
+        if out_of_service:
+            embed.add_field(name="Out of service", value=out_of_service, inline=False)
         embed.add_field(name="Repair estimate", value=f"{total_cost:,} credits", inline=True)
         if total_cost <= 0:
             embed.add_field(name="Status", value="No repairs are needed.", inline=False)
@@ -2078,7 +2163,7 @@ class FireStationCommand(commands.Cog):
         data = await self.config.user(ctx.author).all()
         embed = await self._build_dashboard_embed(ctx.author)
         if data["started"]:
-            view = FscDashboardView(self, ctx.author, ctx.channel, ctx.guild)
+            view = FscDashboardView(self, ctx.author, ctx.channel, ctx.guild, data=data)
         else:
             view = FscStartView(self, ctx.author)
         message = await ctx.send(embed=embed, view=view)
@@ -2615,6 +2700,9 @@ class FireStationCommand(commands.Cog):
             return
 
         data = await self.config.user(ctx.author).all()
+        if not self._feature_available(data, "training"):
+            await ctx.send(self._feature_locked_text("training"))
+            return
         embed = self._build_training_embed(data)
         view = TrainingView(self, ctx.channel, ctx.author, ctx.guild, data=data)
         message = await ctx.send(embed=embed, view=view)
@@ -2639,6 +2727,9 @@ class FireStationCommand(commands.Cog):
             return
 
         data = await self.config.user(ctx.author).all()
+        if not self._feature_available(data, "maintenance"):
+            await ctx.send(self._feature_locked_text("maintenance"))
+            return
         embed = self._build_maintenance_embed(data)
         view = MaintenanceView(self, ctx.channel, ctx.author, ctx.guild)
         message = await ctx.send(embed=embed, view=view)
@@ -2868,7 +2959,7 @@ class FireStationCommand(commands.Cog):
         self._set_mission_stage(mission, self.STAGE_VEHICLE_SELECT)
         await user_conf.active_mission.set(mission)
 
-        vehicles = await self._get_user_vehicles(user)
+        vehicles = self._available_vehicles(await self._get_user_vehicles(user))
         view = VehicleSelectView(self, channel, user, vehicles)
 
         embed = discord.Embed(
@@ -3002,6 +3093,17 @@ class FireStationCommand(commands.Cog):
         if not values:
             await interaction.response.send_message("No vehicles selected.", ephemeral=True)
             return
+        available_ids = {
+            str(vehicle.get("id"))
+            for vehicle in self._available_vehicles(data.get("vehicles", []))
+            if isinstance(vehicle, dict)
+        }
+        if any(vehicle_id not in available_ids for vehicle_id in values):
+            await interaction.response.send_message(
+                "One or more selected vehicles are out of service or no longer available.",
+                ephemeral=True,
+            )
+            return
 
         glb = await self.config.all()
         min_minutes = float(glb.get("travel_minutes_min", 3.0))
@@ -3062,7 +3164,7 @@ class FireStationCommand(commands.Cog):
             title = mission.get("title", "Incident")
             detail = mission.get("detail", "Units report additional information en route.")
             backup_text = self._vehicle_requirement_display_text(mission.get("backup_required_vehicle_ids"))
-            backup_candidates = self._backup_candidate_vehicles(vehicles, mission)
+            backup_candidates = self._backup_candidate_vehicles(self._available_vehicles(vehicles), mission)
 
             embed = discord.Embed(
                 title=f"On-scene update - {title}",
@@ -3152,7 +3254,10 @@ class FireStationCommand(commands.Cog):
             await interaction.response.send_message("No backup vehicles selected.", ephemeral=True)
             return
 
-        available = self._backup_candidate_vehicles(await self._get_user_vehicles(user), mission)
+        available = self._backup_candidate_vehicles(
+            self._available_vehicles(await self._get_user_vehicles(user)),
+            mission,
+        )
         available_ids = {str(vehicle["id"]) for vehicle in available}
         selected_ids = [int(vehicle_id) for vehicle_id in values if vehicle_id in available_ids]
         if not selected_ids:
@@ -3293,12 +3398,13 @@ class FireStationCommand(commands.Cog):
         reputation_delta = self._reputation_delta_for_outcome(outcome_key)
         new_reputation = int(data.get("reputation", 0)) + reputation_delta
         await user_conf.reputation.set(new_reputation)
-        updated_vehicles = self._apply_vehicle_wear(vehicles, dispatched_ids, outcome_key)
+        updated_vehicles = self._apply_vehicle_wear(vehicles, dispatched_ids, outcome_key, data=data)
         await user_conf.vehicles.set(updated_vehicles)
         await self._give(user, reward)
         total_credits = await self._get_credits(user)
         await user_conf.active_mission.set({})
         repair_estimate = self._fleet_maintenance_cost(updated_vehicles)
+        out_of_service = self._out_of_service_vehicle_text(updated_vehicles)
 
         embed = discord.Embed(
             title=f"Incident result – {mission.get('title', 'Unknown')}",
@@ -3319,6 +3425,8 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Reputation", value=f"{new_reputation} ({reputation_delta:+})", inline=True)
         embed.add_field(name="Total credits", value=f"{total_credits:,}", inline=True)
         embed.add_field(name="Repair estimate", value=f"{repair_estimate:,} credits", inline=True)
+        if out_of_service:
+            embed.add_field(name="Out of service", value=out_of_service, inline=False)
         embed.add_field(
             name="Command XP",
             value=self._xp_progress_text(xp_result["total"], xp_result["new_level"]),
@@ -3384,6 +3492,7 @@ class FireStationCommand(commands.Cog):
                 continue
             current = dict(vehicle)
             current["condition"] = 100
+            current.pop("out_of_service_until", None)
             repaired.append(current)
 
         await user_conf.vehicles.set(repaired)
@@ -3538,10 +3647,11 @@ class FireStationCommand(commands.Cog):
         self._apply_vehicle_image(embed, vdef)
         if edit_message:
             embed.add_field(name="Vehicle capacity", value=f"{len(vehicles)} / {max_veh}", inline=True)
+            fresh_data = await user_conf.all()
             if len(vehicles) >= max_veh:
-                view = FscDashboardView(self, user, channel, guild or interaction.guild)
+                view = FscDashboardView(self, user, channel, guild or interaction.guild, data=fresh_data)
             else:
-                view = VehicleShopView(self, channel, user, guild or interaction.guild, data=data)
+                view = VehicleShopView(self, channel, user, guild or interaction.guild, data=fresh_data)
             await interaction.response.edit_message(content=None, embed=embed, view=view)
             return
         await interaction.response.send_message(embed=embed, ephemeral=False)
@@ -3888,6 +3998,12 @@ class FscTimedView(discord.ui.View):
     async def on_timeout(self) -> None:
         await self._edit_timeout_message()
 
+    def stop(self) -> None:
+        try:
+            super().stop()
+        except AttributeError:
+            pass
+
 
 class FscStartView(FscTimedView):
     def __init__(self, cog: FireStationCommand, user: discord.abc.User):
@@ -3902,7 +4018,8 @@ class FscStartView(FscTimedView):
     async def create_station(self, interaction: discord.Interaction, button: discord.ui.Button):
         created = await self.cog._create_station(self.user)
         embed = await self.cog._build_dashboard_embed(self.user)
-        view = FscDashboardView(self.cog, self.user, interaction.channel, interaction.guild)
+        data = await self.cog.config.user(self.user).all()
+        view = FscDashboardView(self.cog, self.user, interaction.channel, interaction.guild, data=data)
         if created:
             await interaction.response.edit_message(embed=embed, view=view)
         else:
@@ -3911,29 +4028,55 @@ class FscStartView(FscTimedView):
 
 
 class FscDashboardView(FscTimedView):
+    FEATURE_BUTTONS = {
+        "career_conversion": {"career"},
+        "expansions": {"expansions"},
+        "maintenance": {"maintenance"},
+        "training": {"training"},
+    }
+
     def __init__(
         self,
         cog: FireStationCommand,
         user: discord.abc.User,
         channel: discord.abc.Messageable,
         guild: discord.Guild | None,
+        data: Dict[str, Any] | None = None,
     ):
         super().__init__(timeout=180)
         self.cog = cog
         self.user = user
         self.channel = channel
         self.guild = guild
+        self.data = data or {}
+        if data:
+            self._remove_unavailable_buttons(data)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user.id
 
-    def _dashboard_view(self) -> "FscDashboardView":
-        return FscDashboardView(self.cog, self.user, self.channel, self.guild)
+    def _button_callback_name(self, child: discord.ui.Item) -> str:
+        callback = getattr(child, "callback", None)
+        return getattr(callback, "__name__", "")
+
+    def _remove_buttons_by_callback(self, callback_names: set[str]) -> None:
+        for child in list(self.children):
+            if self._button_callback_name(child) in callback_names:
+                self.remove_item(child)
+
+    def _remove_unavailable_buttons(self, data: Dict[str, Any]) -> None:
+        for feature, callbacks in self.FEATURE_BUTTONS.items():
+            if not self.cog._feature_available(data, feature):
+                self._remove_buttons_by_callback(callbacks)
+
+    def _dashboard_view(self, data: Dict[str, Any] | None = None) -> "FscDashboardView":
+        return FscDashboardView(self.cog, self.user, self.channel, self.guild, data=data or self.data)
 
     @discord.ui.button(label="Refresh", style=discord.ButtonStyle.primary)
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.config.user(self.user).all()
         embed = await self.cog._build_dashboard_embed(self.user)
-        await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
+        await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view(data))
 
     @discord.ui.button(label="Station overview", style=discord.ButtonStyle.secondary)
     async def station(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -4012,6 +4155,11 @@ class FscDashboardView(FscTimedView):
             embed.add_field(name="Action required", value="Create a station first.", inline=False)
             await interaction.response.edit_message(content=None, embed=embed, view=FscStartView(self.cog, self.user))
             return
+        if not self.cog._feature_available(data, "training"):
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Training locked", value=self.cog._feature_locked_text("training"), inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view(data))
+            return
 
         embed = self.cog._build_training_embed(data)
         view = TrainingView(
@@ -4031,6 +4179,11 @@ class FscDashboardView(FscTimedView):
             embed.add_field(name="Action required", value="Create a station first.", inline=False)
             await interaction.response.edit_message(content=None, embed=embed, view=FscStartView(self.cog, self.user))
             return
+        if not self.cog._feature_available(data, "expansions"):
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Expansions locked", value=self.cog._feature_locked_text("expansions"), inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view(data))
+            return
 
         embed = self.cog._build_expansion_embed(data)
         view = ExpansionView(
@@ -4049,6 +4202,11 @@ class FscDashboardView(FscTimedView):
             embed = await self.cog._build_dashboard_embed(self.user)
             embed.add_field(name="Action required", value="Create a station first.", inline=False)
             await interaction.response.edit_message(content=None, embed=embed, view=FscStartView(self.cog, self.user))
+            return
+        if not self.cog._feature_available(data, "maintenance"):
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Maintenance locked", value=self.cog._feature_locked_text("maintenance"), inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view(data))
             return
 
         embed = self.cog._build_maintenance_embed(data)
@@ -4142,6 +4300,11 @@ class FscDashboardView(FscTimedView):
             embed = await self.cog._build_dashboard_embed(self.user)
             embed.add_field(name="Career station", value="Your station is already a career station.", inline=False)
             await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
+            return
+        if not self.cog._feature_available(data, "career_conversion"):
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Career station locked", value=self.cog._feature_locked_text("career_conversion"), inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view(data))
             return
 
         required_lvl = 2
@@ -4954,24 +5117,8 @@ class MaintenanceView(FscTimedView):
         embed = await self.cog._build_dashboard_embed(self.user)
         channel = interaction.channel or self.channel
         guild = interaction.guild or self.guild
-        view = FscDashboardView(self.cog, self.user, channel, guild)
-        await interaction.response.edit_message(content=None, embed=embed, view=view)
-
-    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
-    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = await self.cog.config.user(self.user).all()
-        page = max(0, self.page - 1)
-        embed = self.cog._build_vehicle_shop_embed(data)
-        view = VehicleShopView(self.cog, interaction.channel or self.channel, self.user, interaction.guild or self.guild, data=data, page=page)
-        await interaction.response.edit_message(content=None, embed=embed, view=view)
-
-    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
-    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
-        data = await self.cog.config.user(self.user).all()
-        max_page = max(0, math.ceil(len(self.cog.VEHICLE_CATALOG) / VehicleShopSelect.PAGE_SIZE) - 1)
-        page = min(max_page, self.page + 1)
-        embed = self.cog._build_vehicle_shop_embed(data)
-        view = VehicleShopView(self.cog, interaction.channel or self.channel, self.user, interaction.guild or self.guild, data=data, page=page)
+        view = FscDashboardView(self.cog, self.user, channel, guild, data=data)
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
 
@@ -5661,8 +5808,10 @@ class ConfirmVehiclePurchaseView(FscTimedView):
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         for child in self.children:
             child.disabled = True
-        if not self.edit_message:
+        try:
             await interaction.message.edit(view=self)
+        except Exception:
+            pass
         await self.cog._confirm_vehicle_purchase(
             interaction,
             self.channel,

@@ -633,6 +633,8 @@ def test_default_global_config_keeps_manual_gameplay_timers_short():
     assert config["scene_backup_window_minutes_max"] == 1.0
     assert config["scene_backup_travel_minutes_min"] == 0.5
     assert config["scene_backup_travel_minutes_max"] == 1.5
+    assert config["maintenance_out_of_service_condition"] == 25
+    assert config["maintenance_out_of_service_minutes"] == 30
     assert config["max_station_level"] == 10
 
 
@@ -1016,6 +1018,48 @@ def test_dashboard_upgrade_button_opens_confirm_view():
     assert edited["view"].edit_message is True
 
 
+def test_feature_availability_locks_early_facilities():
+    cog = _cog_with_game_data({})
+    data = {
+        "started": True,
+        "station_level": 1,
+        "command_level": 1,
+        "xp": 0,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "vehicles": [],
+        "expansions": [],
+        "active_mission": {},
+    }
+
+    assert FireStationCommand._feature_available(cog, data, "training") is False
+    assert FireStationCommand._feature_available(cog, data, "maintenance") is False
+    assert FireStationCommand._feature_available(cog, data, "expansions") is False
+    assert FireStationCommand._feature_available(cog, data, "career_conversion") is False
+
+
+def test_feature_availability_shows_unlocked_facilities():
+    cog = _cog_with_game_data({})
+    data = {
+        "started": True,
+        "station_level": 5,
+        "command_level": 5,
+        "xp": 975,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "vehicles": [],
+        "expansions": [],
+        "active_mission": {},
+    }
+
+    assert FireStationCommand._feature_available(cog, data, "training") is True
+    assert FireStationCommand._feature_available(cog, data, "maintenance") is True
+    assert FireStationCommand._feature_available(cog, data, "expansions") is True
+    assert FireStationCommand._feature_available(cog, data, "career_conversion") is True
+
+
 def test_dashboard_upgrade_button_explains_locked_level():
     user = type("User", (), {"id": 123})()
     cog = _cog_with_game_data({})
@@ -1151,6 +1195,50 @@ def test_vehicle_purchase_confirm_edits_message_and_stores_vehicle():
         ]
     assert user_data["next_vehicle_id"] == 2
     assert user_data["credits"] == 50000
+
+
+def test_vehicle_purchase_confirm_button_disables_message_before_purchase():
+    user = type("User", (), {"id": 123})()
+    user_data = {
+        "started": True,
+        "station_level": 2,
+        "command_level": 1,
+        "xp": 0,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "vehicles": [],
+        "next_vehicle_id": 1,
+        "active_mission": {},
+        "credits": 100000,
+    }
+    cog = _cog_with_game_data({})
+    cog.config = _Config(user_data, {})
+    cog.VEHICLE_CATALOG = {
+        "engine_basic": {
+            "name": "Standard Fire Engine",
+            "crew_capacity": 4,
+            "price": 50000,
+            "image": "Images/Vehicles/engine_basic.png",
+            "unlock_level": 1,
+        }
+    }
+    view = ConfirmVehiclePurchaseView(
+        cog,
+        object(),
+        user,
+        "engine_basic",
+        guild=object(),
+        edit_message=True,
+    )
+    interaction = _Interaction(user)
+
+    asyncio.run(view.confirm(interaction, None))
+
+    assert interaction.message.edited["view"] is view
+    assert all(child.disabled for child in view.children)
+    assert interaction.response.edited["embed"].kwargs["title"] == "Vehicle purchased"
+    assert user_data["vehicles"][0]["catalog_id"] == "engine_basic"
 
 
 def test_vehicle_shop_select_paginates_large_catalog():
@@ -1620,6 +1708,74 @@ def test_vehicle_condition_scales_station_capabilities():
     assert capabilities["fire_suppression"] == 30
 
 
+def test_out_of_service_vehicles_do_not_contribute_capabilities():
+    cog = _cog_with_game_data(
+        {
+            "vehicles": {
+                "vehicles": [
+                    {
+                        "id": "engine_basic",
+                        "name": "Standard Fire Engine",
+                        "required_staff": 4,
+                        "base_cost": 50000,
+                        "capabilities": {"fire_suppression": 40},
+                    }
+                ]
+            },
+        }
+    )
+    vehicle = {
+        "id": 1,
+        "catalog_id": "engine_basic",
+        "condition": 100,
+        "out_of_service_until": "2026-06-12T12:30:00Z",
+    }
+
+    assert FireStationCommand._available_vehicles(cog, [vehicle]) == []
+    assert FireStationCommand._station_capabilities(cog, [vehicle]) == {}
+
+
+def test_vehicle_wear_can_put_maintenance_unlocked_units_out_of_service(monkeypatch):
+    cog = _cog_with_game_data(
+        {
+            "balance": {
+                "balance": {
+                    "maintenance_out_of_service_condition": 25,
+                    "maintenance_out_of_service_minutes": 30,
+                }
+            }
+        }
+    )
+    monkeypatch.setattr("FireStationCommand.fire_station_command.random.randint", lambda _low, _high: 10)
+
+    vehicles = FireStationCommand._apply_vehicle_wear(
+        cog,
+        [{"id": 1, "catalog_id": "engine_basic", "condition": 30}],
+        [1],
+        "failure",
+        data={"command_level": 4, "expansions": []},
+    )
+
+    assert vehicles[0]["condition"] == 20
+    assert vehicles[0]["out_of_service_until"] == "2026-06-12T12:30:00Z"
+
+
+def test_vehicle_wear_does_not_lock_early_players_without_maintenance(monkeypatch):
+    cog = _cog_with_game_data({})
+    monkeypatch.setattr("FireStationCommand.fire_station_command.random.randint", lambda _low, _high: 10)
+
+    vehicles = FireStationCommand._apply_vehicle_wear(
+        cog,
+        [{"id": 1, "catalog_id": "engine_basic", "condition": 30}],
+        [1],
+        "failure",
+        data={"command_level": 1, "expansions": []},
+    )
+
+    assert vehicles[0]["condition"] == 20
+    assert "out_of_service_until" not in vehicles[0]
+
+
 def test_maintenance_embed_lists_damaged_vehicles_and_cost():
     cog = _cog_with_game_data(
         {
@@ -1657,6 +1813,13 @@ def test_maintenance_embed_lists_damaged_vehicles_and_cost():
     assert fields["Repair estimate"] == "100 credits"
 
 
+def test_maintenance_view_only_has_repair_and_back_buttons():
+    assert hasattr(MaintenanceView, "repair")
+    assert hasattr(MaintenanceView, "back")
+    assert not hasattr(MaintenanceView, "previous_page")
+    assert not hasattr(MaintenanceView, "next_page")
+
+
 def test_repair_fleet_spends_credits_and_restores_condition():
     user = type("User", (), {"id": 123})()
     user_data = {
@@ -1668,6 +1831,7 @@ def test_repair_fleet_spends_credits_and_restores_condition():
                 "catalog_id": "engine_basic",
                 "name": "Starter Fire Engine",
                 "condition": 80,
+                "out_of_service_until": "2026-06-12T12:30:00Z",
             }
         ],
     }
@@ -1702,6 +1866,7 @@ def test_repair_fleet_spends_credits_and_restores_condition():
 
     assert user_data["credits"] == 900
     assert user_data["vehicles"][0]["condition"] == 100
+    assert "out_of_service_until" not in user_data["vehicles"][0]
     assert isinstance(interaction.response.edited["view"], MaintenanceView)
     assert interaction.response.edited["embed"].kwargs["title"] == "Maintenance bay"
 
