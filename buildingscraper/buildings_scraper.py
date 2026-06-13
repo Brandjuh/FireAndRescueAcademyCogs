@@ -1,6 +1,7 @@
 import discord
 from redbot.core import commands, Config, data_manager
 import asyncio
+from contextlib import asynccontextmanager
 import logging
 import sqlite3
 from datetime import datetime
@@ -48,6 +49,16 @@ class BuildingsScraper(commands.Cog):
     def cog_unload(self):
         if hasattr(self, 'scrape_task'):
             self.scrape_task.cancel()
+
+    @asynccontextmanager
+    async def _bot_status(self, detail, *, priority=75):
+        bot = getattr(self, "bot", None)
+        botstatus = bot.get_cog("BotStatus") if bot else None
+        if botstatus and hasattr(botstatus, "track_activity"):
+            async with botstatus.track_activity("BuildingsScraper", detail, priority=priority):
+                yield
+        else:
+            yield
     
     async def _background_scraper(self):
         """Background task - scrapes every hour at :45"""
@@ -97,6 +108,10 @@ class BuildingsScraper(commands.Cog):
                 log.exception("Failed to send buildings scraper debug message")
     
     async def _scrape_all_buildings(self, ctx=None):
+        async with self._bot_status("scraping alliance buildings"):
+            return await self._scrape_all_buildings_impl(ctx)
+
+    async def _scrape_all_buildings_impl(self, ctx=None):
         """Scrape all buildings from the buildings page"""
         session = await self._get_session(ctx)
         if not session:

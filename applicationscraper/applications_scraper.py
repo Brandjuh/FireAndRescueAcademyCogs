@@ -3,6 +3,7 @@ from redbot.core import commands, Config, data_manager
 import aiohttp
 import asyncio
 import sqlite3
+from contextlib import asynccontextmanager
 from datetime import datetime
 from bs4 import BeautifulSoup
 from pathlib import Path
@@ -33,6 +34,27 @@ class ApplicationsScraper(commands.Cog):
         """Cancel background task when cog unloads"""
         if self.scraping_task:
             self.scraping_task.cancel()
+
+    @asynccontextmanager
+    async def _bot_status(self, detail, *, priority=75):
+        bot = getattr(self, "bot", None)
+        botstatus = bot.get_cog("BotStatus") if bot else None
+        if botstatus and hasattr(botstatus, "track_activity"):
+            async with botstatus.track_activity("ApplicationsScraper", detail, priority=priority):
+                yield
+        else:
+            yield
+
+    async def _report_bot_status(self, detail, *, priority=80, ttl_seconds=120):
+        bot = getattr(self, "bot", None)
+        botstatus = bot.get_cog("BotStatus") if bot else None
+        if botstatus and hasattr(botstatus, "report_activity"):
+            await botstatus.report_activity(
+                "ApplicationsScraper",
+                detail,
+                priority=priority,
+                ttl_seconds=ttl_seconds,
+            )
     
     def _init_database(self):
         """Initialize SQLite database with schema"""
@@ -155,6 +177,7 @@ class ApplicationsScraper(commands.Cog):
     
     async def _scrape_applications(self, session):
         """Scrape applications page"""
+        await self._report_bot_status("fetching alliance applications page")
         url = self.applications_url
         
         for attempt in range(3):
@@ -214,6 +237,10 @@ class ApplicationsScraper(commands.Cog):
         return []
     
     async def _scrape_all_applications(self, ctx=None):
+        async with self._bot_status("checking alliance applications"):
+            return await self._scrape_all_applications_impl(ctx)
+
+    async def _scrape_all_applications_impl(self, ctx=None):
         """Scrape all applications"""
         session = await self._get_session()
         if not session:

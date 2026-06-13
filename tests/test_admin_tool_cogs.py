@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -9,13 +9,21 @@ from admintimednotifications.admintimednotifications import (
 )
 from announcer.announcer import parse_title_body as parse_announcement_title_body
 from announcementpanel.announcementpanel import normalize_button_key, parse_label_message
-from botstatus.botstatus import clean_activity_type
+from botstatus.botstatus import (
+    StatusActivity,
+    choose_activity,
+    clean_activity_type,
+    format_activity_text,
+)
 from rolebasedcredits.rolebasedcredits import (
     CREDIT_RANKS,
     DEFAULT_GUILD,
     DEFAULT_RANK_ROLE_IDS,
+    ensure_exit_cleanup_schema,
     find_rank,
     is_promotion,
+    mark_rank_exit_rows_processed,
+    pending_rank_exit_rows,
     rank_for_credits,
     should_announce_rank_change,
 )
@@ -63,6 +71,45 @@ def test_botstatus_accepts_only_supported_activity_types():
     assert clean_activity_type("Watching") == "watching"
     with pytest.raises(ValueError):
         clean_activity_type("sleeping")
+
+
+def test_botstatus_formats_and_prioritizes_background_activity():
+    now = datetime(2026, 6, 13, 12, 0, tzinfo=timezone.utc)
+    low = StatusActivity(
+        token="low",
+        source="MembersScraper",
+        detail="scraping alliance members",
+        priority=50,
+        activity_type="watching",
+        started_at=now,
+        updated_at=now,
+    )
+    high = StatusActivity(
+        token="high",
+        source="RoleBasedCredits",
+        detail="syncing credit rank roles",
+        priority=80,
+        activity_type="watching",
+        started_at=now,
+        updated_at=now,
+    )
+    expired = StatusActivity(
+        token="expired",
+        source="LogsScraper",
+        detail="scraping alliance logs",
+        priority=100,
+        activity_type="watching",
+        started_at=now,
+        updated_at=now,
+        expires_at=now - timedelta(seconds=1),
+    )
+
+    assert choose_activity([low, high, expired], now=now) is high
+    assert (
+        format_activity_text("MembersScraper", "scraping alliance members page 10")
+        == "MembersScraper: scraping alliance members page 10"
+    )
+    assert len(format_activity_text("Source", "x" * 200)) == 128
 
 
 def test_credit_rank_table_matches_requested_thresholds():
@@ -135,3 +182,48 @@ def test_credit_rank_first_sync_never_announces_promotions():
         first_assignment=True,
         announce_first_assignment=False,
     )
+
+
+def test_credit_rank_exit_cleanup_reads_and_marks_membersync_rows(tmp_path):
+    db_path = tmp_path / "membersync.db"
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE member_left_alliance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mc_user_id TEXT NOT NULL,
+                username TEXT,
+                discord_id INTEGER,
+                exit_detected_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO member_left_alliance
+            (mc_user_id, username, discord_id, exit_detected_at)
+            VALUES ('123', 'Departed User', 456, '2026-06-13T12:00:00')
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert ensure_exit_cleanup_schema(db_path)
+    rows = pending_rank_exit_rows(db_path)
+
+    assert rows == [
+        {
+            "id": 1,
+            "mc_user_id": "123",
+            "username": "Departed User",
+            "discord_id": 456,
+        }
+    ]
+
+    mark_rank_exit_rows_processed(db_path, [1])
+
+    assert pending_rank_exit_rows(db_path) == []

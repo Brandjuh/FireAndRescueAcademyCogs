@@ -2,6 +2,7 @@ import discord
 from redbot.core import commands, Config, data_manager
 import asyncio
 import sqlite3
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 import re
@@ -87,6 +88,27 @@ class IncomeScraper(commands.Cog):
             self.scrape_task.cancel()
         if hasattr(self, 'pre_reset_task'):
             self.pre_reset_task.cancel()
+
+    @asynccontextmanager
+    async def _bot_status(self, detail, *, priority=75):
+        bot = getattr(self, "bot", None)
+        botstatus = bot.get_cog("BotStatus") if bot else None
+        if botstatus and hasattr(botstatus, "track_activity"):
+            async with botstatus.track_activity("IncomeScraper", detail, priority=priority):
+                yield
+        else:
+            yield
+
+    async def _report_bot_status(self, detail, *, priority=80, ttl_seconds=120):
+        bot = getattr(self, "bot", None)
+        botstatus = bot.get_cog("BotStatus") if bot else None
+        if botstatus and hasattr(botstatus, "report_activity"):
+            await botstatus.report_activity(
+                "IncomeScraper",
+                detail,
+                priority=priority,
+                ttl_seconds=ttl_seconds,
+            )
 
     @staticmethod
     def _next_pre_reset_snapshot(now):
@@ -230,6 +252,7 @@ class IncomeScraper(commands.Cog):
     
     async def _scrape_income_tab(self, session, tab_type='daily', ctx=None):
         """Scrape income/expense data from a specific tab (daily or monthly) - FIXED VERSION"""
+        await self._report_bot_status(f"scraping {tab_type} treasury tab")
         # Construct URL with type parameter (NOT tab!)
         # Daily: https://www.missionchief.com/verband/kasse
         # Monthly: https://www.missionchief.com/verband/kasse?type=monthly
@@ -399,6 +422,8 @@ class IncomeScraper(commands.Cog):
         empty_count = 0
         
         while page <= max_pages:
+            if page == 1 or page % 10 == 0:
+                await self._report_bot_status(f"scraping expenses page {page}")
             # Progress update every 100 pages
             if ctx and page % 100 == 0:
                 pct = (page / max_pages) * 100
@@ -501,6 +526,20 @@ class IncomeScraper(commands.Cog):
             )
 
     async def _scrape_all_income_unlocked(self, ctx=None, include_expenses=True, max_expense_pages=100):
+        if not include_expenses and max_expense_pages == 0:
+            detail = "capturing pre-reset treasury snapshot"
+        elif include_expenses:
+            detail = "scraping treasury and expenses"
+        else:
+            detail = "scraping alliance treasury"
+        async with self._bot_status(detail):
+            return await self._scrape_all_income_unlocked_impl(
+                ctx,
+                include_expenses,
+                max_expense_pages,
+            )
+
+    async def _scrape_all_income_unlocked_impl(self, ctx=None, include_expenses=True, max_expense_pages=100):
         """Scrape daily income, monthly income, and expenses from the treasury page"""
         session = await self._get_session(ctx)
         if not session:

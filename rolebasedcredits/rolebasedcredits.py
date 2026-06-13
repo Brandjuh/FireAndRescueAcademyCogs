@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 import discord
@@ -108,6 +111,70 @@ def should_announce_rank_change(
     return is_promotion(previous_key, next_key)
 
 
+def ensure_exit_cleanup_schema(db_path: Path) -> bool:
+    """Add RoleBasedCredits exit-cleanup state to the MemberSync exit table if present."""
+    if not db_path.exists():
+        return False
+
+    conn = sqlite3.connect(db_path)
+    try:
+        table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='member_left_alliance'"
+        ).fetchone()
+        if not table:
+            return False
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(member_left_alliance)")}
+        if "rank_role_removed" not in columns:
+            conn.execute(
+                "ALTER TABLE member_left_alliance "
+                "ADD COLUMN rank_role_removed INTEGER DEFAULT 0"
+            )
+            conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def pending_rank_exit_rows(db_path: Path) -> list[dict[str, Any]]:
+    """Return MemberSync exit rows that still need rank-role cleanup."""
+    if not ensure_exit_cleanup_schema(db_path):
+        return []
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, mc_user_id, username, discord_id
+            FROM member_left_alliance
+            WHERE COALESCE(rank_role_removed, 0) = 0
+              AND discord_id IS NOT NULL
+            ORDER BY exit_detected_at ASC, id ASC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def mark_rank_exit_rows_processed(db_path: Path, row_ids: list[int]) -> None:
+    if not row_ids:
+        return
+    if not ensure_exit_cleanup_schema(db_path):
+        return
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executemany(
+            "UPDATE member_left_alliance SET rank_role_removed = 1 WHERE id = ?",
+            [(int(row_id),) for row_id in row_ids],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 class RoleBasedCredits(commands.Cog):
     """Assign Discord rank roles from MissionChief earned credits."""
 
@@ -126,6 +193,16 @@ class RoleBasedCredits(commands.Cog):
 
     def dependencies(self):
         return self.bot.get_cog("MembersScraper"), self.bot.get_cog("MemberSync")
+
+    @asynccontextmanager
+    async def _bot_status(self, detail: str, *, priority: int = 80):
+        bot = getattr(self, "bot", None)
+        botstatus = bot.get_cog("BotStatus") if bot else None
+        if botstatus and hasattr(botstatus, "track_activity"):
+            async with botstatus.track_activity("RoleBasedCredits", detail, priority=priority):
+                yield
+        else:
+            yield
 
     async def sync_loop(self):
         await self.bot.wait_until_red_ready()
@@ -146,9 +223,23 @@ class RoleBasedCredits(commands.Cog):
                 await asyncio.sleep(300)
 
     async def sync_guild(self, guild: discord.Guild, *, dry_run: bool) -> dict[str, int]:
+        detail = f"syncing credit rank roles in {guild.name}"
+        if dry_run:
+            detail = f"checking credit rank roles in {guild.name}"
+        async with self._bot_status(detail):
+            return await self.sync_guild_impl(guild, dry_run=dry_run)
+
+    async def sync_guild_impl(self, guild: discord.Guild, *, dry_run: bool) -> dict[str, int]:
         members_scraper, member_sync = self.dependencies()
         if not members_scraper or not member_sync:
-            return {"updated": 0, "skipped": 0, "missing_dependencies": 1, "promotions": 0}
+            return {
+                "updated": 0,
+                "skipped": 0,
+                "missing_dependencies": 1,
+                "promotions": 0,
+                "departures": 0,
+                "departure_roles_removed": 0,
+            }
 
         rank_role_ids = await self.config.guild(guild).rank_role_ids()
         configured_role_ids = {
@@ -157,16 +248,35 @@ class RoleBasedCredits(commands.Cog):
             if str(role_id).isdigit() and guild.get_role(int(role_id))
         }
         if not configured_role_ids:
-            return {"updated": 0, "skipped": 0, "missing_dependencies": 0, "promotions": 0}
+            return {
+                "updated": 0,
+                "skipped": 0,
+                "missing_dependencies": 0,
+                "promotions": 0,
+                "departures": 0,
+                "departure_roles_removed": 0,
+            }
 
         current_members = await members_scraper.get_members()
         updated = 0
         skipped = 0
         promotions = 0
+        departures = 0
+        departure_roles_removed = 0
         baseline_initialized = await self.config.guild(guild).baseline_initialized()
         announce_first_assignment = await self.config.guild(guild).announce_first_assignment()
 
         async with self.config.guild(guild).last_rank_by_discord_id() as last_ranks:
+            departure_result = await self.cleanup_departed_members(
+                guild,
+                member_sync,
+                configured_role_ids,
+                dry_run=dry_run,
+                last_ranks=last_ranks,
+            )
+            departures = departure_result["departures"]
+            departure_roles_removed = departure_result["departure_roles_removed"]
+
             for mc_member in current_members:
                 mc_id = mc_member.get("user_id") or mc_member.get("mc_user_id")
                 if not mc_id:
@@ -253,7 +363,86 @@ class RoleBasedCredits(commands.Cog):
             "skipped": skipped,
             "missing_dependencies": 0,
             "promotions": promotions,
+            "departures": departures,
+            "departure_roles_removed": departure_roles_removed,
         }
+
+    async def cleanup_departed_members(
+        self,
+        guild: discord.Guild,
+        member_sync: Any,
+        configured_role_ids: set[int],
+        *,
+        dry_run: bool,
+        last_ranks: dict[str, Any],
+    ) -> dict[str, int]:
+        async with self._bot_status("removing departed member rank roles", priority=85):
+            return await self.cleanup_departed_members_impl(
+                guild,
+                member_sync,
+                configured_role_ids,
+                dry_run=dry_run,
+                last_ranks=last_ranks,
+            )
+
+    async def cleanup_departed_members_impl(
+        self,
+        guild: discord.Guild,
+        member_sync: Any,
+        configured_role_ids: set[int],
+        *,
+        dry_run: bool,
+        last_ranks: dict[str, Any],
+    ) -> dict[str, int]:
+        db_path = self.member_sync_db_path(member_sync)
+        if not db_path:
+            return {"departures": 0, "departure_roles_removed": 0}
+
+        exit_rows = await asyncio.to_thread(pending_rank_exit_rows, db_path)
+        processed_row_ids: list[int] = []
+        departures = 0
+        roles_removed = 0
+
+        for row in exit_rows:
+            departures += 1
+            row_id = int(row["id"])
+            discord_id = row.get("discord_id")
+            member = guild.get_member(int(discord_id)) if discord_id else None
+            if not member:
+                if not dry_run:
+                    last_ranks.pop(str(discord_id), None)
+                    processed_row_ids.append(row_id)
+                continue
+
+            rank_roles = [role for role in member.roles if role.id in configured_role_ids]
+            if dry_run:
+                if rank_roles:
+                    roles_removed += 1
+                continue
+
+            try:
+                if rank_roles:
+                    await member.remove_roles(
+                        *rank_roles,
+                        reason="RoleBasedCredits: member left MissionChief alliance",
+                    )
+                    roles_removed += 1
+                last_ranks.pop(str(member.id), None)
+                processed_row_ids.append(row_id)
+            except (discord.Forbidden, discord.HTTPException):
+                log.exception("Failed to remove credit rank roles for departed member %s", member.id)
+
+        if not dry_run and processed_row_ids:
+            await asyncio.to_thread(mark_rank_exit_rows_processed, db_path, processed_row_ids)
+
+        return {"departures": departures, "departure_roles_removed": roles_removed}
+
+    @staticmethod
+    def member_sync_db_path(member_sync: Any) -> Optional[Path]:
+        raw_path = getattr(member_sync, "links_db", None) or getattr(member_sync, "db_path", None)
+        if raw_path is None:
+            return None
+        return Path(raw_path)
 
     @staticmethod
     def current_configured_rank_key(
@@ -391,7 +580,10 @@ class RoleBasedCredits(commands.Cog):
             return
         await ctx.send(
             f"Dry-run complete. Would update: {result['updated']}, "
-            f"promotions: {result['promotions']}, skipped: {result['skipped']}."
+            f"promotions: {result['promotions']}, "
+            f"departures: {result['departures']}, "
+            f"rank removals: {result['departure_roles_removed']}, "
+            f"skipped: {result['skipped']}."
         )
 
     @creditranks.command(name="sync")
@@ -404,5 +596,8 @@ class RoleBasedCredits(commands.Cog):
             return
         await ctx.send(
             f"Sync complete. Updated: {result['updated']}, "
-            f"promotions: {result['promotions']}, skipped: {result['skipped']}."
+            f"promotions: {result['promotions']}, "
+            f"departures: {result['departures']}, "
+            f"rank removals: {result['departure_roles_removed']}, "
+            f"skipped: {result['skipped']}."
         )

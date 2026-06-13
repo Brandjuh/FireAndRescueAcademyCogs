@@ -2,6 +2,7 @@ import discord
 from redbot.core import commands, Config, data_manager
 import asyncio
 import sqlite3
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 import re
@@ -102,6 +103,27 @@ class LogsScraper(commands.Cog):
         """Cancel background task on unload"""
         if self.scrape_task:
             self.scrape_task.cancel()
+
+    @asynccontextmanager
+    async def _bot_status(self, detail, *, priority=75):
+        bot = getattr(self, "bot", None)
+        botstatus = bot.get_cog("BotStatus") if bot else None
+        if botstatus and hasattr(botstatus, "track_activity"):
+            async with botstatus.track_activity("LogsScraper", detail, priority=priority):
+                yield
+        else:
+            yield
+
+    async def _report_bot_status(self, detail, *, priority=80, ttl_seconds=120):
+        bot = getattr(self, "bot", None)
+        botstatus = bot.get_cog("BotStatus") if bot else None
+        if botstatus and hasattr(botstatus, "report_activity"):
+            await botstatus.report_activity(
+                "LogsScraper",
+                detail,
+                priority=priority,
+                ttl_seconds=ttl_seconds,
+            )
 
     @staticmethod
     def _build_member_identity_filter(
@@ -320,6 +342,8 @@ class LogsScraper(commands.Cog):
     
     async def _scrape_logs_page(self, session, page_num, ctx=None):
         """Scrape a single page of logs with COMPLETE data extraction"""
+        if page_num == 1 or page_num % 10 == 0:
+            await self._report_bot_status(f"scraping alliance logs page {page_num}")
         url = f"{self.logs_url}?page={page_num}"
         await self._debug_log(f"🌐 Page {page_num}: {url}", ctx)
         
@@ -517,6 +541,11 @@ class LogsScraper(commands.Cog):
             return []
     
     async def _scrape_all_logs(self, ctx, max_pages=5):
+        detail = f"scraping alliance logs ({max_pages} pages)"
+        async with self._bot_status(detail):
+            return await self._scrape_all_logs_impl(ctx, max_pages)
+
+    async def _scrape_all_logs_impl(self, ctx, max_pages=5):
         """Scrape multiple pages of logs"""
         session = await self._get_session(ctx)
         if not session:

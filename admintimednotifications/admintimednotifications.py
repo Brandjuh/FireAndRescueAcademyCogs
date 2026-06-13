@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -65,6 +66,16 @@ class AdminTimedNotifications(commands.Cog):
         if self._task:
             self._task.cancel()
 
+    @asynccontextmanager
+    async def _bot_status(self, detail: str, *, priority: int = 70):
+        bot = getattr(self, "bot", None)
+        botstatus = bot.get_cog("BotStatus") if bot else None
+        if botstatus and hasattr(botstatus, "track_activity"):
+            async with botstatus.track_activity("AdminTimedNotifications", detail, priority=priority):
+                yield
+        else:
+            yield
+
     async def reminder_loop(self):
         await self.bot.wait_until_red_ready()
         while True:
@@ -87,20 +98,24 @@ class AdminTimedNotifications(commands.Cog):
             role = guild.get_role(role_id) if role_id else None
             async with self.config.guild(guild).reminders() as reminders:
                 due, pending = split_due_reminders(list(reminders), now_ts=current_ts)
-                for reminder in due:
-                    interval = int(reminder.get("interval_minutes") or 0)
-                    if interval < 1:
-                        continue
-                    embed = discord.Embed(
-                        title=reminder.get("title") or "Admin reminder",
-                        description=reminder.get("body") or "",
-                        color=discord.Color.orange(),
-                        timestamp=datetime.now(timezone.utc),
-                    )
-                    content = role.mention if role else None
-                    await channel.send(content=content, embed=embed)
-                    reminder["next_run"] = next_run(interval)
-                    pending.append(reminder)
+                if due:
+                    async with self._bot_status(
+                        f"posting {len(due)} admin reminders in {guild.name}"
+                    ):
+                        for reminder in due:
+                            interval = int(reminder.get("interval_minutes") or 0)
+                            if interval < 1:
+                                continue
+                            embed = discord.Embed(
+                                title=reminder.get("title") or "Admin reminder",
+                                description=reminder.get("body") or "",
+                                color=discord.Color.orange(),
+                                timestamp=datetime.now(timezone.utc),
+                            )
+                            content = role.mention if role else None
+                            await channel.send(content=content, embed=embed)
+                            reminder["next_run"] = next_run(interval)
+                            pending.append(reminder)
                 reminders[:] = pending
 
     @commands.group(name="admintimerset")

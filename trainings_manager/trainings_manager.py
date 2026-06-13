@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -994,6 +995,16 @@ class TrainingManager(commands.Cog):
         if self._reminder_task:
             self._reminder_task.cancel()
 
+    @asynccontextmanager
+    async def _bot_status(self, detail: str, *, priority: int = 70):
+        bot = getattr(self, "bot", None)
+        botstatus = bot.get_cog("BotStatus") if bot else None
+        if botstatus and hasattr(botstatus, "track_activity"):
+            async with botstatus.track_activity("TrainingManager", detail, priority=priority):
+                yield
+        else:
+            yield
+
     # --------------- Reminder machinery ---------------
 
     async def _add_reminder(self, guild_id: int, user_id: int, text: str, when, fallback_channel_id: int):
@@ -1022,11 +1033,14 @@ class TrainingManager(commands.Cog):
                     if not due:
                         continue
                     keep: List[dict] = []
-                    for r in rems:
-                        if r in due:
-                            await self._deliver_reminder(guild, r)
-                        else:
-                            keep.append(r)
+                    async with self._bot_status(
+                        f"sending {len(due)} training reminders in {guild.name}"
+                    ):
+                        for r in rems:
+                            if r in due:
+                                await self._deliver_reminder(guild, r)
+                            else:
+                                keep.append(r)
                     await self.config.guild(guild).reminders.set(keep)
             except asyncio.CancelledError:
                 break

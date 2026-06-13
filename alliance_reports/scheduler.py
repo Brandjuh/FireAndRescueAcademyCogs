@@ -4,6 +4,7 @@ Handles time-based report generation with timezone support and smart month-end s
 """
 
 import asyncio
+from contextlib import asynccontextmanager
 import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -107,6 +108,27 @@ class ReportScheduler:
     def is_running(self) -> bool:
         """Check if scheduler is running."""
         return self._running
+
+    @asynccontextmanager
+    async def _bot_status(self, detail: str, *, priority: int = 80):
+        bot = getattr(self, "bot", None)
+        botstatus = bot.get_cog("BotStatus") if bot else None
+        if botstatus and hasattr(botstatus, "track_activity"):
+            async with botstatus.track_activity("AllianceReports", detail, priority=priority):
+                yield
+        else:
+            yield
+
+    async def _report_bot_status(self, detail: str, *, priority: int = 82, ttl_seconds: int = 180):
+        bot = getattr(self, "bot", None)
+        botstatus = bot.get_cog("BotStatus") if bot else None
+        if botstatus and hasattr(botstatus, "report_activity"):
+            await botstatus.report_activity(
+                "AllianceReports",
+                detail,
+                priority=priority,
+                ttl_seconds=ttl_seconds,
+            )
     
     async def get_next_run_times(self) -> Dict[str, datetime]:
         """Get next scheduled run times."""
@@ -305,6 +327,10 @@ class ReportScheduler:
         log.info("Monthly report loop stopped")
     
     async def _execute_daily_reports(self):
+        async with self._bot_status("building daily reports"):
+            return await self._execute_daily_reports_impl()
+
+    async def _execute_daily_reports_impl(self):
         """Execute daily report generation."""
         log.info("Executing daily reports...")
         
@@ -319,6 +345,7 @@ class ReportScheduler:
             # Daily Member Report
             if member_channel_id and await self.config_manager.config.daily_member_enabled():
                 try:
+                    await self._report_bot_status("building daily member report")
                     from .templates.daily_member import DailyMemberReport
                     
                     report_gen = DailyMemberReport(self.bot, self.config_manager)
@@ -354,6 +381,7 @@ class ReportScheduler:
             # Daily Admin Report
             if admin_channel_id and await self.config_manager.config.daily_admin_enabled():
                 try:
+                    await self._report_bot_status("building daily admin report")
                     from .templates.daily_admin import DailyAdminReport
                     
                     report_gen = DailyAdminReport(self.bot, self.config_manager)
@@ -397,6 +425,10 @@ class ReportScheduler:
             )
     
     async def _execute_monthly_reports(self):
+        async with self._bot_status("building monthly reports"):
+            return await self._execute_monthly_reports_impl()
+
+    async def _execute_monthly_reports_impl(self):
         """Execute monthly report generation."""
         log.info("Executing monthly reports...")
         
@@ -412,6 +444,7 @@ class ReportScheduler:
             # Monthly Member Report
             if member_channel_id and await self.config_manager.config.monthly_member_enabled():
                 try:
+                    await self._report_bot_status("building monthly member report")
                     from .templates.monthly_member import MonthlyMemberReport
                     
                     report_gen = MonthlyMemberReport(self.bot, self.config_manager)
@@ -450,6 +483,7 @@ class ReportScheduler:
             # Monthly Admin Report
             if admin_channel_id and await self.config_manager.config.monthly_admin_enabled():
                 try:
+                    await self._report_bot_status("building monthly admin report")
                     from .templates.monthly_admin import MonthlyAdminReport
                     
                     report_gen = MonthlyAdminReport(self.bot, self.config_manager)
