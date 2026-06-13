@@ -44,10 +44,13 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added specialist equipment kits for traffic control, EMS, law enforcement, HazMat, water rescue, command, rescue, and aviation progression.
 - Added equipment image support to equipment purchase confirmation and purchase result embeds.
 - Added mutual aid and extension unlock roadmap notes.
+- Added station extensions for command, ambulance, police, HazMat, water rescue, wildland, foam, aviation, and rescue specialization.
+- Added extension requirements for specialized vehicles, equipment, and mission dispatch families.
+- Added tests to keep ambulance and police content behind their station extensions while preserving fire service as the primary core loop.
 
 ### Changed
 
-- Bumped the cog version to `1.2.2`.
+- Bumped the cog version to `1.2.3`.
 - Vehicle shop options now come from `data/config/vehicles.yaml` when available.
 - Mission definitions now come from `data/config/missions.yaml` when available.
 - Mission embeds now show configured mission images when available.
@@ -84,6 +87,8 @@ All notable changes to FireStationCommand will be documented in this file.
 - Imported missions now have broader equipment requirements while preserving repeated MissionChief equipment quantities.
 - Imported vehicles now expose equipment slots so owned equipment contributes to mission readiness across the full catalog.
 - Vehicle and equipment shop locked lists are now compacted to avoid oversized Discord embed fields.
+- Mission selection now skips incidents that require station extensions the player has not built.
+- Vehicle and equipment shops now show and enforce extension locks in addition to command-level locks.
 - New stations now start with Basic Firefighting certification.
 - Technical Rescue now unlocks at command level 2 so level 2 rescue progression is playable.
 - Built expansions now appear on dashboard and station overview embeds.
