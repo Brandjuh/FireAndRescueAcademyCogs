@@ -198,6 +198,7 @@ def test_default_global_config_keeps_manual_gameplay_timers_short():
     assert config["travel_minutes_max"] == 2.0
     assert config["scene_work_minutes_min"] == 0.5
     assert config["scene_work_minutes_max"] == 1.5
+    assert config["max_station_level"] == 10
 
 
 def test_relative_text_rounds_short_positive_waits_up_to_one_minute():
@@ -224,6 +225,21 @@ def test_mission_image_helpers_build_raw_urls_and_apply_embed_image():
             "refs/heads/main/FireStationCommand/Images/Missions/small_bin_fire.png"
         )
     }
+
+
+def test_station_image_helper_builds_level_urls_and_clamps_range():
+    assert FireStationCommand._station_image_url(1) == (
+        "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/"
+        "refs/heads/main/FireStationCommand/Images/Stations/station_level_01.png"
+    )
+    assert FireStationCommand._station_image_url(10) == (
+        "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/"
+        "refs/heads/main/FireStationCommand/Images/Stations/station_level_10.png"
+    )
+    assert FireStationCommand._station_image_url(99) == (
+        "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/"
+        "refs/heads/main/FireStationCommand/Images/Stations/station_level_10.png"
+    )
 
 
 def test_vehicle_image_helpers_build_raw_urls_and_apply_embed_image():

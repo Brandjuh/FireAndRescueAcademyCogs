@@ -182,7 +182,7 @@ class FireStationCommand(commands.Cog):
             "staff_cost": 2000,
             "upgrade_base_cost": 50000,
             "career_convert_cost": self._balance_int("career_upgrade_cost", 250000),
-            "max_station_level": 5,
+            "max_station_level": 10,
         }
 
     def _utcnow(self) -> datetime:
@@ -711,7 +711,7 @@ class FireStationCommand(commands.Cog):
                 inline=False,
             )
 
-        image_url = self._station_image_url(max_veh)
+        image_url = self._station_image_url(lvl)
         if image_url:
             embed.set_image(url=image_url)
         return embed
@@ -760,12 +760,12 @@ class FireStationCommand(commands.Cog):
         return embed
 
     @staticmethod
-    def _station_image_url(max_vehicles: int) -> str | None:
-        if max_vehicles <= 1:
-            return FireStationCommand._asset_image_url("Images/FDT1B1.png")
-        if max_vehicles == 2:
-            return FireStationCommand._asset_image_url("Images/FDT1B2.png")
-        return FireStationCommand._asset_image_url("Images/FDT1B3.png")
+    def _station_image_url(level: int) -> str | None:
+        if level < 1:
+            level = 1
+        if level > 10:
+            level = 10
+        return FireStationCommand._asset_image_url(f"Images/Stations/station_level_{level:02d}.png")
 
     @staticmethod
     def _asset_image_url(path: str | None) -> str | None:
@@ -1017,7 +1017,7 @@ class FireStationCommand(commands.Cog):
                 inline=False,
             )
 
-        image_url = self._station_image_url(max_veh)
+        image_url = self._station_image_url(lvl)
         if image_url:
             embed.set_image(url=image_url)
 
@@ -1139,7 +1139,7 @@ class FireStationCommand(commands.Cog):
         lvl = int(data.get("station_level", 1))
 
         glb = await self.config.all()
-        max_lvl = int(glb.get("max_station_level", 5))
+        max_lvl = int(glb.get("max_station_level", 10))
         if lvl >= max_lvl:
             await ctx.send("Your station is already at the maximum level.")
             return
@@ -1919,7 +1919,7 @@ class FscDashboardView(discord.ui.View):
 
         lvl = int(data.get("station_level", 1))
         glb = await self.cog.config.all()
-        max_lvl = int(glb.get("max_station_level", 5))
+        max_lvl = int(glb.get("max_station_level", 10))
         if lvl >= max_lvl:
             embed = await self.cog._build_dashboard_embed(self.user)
             embed.add_field(name="Station upgrade", value="Your station is already at the maximum level.", inline=False)
