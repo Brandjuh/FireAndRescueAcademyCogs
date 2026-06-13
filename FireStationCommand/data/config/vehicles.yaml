@@ -85,6 +85,10 @@
         "foam_supply",
         "water_supply_equipment",
         "aviation_rescue_kit"
+      ],
+      "required_expansions": [
+        "aviation_pad",
+        "foam_storage"
       ]
     },
     {
@@ -112,6 +116,9 @@
         "wildland_gear",
         "foam_supply",
         "water_supply_equipment"
+      ],
+      "required_expansions": [
+        "foam_storage"
       ]
     },
     {
@@ -139,6 +146,9 @@
         "tactical_gear",
         "crowd_control_gear",
         "hazmat_kit"
+      ],
+      "required_expansions": [
+        "police_liaison"
       ]
     },
     {
@@ -165,6 +175,9 @@
         "police_drone_equipment",
         "tactical_gear",
         "crowd_control_gear"
+      ],
+      "required_expansions": [
+        "police_liaison"
       ]
     },
     {
@@ -234,6 +247,9 @@
         "ems_bag",
         "patient_monitor",
         "litter"
+      ],
+      "required_expansions": [
+        "ems_bay"
       ]
     },
     {
@@ -305,6 +321,9 @@
         "flood_equipment",
         "search_and_rescue_equipment",
         "sked"
+      ],
+      "required_expansions": [
+        "water_rescue_bay"
       ]
     },
     {
@@ -330,6 +349,9 @@
         "flood_equipment",
         "search_and_rescue_equipment",
         "sked"
+      ],
+      "required_expansions": [
+        "water_rescue_bay"
       ]
     },
     {
@@ -356,6 +378,9 @@
         "police_drone_equipment",
         "tactical_gear",
         "crowd_control_gear"
+      ],
+      "required_expansions": [
+        "police_liaison"
       ]
     },
     {
@@ -382,6 +407,9 @@
         "police_drone_equipment",
         "tactical_gear",
         "crowd_control_gear"
+      ],
+      "required_expansions": [
+        "police_liaison"
       ]
     },
     {
@@ -409,6 +437,9 @@
         "tactical_gear",
         "crowd_control_gear",
         "search_camera"
+      ],
+      "required_expansions": [
+        "police_liaison"
       ]
     },
     {
@@ -435,6 +466,9 @@
         "police_drone_equipment",
         "tactical_gear",
         "crowd_control_gear"
+      ],
+      "required_expansions": [
+        "police_liaison"
       ]
     },
     {
@@ -462,6 +496,9 @@
         "tactical_gear",
         "crowd_control_gear",
         "search_camera"
+      ],
+      "required_expansions": [
+        "police_liaison"
       ]
     },
     {
@@ -488,6 +525,9 @@
         "police_drone_equipment",
         "tactical_gear",
         "crowd_control_gear"
+      ],
+      "required_expansions": [
+        "police_liaison"
       ]
     },
     {
@@ -559,6 +599,9 @@
         "flood_equipment",
         "search_and_rescue_equipment",
         "sked"
+      ],
+      "required_expansions": [
+        "water_rescue_bay"
       ]
     },
     {
@@ -612,6 +655,9 @@
         "traffic_control_kit",
         "light_tower_kit",
         "investigation_kit"
+      ],
+      "required_expansions": [
+        "command_room"
       ]
     },
     {
@@ -639,6 +685,9 @@
         "wildland_gear",
         "foam_supply",
         "water_supply_equipment"
+      ],
+      "required_expansions": [
+        "foam_storage"
       ]
     },
     {
@@ -665,6 +714,9 @@
         "hazmat_kit",
         "decon_kit",
         "ba_basic"
+      ],
+      "required_expansions": [
+        "hazmat_unit"
       ]
     },
     {
@@ -714,6 +766,9 @@
         "police_drone_equipment",
         "tactical_gear",
         "crowd_control_gear"
+      ],
+      "required_expansions": [
+        "police_liaison"
       ]
     },
     {
@@ -739,6 +794,9 @@
         "flood_equipment",
         "search_and_rescue_equipment",
         "sked"
+      ],
+      "required_expansions": [
+        "water_rescue_bay"
       ]
     },
     {
@@ -810,6 +868,9 @@
         "flood_equipment",
         "search_and_rescue_equipment",
         "sked"
+      ],
+      "required_expansions": [
+        "water_rescue_bay"
       ]
     },
     {
@@ -833,6 +894,9 @@
         "command_tablet",
         "traffic_control_kit",
         "light_tower_kit"
+      ],
+      "required_expansions": [
+        "command_room"
       ]
     },
     {
@@ -856,6 +920,9 @@
         "ems_bag",
         "patient_monitor",
         "litter"
+      ],
+      "required_expansions": [
+        "ems_bay"
       ]
     },
     {
@@ -879,6 +946,9 @@
         "command_tablet",
         "traffic_control_kit",
         "light_tower_kit"
+      ],
+      "required_expansions": [
+        "command_room"
       ]
     },
     {
@@ -904,6 +974,9 @@
         "flood_equipment",
         "search_and_rescue_equipment",
         "sked"
+      ],
+      "required_expansions": [
+        "water_rescue_bay"
       ]
     },
     {
@@ -930,6 +1003,9 @@
         "police_drone_equipment",
         "tactical_gear",
         "crowd_control_gear"
+      ],
+      "required_expansions": [
+        "police_liaison"
       ]
     },
     {
@@ -956,6 +1032,9 @@
         "police_drone_equipment",
         "tactical_gear",
         "crowd_control_gear"
+      ],
+      "required_expansions": [
+        "police_liaison"
       ]
     },
     {
@@ -982,6 +1061,9 @@
         "police_drone_equipment",
         "tactical_gear",
         "crowd_control_gear"
+      ],
+      "required_expansions": [
+        "police_liaison"
       ]
     },
     {
@@ -1008,6 +1090,9 @@
         "police_drone_equipment",
         "tactical_gear",
         "crowd_control_gear"
+      ],
+      "required_expansions": [
+        "police_liaison"
       ]
     },
     {
@@ -1035,6 +1120,9 @@
         "tactical_gear",
         "crowd_control_gear",
         "search_camera"
+      ],
+      "required_expansions": [
+        "police_liaison"
       ]
     },
     {
@@ -1061,6 +1149,9 @@
         "police_drone_equipment",
         "tactical_gear",
         "crowd_control_gear"
+      ],
+      "required_expansions": [
+        "police_liaison"
       ]
     },
     {
@@ -1087,6 +1178,9 @@
         "police_drone_equipment",
         "tactical_gear",
         "crowd_control_gear"
+      ],
+      "required_expansions": [
+        "police_liaison"
       ]
     },
     {
@@ -1113,6 +1207,9 @@
         "police_drone_equipment",
         "tactical_gear",
         "crowd_control_gear"
+      ],
+      "required_expansions": [
+        "police_liaison"
       ]
     },
     {
@@ -1167,6 +1264,9 @@
         "police_drone_equipment",
         "tactical_gear",
         "crowd_control_gear"
+      ],
+      "required_expansions": [
+        "police_liaison"
       ]
     },
     {
@@ -1193,6 +1293,9 @@
         "police_drone_equipment",
         "tactical_gear",
         "crowd_control_gear"
+      ],
+      "required_expansions": [
+        "police_liaison"
       ]
     },
     {
@@ -1219,6 +1322,9 @@
         "police_drone_equipment",
         "tactical_gear",
         "crowd_control_gear"
+      ],
+      "required_expansions": [
+        "police_liaison"
       ]
     },
     {
@@ -1244,6 +1350,9 @@
         "flood_equipment",
         "search_and_rescue_equipment",
         "sked"
+      ],
+      "required_expansions": [
+        "water_rescue_bay"
       ]
     },
     {
@@ -1267,6 +1376,10 @@
         "aviation_rescue_kit",
         "wildland_gear",
         "search_and_rescue_equipment"
+      ],
+      "required_expansions": [
+        "aviation_pad",
+        "wildland_cache"
       ]
     },
     {
@@ -1339,6 +1452,9 @@
         "police_drone_equipment",
         "tactical_gear",
         "crowd_control_gear"
+      ],
+      "required_expansions": [
+        "police_liaison"
       ]
     },
     {
@@ -1367,6 +1483,9 @@
         "foam_supply",
         "water_supply_equipment",
         "command_tablet"
+      ],
+      "required_expansions": [
+        "wildland_cache"
       ]
     },
     {
@@ -1395,6 +1514,9 @@
         "foam_supply",
         "water_supply_equipment",
         "command_tablet"
+      ],
+      "required_expansions": [
+        "wildland_cache"
       ]
     },
     {
@@ -1422,6 +1544,9 @@
         "wildland_gear",
         "foam_supply",
         "water_supply_equipment"
+      ],
+      "required_expansions": [
+        "wildland_cache"
       ]
     },
     {
@@ -1449,6 +1574,9 @@
         "sked",
         "foam_supply",
         "water_supply_equipment"
+      ],
+      "required_expansions": [
+        "water_rescue_bay"
       ]
     },
     {
@@ -1501,6 +1629,9 @@
         "ems_bag",
         "patient_monitor",
         "litter"
+      ],
+      "required_expansions": [
+        "ems_bay"
       ]
     }
   ]

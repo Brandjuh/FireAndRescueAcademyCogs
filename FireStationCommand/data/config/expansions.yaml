@@ -1,29 +1,169 @@
-expansions:
-  - id: extra_bay
-    name: "Extra Vehicle Bay"
-    description: "Adds one additional vehicle slot."
-    unlock_level: 2
-    base_cost: 30000
-    build_time_hours: 4
-    effects:
-      extra_vehicle_slots: 1
-
-  - id: workshop
-    name: "Workshop"
-    description: "Enables in-house vehicle repairs."
-    unlock_level: 4
-    base_cost: 100000
-    build_time_hours: 8
-    effects:
-      repair_time_multiplier: 0.7
-      repair_cost_multiplier: 0.7
-
-  - id: training_facility
-    name: "Training Facility"
-    description: "Reduces training time and cost."
-    unlock_level: 5
-    base_cost: 80000
-    build_time_hours: 6
-    effects:
-      training_time_multiplier: 0.8
-      training_cost_multiplier: 0.9
+{
+  "expansions": [
+    {
+      "id": "extra_bay",
+      "name": "Extra Vehicle Bay",
+      "description": "Adds one additional vehicle slot.",
+      "unlock_level": 2,
+      "base_cost": 30000,
+      "build_time_hours": 4,
+      "effects": {
+        "extra_vehicle_slots": 1
+      }
+    },
+    {
+      "id": "workshop",
+      "name": "Workshop",
+      "description": "Enables in-house vehicle repairs and advanced maintenance.",
+      "unlock_level": 4,
+      "base_cost": 100000,
+      "build_time_hours": 8,
+      "effects": {
+        "repair_time_multiplier": 0.7,
+        "repair_cost_multiplier": 0.7
+      }
+    },
+    {
+      "id": "training_facility",
+      "name": "Training Facility",
+      "description": "Reduces training time and cost for station staff.",
+      "unlock_level": 5,
+      "base_cost": 80000,
+      "build_time_hours": 6,
+      "effects": {
+        "training_time_multiplier": 0.8,
+        "training_cost_multiplier": 0.9
+      }
+    },
+    {
+      "id": "command_room",
+      "name": "Command Room",
+      "description": "Unlocks larger incident coordination and future mutual aid command tools.",
+      "unlock_level": 2,
+      "base_cost": 60000,
+      "build_time_hours": 5,
+      "effects": {
+        "extra_vehicle_slots": 1,
+        "mutual_aid_bonus": 1
+      }
+    },
+    {
+      "id": "ems_bay",
+      "name": "Ambulance Bay",
+      "description": "Unlocks ambulance vehicles, EMS equipment, and ambulance mission dispatches.",
+      "unlock_level": 2,
+      "base_cost": 75000,
+      "build_time_hours": 6,
+      "effects": {
+        "extra_vehicle_slots": 1,
+        "unlock_vehicle_categories": [
+          "ems"
+        ],
+        "unlock_mission_types": [
+          "Ambulance Missions"
+        ]
+      }
+    },
+    {
+      "id": "police_liaison",
+      "name": "Police Liaison Office",
+      "description": "Unlocks police vehicles, law enforcement equipment, and police support incidents.",
+      "unlock_level": 3,
+      "base_cost": 90000,
+      "build_time_hours": 7,
+      "effects": {
+        "extra_vehicle_slots": 1,
+        "unlock_vehicle_categories": [
+          "police"
+        ],
+        "unlock_mission_types": [
+          "Police Missions",
+          "Federal Police Missions"
+        ]
+      }
+    },
+    {
+      "id": "hazmat_unit",
+      "name": "HazMat Unit",
+      "description": "Unlocks HazMat equipment, HazMat vehicles, and chemical or industrial incidents.",
+      "unlock_level": 3,
+      "base_cost": 120000,
+      "build_time_hours": 10,
+      "effects": {
+        "extra_vehicle_slots": 1,
+        "unlock_equipment_categories": [
+          "hazmat"
+        ]
+      }
+    },
+    {
+      "id": "water_rescue_bay",
+      "name": "Water Rescue Bay",
+      "description": "Unlocks water rescue equipment, boats, coastal units, and water rescue missions.",
+      "unlock_level": 3,
+      "base_cost": 125000,
+      "build_time_hours": 10,
+      "effects": {
+        "extra_vehicle_slots": 1,
+        "unlock_vehicle_categories": [
+          "water_rescue"
+        ]
+      }
+    },
+    {
+      "id": "wildland_cache",
+      "name": "Wildland Cache",
+      "description": "Unlocks wildland firefighting gear, rural wildfire units, and wildfire mission depth.",
+      "unlock_level": 3,
+      "base_cost": 95000,
+      "build_time_hours": 8,
+      "effects": {
+        "extra_vehicle_slots": 1,
+        "unlock_equipment_categories": [
+          "fire"
+        ]
+      }
+    },
+    {
+      "id": "foam_storage",
+      "name": "Foam Storage",
+      "description": "Unlocks larger foam operations for fuel, airport, and industrial fire incidents.",
+      "unlock_level": 4,
+      "base_cost": 110000,
+      "build_time_hours": 8,
+      "effects": {
+        "unlock_equipment": [
+          "foam_supply"
+        ]
+      }
+    },
+    {
+      "id": "aviation_pad",
+      "name": "Aviation Pad",
+      "description": "Unlocks aviation rescue equipment, aircraft-related incidents, and aerial support units.",
+      "unlock_level": 6,
+      "base_cost": 250000,
+      "build_time_hours": 16,
+      "effects": {
+        "extra_vehicle_slots": 1,
+        "unlock_vehicle_categories": [
+          "aviation"
+        ]
+      }
+    },
+    {
+      "id": "rescue_bay",
+      "name": "Rescue Bay",
+      "description": "Unlocks deeper technical rescue equipment and heavy rescue capability.",
+      "unlock_level": 2,
+      "base_cost": 85000,
+      "build_time_hours": 7,
+      "effects": {
+        "extra_vehicle_slots": 1,
+        "unlock_vehicle_categories": [
+          "rescue"
+        ]
+      }
+    }
+  ]
+}

@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - dependency is declared in info.json
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.2.2"
+    __version__ = "1.2.3"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
@@ -353,6 +353,28 @@ class FireStationCommand(commands.Cog):
                     totals[effect] = totals.get(effect, 0.0) + value
         return totals
 
+    @staticmethod
+    def _required_expansion_ids(item: Dict[str, Any]) -> List[str]:
+        required = item.get("required_expansions", [])
+        if not isinstance(required, list):
+            return []
+        return [str(expansion_id) for expansion_id in required if expansion_id]
+
+    def _missing_required_expansion_ids(self, item: Dict[str, Any], data: Dict[str, Any]) -> List[str]:
+        owned = self._expansion_inventory_set(data.get("expansions", []))
+        return [expansion_id for expansion_id in self._required_expansion_ids(item) if expansion_id not in owned]
+
+    def _expansion_requirement_display_text(self, expansion_ids: Any) -> str | None:
+        if not isinstance(expansion_ids, list) or not expansion_ids:
+            return None
+        names = []
+        for expansion_id in expansion_ids:
+            expansion_key = str(expansion_id)
+            expansion = self.expansion_definitions.get(expansion_key)
+            name = expansion.get("name") if expansion else None
+            names.append(name if isinstance(name, str) else expansion_key)
+        return ", ".join(names)
+
     def _equipment_inventory_counts(self, equipment_inventory: Any) -> Dict[str, int]:
         if isinstance(equipment_inventory, dict):
             counts: Dict[str, int] = {}
@@ -611,6 +633,7 @@ class FireStationCommand(commands.Cog):
             "image": incident.get("image"),
             "required_vehicles": incident.get("required_vehicles", []),
             "required_equipment": incident.get("required_equipment", []),
+            "required_expansions": incident.get("required_expansions", []),
             "base_xp": incident.get("base_xp", self._balance_int("xp_per_mission_base", 50)),
             "tier": incident.get("tier", incident.get("min_tier", 1)),
             "recommended_level": incident.get("recommended_level", incident.get("min_tier", 1)),
@@ -823,6 +846,9 @@ class FireStationCommand(commands.Cog):
         equipment_text = self._equipment_display_text(mission.get("required_equipment"))
         if equipment_text:
             embed.add_field(name="Required equipment", value=equipment_text, inline=False)
+        expansion_text = self._expansion_requirement_display_text(mission.get("required_expansions"))
+        if expansion_text:
+            embed.add_field(name="Required expansions", value=expansion_text, inline=False)
         readiness = mission.get("readiness_score")
         if isinstance(readiness, int):
             embed.add_field(name="Readiness", value=f"{readiness} / 100", inline=True)
@@ -881,6 +907,7 @@ class FireStationCommand(commands.Cog):
                     "image": mission.get("image"),
                     "required_vehicles": mission.get("required_vehicles", []),
                     "required_equipment": mission.get("required_equipment", []),
+                    "required_expansions": mission.get("required_expansions", []),
                     "base_xp": int(mission.get("base_xp", self._balance_int("xp_per_mission_base", 50))),
                     "tier": int(mission.get("tier", mission.get("min_tier", 1))),
                     "recommended_level": int(mission.get("recommended_level", mission.get("min_tier", 1))),
@@ -905,6 +932,7 @@ class FireStationCommand(commands.Cog):
                 "unlock_level": self._unlock_level(vehicle),
                 "capabilities": vehicle.get("capabilities", {}),
                 "required_training": vehicle.get("required_training", []),
+                "required_expansions": vehicle.get("required_expansions", []),
                 "maintenance_cost": int(vehicle.get("maintenance_cost", 500)),
             }
 
@@ -923,6 +951,7 @@ class FireStationCommand(commands.Cog):
                 "unlock_level": self._unlock_level(equipment),
                 "capabilities": equipment.get("capabilities", {}),
                 "required_training": equipment.get("required_training", []),
+                "required_expansions": equipment.get("required_expansions", []),
             }
         return catalog
 
@@ -1122,11 +1151,25 @@ class FireStationCommand(commands.Cog):
             return f"Level {command_level} - {xp:,} XP (max)"
         return f"Level {command_level} - {xp:,} / {next_xp:,} XP"
 
-    def _vehicle_is_unlocked(self, vehicle: Dict[str, Any], command_level: int) -> bool:
-        return command_level >= int(vehicle.get("unlock_level", 1))
+    def _vehicle_is_unlocked(
+        self,
+        vehicle: Dict[str, Any],
+        command_level: int,
+        data: Dict[str, Any] | None = None,
+    ) -> bool:
+        if command_level < int(vehicle.get("unlock_level", 1)):
+            return False
+        return data is None or not self._missing_required_expansion_ids(vehicle, data)
 
-    def _equipment_is_unlocked(self, equipment: Dict[str, Any], command_level: int) -> bool:
-        return command_level >= int(equipment.get("unlock_level", 1))
+    def _equipment_is_unlocked(
+        self,
+        equipment: Dict[str, Any],
+        command_level: int,
+        data: Dict[str, Any] | None = None,
+    ) -> bool:
+        if command_level < int(equipment.get("unlock_level", 1)):
+            return False
+        return data is None or not self._missing_required_expansion_ids(equipment, data)
 
     def _training_is_unlocked(self, training: Dict[str, Any], command_level: int) -> bool:
         return command_level >= int(training.get("unlock_level", 1))
@@ -1145,6 +1188,8 @@ class FireStationCommand(commands.Cog):
         fallback: List[Dict[str, Any]] = []
 
         for incident in self.INCIDENTS:
+            if self._missing_required_expansion_ids(incident, data):
+                continue
             unlock_level = self._unlock_level(incident)
             readiness = self._readiness_score(incident, data)
             if unlock_level <= command_level and readiness >= 50:
@@ -1160,6 +1205,11 @@ class FireStationCommand(commands.Cog):
             return random.choice(challenge)
         if fallback:
             return random.choice(fallback)
+        core_incidents = [
+            incident for incident in self.INCIDENTS if not self._missing_required_expansion_ids(incident, data)
+        ]
+        if core_incidents:
+            return random.choice(core_incidents)
         return random.choice(self.INCIDENTS)
 
     def _make_relative_text(self, minutes: float) -> str:
@@ -1573,10 +1623,23 @@ class FireStationCommand(commands.Cog):
         locked = [
             f"{vehicle['name']} (level {vehicle.get('unlock_level', 1)})"
             for vehicle in self.VEHICLE_CATALOG.values()
-            if not self._vehicle_is_unlocked(vehicle, command_level)
+            if command_level < int(vehicle.get("unlock_level", 1))
+        ]
+        expansion_locked = [
+            f"{vehicle['name']} ({self._expansion_requirement_display_text(missing)})"
+            for vehicle in self.VEHICLE_CATALOG.values()
+            if command_level >= int(vehicle.get("unlock_level", 1))
+            for missing in [self._missing_required_expansion_ids(vehicle, data)]
+            if missing
         ]
         if locked:
             embed.add_field(name="Locked vehicles", value=self._compact_display_list(locked), inline=False)
+        if expansion_locked:
+            embed.add_field(
+                name="Expansion locked vehicles",
+                value=self._compact_display_list(expansion_locked),
+                inline=False,
+            )
         return embed
 
     def _build_equipment_shop_embed(self, data: Dict[str, Any]) -> discord.Embed:
@@ -1590,7 +1653,14 @@ class FireStationCommand(commands.Cog):
         locked = [
             f"{equipment['name']} (level {equipment.get('unlock_level', 1)})"
             for equipment in self.EQUIPMENT_CATALOG.values()
-            if not self._equipment_is_unlocked(equipment, command_level)
+            if command_level < int(equipment.get("unlock_level", 1))
+        ]
+        expansion_locked = [
+            f"{equipment['name']} ({self._expansion_requirement_display_text(missing)})"
+            for equipment in self.EQUIPMENT_CATALOG.values()
+            if command_level >= int(equipment.get("unlock_level", 1))
+            for missing in [self._missing_required_expansion_ids(equipment, data)]
+            if missing
         ]
 
         embed = discord.Embed(
@@ -1602,6 +1672,12 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Command XP", value=self._xp_progress_text(int(data.get("xp", 0)), command_level), inline=False)
         if locked:
             embed.add_field(name="Locked equipment", value=self._compact_display_list(locked), inline=False)
+        if expansion_locked:
+            embed.add_field(
+                name="Expansion locked equipment",
+                value=self._compact_display_list(expansion_locked),
+                inline=False,
+            )
         return embed
 
     def _build_training_embed(self, data: Dict[str, Any]) -> discord.Embed:
@@ -2807,21 +2883,27 @@ class FireStationCommand(commands.Cog):
         vdef = catalog[vehicle_id]
         xp = int(data.get("xp", 0))
         command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
-        if not self._vehicle_is_unlocked(vdef, command_level):
+        if not self._vehicle_is_unlocked(vdef, command_level, data):
             required_level = int(vdef.get("unlock_level", 1))
+            missing_expansions = self._missing_required_expansion_ids(vdef, data)
+            if missing_expansions:
+                locked_text = (
+                    f"{vdef['name']} requires expansion: "
+                    f"{self._expansion_requirement_display_text(missing_expansions)}."
+                )
+            else:
+                locked_text = f"{vdef['name']} requires command level {required_level}."
             if edit_message:
                 embed = self._build_vehicle_shop_embed(data)
                 embed.add_field(
                     name="Purchase locked",
-                    value=f"{vdef['name']} requires command level {required_level}.",
+                    value=locked_text,
                     inline=False,
                 )
                 view = VehicleShopView(self, channel, user, guild or interaction.guild, data=data)
                 await interaction.response.edit_message(content=None, embed=embed, view=view)
                 return
-            await interaction.response.send_message(
-                f"Purchase locked: command level {required_level} required.", ephemeral=True
-            )
+            await interaction.response.send_message(f"Purchase locked: {locked_text}", ephemeral=True)
             return
 
         trained = self._training_inventory_set(data.get("trainings", []))
@@ -3134,21 +3216,27 @@ class FireStationCommand(commands.Cog):
         equipment = self.EQUIPMENT_CATALOG[equipment_id]
         xp = int(data.get("xp", 0))
         command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
-        if not self._equipment_is_unlocked(equipment, command_level):
+        if not self._equipment_is_unlocked(equipment, command_level, data):
             required_level = int(equipment.get("unlock_level", 1))
+            missing_expansions = self._missing_required_expansion_ids(equipment, data)
+            if missing_expansions:
+                locked_text = (
+                    f"{equipment['name']} requires expansion: "
+                    f"{self._expansion_requirement_display_text(missing_expansions)}."
+                )
+            else:
+                locked_text = f"{equipment['name']} requires command level {required_level}."
             if edit_message:
                 embed = self._build_equipment_shop_embed(data)
                 embed.add_field(
                     name="Purchase locked",
-                    value=f"{equipment['name']} requires command level {required_level}.",
+                    value=locked_text,
                     inline=False,
                 )
                 view = EquipmentShopView(self, channel, user, guild or interaction.guild, data=data)
                 await interaction.response.edit_message(content=None, embed=embed, view=view)
                 return
-            await interaction.response.send_message(
-                f"Purchase locked: command level {required_level} required.", ephemeral=True
-            )
+            await interaction.response.send_message(f"Purchase locked: {locked_text}", ephemeral=True)
             return
 
         trained = self._training_inventory_set(data.get("trainings", []))
@@ -3944,6 +4032,7 @@ class VehicleShopSelect(discord.ui.Select):
         channel: discord.abc.Messageable,
         user: discord.abc.User,
         guild: discord.Guild | None = None,
+        data: Dict[str, Any] | None = None,
         command_level: int = 1,
         page: int = 0,
     ):
@@ -3951,6 +4040,7 @@ class VehicleShopSelect(discord.ui.Select):
         self.channel = channel
         self.user = user
         self.guild = guild
+        self.data = data or {}
         self.page = max(0, page)
 
         options: List[discord.SelectOption] = []
@@ -3958,11 +4048,15 @@ class VehicleShopSelect(discord.ui.Select):
         start = self.page * self.PAGE_SIZE
         for vid, v in items[start:start + self.PAGE_SIZE]:
             unlock_level = int(v.get("unlock_level", 1))
-            locked = command_level < unlock_level
+            missing_expansions = self.cog._missing_required_expansion_ids(v, self.data)
+            locked = command_level < unlock_level or bool(missing_expansions)
             label = f"{v['name']} ({v['price']:,} cr, cap {v['crew_capacity']})"
             description = None
             if locked:
-                description = f"Requires command level {unlock_level}"
+                if missing_expansions:
+                    description = f"Requires {self.cog._expansion_requirement_display_text(missing_expansions)}"
+                else:
+                    description = f"Requires command level {unlock_level}"
                 label = f"Locked - {label}"
             options.append(
                 discord.SelectOption(
@@ -3990,12 +4084,20 @@ class VehicleShopSelect(discord.ui.Select):
         data = await self.cog.config.user(self.user).all()
         xp = int(data.get("xp", 0))
         command_level = int(data.get("command_level", self.cog._command_level_for_xp(xp)))
-        if not self.cog._vehicle_is_unlocked(vdef, command_level):
+        if not self.cog._vehicle_is_unlocked(vdef, command_level, data):
             required_level = int(vdef.get("unlock_level", 1))
+            missing_expansions = self.cog._missing_required_expansion_ids(vdef, data)
+            if missing_expansions:
+                locked_text = (
+                    f"{vdef['name']} requires expansion: "
+                    f"{self.cog._expansion_requirement_display_text(missing_expansions)}."
+                )
+            else:
+                locked_text = f"{vdef['name']} requires command level {required_level}."
             embed = self.cog._build_vehicle_shop_embed(data)
             embed.add_field(
                 name="Purchase locked",
-                value=f"{vdef['name']} requires command level {required_level}.",
+                value=locked_text,
                 inline=False,
             )
             await interaction.response.edit_message(
@@ -4057,6 +4159,7 @@ class VehicleShopView(discord.ui.View):
                 channel,
                 user,
                 guild,
+                data=self.data,
                 command_level=command_level,
                 page=self.page,
             )
@@ -4138,6 +4241,7 @@ class EquipmentShopSelect(discord.ui.Select):
         channel: discord.abc.Messageable,
         user: discord.abc.User,
         guild: discord.Guild | None = None,
+        data: Dict[str, Any] | None = None,
         command_level: int = 1,
         page: int = 0,
     ):
@@ -4145,6 +4249,7 @@ class EquipmentShopSelect(discord.ui.Select):
         self.channel = channel
         self.user = user
         self.guild = guild
+        self.data = data or {}
         self.page = max(0, page)
 
         options: List[discord.SelectOption] = []
@@ -4152,11 +4257,15 @@ class EquipmentShopSelect(discord.ui.Select):
         start = self.page * self.PAGE_SIZE
         for equipment_id, equipment in items[start:start + self.PAGE_SIZE]:
             unlock_level = int(equipment.get("unlock_level", 1))
-            locked = command_level < unlock_level
+            missing_expansions = self.cog._missing_required_expansion_ids(equipment, self.data)
+            locked = command_level < unlock_level or bool(missing_expansions)
             label = f"{equipment['name']} ({equipment['price']:,} cr)"
             description = None
             if locked:
-                description = f"Requires command level {unlock_level}"
+                if missing_expansions:
+                    description = f"Requires {self.cog._expansion_requirement_display_text(missing_expansions)}"
+                else:
+                    description = f"Requires command level {unlock_level}"
                 label = f"Locked - {label}"
             options.append(
                 discord.SelectOption(
@@ -4192,12 +4301,20 @@ class EquipmentShopSelect(discord.ui.Select):
         data = await self.cog.config.user(self.user).all()
         xp = int(data.get("xp", 0))
         command_level = int(data.get("command_level", self.cog._command_level_for_xp(xp)))
-        if not self.cog._equipment_is_unlocked(equipment, command_level):
+        if not self.cog._equipment_is_unlocked(equipment, command_level, data):
             required_level = int(equipment.get("unlock_level", 1))
+            missing_expansions = self.cog._missing_required_expansion_ids(equipment, data)
+            if missing_expansions:
+                locked_text = (
+                    f"{equipment['name']} requires expansion: "
+                    f"{self.cog._expansion_requirement_display_text(missing_expansions)}."
+                )
+            else:
+                locked_text = f"{equipment['name']} requires command level {required_level}."
             embed = self.cog._build_equipment_shop_embed(data)
             embed.add_field(
                 name="Purchase locked",
-                value=f"{equipment['name']} requires command level {required_level}.",
+                value=locked_text,
                 inline=False,
             )
             view = EquipmentShopView(
@@ -4259,6 +4376,7 @@ class EquipmentShopView(discord.ui.View):
                 channel,
                 user,
                 guild,
+                data=self.data,
                 command_level=command_level,
                 page=self.page,
             )

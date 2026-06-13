@@ -120,6 +120,7 @@ def test_build_vehicle_catalog_uses_yaml_vehicle_data():
             "unlock_level": 1,
             "capabilities": {},
             "required_training": [],
+            "required_expansions": [],
             "maintenance_cost": 500,
         }
     }
@@ -234,6 +235,58 @@ def test_imported_vehicle_equipment_slots_reference_catalog():
     ] == []
 
 
+def test_imported_expansions_unlock_specialized_services():
+    expansions = _load_json_catalog("expansions")
+    expansion_ids = {expansion["id"] for expansion in expansions}
+
+    assert expansion_ids >= {
+        "command_room",
+        "ems_bay",
+        "police_liaison",
+        "hazmat_unit",
+        "water_rescue_bay",
+        "wildland_cache",
+        "foam_storage",
+        "aviation_pad",
+        "rescue_bay",
+    }
+    assert len(expansions) >= 12
+
+
+def test_imported_ambulance_and_police_content_requires_extensions():
+    vehicles = _load_json_catalog("vehicles")
+    missions = _load_json_catalog("missions")
+
+    assert all(
+        "ems_bay" in vehicle.get("required_expansions", [])
+        for vehicle in vehicles
+        if vehicle.get("category") == "ems"
+    )
+    assert all(
+        "police_liaison" in vehicle.get("required_expansions", [])
+        for vehicle in vehicles
+        if vehicle.get("category") == "police"
+    )
+    assert all(
+        "ems_bay" in mission.get("required_expansions", [])
+        for mission in missions
+        if "Ambulance Missions" in mission.get("mission_type", "")
+    )
+    assert all(
+        "police_liaison" in mission.get("required_expansions", [])
+        for mission in missions
+        if "Police Missions" in mission.get("mission_type", "")
+    )
+
+
+def test_imported_expansion_gating_keeps_fire_core_primary():
+    missions = _load_json_catalog("missions")
+    core_missions = [mission for mission in missions if not mission.get("required_expansions")]
+
+    assert len(core_missions) >= 400
+    assert any("Fire Fighting Missions" in mission.get("mission_type", "") for mission in core_missions)
+
+
 def test_build_incidents_derives_staff_from_required_vehicles():
     cog = _cog_with_game_data(
         {
@@ -294,6 +347,7 @@ def test_build_incidents_derives_staff_from_required_vehicles():
             "failure_narrative": "The fire spreads before crews gain control.",
             "required_vehicles": ["engine_basic"],
             "required_equipment": ["hose"],
+            "required_expansions": [],
         }
     ]
 
@@ -1120,6 +1174,106 @@ def test_expansion_purchase_confirm_edits_message_and_stores_expansion():
     assert user_data["credits"] == 70000
 
 
+def test_expansion_requirements_lock_vehicle_and_equipment_until_built():
+    cog = _cog_with_game_data(
+        {
+            "vehicles": {
+                "vehicles": [
+                    {
+                        "id": "ambulance",
+                        "name": "Ambulance",
+                        "required_staff": 2,
+                        "base_cost": 30000,
+                        "unlock_level": 1,
+                        "required_expansions": ["ems_bay"],
+                    }
+                ]
+            },
+            "equipment": {
+                "equipment": [
+                    {
+                        "id": "ems_bag",
+                        "name": "EMS Response Bag",
+                        "base_cost": 2200,
+                        "unlock_level": 1,
+                        "required_expansions": ["ems_bay"],
+                    }
+                ]
+            },
+            "expansions": {
+                "expansions": [
+                    {
+                        "id": "ems_bay",
+                        "name": "Ambulance Bay",
+                        "base_cost": 75000,
+                        "unlock_level": 2,
+                    }
+                ]
+            },
+        }
+    )
+    locked_data = {"command_level": 2, "expansions": []}
+    unlocked_data = {"command_level": 2, "expansions": ["ems_bay"]}
+
+    assert not FireStationCommand._vehicle_is_unlocked(
+        cog,
+        cog.VEHICLE_CATALOG["ambulance"],
+        2,
+        locked_data,
+    )
+    assert FireStationCommand._vehicle_is_unlocked(
+        cog,
+        cog.VEHICLE_CATALOG["ambulance"],
+        2,
+        unlocked_data,
+    )
+    assert not FireStationCommand._equipment_is_unlocked(
+        cog,
+        cog.EQUIPMENT_CATALOG["ems_bag"],
+        2,
+        locked_data,
+    )
+    assert FireStationCommand._equipment_is_unlocked(
+        cog,
+        cog.EQUIPMENT_CATALOG["ems_bag"],
+        2,
+        unlocked_data,
+    )
+
+
+def test_mission_picker_skips_expansion_locked_incidents_when_core_is_available():
+    cog = _cog_with_game_data({})
+    cog.INCIDENTS = [
+        {
+            "id": "ambulance_call",
+            "name": "Ambulance Call",
+            "required_staff": 1,
+            "base_credits": 100,
+            "hint": "Patient needs help.",
+            "detail": "Patient needs help.",
+            "required_expansions": ["ems_bay"],
+        },
+        {
+            "id": "bin_fire",
+            "name": "Bin Fire",
+            "required_staff": 1,
+            "base_credits": 100,
+            "hint": "Small fire.",
+            "detail": "Small fire.",
+        },
+    ]
+
+    picked = [
+        FireStationCommand._pick_random_incident(
+            cog,
+            {"command_level": 10, "staff_total": 10, "vehicles": [], "equipment": [], "expansions": []},
+        )["id"]
+        for _ in range(20)
+    ]
+
+    assert set(picked) == {"bin_fire"}
+
+
 def test_vehicle_condition_scales_station_capabilities():
     cog = _cog_with_game_data(
         {
@@ -1285,6 +1439,7 @@ def test_new_mission_state_includes_schema_and_initial_stage():
         "failure_narrative": "The fire spreads before crews gain control.",
         "required_vehicles": ["engine_basic"],
         "required_equipment": ["hose", "basic_tools"],
+        "required_expansions": [],
         "base_xp": 40,
         "tier": 1,
         "recommended_level": 1,
@@ -1313,6 +1468,7 @@ def test_new_mission_state_includes_schema_and_initial_stage():
         "failure_narrative": "The fire spreads before crews gain control.",
         "required_vehicles": ["engine_basic"],
         "required_equipment": ["hose", "basic_tools"],
+        "required_expansions": [],
         "base_xp": 40,
         "tier": 1,
         "recommended_level": 1,

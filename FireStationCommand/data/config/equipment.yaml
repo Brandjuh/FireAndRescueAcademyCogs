@@ -88,7 +88,10 @@
         "foam_operations": 100,
         "fire_suppression": 60
       },
-      "image": "Images/Equipment/foam_supply.png"
+      "image": "Images/Equipment/foam_supply.png",
+      "required_expansions": [
+        "foam_storage"
+      ]
     },
     {
       "id": "litter",
@@ -115,7 +118,10 @@
       "capabilities": {
         "scene_safety": 16
       },
-      "image": "Images/Equipment/fire_crane_equipment.png"
+      "image": "Images/Equipment/fire_crane_equipment.png",
+      "required_expansions": [
+        "rescue_bay"
+      ]
     },
     {
       "id": "flood_equipment",
@@ -129,7 +135,10 @@
         "water_supply": 36,
         "water_rescue": 20
       },
-      "image": "Images/Equipment/flood_equipment.png"
+      "image": "Images/Equipment/flood_equipment.png",
+      "required_expansions": [
+        "water_rescue_bay"
+      ]
     },
     {
       "id": "personnel",
@@ -169,7 +178,10 @@
         "search": 31,
         "scene_safety": 12
       },
-      "image": "Images/Equipment/police_drone_equipment.png"
+      "image": "Images/Equipment/police_drone_equipment.png",
+      "required_expansions": [
+        "police_liaison"
+      ]
     },
     {
       "id": "search_and_rescue_equipment",
@@ -182,7 +194,10 @@
       "capabilities": {
         "scene_safety": 20
       },
-      "image": "Images/Equipment/search_and_rescue_equipment.png"
+      "image": "Images/Equipment/search_and_rescue_equipment.png",
+      "required_expansions": [
+        "rescue_bay"
+      ]
     },
     {
       "id": "swat_personnel_in_swat_vehicle",
@@ -195,7 +210,10 @@
       "capabilities": {
         "scene_safety": 40
       },
-      "image": "Images/Equipment/swat_personnel_in_swat_vehicle.png"
+      "image": "Images/Equipment/swat_personnel_in_swat_vehicle.png",
+      "required_expansions": [
+        "police_liaison"
+      ]
     },
     {
       "id": "sked",
@@ -223,7 +241,10 @@
         "water_supply": 100,
         "water_rescue": 60
       },
-      "image": "Images/Equipment/water_supply_equipment.png"
+      "image": "Images/Equipment/water_supply_equipment.png",
+      "required_expansions": [
+        "water_rescue_bay"
+      ]
     },
     {
       "id": "traffic_control_kit",
@@ -251,7 +272,10 @@
         "medical_care": 24,
         "patient_stabilization": 18
       },
-      "image": "Images/Equipment/ems_bag.png"
+      "image": "Images/Equipment/ems_bag.png",
+      "required_expansions": [
+        "ems_bay"
+      ]
     },
     {
       "id": "law_enforcement_kit",
@@ -265,7 +289,10 @@
         "law_enforcement": 25,
         "scene_safety": 12
       },
-      "image": "Images/Equipment/law_enforcement_kit.png"
+      "image": "Images/Equipment/law_enforcement_kit.png",
+      "required_expansions": [
+        "police_liaison"
+      ]
     },
     {
       "id": "throw_bag",
@@ -279,7 +306,10 @@
         "water_rescue": 18,
         "scene_safety": 10
       },
-      "image": "Images/Equipment/throw_bag.png"
+      "image": "Images/Equipment/throw_bag.png",
+      "required_expansions": [
+        "water_rescue_bay"
+      ]
     },
     {
       "id": "wildland_gear",
@@ -293,7 +323,10 @@
         "wildland_firefighting": 28,
         "fire_suppression": 16
       },
-      "image": "Images/Equipment/wildland_gear.png"
+      "image": "Images/Equipment/wildland_gear.png",
+      "required_expansions": [
+        "wildland_cache"
+      ]
     },
     {
       "id": "technical_rescue_kit",
@@ -309,7 +342,10 @@
         "technical_rescue": 34,
         "stabilization": 18
       },
-      "image": "Images/Equipment/technical_rescue_kit.png"
+      "image": "Images/Equipment/technical_rescue_kit.png",
+      "required_expansions": [
+        "rescue_bay"
+      ]
     },
     {
       "id": "water_rescue_gear",
@@ -323,7 +359,10 @@
         "water_rescue": 34,
         "search": 12
       },
-      "image": "Images/Equipment/water_rescue_gear.png"
+      "image": "Images/Equipment/water_rescue_gear.png",
+      "required_expansions": [
+        "water_rescue_bay"
+      ]
     },
     {
       "id": "command_tablet",
@@ -337,7 +376,10 @@
         "incident_command": 30,
         "scene_safety": 14
       },
-      "image": "Images/Equipment/command_tablet.png"
+      "image": "Images/Equipment/command_tablet.png",
+      "required_expansions": [
+        "command_room"
+      ]
     },
     {
       "id": "investigation_kit",
@@ -351,7 +393,10 @@
         "investigation": 30,
         "law_enforcement": 12
       },
-      "image": "Images/Equipment/investigation_kit.png"
+      "image": "Images/Equipment/investigation_kit.png",
+      "required_expansions": [
+        "police_liaison"
+      ]
     },
     {
       "id": "patient_monitor",
@@ -365,7 +410,10 @@
         "medical_care": 38,
         "patient_stabilization": 28
       },
-      "image": "Images/Equipment/patient_monitor.png"
+      "image": "Images/Equipment/patient_monitor.png",
+      "required_expansions": [
+        "ems_bay"
+      ]
     },
     {
       "id": "hazmat_kit",
@@ -381,7 +429,10 @@
         "hazmat": 40,
         "scene_safety": 18
       },
-      "image": "Images/Equipment/hazmat_kit.png"
+      "image": "Images/Equipment/hazmat_kit.png",
+      "required_expansions": [
+        "hazmat_unit"
+      ]
     },
     {
       "id": "search_camera",
@@ -395,7 +446,10 @@
         "search": 36,
         "technical_rescue": 14
       },
-      "image": "Images/Equipment/search_camera.png"
+      "image": "Images/Equipment/search_camera.png",
+      "required_expansions": [
+        "rescue_bay"
+      ]
     },
     {
       "id": "light_tower_kit",
@@ -409,7 +463,10 @@
         "scene_safety": 32,
         "incident_support": 22
       },
-      "image": "Images/Equipment/light_tower_kit.png"
+      "image": "Images/Equipment/light_tower_kit.png",
+      "required_expansions": [
+        "command_room"
+      ]
     },
     {
       "id": "decon_kit",
@@ -425,7 +482,10 @@
         "hazmat": 34,
         "decontamination": 40
       },
-      "image": "Images/Equipment/decon_kit.png"
+      "image": "Images/Equipment/decon_kit.png",
+      "required_expansions": [
+        "hazmat_unit"
+      ]
     },
     {
       "id": "rope_rescue_kit",
@@ -441,7 +501,10 @@
         "technical_rescue": 42,
         "search": 18
       },
-      "image": "Images/Equipment/rope_rescue_kit.png"
+      "image": "Images/Equipment/rope_rescue_kit.png",
+      "required_expansions": [
+        "rescue_bay"
+      ]
     },
     {
       "id": "crowd_control_gear",
@@ -455,7 +518,10 @@
         "law_enforcement": 36,
         "scene_safety": 30
       },
-      "image": "Images/Equipment/crowd_control_gear.png"
+      "image": "Images/Equipment/crowd_control_gear.png",
+      "required_expansions": [
+        "police_liaison"
+      ]
     },
     {
       "id": "tactical_gear",
@@ -469,7 +535,10 @@
         "law_enforcement": 45,
         "forcible_entry": 20
       },
-      "image": "Images/Equipment/tactical_gear.png"
+      "image": "Images/Equipment/tactical_gear.png",
+      "required_expansions": [
+        "police_liaison"
+      ]
     },
     {
       "id": "aviation_rescue_kit",
@@ -483,7 +552,10 @@
         "aviation_rescue": 46,
         "fire_suppression": 22
       },
-      "image": "Images/Equipment/aviation_rescue_kit.png"
+      "image": "Images/Equipment/aviation_rescue_kit.png",
+      "required_expansions": [
+        "aviation_pad"
+      ]
     }
   ]
 }
