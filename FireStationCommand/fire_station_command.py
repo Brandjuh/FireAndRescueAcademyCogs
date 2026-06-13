@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - dependency is declared in info.json
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.1.4"
+    __version__ = "1.1.5"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
@@ -46,6 +46,7 @@ class FireStationCommand(commands.Cog):
             "vehicles": [],
             "next_vehicle_id": 1,
             "equipment": [],
+            "trainings": [],
             "station_level": 1,
             "command_level": 1,
             "xp": 0,
@@ -61,9 +62,11 @@ class FireStationCommand(commands.Cog):
 
         self.vehicle_definitions = self._build_vehicle_definitions()
         self.equipment_definitions = self._equipment_definitions()
+        self.training_definitions = self._training_definitions()
         self.INCIDENTS = self._build_incidents()
         self.VEHICLE_CATALOG = self._build_vehicle_catalog()
         self.EQUIPMENT_CATALOG = self._build_equipment_catalog()
+        self.TRAINING_CATALOG = self._build_training_catalog()
 
     # --------------------------------------------------
     # Static fallback data
@@ -260,6 +263,34 @@ class FireStationCommand(commands.Cog):
                 definitions[item_id] = item
         return definitions
 
+    def _training_definitions(self) -> Dict[str, Dict[str, Any]]:
+        trainings = self.game_data.get("trainings", {}).get("trainings", [])
+        if not isinstance(trainings, list):
+            return {}
+
+        definitions: Dict[str, Dict[str, Any]] = {}
+        for training in trainings:
+            if not isinstance(training, dict):
+                continue
+            training_id = training.get("id")
+            if isinstance(training_id, str) and training_id:
+                definitions[training_id] = training
+        return definitions
+
+    @staticmethod
+    def _training_inventory_set(trainings: Any) -> set[str]:
+        if not isinstance(trainings, list):
+            return set()
+        trained: set[str] = set()
+        for training in trainings:
+            if isinstance(training, str) and training:
+                trained.add(training)
+            elif isinstance(training, dict):
+                training_id = training.get("id") or training.get("catalog_id")
+                if training_id:
+                    trained.add(str(training_id))
+        return trained
+
     def _equipment_inventory_counts(self, equipment_inventory: Any) -> Dict[str, int]:
         if isinstance(equipment_inventory, dict):
             counts: Dict[str, int] = {}
@@ -349,13 +380,16 @@ class FireStationCommand(commands.Cog):
         staff_score = min(1.0, staff_total / required_staff) if required_staff > 0 else 1.0
         missing_vehicles = self._missing_required_vehicle_ids(mission, vehicles)
         vehicle_score = 1.0 if not missing_vehicles else max(0.0, 1.0 - (len(missing_vehicles) * 0.5))
+        missing_training = self._missing_required_training_ids(mission, data)
+        training_score = 1.0 if not missing_training else max(0.0, 1.0 - (len(missing_training) * 0.25))
         level_required = self._unlock_level(mission)
         level_score = 1.0 if command_level >= level_required else max(0.0, command_level / level_required)
 
         score = (
-            capability_score * 0.45
+            capability_score * 0.40
             + staff_score * 0.20
-            + vehicle_score * 0.25
+            + vehicle_score * 0.20
+            + training_score * 0.10
             + level_score * 0.10
         )
         return int(round(max(0.0, min(1.0, score)) * 100))
@@ -511,6 +545,18 @@ class FireStationCommand(commands.Cog):
         names = [names_by_id.get(str(item_id), str(item_id)) for item_id in equipment_ids]
         return ", ".join(names)
 
+    def _training_display_text(self, training_ids: Any) -> str | None:
+        if not isinstance(training_ids, list) or not training_ids:
+            return None
+
+        names = []
+        for training_id in training_ids:
+            training_key = str(training_id)
+            training = self.training_definitions.get(training_key)
+            name = training.get("name") if training else None
+            names.append(name if isinstance(name, str) else training_key)
+        return ", ".join(names)
+
     def _vehicle_requirement_display_text(self, vehicle_ids: Any) -> str | None:
         if not isinstance(vehicle_ids, list) or not vehicle_ids:
             return None
@@ -536,6 +582,36 @@ class FireStationCommand(commands.Cog):
                 missing.append(equipment_key)
             else:
                 counts[equipment_key] -= 1
+        return missing
+
+    def _missing_required_training_ids(self, mission: Dict[str, Any], data: Dict[str, Any]) -> List[str]:
+        trained = self._training_inventory_set(data.get("trainings", []))
+        required_training: List[str] = []
+
+        required_vehicles = mission.get("required_vehicles", [])
+        if isinstance(required_vehicles, list):
+            for vehicle_id in required_vehicles:
+                vehicle = self.vehicle_definitions.get(str(vehicle_id))
+                if not vehicle:
+                    continue
+                trainings = vehicle.get("required_training", [])
+                if isinstance(trainings, list):
+                    required_training.extend(str(training) for training in trainings)
+
+        required_equipment = mission.get("required_equipment", [])
+        if isinstance(required_equipment, list):
+            for equipment_id in required_equipment:
+                equipment = self.equipment_definitions.get(str(equipment_id))
+                if not equipment:
+                    continue
+                trainings = equipment.get("required_training", [])
+                if isinstance(trainings, list):
+                    required_training.extend(str(training) for training in trainings)
+
+        missing: List[str] = []
+        for training_id in required_training:
+            if training_id and training_id not in trained and training_id not in missing:
+                missing.append(training_id)
         return missing
 
     def _missing_required_vehicle_ids(self, mission: Dict[str, Any], owned_vehicles: Any) -> List[str]:
@@ -577,6 +653,14 @@ class FireStationCommand(commands.Cog):
             embed.add_field(
                 name="Equipment readiness",
                 value=f"Missing equipment: {missing_equipment_text}",
+                inline=False,
+            )
+        missing_training = mission.get("missing_required_training", [])
+        missing_training_text = self._training_display_text(missing_training)
+        if missing_training_text:
+            embed.add_field(
+                name="Training readiness",
+                value=f"Missing training: {missing_training_text}",
                 inline=False,
             )
 
@@ -633,6 +717,7 @@ class FireStationCommand(commands.Cog):
                 "image": vehicle.get("image"),
                 "unlock_level": self._unlock_level(vehicle),
                 "capabilities": vehicle.get("capabilities", {}),
+                "required_training": vehicle.get("required_training", []),
             }
 
         return catalog or self._fallback_vehicle_catalog()
@@ -649,6 +734,20 @@ class FireStationCommand(commands.Cog):
                 "unlock_level": self._unlock_level(equipment),
                 "capabilities": equipment.get("capabilities", {}),
                 "required_training": equipment.get("required_training", []),
+            }
+        return catalog
+
+    def _build_training_catalog(self) -> Dict[str, Dict[str, Any]]:
+        catalog: Dict[str, Dict[str, Any]] = {}
+        for training_id, training in self.training_definitions.items():
+            name = training.get("name")
+            if not isinstance(name, str):
+                continue
+            catalog[training_id] = {
+                "name": name,
+                "price": int(training.get("cost", 0)),
+                "unlock_level": self._unlock_level(training),
+                "duration_hours": int(training.get("duration_hours", 0)),
             }
         return catalog
 
@@ -768,6 +867,7 @@ class FireStationCommand(commands.Cog):
                 {"catalog_id": "basic_tools", "quantity": 1},
             ]
         )
+        await user_conf.trainings.set(["basic_firefighting"])
         await user_conf.station_level.set(1)
         await user_conf.command_level.set(1)
         await user_conf.xp.set(0)
@@ -813,6 +913,9 @@ class FireStationCommand(commands.Cog):
 
     def _equipment_is_unlocked(self, equipment: Dict[str, Any], command_level: int) -> bool:
         return command_level >= int(equipment.get("unlock_level", 1))
+
+    def _training_is_unlocked(self, training: Dict[str, Any], command_level: int) -> bool:
+        return command_level >= int(training.get("unlock_level", 1))
 
     def _pick_random_incident(self, data: Dict[str, Any] | None = None) -> Dict[str, Any]:
         if not data:
@@ -939,6 +1042,7 @@ class FireStationCommand(commands.Cog):
 
         vehicles = data.get("vehicles", [])
         equipment_count = sum(self._equipment_inventory_counts(data.get("equipment", [])).values())
+        training_count = len(self._training_inventory_set(data.get("trainings", [])))
         credits = await self._get_credits(user)
         lvl = int(data.get("station_level", 1))
         xp = int(data.get("xp", 0))
@@ -968,6 +1072,7 @@ class FireStationCommand(commands.Cog):
             inline=False,
         )
         embed.add_field(name="Equipment", value=f"{equipment_count} item(s)", inline=True)
+        embed.add_field(name="Training", value=f"{training_count} certification(s)", inline=True)
         if active:
             embed.add_field(
                 name="Active incident",
@@ -1191,6 +1296,7 @@ class FireStationCommand(commands.Cog):
         command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
         vehicles = data.get("vehicles", [])
         equipment_count = sum(self._equipment_inventory_counts(data.get("equipment", [])).values())
+        training_count = len(self._training_inventory_set(data.get("trainings", [])))
         max_veh = self._max_vehicles(lvl)
         embed = discord.Embed(
             title="Vehicle shop",
@@ -1234,6 +1340,38 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Command XP", value=self._xp_progress_text(int(data.get("xp", 0)), command_level), inline=False)
         if locked:
             embed.add_field(name="Locked equipment", value=", ".join(locked), inline=False)
+        return embed
+
+    def _build_training_embed(self, data: Dict[str, Any]) -> discord.Embed:
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
+        trained = self._training_inventory_set(data.get("trainings", []))
+        owned = [
+            self.TRAINING_CATALOG.get(training_id, {}).get("name", training_id)
+            for training_id in sorted(trained)
+        ]
+        available = []
+        locked = []
+        for training_id, training in self.TRAINING_CATALOG.items():
+            if training_id in trained:
+                continue
+            entry = f"{training['name']} ({training['price']:,} cr)"
+            if self._training_is_unlocked(training, command_level):
+                available.append(entry)
+            else:
+                locked.append(f"{training['name']} (level {training.get('unlock_level', 1)})")
+
+        embed = discord.Embed(
+            title="Training desk",
+            description="Complete station training to unlock safer and more capable responses.",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(name="Completed training", value=", ".join(owned) if owned else "None", inline=False)
+        embed.add_field(name="Command XP", value=self._xp_progress_text(xp, command_level), inline=False)
+        if available:
+            embed.add_field(name="Available training", value=", ".join(available), inline=False)
+        if locked:
+            embed.add_field(name="Locked training", value=", ".join(locked), inline=False)
         return embed
 
     async def _send_vehicle_shop(
@@ -1301,6 +1439,7 @@ class FireStationCommand(commands.Cog):
             incident,
             data.get("equipment", []),
         )
+        mission["missing_required_training"] = self._missing_required_training_ids(incident, data)
         mission["readiness_score"] = self._readiness_score(incident, data)
         await user_conf.active_mission.set(mission)
 
@@ -1432,6 +1571,7 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Type", value=stype.capitalize(), inline=True)
         embed.add_field(name="Vehicle capacity", value=f"{len(vehicles)} / {max_veh}", inline=True)
         embed.add_field(name="Equipment", value=f"{equipment_count} item(s)", inline=True)
+        embed.add_field(name="Training", value=f"{training_count} certification(s)", inline=True)
         embed.add_field(name="Command XP", value=self._xp_progress_text(xp, command_level), inline=False)
 
         embed.add_field(
@@ -1813,6 +1953,17 @@ class FireStationCommand(commands.Cog):
         view = EquipmentShopView(self, ctx.channel, ctx.author, ctx.guild, data=data)
         await ctx.send(embed=embed, view=view)
 
+    @fsc_group.command(name="training")
+    async def fsc_training(self, ctx: commands.Context):
+        """Open the training desk."""
+        if not await self._ensure_started(ctx):
+            return
+
+        data = await self.config.user(ctx.author).all()
+        embed = self._build_training_embed(data)
+        view = TrainingView(self, ctx.channel, ctx.author, ctx.guild, data=data)
+        await ctx.send(embed=embed, view=view)
+
     @fsc_group.command(name="mission")
     async def fsc_mission(self, ctx: commands.Context):
         """Start a new incident if none is active."""
@@ -1842,6 +1993,7 @@ class FireStationCommand(commands.Cog):
             incident,
             data.get("equipment", []),
         )
+        mission["missing_required_training"] = self._missing_required_training_ids(incident, data)
         mission["readiness_score"] = self._readiness_score(incident, data)
         await user_conf.active_mission.set(mission)
 
@@ -2259,6 +2411,29 @@ class FireStationCommand(commands.Cog):
             )
             return
 
+        trained = self._training_inventory_set(data.get("trainings", []))
+        required_training = vdef.get("required_training", [])
+        if isinstance(required_training, list):
+            missing_training = [str(training) for training in required_training if str(training) not in trained]
+        else:
+            missing_training = []
+        if missing_training:
+            training_text = self._training_display_text(missing_training) or ", ".join(missing_training)
+            if edit_message:
+                embed = self._build_vehicle_shop_embed(data)
+                embed.add_field(
+                    name="Purchase locked",
+                    value=f"{vdef['name']} requires training: {training_text}.",
+                    inline=False,
+                )
+                view = VehicleShopView(self, channel, user, guild or interaction.guild, data=data)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
+            await interaction.response.send_message(
+                f"Purchase locked: training required: {training_text}.", ephemeral=True
+            )
+            return
+
         price = int(vdef["price"])
 
         # Check capacity again
@@ -2329,6 +2504,98 @@ class FireStationCommand(commands.Cog):
             return
         await interaction.response.send_message(embed=embed, ephemeral=False)
 
+    async def _confirm_training_purchase(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        training_id: str,
+        *,
+        edit_message: bool = False,
+        guild: discord.Guild | None = None,
+    ):
+        user_conf = self.config.user(user)
+        data = await user_conf.all()
+
+        if training_id not in self.TRAINING_CATALOG:
+            if edit_message:
+                embed = self._build_training_embed(data)
+                embed.add_field(name="Training failed", value="Unknown training type.", inline=False)
+                view = TrainingView(self, channel, user, guild or interaction.guild, data=data)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
+            await interaction.response.send_message("Unknown training type.", ephemeral=True)
+            return
+
+        training = self.TRAINING_CATALOG[training_id]
+        trained = self._training_inventory_set(data.get("trainings", []))
+        if training_id in trained:
+            if edit_message:
+                embed = self._build_training_embed(data)
+                embed.add_field(name="Training complete", value="This training is already completed.", inline=False)
+                view = TrainingView(self, channel, user, guild or interaction.guild, data=data)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
+            await interaction.response.send_message("This training is already completed.", ephemeral=True)
+            return
+
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
+        if not self._training_is_unlocked(training, command_level):
+            required_level = int(training.get("unlock_level", 1))
+            if edit_message:
+                embed = self._build_training_embed(data)
+                embed.add_field(
+                    name="Training locked",
+                    value=f"{training['name']} requires command level {required_level}.",
+                    inline=False,
+                )
+                view = TrainingView(self, channel, user, guild or interaction.guild, data=data)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
+            await interaction.response.send_message(
+                f"Training locked: command level {required_level} required.", ephemeral=True
+            )
+            return
+
+        price = int(training.get("price", 0))
+        credits = await self._get_credits(user)
+        if credits < price or not await self._spend(user, price):
+            if edit_message:
+                embed = self._build_training_embed(data)
+                embed.add_field(
+                    name="Training failed",
+                    value="You do not have enough credits to complete this training.",
+                    inline=False,
+                )
+                view = TrainingView(self, channel, user, guild or interaction.guild, data=data)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
+            await interaction.response.send_message(
+                "You do not have enough credits to complete this training.",
+                ephemeral=True,
+            )
+            return
+
+        updated_trainings = sorted(trained | {training_id})
+        await user_conf.trainings.set(updated_trainings)
+
+        updated_data = dict(data)
+        updated_data["trainings"] = updated_trainings
+        embed = discord.Embed(
+            title="Training completed",
+            description=f"Completed **{training['name']}** for **{price:,}** credits.",
+            color=discord.Color.green(),
+        )
+        duration = int(training.get("duration_hours", 0))
+        if duration > 0:
+            embed.add_field(name="Training duration", value=f"{duration} hour(s)", inline=True)
+        if edit_message:
+            view = TrainingView(self, channel, user, guild or interaction.guild, data=updated_data)
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+            return
+        await interaction.response.send_message(embed=embed, ephemeral=False)
+
     async def _confirm_equipment_purchase(
         self,
         interaction: discord.Interaction,
@@ -2369,6 +2636,29 @@ class FireStationCommand(commands.Cog):
                 return
             await interaction.response.send_message(
                 f"Purchase locked: command level {required_level} required.", ephemeral=True
+            )
+            return
+
+        trained = self._training_inventory_set(data.get("trainings", []))
+        required_training = equipment.get("required_training", [])
+        if isinstance(required_training, list):
+            missing_training = [str(training) for training in required_training if str(training) not in trained]
+        else:
+            missing_training = []
+        if missing_training:
+            training_text = self._training_display_text(missing_training) or ", ".join(missing_training)
+            if edit_message:
+                embed = self._build_equipment_shop_embed(data)
+                embed.add_field(
+                    name="Purchase locked",
+                    value=f"{equipment['name']} requires training: {training_text}.",
+                    inline=False,
+                )
+                view = EquipmentShopView(self, channel, user, guild or interaction.guild, data=data)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
+            await interaction.response.send_message(
+                f"Purchase locked: training required: {training_text}.", ephemeral=True
             )
             return
 
@@ -2523,6 +2813,25 @@ class FscDashboardView(discord.ui.View):
 
         embed = self.cog._build_equipment_shop_embed(data)
         view = EquipmentShopView(
+            self.cog,
+            interaction.channel or self.channel,
+            self.user,
+            interaction.guild or self.guild,
+            data=data,
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+    @discord.ui.button(label="Training", style=discord.ButtonStyle.secondary)
+    async def training(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.config.user(self.user).all()
+        if not data["started"]:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Action required", value="Create a station first.", inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=FscStartView(self.cog, self.user))
+            return
+
+        embed = self.cog._build_training_embed(data)
+        view = TrainingView(
             self.cog,
             interaction.channel or self.channel,
             self.user,
@@ -2700,6 +3009,7 @@ class FscDashboardView(discord.ui.View):
             incident,
             data.get("equipment", []),
         )
+        mission["missing_required_training"] = self.cog._missing_required_training_ids(incident, data)
         mission["readiness_score"] = self.cog._readiness_score(incident, data)
         await self.cog.config.user(self.user).active_mission.set(mission)
 
@@ -2729,6 +3039,7 @@ class FscDashboardView(discord.ui.View):
         embed.add_field(name="Upgrade", value="`[p]fsc upgrade`", inline=False)
         embed.add_field(name="Career station", value="`[p]fsc career`", inline=False)
         embed.add_field(name="Equipment", value="`[p]fsc equipment`", inline=False)
+        embed.add_field(name="Training", value="`[p]fsc training`", inline=False)
         await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
 
 
@@ -3294,6 +3605,143 @@ class EquipmentShopView(discord.ui.View):
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
 
+class TrainingSelect(discord.ui.Select):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        guild: discord.Guild | None = None,
+        data: Dict[str, Any] | None = None,
+    ):
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+        self.guild = guild
+        data = data or {}
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", cog._command_level_for_xp(xp)))
+        trained = cog._training_inventory_set(data.get("trainings", []))
+
+        options: List[discord.SelectOption] = []
+        for training_id, training in self.cog.TRAINING_CATALOG.items():
+            if training_id in trained:
+                continue
+            unlock_level = int(training.get("unlock_level", 1))
+            locked = command_level < unlock_level
+            label = f"{training['name']} ({training['price']:,} cr)"
+            description = f"{training.get('duration_hours', 0)} hour(s)"
+            if locked:
+                description = f"Requires command level {unlock_level}"
+                label = f"Locked - {label}"
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    value=training_id,
+                    description=description,
+                    default=False,
+                    emoji=None,
+                )
+            )
+
+        if not options:
+            options = [discord.SelectOption(label="No training available", value="none")]
+
+        super().__init__(
+            placeholder="Select training to complete",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        choice = self.values[0]
+        if choice == "none":
+            await interaction.response.send_message("No training available.", ephemeral=True)
+            return
+
+        training = self.cog.TRAINING_CATALOG.get(choice)
+        if not training:
+            await interaction.response.send_message("Unknown training type.", ephemeral=True)
+            return
+
+        data = await self.cog.config.user(self.user).all()
+        trained = self.cog._training_inventory_set(data.get("trainings", []))
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", self.cog._command_level_for_xp(xp)))
+        if choice in trained:
+            embed = self.cog._build_training_embed(data)
+            embed.add_field(name="Training complete", value="This training is already completed.", inline=False)
+            await interaction.response.edit_message(
+                content=None,
+                embed=embed,
+                view=TrainingView(self.cog, self.channel, self.user, interaction.guild or self.guild, data=data),
+            )
+            return
+        if not self.cog._training_is_unlocked(training, command_level):
+            required_level = int(training.get("unlock_level", 1))
+            embed = self.cog._build_training_embed(data)
+            embed.add_field(
+                name="Training locked",
+                value=f"{training['name']} requires command level {required_level}.",
+                inline=False,
+            )
+            await interaction.response.edit_message(
+                content=None,
+                embed=embed,
+                view=TrainingView(self.cog, self.channel, self.user, interaction.guild or self.guild, data=data),
+            )
+            return
+
+        price = int(training["price"])
+        embed = discord.Embed(
+            title="Confirm training",
+            description=f"Complete **{training['name']}** for **{price:,}** credits?",
+            color=discord.Color.gold(),
+        )
+        duration = int(training.get("duration_hours", 0))
+        if duration > 0:
+            embed.add_field(name="Training duration", value=f"{duration} hour(s)", inline=True)
+
+        view = ConfirmTrainingView(
+            self.cog,
+            self.channel,
+            self.user,
+            choice,
+            guild=interaction.guild or self.guild,
+            edit_message=True,
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+
+class TrainingView(discord.ui.View):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        guild: discord.Guild | None = None,
+        data: Dict[str, Any] | None = None,
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+        self.guild = guild
+        self.add_item(TrainingSelect(cog, channel, user, guild, data=data))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = await self.cog._build_dashboard_embed(self.user)
+        channel = interaction.channel or self.channel
+        guild = interaction.guild or self.guild
+        view = FscDashboardView(self.cog, self.user, channel, guild)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+
 class ConfirmRecruitView(discord.ui.View):
     def __init__(
         self,
@@ -3607,4 +4055,67 @@ class ConfirmEquipmentPurchaseView(discord.ui.View):
             self.stop()
             return
         await interaction.response.send_message("Purchase cancelled.", ephemeral=True)
+        self.stop()
+
+
+class ConfirmTrainingView(discord.ui.View):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        training_id: str,
+        *,
+        guild: discord.Guild | None = None,
+        edit_message: bool = False,
+    ):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+        self.training_id = training_id
+        self.guild = guild
+        self.edit_message = edit_message
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.message.edit(view=self)
+        await self.cog._confirm_training_purchase(
+            interaction,
+            self.channel,
+            self.user,
+            self.training_id,
+            edit_message=self.edit_message,
+            guild=self.guild,
+        )
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        if self.edit_message:
+            data = await self.cog.config.user(self.user).all()
+            embed = self.cog._build_training_embed(data)
+            embed.add_field(name="Training cancelled", value="No training was completed.", inline=False)
+            view = TrainingView(
+                self.cog,
+                self.channel,
+                self.user,
+                interaction.guild or self.guild,
+                data=data,
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+            self.stop()
+            return
+        await interaction.response.send_message("Training cancelled.", ephemeral=True)
         self.stop()

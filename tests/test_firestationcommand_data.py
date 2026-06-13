@@ -21,7 +21,9 @@ def _cog_with_game_data(game_data):
     cog.game_data = game_data
     cog.vehicle_definitions = FireStationCommand._build_vehicle_definitions(cog)
     cog.equipment_definitions = FireStationCommand._equipment_definitions(cog)
+    cog.training_definitions = FireStationCommand._training_definitions(cog)
     cog.EQUIPMENT_CATALOG = FireStationCommand._build_equipment_catalog(cog)
+    cog.TRAINING_CATALOG = FireStationCommand._build_training_catalog(cog)
     cog._utcnow = lambda: datetime(2026, 6, 12, 12, 0, tzinfo=timezone.utc)
     return cog
 
@@ -102,6 +104,7 @@ def test_build_vehicle_catalog_uses_yaml_vehicle_data():
             "image": "Images/Vehicles/engine_basic.png",
             "unlock_level": 1,
             "capabilities": {},
+            "required_training": [],
         }
     }
 
@@ -472,6 +475,44 @@ def test_missing_required_equipment_ids_compares_required_types_to_owned_invento
     assert FireStationCommand._missing_required_equipment_ids(cog, mission, "bad") == ["hose", "rescue_tools"]
 
 
+def test_missing_required_training_ids_uses_vehicle_and_equipment_requirements():
+    cog = _cog_with_game_data(
+        {
+            "vehicles": {
+                "vehicles": [
+                    {"id": "rescue_basic", "name": "Basic Rescue Truck", "required_training": ["technical_rescue"]},
+                ]
+            },
+            "equipment": {
+                "equipment": [
+                    {"id": "rescue_tools", "name": "Hydraulic Rescue Tools", "required_training": ["technical_rescue"]},
+                    {"id": "ba_basic", "name": "Basic Breathing Apparatus", "required_training": ["breathing_apparatus"]},
+                ]
+            },
+            "trainings": {
+                "trainings": [
+                    {"id": "technical_rescue", "name": "Technical Rescue"},
+                    {"id": "breathing_apparatus", "name": "Breathing Apparatus"},
+                ]
+            },
+        }
+    )
+    mission = {
+        "required_vehicles": ["rescue_basic"],
+        "required_equipment": ["rescue_tools", "ba_basic"],
+    }
+
+    assert FireStationCommand._missing_required_training_ids(cog, mission, {"trainings": []}) == [
+        "technical_rescue",
+        "breathing_apparatus",
+    ]
+    assert FireStationCommand._missing_required_training_ids(
+        cog,
+        mission,
+        {"trainings": ["technical_rescue"]},
+    ) == ["breathing_apparatus"]
+
+
 def test_recruitment_embed_shows_hireable_staff():
     user = object()
     cog = _cog_with_game_data({})
@@ -712,6 +753,73 @@ def test_equipment_purchase_confirm_edits_message_and_stores_inventory():
     assert isinstance(edited["view"], EquipmentShopView)
     assert user_data["equipment"] == [{"catalog_id": "hose", "quantity": 2}]
     assert user_data["credits"] == 8500
+
+
+def test_training_embed_shows_completed_available_and_locked_training():
+    cog = _cog_with_game_data(
+        {
+            "trainings": {
+                "trainings": [
+                    {"id": "basic_firefighting", "name": "Basic Firefighting", "cost": 1000, "unlock_level": 1},
+                    {"id": "technical_rescue", "name": "Technical Rescue", "cost": 3000, "unlock_level": 2},
+                    {"id": "breathing_apparatus", "name": "Breathing Apparatus", "cost": 2000, "unlock_level": 3},
+                ]
+            }
+        }
+    )
+
+    embed = FireStationCommand._build_training_embed(
+        cog,
+        {
+            "xp": 100,
+            "command_level": 2,
+            "trainings": ["basic_firefighting"],
+        },
+    )
+
+    fields = {field["name"]: field["value"] for field in embed.fields}
+    assert fields["Completed training"] == "Basic Firefighting"
+    assert fields["Available training"] == "Technical Rescue (3,000 cr)"
+    assert fields["Locked training"] == "Breathing Apparatus (level 3)"
+
+
+def test_training_purchase_confirm_edits_message_and_stores_training():
+    user = type("User", (), {"id": 123})()
+    user_data = {
+        "started": True,
+        "station_level": 2,
+        "command_level": 2,
+        "xp": 100,
+        "trainings": ["basic_firefighting"],
+        "credits": 10000,
+    }
+    cog = _cog_with_game_data(
+        {
+            "trainings": {
+                "trainings": [
+                    {"id": "technical_rescue", "name": "Technical Rescue", "cost": 3000, "unlock_level": 2},
+                ]
+            }
+        }
+    )
+    cog.config = _Config(user_data, {})
+    interaction = _Interaction(user)
+
+    asyncio.run(
+        cog._confirm_training_purchase(
+            interaction,
+            object(),
+            user,
+            "technical_rescue",
+            edit_message=True,
+            guild=object(),
+        )
+    )
+
+    edited = interaction.response.edited
+    assert edited["embed"].kwargs["title"] == "Training completed"
+    assert user_data["trainings"] == ["basic_firefighting", "technical_rescue"]
+    assert user_data["credits"] == 7000
 
 
 def test_invalid_yaml_shapes_fall_back_to_static_catalog_and_incidents():
