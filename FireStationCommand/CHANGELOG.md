@@ -54,10 +54,11 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added an on-scene backup request phase where some incidents can ask for additional vehicles before the result is calculated.
 - Added local backup vehicle dispatch from the on-scene update, including backup ETA and result scoring that counts the extra vehicles.
 - Added illustrated incident result outcome images for successful, partial, and failed incident outcomes.
+- Added cleaner shop list formatting for locked vehicles and equipment.
 
 ### Changed
 
-- Bumped the cog version to `1.2.8`.
+- Bumped the cog version to `1.2.9`.
 - Vehicle shop options now come from `data/config/vehicles.yaml` when available.
 - Mission definitions now come from `data/config/missions.yaml` when available.
 - Mission embeds now show configured mission images when available.
@@ -114,6 +115,8 @@ All notable changes to FireStationCommand will be documented in this file.
 - Config validation now accepts real YAML instead of requiring JSON-compatible YAML syntax.
 - Mission control now shows `SCENE_BACKUP` guidance, requested backup vehicle types, and backup deadlines.
 - Incident result embeds now use outcome-specific images instead of reusing the active incident image.
+- Dashboard menu buttons now use clearer action labels such as `Vehicle shop`, `Equipment shop`, and `Start mission`.
+- Vehicle and equipment shop lock lists now group items by command level or required expansion.
 
 ### Fixed
 
