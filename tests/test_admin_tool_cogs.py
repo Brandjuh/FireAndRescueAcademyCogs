@@ -9,7 +9,11 @@ from admintimednotifications.admintimednotifications import (
 )
 from announcer.announcer import parse_title_body as parse_announcement_title_body
 from announcementpanel.announcementpanel import (
+    ButtonWizardState,
+    button_config_from_wizard_state,
+    button_wizard_state_from_config,
     format_announcement_content_chunks,
+    normalize_id_list,
     normalize_button_key,
     panel_message_record,
     parse_channel_ids,
@@ -77,6 +81,32 @@ def test_panel_button_key_and_message_parsing():
     long_content = format_announcement_content_chunks("Training", "x" * 4500)
     assert len(long_content) == 3
     assert all(len(chunk) <= 2000 for chunk in long_content)
+
+
+def test_panel_button_wizard_state_round_trip():
+    assert normalize_id_list(["123456789012345678", 123456789012345678, "bad"]) == [
+        123456789012345678
+    ]
+    state = ButtonWizardState(
+        original_key="oldtraining",
+        key="training",
+        label="Training",
+        message="Training starts now",
+        channel_ids=[123456789012345678],
+        ping_role_id=987654321098765432,
+    )
+    config = button_config_from_wizard_state(state)
+    assert config == {
+        "label": "Training",
+        "message": "Training starts now",
+        "channel_ids": [123456789012345678],
+        "ping_role_id": 987654321098765432,
+    }
+    restored = button_wizard_state_from_config("training", config)
+    assert restored.original_key == "training"
+    assert restored.key == "training"
+    assert restored.channel_ids == [123456789012345678]
+    assert restored.ping_role_id == 987654321098765432
 
 
 def test_admin_timer_due_split_and_next_run():
