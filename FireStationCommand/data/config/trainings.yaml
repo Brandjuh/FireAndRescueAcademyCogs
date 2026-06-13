@@ -18,7 +18,7 @@ trainings:
 
   - id: technical_rescue
     name: "Technical Rescue"
-    unlock_level: 3
+    unlock_level: 2
     duration_hours: 4
     cost: 3000
     unlocks_vehicles:

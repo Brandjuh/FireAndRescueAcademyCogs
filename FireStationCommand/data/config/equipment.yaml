@@ -25,7 +25,7 @@ equipment:
   - id: rescue_tools
     name: "Hydraulic Rescue Tools"
     category: "rescue"
-    unlock_level: 3
+    unlock_level: 2
     base_cost: 5000
     durability: 100
     required_training:

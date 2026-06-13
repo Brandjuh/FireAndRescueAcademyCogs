@@ -26,13 +26,16 @@ progression:
         - rescue_basic
       equipment:
         - stabilization_kit
+        - rescue_tools
+      trainings:
+        - technical_rescue
       features:
         - career_conversion
     3:
       equipment:
-        - rescue_tools
+        - ba_basic
       trainings:
-        - technical_rescue
+        - breathing_apparatus
     4:
       expansions:
         - workshop
