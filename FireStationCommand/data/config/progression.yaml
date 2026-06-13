@@ -1,47 +1,69 @@
-progression:
-  level_xp:
-    1: 0
-    2: 100
-    3: 275
-    4: 550
-    5: 975
-    6: 1600
-    7: 2500
-    8: 3750
-    9: 5450
-    10: 7700
-
-  unlocks:
-    1:
-      vehicles:
-        - engine_basic
-      equipment:
-        - hose
-        - basic_tools
-      missions:
-        - small_bin_fire
-        - vehicle_collision
-    2:
-      vehicles:
-        - rescue_basic
-      equipment:
-        - stabilization_kit
-        - rescue_tools
-      trainings:
-        - technical_rescue
-      features:
-        - career_conversion
-    3:
-      equipment:
-        - ba_basic
-      trainings:
-        - breathing_apparatus
-    4:
-      expansions:
-        - workshop
-    5:
-      expansions:
-        - training_facility
-    8:
-      planned_features:
-        - automatic_dispatch
+{
+  "progression": {
+    "level_xp": {
+      "1": 0,
+      "2": 100,
+      "3": 275,
+      "4": 550,
+      "5": 975,
+      "6": 1600,
+      "7": 2500,
+      "8": 3750,
+      "9": 5450,
+      "10": 7700
+    },
+    "unlocks": {
+      "1": {
+        "vehicles": [
+          "engine_basic"
+        ],
+        "equipment": [
+          "hose",
+          "basic_tools"
+        ],
+        "missions": [
+          "small_bin_fire",
+          "vehicle_collision"
+        ]
+      },
+      "2": {
+        "vehicles": [
+          "rescue_basic"
+        ],
+        "equipment": [
+          "stabilization_kit",
+          "rescue_tools"
+        ],
+        "trainings": [
+          "technical_rescue"
+        ],
+        "features": [
+          "career_conversion"
+        ]
+      },
+      "3": {
+        "equipment": [
+          "ba_basic"
+        ],
+        "trainings": [
+          "breathing_apparatus"
+        ]
+      },
+      "4": {
+        "expansions": [
+          "workshop"
+        ]
+      },
+      "5": {
+        "expansions": [
+          "training_facility"
+        ]
+      },
+      "8": {
+        "planned_features": [
+          "automatic_dispatch"
+        ]
+      }
+    }
+  }
+}
