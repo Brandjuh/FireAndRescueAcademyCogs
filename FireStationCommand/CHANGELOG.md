@@ -48,10 +48,11 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added extension requirements for specialized vehicles, equipment, and mission dispatch families.
 - Added tests to keep ambulance and police content behind their station extensions while preserving fire service as the primary core loop.
 - Added balance tests that verify mission extension locks include all required vehicle and equipment expansion gates.
+- Added a config format regression test so every FireStationCommand config file remains JSON-compatible YAML.
 
 ### Changed
 
-- Bumped the cog version to `1.2.4`.
+- Bumped the cog version to `1.2.5`.
 - Vehicle shop options now come from `data/config/vehicles.yaml` when available.
 - Mission definitions now come from `data/config/missions.yaml` when available.
 - Mission embeds now show configured mission images when available.
@@ -92,6 +93,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - Vehicle and equipment shops now show and enforce extension locks in addition to command-level locks.
 - Mission extension locks now inherit requirements from required vehicles and equipment, preventing hidden locked loadouts in core dispatches.
 - Early station extension costs are lower so ambulance, police, rescue, command, and extra-bay progression is reachable from early core missions.
+- Balance, progression, and training config files now use the same JSON-compatible YAML format as missions, vehicles, equipment, and expansions.
 - New stations now start with Basic Firefighting certification.
 - Technical Rescue now unlocks at command level 2 so level 2 rescue progression is playable.
 - Built expansions now appear on dashboard and station overview embeds.

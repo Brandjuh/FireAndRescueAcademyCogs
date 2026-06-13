@@ -43,6 +43,17 @@ def _load_json_catalog(name):
     return json.loads(path.read_text(encoding="utf-8"))[name]
 
 
+def test_config_files_are_json_compatible_yaml():
+    config_dir = _FSC_ROOT / "data" / "config"
+    config_files = sorted(config_dir.glob("*.yaml"))
+
+    assert config_files
+    for path in config_files:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+        assert isinstance(parsed, dict)
+        assert path.stem in parsed
+
+
 class _ValueSetter:
     def __init__(self, data, key):
         self.data = data
