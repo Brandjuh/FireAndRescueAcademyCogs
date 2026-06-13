@@ -3,6 +3,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from admintimednotifications.admintimednotifications import (
+    LOCAL_TIMEZONE,
+    first_scheduled_run,
+    next_scheduled_run,
     next_run,
     parse_title_body as parse_timer_title_body,
     split_due_reminders,
@@ -129,6 +132,53 @@ def test_admin_timer_due_split_and_next_run():
 
     assert [item["id"] for item in due] == [1, 2]
     assert [item["id"] for item in pending] == [3]
+
+
+def test_admin_timer_recurring_schedule_helpers():
+    now = datetime(2026, 6, 13, 10, 0, tzinfo=LOCAL_TIMEZONE)
+
+    weekly_ts = first_scheduled_run("weekly", "maandag", "09:30", now=now)
+    weekly_dt = datetime.fromtimestamp(weekly_ts, tz=LOCAL_TIMEZONE)
+    assert (weekly_dt.year, weekly_dt.month, weekly_dt.day, weekly_dt.hour, weekly_dt.minute) == (
+        2026,
+        6,
+        15,
+        9,
+        30,
+    )
+
+    monthly_now = datetime(2026, 2, 1, 10, 0, tzinfo=LOCAL_TIMEZONE)
+    monthly_ts = first_scheduled_run("monthly", "31", "08:00", now=monthly_now)
+    monthly_dt = datetime.fromtimestamp(monthly_ts, tz=LOCAL_TIMEZONE)
+    assert (monthly_dt.year, monthly_dt.month, monthly_dt.day, monthly_dt.hour) == (2026, 2, 28, 8)
+
+    reminder = {
+        "recurrence": "monthly",
+        "day": "31",
+        "time": "08:00",
+        "next_run": monthly_ts,
+    }
+    next_month_ts = next_scheduled_run(reminder, now_ts=monthly_ts)
+    next_month_dt = datetime.fromtimestamp(next_month_ts, tz=LOCAL_TIMEZONE)
+    assert (next_month_dt.year, next_month_dt.month, next_month_dt.day, next_month_dt.hour) == (
+        2026,
+        3,
+        31,
+        8,
+    )
+
+
+def test_admin_timer_due_split_includes_snoozed_reminders():
+    due, pending = split_due_reminders(
+        [
+            {"id": 1, "next_run": 500, "snooze_until": 100},
+            {"id": 2, "next_run": 500, "snooze_until": 600},
+        ],
+        now_ts=100,
+    )
+
+    assert [item["id"] for item in due] == [1]
+    assert [item["id"] for item in pending] == [2]
 
 
 def test_botstatus_accepts_only_supported_activity_types():

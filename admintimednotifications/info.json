@@ -3,7 +3,7 @@
     "min_bot_version": "3.5.0",
     "description": "Repeated admin reminders for scheduled operational actions.",
     "hidden": false,
-    "install_msg": "AdminTimedNotifications loaded. Configure channel and role, then add reminders with `[p]admintimer add <minutes> Title | message`.",
+    "install_msg": "AdminTimedNotifications loaded. Use `[p]admintimer panel` to post or refresh the timer management panel.",
     "required_cogs": {},
     "requirements": [],
     "short": "Repeated reminders for admins.",
