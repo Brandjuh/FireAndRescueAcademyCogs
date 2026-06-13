@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - dependency is declared in info.json
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.1.5"
+    __version__ = "1.1.6"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
@@ -47,6 +47,7 @@ class FireStationCommand(commands.Cog):
             "next_vehicle_id": 1,
             "equipment": [],
             "trainings": [],
+            "expansions": [],
             "station_level": 1,
             "command_level": 1,
             "xp": 0,
@@ -63,10 +64,12 @@ class FireStationCommand(commands.Cog):
         self.vehicle_definitions = self._build_vehicle_definitions()
         self.equipment_definitions = self._equipment_definitions()
         self.training_definitions = self._training_definitions()
+        self.expansion_definitions = self._expansion_definitions()
         self.INCIDENTS = self._build_incidents()
         self.VEHICLE_CATALOG = self._build_vehicle_catalog()
         self.EQUIPMENT_CATALOG = self._build_equipment_catalog()
         self.TRAINING_CATALOG = self._build_training_catalog()
+        self.EXPANSION_CATALOG = self._build_expansion_catalog()
 
     # --------------------------------------------------
     # Static fallback data
@@ -277,6 +280,20 @@ class FireStationCommand(commands.Cog):
                 definitions[training_id] = training
         return definitions
 
+    def _expansion_definitions(self) -> Dict[str, Dict[str, Any]]:
+        expansions = self.game_data.get("expansions", {}).get("expansions", [])
+        if not isinstance(expansions, list):
+            return {}
+
+        definitions: Dict[str, Dict[str, Any]] = {}
+        for expansion in expansions:
+            if not isinstance(expansion, dict):
+                continue
+            expansion_id = expansion.get("id")
+            if isinstance(expansion_id, str) and expansion_id:
+                definitions[expansion_id] = expansion
+        return definitions
+
     @staticmethod
     def _training_inventory_set(trainings: Any) -> set[str]:
         if not isinstance(trainings, list):
@@ -290,6 +307,38 @@ class FireStationCommand(commands.Cog):
                 if training_id:
                     trained.add(str(training_id))
         return trained
+
+    @staticmethod
+    def _expansion_inventory_set(expansions: Any) -> set[str]:
+        if not isinstance(expansions, list):
+            return set()
+        owned: set[str] = set()
+        for expansion in expansions:
+            if isinstance(expansion, str) and expansion:
+                owned.add(expansion)
+            elif isinstance(expansion, dict):
+                expansion_id = expansion.get("id") or expansion.get("catalog_id")
+                if expansion_id:
+                    owned.add(str(expansion_id))
+        return owned
+
+    def _expansion_effect_totals(self, expansions: Any) -> Dict[str, float]:
+        totals: Dict[str, float] = {}
+        for expansion_id in self._expansion_inventory_set(expansions):
+            expansion = self.expansion_definitions.get(expansion_id)
+            if not expansion:
+                continue
+            effects = expansion.get("effects", {})
+            if not isinstance(effects, dict):
+                continue
+            for effect, raw_value in effects.items():
+                try:
+                    value = float(raw_value)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(effect, str):
+                    totals[effect] = totals.get(effect, 0.0) + value
+        return totals
 
     def _equipment_inventory_counts(self, equipment_inventory: Any) -> Dict[str, int]:
         if isinstance(equipment_inventory, dict):
@@ -751,6 +800,22 @@ class FireStationCommand(commands.Cog):
             }
         return catalog
 
+    def _build_expansion_catalog(self) -> Dict[str, Dict[str, Any]]:
+        catalog: Dict[str, Dict[str, Any]] = {}
+        for expansion_id, expansion in self.expansion_definitions.items():
+            name = expansion.get("name")
+            if not isinstance(name, str):
+                continue
+            catalog[expansion_id] = {
+                "name": name,
+                "description": expansion.get("description", ""),
+                "price": int(expansion.get("base_cost", 0)),
+                "unlock_level": self._unlock_level(expansion),
+                "build_time_hours": int(expansion.get("build_time_hours", 0)),
+                "effects": expansion.get("effects", {}),
+            }
+        return catalog
+
     # --------------------------------------------------
     # Helpers
     # --------------------------------------------------
@@ -868,6 +933,7 @@ class FireStationCommand(commands.Cog):
             ]
         )
         await user_conf.trainings.set(["basic_firefighting"])
+        await user_conf.expansions.set([])
         await user_conf.station_level.set(1)
         await user_conf.command_level.set(1)
         await user_conf.xp.set(0)
@@ -888,7 +954,7 @@ class FireStationCommand(commands.Cog):
             color=discord.Color.red(),
         )
         embed.add_field(name="Starter vehicle", value="🚒 Starter Fire Engine (crew 6)", inline=False)
-        embed.add_field(name="Staff", value="6 volunteers (untrained)", inline=True)
+        embed.add_field(name="Staff", value="6 volunteers", inline=True)
         embed.add_field(name="Credits", value=f"{credits:,}", inline=True)
         return embed
 
@@ -901,6 +967,12 @@ class FireStationCommand(commands.Cog):
         if level < 1:
             level = 1
         return 1 + (level - 1)
+
+    def _max_vehicles_for_data(self, data: Dict[str, Any]) -> int:
+        level = int(data.get("station_level", 1))
+        base = self._max_vehicles(level)
+        effects = self._expansion_effect_totals(data.get("expansions", []))
+        return base + int(effects.get("extra_vehicle_slots", 0))
 
     def _xp_progress_text(self, xp: int, command_level: int) -> str:
         next_xp = self._xp_for_next_command_level(command_level)
@@ -916,6 +988,9 @@ class FireStationCommand(commands.Cog):
 
     def _training_is_unlocked(self, training: Dict[str, Any], command_level: int) -> bool:
         return command_level >= int(training.get("unlock_level", 1))
+
+    def _expansion_is_unlocked(self, expansion: Dict[str, Any], command_level: int) -> bool:
+        return command_level >= int(expansion.get("unlock_level", 1))
 
     def _pick_random_incident(self, data: Dict[str, Any] | None = None) -> Dict[str, Any]:
         if not data:
@@ -1043,6 +1118,7 @@ class FireStationCommand(commands.Cog):
         vehicles = data.get("vehicles", [])
         equipment_count = sum(self._equipment_inventory_counts(data.get("equipment", [])).values())
         training_count = len(self._training_inventory_set(data.get("trainings", [])))
+        expansion_count = len(self._expansion_inventory_set(data.get("expansions", [])))
         credits = await self._get_credits(user)
         lvl = int(data.get("station_level", 1))
         xp = int(data.get("xp", 0))
@@ -1068,11 +1144,12 @@ class FireStationCommand(commands.Cog):
         )
         embed.add_field(
             name="Vehicles",
-            value=f"{len(vehicles)} / max {self._max_vehicles(lvl)}",
+            value=f"{len(vehicles)} / max {self._max_vehicles_for_data(data)}",
             inline=False,
         )
         embed.add_field(name="Equipment", value=f"{equipment_count} item(s)", inline=True)
         embed.add_field(name="Training", value=f"{training_count} certification(s)", inline=True)
+        embed.add_field(name="Expansions", value=f"{expansion_count} built", inline=True)
         if active:
             embed.add_field(
                 name="Active incident",
@@ -1174,7 +1251,7 @@ class FireStationCommand(commands.Cog):
         vehicles = data.get("vehicles", [])
 
         max_staff = self._max_staff(lvl)
-        max_veh = self._max_vehicles(lvl)
+        max_veh = self._max_vehicles_for_data(data)
 
         embed = discord.Embed(
             title="Station overview",
@@ -1295,9 +1372,10 @@ class FireStationCommand(commands.Cog):
         xp = int(data.get("xp", 0))
         command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
         vehicles = data.get("vehicles", [])
+        expansion_count = len(self._expansion_inventory_set(data.get("expansions", [])))
         equipment_count = sum(self._equipment_inventory_counts(data.get("equipment", [])).values())
         training_count = len(self._training_inventory_set(data.get("trainings", [])))
-        max_veh = self._max_vehicles(lvl)
+        max_veh = self._max_vehicles_for_data(data)
         embed = discord.Embed(
             title="Vehicle shop",
             description="Select a vehicle to purchase from the menu below.",
@@ -1374,6 +1452,43 @@ class FireStationCommand(commands.Cog):
             embed.add_field(name="Locked training", value=", ".join(locked), inline=False)
         return embed
 
+    def _build_expansion_embed(self, data: Dict[str, Any]) -> discord.Embed:
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
+        owned_ids = self._expansion_inventory_set(data.get("expansions", []))
+        owned = [
+            self.EXPANSION_CATALOG.get(expansion_id, {}).get("name", expansion_id)
+            for expansion_id in sorted(owned_ids)
+        ]
+        available = []
+        locked = []
+        for expansion_id, expansion in self.EXPANSION_CATALOG.items():
+            if expansion_id in owned_ids:
+                continue
+            entry = f"{expansion['name']} ({expansion['price']:,} cr)"
+            if self._expansion_is_unlocked(expansion, command_level):
+                available.append(entry)
+            else:
+                locked.append(f"{expansion['name']} (level {expansion.get('unlock_level', 1)})")
+
+        embed = discord.Embed(
+            title="Station expansions",
+            description="Build permanent station upgrades.",
+            color=discord.Color.blue(),
+        )
+        embed.add_field(name="Built expansions", value=", ".join(owned) if owned else "None", inline=False)
+        embed.add_field(name="Command XP", value=self._xp_progress_text(xp, command_level), inline=False)
+        if available:
+            embed.add_field(name="Available expansions", value=", ".join(available), inline=False)
+        if locked:
+            embed.add_field(name="Locked expansions", value=", ".join(locked), inline=False)
+        embed.add_field(
+            name="Vehicle capacity",
+            value=f"{len(data.get('vehicles', []))} / {self._max_vehicles_for_data(data)}",
+            inline=True,
+        )
+        return embed
+
     async def _send_vehicle_shop(
         self,
         send,
@@ -1385,7 +1500,7 @@ class FireStationCommand(commands.Cog):
         data = await self.config.user(user).all()
         lvl = int(data.get("station_level", 1))
         vehicles = data.get("vehicles", [])
-        max_veh = self._max_vehicles(lvl)
+        max_veh = self._max_vehicles_for_data(data)
         if len(vehicles) >= max_veh:
             kwargs = {"ephemeral": True} if ephemeral else {}
             await send(
@@ -1512,7 +1627,7 @@ class FireStationCommand(commands.Cog):
         active = data.get("active_mission", {}) or {}
 
         max_staff = self._max_staff(lvl)
-        max_veh = self._max_vehicles(lvl)
+        max_veh = self._max_vehicles_for_data(data)
 
         embed = discord.Embed(
             title="Fire Station Status",
@@ -1561,7 +1676,7 @@ class FireStationCommand(commands.Cog):
         vehicles = data.get("vehicles", [])
 
         max_staff = self._max_staff(lvl)
-        max_veh = self._max_vehicles(lvl)
+        max_veh = self._max_vehicles_for_data(data)
 
         embed = discord.Embed(
             title="Station overview",
@@ -1570,6 +1685,7 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Level", value=str(lvl), inline=True)
         embed.add_field(name="Type", value=stype.capitalize(), inline=True)
         embed.add_field(name="Vehicle capacity", value=f"{len(vehicles)} / {max_veh}", inline=True)
+        embed.add_field(name="Expansions", value=f"{expansion_count} built", inline=True)
         embed.add_field(name="Equipment", value=f"{equipment_count} item(s)", inline=True)
         embed.add_field(name="Training", value=f"{training_count} certification(s)", inline=True)
         embed.add_field(name="Command XP", value=self._xp_progress_text(xp, command_level), inline=False)
@@ -1933,7 +2049,7 @@ class FireStationCommand(commands.Cog):
         data = await self.config.user(ctx.author).all()
         lvl = int(data.get("station_level", 1))
         vehicles = data.get("vehicles", [])
-        max_veh = self._max_vehicles(lvl)
+        max_veh = self._max_vehicles_for_data(data)
         if len(vehicles) >= max_veh:
             await ctx.send("You are at maximum vehicle capacity. Upgrade your station to buy more vehicles.")
             return
@@ -1962,6 +2078,17 @@ class FireStationCommand(commands.Cog):
         data = await self.config.user(ctx.author).all()
         embed = self._build_training_embed(data)
         view = TrainingView(self, ctx.channel, ctx.author, ctx.guild, data=data)
+        await ctx.send(embed=embed, view=view)
+
+    @fsc_group.command(name="expansions")
+    async def fsc_expansions(self, ctx: commands.Context):
+        """Open the station expansion desk."""
+        if not await self._ensure_started(ctx):
+            return
+
+        data = await self.config.user(ctx.author).all()
+        embed = self._build_expansion_embed(data)
+        view = ExpansionView(self, ctx.channel, ctx.author, ctx.guild, data=data)
         await ctx.send(embed=embed, view=view)
 
     @fsc_group.command(name="mission")
@@ -2439,7 +2566,7 @@ class FireStationCommand(commands.Cog):
         # Check capacity again
         lvl = int(data.get("station_level", 1))
         vehicles = data.get("vehicles", [])
-        max_veh = self._max_vehicles(lvl)
+        max_veh = self._max_vehicles_for_data(data)
         if len(vehicles) >= max_veh:
             if edit_message:
                 embed = await self._build_dashboard_embed(user)
@@ -2500,6 +2627,104 @@ class FireStationCommand(commands.Cog):
                 view = FscDashboardView(self, user, channel, guild or interaction.guild)
             else:
                 view = VehicleShopView(self, channel, user, guild or interaction.guild, data=data)
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+            return
+        await interaction.response.send_message(embed=embed, ephemeral=False)
+
+    async def _confirm_expansion_purchase(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        expansion_id: str,
+        *,
+        edit_message: bool = False,
+        guild: discord.Guild | None = None,
+    ):
+        user_conf = self.config.user(user)
+        data = await user_conf.all()
+
+        if expansion_id not in self.EXPANSION_CATALOG:
+            if edit_message:
+                embed = self._build_expansion_embed(data)
+                embed.add_field(name="Expansion failed", value="Unknown expansion type.", inline=False)
+                view = ExpansionView(self, channel, user, guild or interaction.guild, data=data)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
+            await interaction.response.send_message("Unknown expansion type.", ephemeral=True)
+            return
+
+        expansion = self.EXPANSION_CATALOG[expansion_id]
+        owned = self._expansion_inventory_set(data.get("expansions", []))
+        if expansion_id in owned:
+            if edit_message:
+                embed = self._build_expansion_embed(data)
+                embed.add_field(name="Expansion already built", value="This expansion is already active.", inline=False)
+                view = ExpansionView(self, channel, user, guild or interaction.guild, data=data)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
+            await interaction.response.send_message("This expansion is already active.", ephemeral=True)
+            return
+
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
+        if not self._expansion_is_unlocked(expansion, command_level):
+            required_level = int(expansion.get("unlock_level", 1))
+            if edit_message:
+                embed = self._build_expansion_embed(data)
+                embed.add_field(
+                    name="Expansion locked",
+                    value=f"{expansion['name']} requires command level {required_level}.",
+                    inline=False,
+                )
+                view = ExpansionView(self, channel, user, guild or interaction.guild, data=data)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
+            await interaction.response.send_message(
+                f"Expansion locked: command level {required_level} required.", ephemeral=True
+            )
+            return
+
+        price = int(expansion.get("price", 0))
+        credits = await self._get_credits(user)
+        if credits < price or not await self._spend(user, price):
+            if edit_message:
+                embed = self._build_expansion_embed(data)
+                embed.add_field(
+                    name="Expansion failed",
+                    value="You do not have enough credits to build this expansion.",
+                    inline=False,
+                )
+                view = ExpansionView(self, channel, user, guild or interaction.guild, data=data)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
+            await interaction.response.send_message(
+                "You do not have enough credits to build this expansion.",
+                ephemeral=True,
+            )
+            return
+
+        updated_expansions = sorted(owned | {expansion_id})
+        await user_conf.expansions.set(updated_expansions)
+
+        updated_data = dict(data)
+        updated_data["expansions"] = updated_expansions
+        embed = discord.Embed(
+            title="Expansion built",
+            description=f"Built **{expansion['name']}** for **{price:,}** credits.",
+            color=discord.Color.green(),
+        )
+        effects = expansion.get("effects", {})
+        if isinstance(effects, dict) and effects:
+            effect_text = ", ".join(f"{name}: {value}" for name, value in effects.items())
+            embed.add_field(name="Effects", value=effect_text, inline=False)
+        embed.add_field(
+            name="Vehicle capacity",
+            value=f"{len(updated_data.get('vehicles', []))} / {self._max_vehicles_for_data(updated_data)}",
+            inline=True,
+        )
+        if edit_message:
+            view = ExpansionView(self, channel, user, guild or interaction.guild, data=updated_data)
             await interaction.response.edit_message(content=None, embed=embed, view=view)
             return
         await interaction.response.send_message(embed=embed, ephemeral=False)
@@ -2782,9 +3007,8 @@ class FscDashboardView(discord.ui.View):
             embed.add_field(name="Action required", value="Create a station first.", inline=False)
             await interaction.response.edit_message(content=None, embed=embed, view=FscStartView(self.cog, self.user))
             return
-        lvl = int(data.get("station_level", 1))
         vehicles = data.get("vehicles", [])
-        max_veh = self.cog._max_vehicles(lvl)
+        max_veh = self.cog._max_vehicles_for_data(data)
         if len(vehicles) >= max_veh:
             embed = await self.cog._build_dashboard_embed(self.user)
             embed.add_field(
@@ -2832,6 +3056,25 @@ class FscDashboardView(discord.ui.View):
 
         embed = self.cog._build_training_embed(data)
         view = TrainingView(
+            self.cog,
+            interaction.channel or self.channel,
+            self.user,
+            interaction.guild or self.guild,
+            data=data,
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+    @discord.ui.button(label="Expansions", style=discord.ButtonStyle.secondary)
+    async def expansions(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.config.user(self.user).all()
+        if not data["started"]:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Action required", value="Create a station first.", inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=FscStartView(self.cog, self.user))
+            return
+
+        embed = self.cog._build_expansion_embed(data)
+        view = ExpansionView(
             self.cog,
             interaction.channel or self.channel,
             self.user,
@@ -3040,6 +3283,7 @@ class FscDashboardView(discord.ui.View):
         embed.add_field(name="Career station", value="`[p]fsc career`", inline=False)
         embed.add_field(name="Equipment", value="`[p]fsc equipment`", inline=False)
         embed.add_field(name="Training", value="`[p]fsc training`", inline=False)
+        embed.add_field(name="Expansions", value="`[p]fsc expansions`", inline=False)
         await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
 
 
@@ -3742,6 +3986,147 @@ class TrainingView(discord.ui.View):
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
 
+class ExpansionSelect(discord.ui.Select):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        guild: discord.Guild | None = None,
+        data: Dict[str, Any] | None = None,
+    ):
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+        self.guild = guild
+        data = data or {}
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", cog._command_level_for_xp(xp)))
+        owned = cog._expansion_inventory_set(data.get("expansions", []))
+
+        options: List[discord.SelectOption] = []
+        for expansion_id, expansion in self.cog.EXPANSION_CATALOG.items():
+            if expansion_id in owned:
+                continue
+            unlock_level = int(expansion.get("unlock_level", 1))
+            locked = command_level < unlock_level
+            label = f"{expansion['name']} ({expansion['price']:,} cr)"
+            description = str(expansion.get("description", ""))[:100] or f"{expansion.get('build_time_hours', 0)} hour(s)"
+            if locked:
+                description = f"Requires command level {unlock_level}"
+                label = f"Locked - {label}"
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    value=expansion_id,
+                    description=description,
+                    default=False,
+                    emoji=None,
+                )
+            )
+
+        if not options:
+            options = [discord.SelectOption(label="No expansions available", value="none")]
+
+        super().__init__(
+            placeholder="Select expansion to build",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        choice = self.values[0]
+        if choice == "none":
+            await interaction.response.send_message("No expansions available.", ephemeral=True)
+            return
+
+        expansion = self.cog.EXPANSION_CATALOG.get(choice)
+        if not expansion:
+            await interaction.response.send_message("Unknown expansion type.", ephemeral=True)
+            return
+
+        data = await self.cog.config.user(self.user).all()
+        owned = self.cog._expansion_inventory_set(data.get("expansions", []))
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", self.cog._command_level_for_xp(xp)))
+        if choice in owned:
+            embed = self.cog._build_expansion_embed(data)
+            embed.add_field(name="Expansion already built", value="This expansion is already active.", inline=False)
+            await interaction.response.edit_message(
+                content=None,
+                embed=embed,
+                view=ExpansionView(self.cog, self.channel, self.user, interaction.guild or self.guild, data=data),
+            )
+            return
+        if not self.cog._expansion_is_unlocked(expansion, command_level):
+            required_level = int(expansion.get("unlock_level", 1))
+            embed = self.cog._build_expansion_embed(data)
+            embed.add_field(
+                name="Expansion locked",
+                value=f"{expansion['name']} requires command level {required_level}.",
+                inline=False,
+            )
+            await interaction.response.edit_message(
+                content=None,
+                embed=embed,
+                view=ExpansionView(self.cog, self.channel, self.user, interaction.guild or self.guild, data=data),
+            )
+            return
+
+        price = int(expansion["price"])
+        embed = discord.Embed(
+            title="Confirm expansion",
+            description=f"Build **{expansion['name']}** for **{price:,}** credits?",
+            color=discord.Color.blue(),
+        )
+        description = expansion.get("description")
+        if isinstance(description, str) and description:
+            embed.add_field(name="Description", value=description, inline=False)
+        effects = expansion.get("effects", {})
+        if isinstance(effects, dict) and effects:
+            effect_text = ", ".join(f"{name}: {value}" for name, value in effects.items())
+            embed.add_field(name="Effects", value=effect_text, inline=False)
+
+        view = ConfirmExpansionView(
+            self.cog,
+            self.channel,
+            self.user,
+            choice,
+            guild=interaction.guild or self.guild,
+            edit_message=True,
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+
+class ExpansionView(discord.ui.View):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        guild: discord.Guild | None = None,
+        data: Dict[str, Any] | None = None,
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+        self.guild = guild
+        self.add_item(ExpansionSelect(cog, channel, user, guild, data=data))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = await self.cog._build_dashboard_embed(self.user)
+        channel = interaction.channel or self.channel
+        guild = interaction.guild or self.guild
+        view = FscDashboardView(self.cog, self.user, channel, guild)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+
 class ConfirmRecruitView(discord.ui.View):
     def __init__(
         self,
@@ -4118,4 +4503,67 @@ class ConfirmTrainingView(discord.ui.View):
             self.stop()
             return
         await interaction.response.send_message("Training cancelled.", ephemeral=True)
+        self.stop()
+
+
+class ConfirmExpansionView(discord.ui.View):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        expansion_id: str,
+        *,
+        guild: discord.Guild | None = None,
+        edit_message: bool = False,
+    ):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+        self.expansion_id = expansion_id
+        self.guild = guild
+        self.edit_message = edit_message
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.message.edit(view=self)
+        await self.cog._confirm_expansion_purchase(
+            interaction,
+            self.channel,
+            self.user,
+            self.expansion_id,
+            edit_message=self.edit_message,
+            guild=self.guild,
+        )
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        if self.edit_message:
+            data = await self.cog.config.user(self.user).all()
+            embed = self.cog._build_expansion_embed(data)
+            embed.add_field(name="Expansion cancelled", value="No expansion was built.", inline=False)
+            view = ExpansionView(
+                self.cog,
+                self.channel,
+                self.user,
+                interaction.guild or self.guild,
+                data=data,
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+            self.stop()
+            return
+        await interaction.response.send_message("Expansion cancelled.", ephemeral=True)
         self.stop()
