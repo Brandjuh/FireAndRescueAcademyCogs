@@ -97,6 +97,8 @@ def test_build_vehicle_catalog_uses_yaml_vehicle_data():
             "crew_capacity": 4,
             "price": 50000,
             "image": "Images/Vehicles/engine_basic.png",
+            "unlock_level": 1,
+            "capabilities": {},
         }
     }
 
@@ -110,6 +112,9 @@ def test_build_incidents_derives_staff_from_required_vehicles():
                         "id": "small_bin_fire",
                         "name": "Small Bin Fire",
                         "base_credits": 200,
+                        "base_xp": 40,
+                        "min_tier": 1,
+                        "recommended_level": 1,
                         "image": "Images/Missions/small_bin_fire.png",
                         "required_vehicles": ["engine_basic"],
                         "required_equipment": ["hose"],
@@ -119,6 +124,7 @@ def test_build_incidents_derives_staff_from_required_vehicles():
                         "success_narrative": "The fire is knocked down quickly.",
                         "partial_narrative": "The fire is controlled with minor extension.",
                         "failure_narrative": "The fire spreads before crews gain control.",
+                        "capabilities": {"fire_suppression": 35},
                     }
                 ]
             },
@@ -143,6 +149,11 @@ def test_build_incidents_derives_staff_from_required_vehicles():
             "name": "Small Bin Fire",
             "required_staff": 4,
             "base_credits": 200,
+            "base_xp": 40,
+            "tier": 1,
+            "recommended_level": 1,
+            "unlock_level": 1,
+            "capabilities": {"fire_suppression": 35},
             "image": "Images/Missions/small_bin_fire.png",
             "hint": "A small bin fire in a residential area.",
             "detail": "The crew finds fire spreading along a fence.",
@@ -173,6 +184,100 @@ def test_balance_helpers_read_values_with_fallbacks():
     assert FireStationCommand._balance_seconds_as_minutes(cog, "career_turnout_seconds", 0) == 0.5
     assert FireStationCommand._reward_multiplier(cog) == 1.25
     assert FireStationCommand._balance_int(cog, "missing", 7) == 7
+
+
+def test_command_level_uses_progression_thresholds():
+    cog = _cog_with_game_data(
+        {
+            "progression": {
+                "progression": {
+                    "level_xp": {
+                        1: 0,
+                        2: 100,
+                        3: 250,
+                    }
+                }
+            }
+        }
+    )
+
+    assert FireStationCommand._command_level_for_xp(cog, 0) == 1
+    assert FireStationCommand._command_level_for_xp(cog, 100) == 2
+    assert FireStationCommand._command_level_for_xp(cog, 249) == 2
+    assert FireStationCommand._command_level_for_xp(cog, 250) == 3
+    assert FireStationCommand._xp_for_next_command_level(cog, 2) == 250
+
+
+def test_readiness_score_combines_capabilities_staff_vehicles_and_level():
+    cog = _cog_with_game_data(
+        {
+            "vehicles": {
+                "vehicles": [
+                    {
+                        "id": "engine_basic",
+                        "name": "Standard Fire Engine",
+                        "required_staff": 4,
+                        "capabilities": {"fire_suppression": 45, "water_supply": 30},
+                        "equipment_slots": ["hose", "basic_tools"],
+                    }
+                ]
+            },
+            "equipment": {
+                "equipment": [
+                    {"id": "hose", "capabilities": {"fire_suppression": 15}},
+                    {"id": "basic_tools", "capabilities": {"scene_safety": 10}},
+                ]
+            },
+        }
+    )
+    mission = {
+        "required_staff": 4,
+        "required_vehicles": ["engine_basic"],
+        "recommended_level": 1,
+        "capabilities": {"fire_suppression": 35, "water_supply": 20},
+    }
+    data = {
+        "command_level": 1,
+        "staff_total": 4,
+        "vehicles": [{"id": 1, "catalog_id": "engine_basic"}],
+    }
+
+    assert FireStationCommand._readiness_score(cog, mission, data) == 100
+
+
+def test_random_incident_selection_prefers_current_level_ready_missions(monkeypatch):
+    cog = _cog_with_game_data({})
+    cog.INCIDENTS = [
+        {
+            "id": "small_bin_fire",
+            "name": "Small Bin Fire",
+            "required_staff": 4,
+            "required_vehicles": [],
+            "recommended_level": 1,
+            "capabilities": {},
+        },
+        {
+            "id": "high_rise_fire",
+            "name": "High Rise Fire",
+            "required_staff": 20,
+            "required_vehicles": ["ladder"],
+            "recommended_level": 10,
+            "capabilities": {"aerial_access": 100},
+        },
+    ]
+    monkeypatch.setattr("FireStationCommand.fire_station_command.random.random", lambda: 0.9)
+    monkeypatch.setattr("FireStationCommand.fire_station_command.random.choice", lambda options: options[0])
+
+    incident = FireStationCommand._pick_random_incident(
+        cog,
+        {
+            "command_level": 1,
+            "staff_total": 6,
+            "vehicles": [],
+        },
+    )
+
+    assert incident["id"] == "small_bin_fire"
 
 
 def test_default_global_config_keeps_manual_gameplay_timers_short():
@@ -354,6 +459,8 @@ def test_dashboard_upgrade_button_opens_confirm_view():
         {
             "started": True,
             "station_level": 1,
+            "command_level": 2,
+            "xp": 100,
             "station_type": "volunteer",
             "staff_total": 6,
             "staff_trained": 0,
@@ -415,6 +522,7 @@ def test_vehicle_shop_select_edits_message_to_confirm_purchase():
             "image": "Images/Vehicles/engine_basic.png",
         }
     }
+    cog.config = _Config({"xp": 0, "command_level": 1}, {})
     select = VehicleShopSelect(cog, object(), user, object())
     select.values = ["engine_basic"]
     interaction = _Interaction(user)
@@ -503,6 +611,10 @@ def test_new_mission_state_includes_schema_and_initial_stage():
         "failure_narrative": "The fire spreads before crews gain control.",
         "required_vehicles": ["engine_basic"],
         "required_equipment": ["hose", "basic_tools"],
+        "base_xp": 40,
+        "tier": 1,
+        "recommended_level": 1,
+        "capabilities": {"fire_suppression": 35},
     }
 
     mission = FireStationCommand._new_mission_state(
@@ -527,6 +639,10 @@ def test_new_mission_state_includes_schema_and_initial_stage():
         "failure_narrative": "The fire spreads before crews gain control.",
         "required_vehicles": ["engine_basic"],
         "required_equipment": ["hose", "basic_tools"],
+        "base_xp": 40,
+        "tier": 1,
+        "recommended_level": 1,
+        "capabilities": {"fire_suppression": 35},
         "stage": FireStationCommand.STAGE_ALERT_CHOICE,
         "alert_mode": None,
         "channel_id": 123,

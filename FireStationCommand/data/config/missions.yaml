@@ -2,6 +2,7 @@ missions:
   - id: small_bin_fire
     name: "Small Bin Fire"
     min_tier: 1
+    recommended_level: 1
     base_xp: 40
     base_credits: 200
     image: "Images/Missions/small_bin_fire.png"
@@ -10,6 +11,10 @@ missions:
     required_equipment:
       - hose
       - basic_tools
+    capabilities:
+      fire_suppression: 35
+      water_supply: 20
+      forcible_entry: 5
     description: "A small bin fire in a residential area. Quick response limits damage."
     dispatch_narrative: "A resident calls in after seeing smoke curling from a row of bins beside a block of homes. The caller sounds calm, but says the fire is spreading along the fence."
     scene_narrative: "Your crew arrives to find flames licking up the wooden panels behind the bins. A quick knockdown should prevent extension to the nearby sheds."
@@ -20,6 +25,7 @@ missions:
   - id: vehicle_collision
     name: "Vehicle Collision"
     min_tier: 1
+    recommended_level: 1
     base_xp: 60
     base_credits: 350
     image: "Images/Missions/vehicle_collision.png"
@@ -28,6 +34,10 @@ missions:
     required_equipment:
       - hose
       - basic_tools
+    capabilities:
+      fire_suppression: 25
+      scene_safety: 30
+      forcible_entry: 10
     description: "Two vehicles collided on a local road. Fire suppression and scene safety required."
     dispatch_narrative: "Multiple callers report a two-car collision at a busy junction. One vehicle is leaking fluids and traffic is still moving around the scene."
     scene_narrative: "Police are blocking the road as your first unit arrives. One driver is shaken, another vehicle has light smoke from the engine bay, and bystanders are crowding close."
@@ -37,7 +47,8 @@ missions:
 
   - id: rescue_call
     name: "Rescue Call – Person Trapped"
-    min_tier: 1
+    min_tier: 2
+    recommended_level: 2
     base_xp: 80
     base_credits: 500
     image: "Images/Missions/rescue_call.png"
@@ -46,6 +57,10 @@ missions:
     required_equipment:
       - rescue_tools
       - stabilization_kit
+    capabilities:
+      technical_rescue: 60
+      stabilization: 35
+      scene_safety: 20
     description: "A person is trapped in a vehicle after a collision. Technical rescue is needed."
     dispatch_narrative: "Dispatch reports a trapped occupant after a heavy collision. The caller says the vehicle is unstable and the patient cannot open the door."
     scene_narrative: "The vehicle is resting at an angle near the shoulder. The patient is conscious but pinned, and the crew needs a controlled rescue plan before cutting."
