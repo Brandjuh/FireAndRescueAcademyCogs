@@ -189,13 +189,6 @@ class ButtonConfigModal(discord.ui.Modal, title="Announcement panel button"):
         required=True,
         placeholder="The message this button will post.",
     )
-    channels_input = discord.ui.TextInput(
-        label="Target channels",
-        style=discord.TextStyle.paragraph,
-        max_length=1000,
-        required=False,
-        placeholder="Mention channels or paste channel IDs, separated by spaces or commas.",
-    )
 
     def __init__(
         self,
@@ -213,9 +206,6 @@ class ButtonConfigModal(discord.ui.Modal, title="Announcement panel button"):
         if existing_config:
             self.label_input.default = existing_config.get("label", "")
             self.message_input.default = existing_config.get("message", "")
-            self.channels_input.default = " ".join(
-                str(channel_id) for channel_id in existing_config.get("channel_ids", [])
-            )
 
     async def on_submit(self, interaction: discord.Interaction):
         if not interaction.guild:
@@ -231,7 +221,6 @@ class ButtonConfigModal(discord.ui.Modal, title="Announcement panel button"):
             await interaction.response.send_message("Label and message are required.", ephemeral=True)
             return
 
-        channel_ids = parse_channel_ids(str(self.channels_input.value))
         async with self.cog.config.guild(interaction.guild).buttons() as buttons:
             raw_key = str(self.key_input.value).strip()
             if raw_key:
@@ -247,18 +236,21 @@ class ButtonConfigModal(discord.ui.Modal, title="Announcement panel button"):
             buttons[button_key] = {
                 "label": label,
                 "message": message,
-                "channel_ids": channel_ids if channel_ids else existing.get("channel_ids", []),
+                "channel_ids": existing.get("channel_ids", []),
                 "ping_role_id": existing.get("ping_role_id"),
             }
 
         refreshed = await self.cog.refresh_panel_messages(interaction.guild)
-        channel_note = "" if channel_ids else " No target channels were changed."
         target_view = self.cog.target_config_view(button_key, interaction.user.id)
-        target_text = await self.cog.target_config_message(interaction.guild, button_key)
+        target_text = await self.cog.target_config_message(
+            interaction.guild,
+            button_key,
+            intro="Step 2/2: select where this button posts and which role it pings.",
+        )
         await interaction.response.send_message(
             (
                 f"Button `{button_key}` saved. Refreshed {refreshed} panel message(s)."
-                f"{channel_note}\n\n{target_text}"
+                f"\n\n{target_text}"
             ),
             view=target_view,
             ephemeral=True,
@@ -736,13 +728,21 @@ class AnnouncementPanel(commands.Cog):
     def target_config_view(self, key: str, user_id: int):
         return ButtonTargetConfigView(self, key, user_id)
 
-    async def target_config_message(self, guild: discord.Guild, key: str) -> str:
+    async def target_config_message(
+        self,
+        guild: discord.Guild,
+        key: str,
+        *,
+        intro: str = "Configure posting targets and ping role.",
+    ) -> str:
         buttons = await self.config.guild(guild).buttons()
         config = buttons.get(key, {})
         channel_ids = [int(channel_id) for channel_id in config.get("channel_ids", [])]
+        label = config.get("label", key)
         return "\n".join(
             [
-                f"Configure targets for `{key}`.",
+                intro,
+                f"Button: `{key}` - {label}",
                 f"Channels: {self.format_channel_list(guild, channel_ids)}",
                 f"Ping role: {self.format_role_label(guild, config.get('ping_role_id'))}",
             ]
