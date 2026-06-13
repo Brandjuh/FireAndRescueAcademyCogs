@@ -67,7 +67,13 @@ def test_panel_button_key_and_message_parsing():
         "Training",
         "<@&123456789012345678> Training starts now",
     )
-    assert content == ["**Training**\n<@&123456789012345678> Training starts now"]
+    assert content == ["<@&123456789012345678> Training starts now"]
+    content_with_role = format_announcement_content_chunks(
+        "Training",
+        "Training starts now",
+        ping_role_id=123456789012345678,
+    )
+    assert content_with_role == ["<@&123456789012345678>\nTraining starts now"]
     long_content = format_announcement_content_chunks("Training", "x" * 4500)
     assert len(long_content) == 3
     assert all(len(chunk) <= 2000 for chunk in long_content)

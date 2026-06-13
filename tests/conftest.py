@@ -133,6 +133,7 @@ def pytest_configure():
     discord.Interaction = object
     discord.Object = _Object
     discord.SelectOption = _SelectOption
+    discord.ChannelType = types.SimpleNamespace(text="text", news="news")
     discord.Embed = _Embed
     discord.Color = types.SimpleNamespace(
         blue=lambda: "blue",
@@ -167,6 +168,8 @@ def pytest_configure():
         View=_View,
         Button=_Button,
         Select=_Select,
+        ChannelSelect=_Select,
+        RoleSelect=_Select,
         Modal=_Modal,
         TextInput=_TextInput,
         button=_ui_button,
