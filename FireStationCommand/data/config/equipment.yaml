@@ -2,6 +2,7 @@ equipment:
   - id: hose
     name: "Fire Hose Set"
     category: "fire"
+    unlock_level: 1
     base_cost: 1500
     durability: 100
     required_training: []
@@ -12,6 +13,7 @@ equipment:
   - id: ba_basic
     name: "Basic Breathing Apparatus"
     category: "ba"
+    unlock_level: 3
     base_cost: 3000
     durability: 100
     required_training:
@@ -23,6 +25,7 @@ equipment:
   - id: rescue_tools
     name: "Hydraulic Rescue Tools"
     category: "rescue"
+    unlock_level: 3
     base_cost: 5000
     durability: 100
     required_training:
@@ -34,6 +37,7 @@ equipment:
   - id: stabilization_kit
     name: "Vehicle Stabilization Kit"
     category: "rescue"
+    unlock_level: 2
     base_cost: 2500
     durability: 100
     required_training:
@@ -45,6 +49,7 @@ equipment:
   - id: basic_tools
     name: "Basic Hand Tools"
     category: "general"
+    unlock_level: 1
     base_cost: 1000
     durability: 100
     required_training: []
