@@ -70,24 +70,21 @@ def format_announcement_content_chunks(
     label: str,
     message: str,
     *,
+    ping_role_id: Optional[int] = None,
     limit: int = MESSAGE_CONTENT_LIMIT,
 ) -> list[str]:
-    title = (label or "Announcement").strip() or "Announcement"
+    del label
     body = (message or "").strip()
-    prefix = f"**{title[:80]}**\n"
-    if not body:
-        return [prefix.strip()]
+    prefix = f"<@&{int(ping_role_id)}>\n" if ping_role_id else ""
+    content = f"{prefix}{body}".strip()
+    if not content:
+        return []
 
-    full_message = f"{prefix}{body}"
-    if len(full_message) <= limit:
-        return [full_message]
+    if len(content) <= limit:
+        return [content]
 
     chunks = []
-    remaining = body
-    first_limit = max(1, limit - len(prefix))
-    first_body = remaining[:first_limit].rstrip()
-    chunks.append(f"{prefix}{first_body}".rstrip())
-    remaining = remaining[len(first_body):].lstrip()
+    remaining = content
 
     while remaining:
         chunk = remaining[:limit].rstrip()
@@ -95,6 +92,18 @@ def format_announcement_content_chunks(
         remaining = remaining[len(chunk):].lstrip()
 
     return chunks
+
+
+def selectable_channel_types():
+    channel_type = getattr(discord, "ChannelType", None)
+    if channel_type is None:
+        return None
+    values = [
+        value
+        for name in ("text", "news")
+        if (value := getattr(channel_type, name, None)) is not None
+    ]
+    return values or None
 
 
 class PanelButton(discord.ui.Button):
@@ -239,13 +248,134 @@ class ButtonConfigModal(discord.ui.Modal, title="Announcement panel button"):
                 "label": label,
                 "message": message,
                 "channel_ids": channel_ids if channel_ids else existing.get("channel_ids", []),
+                "ping_role_id": existing.get("ping_role_id"),
             }
 
         refreshed = await self.cog.refresh_panel_messages(interaction.guild)
         channel_note = "" if channel_ids else " No target channels were changed."
+        target_view = self.cog.target_config_view(button_key, interaction.user.id)
+        target_text = await self.cog.target_config_message(interaction.guild, button_key)
         await interaction.response.send_message(
-            f"Button `{button_key}` saved. Refreshed {refreshed} panel message(s).{channel_note}",
+            (
+                f"Button `{button_key}` saved. Refreshed {refreshed} panel message(s)."
+                f"{channel_note}\n\n{target_text}"
+            ),
+            view=target_view,
             ephemeral=True,
+        )
+
+
+class TargetChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, cog: "AnnouncementPanel", key: str):
+        self.cog = cog
+        self.key = key
+        kwargs = {
+            "placeholder": "Select target channels",
+            "min_values": 1,
+            "max_values": 25,
+        }
+        channel_types = selectable_channel_types()
+        if channel_types:
+            kwargs["channel_types"] = channel_types
+        super().__init__(**kwargs)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("This can only be used in a server.", ephemeral=True)
+            return
+        if not await self.cog.can_use(interaction):
+            await interaction.response.send_message("You do not have permission.", ephemeral=True)
+            return
+
+        channel_ids = [int(channel.id) for channel in getattr(self, "values", [])]
+        async with self.cog.config.guild(interaction.guild).buttons() as buttons:
+            if self.key not in buttons:
+                await interaction.response.send_message("That button no longer exists.", ephemeral=True)
+                return
+            buttons[self.key]["channel_ids"] = channel_ids
+        refreshed = await self.cog.refresh_panel_messages(interaction.guild)
+        await interaction.response.edit_message(
+            content=(
+                f"Target channels updated. Refreshed {refreshed} panel message(s).\n\n"
+                f"{await self.cog.target_config_message(interaction.guild, self.key)}"
+            ),
+            view=self.cog.target_config_view(self.key, interaction.user.id),
+        )
+
+
+class TargetRoleSelect(discord.ui.RoleSelect):
+    def __init__(self, cog: "AnnouncementPanel", key: str):
+        self.cog = cog
+        self.key = key
+        super().__init__(
+            placeholder="Select role to ping",
+            min_values=0,
+            max_values=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("This can only be used in a server.", ephemeral=True)
+            return
+        if not await self.cog.can_use(interaction):
+            await interaction.response.send_message("You do not have permission.", ephemeral=True)
+            return
+
+        roles = list(getattr(self, "values", []))
+        role_id = int(roles[0].id) if roles else None
+        async with self.cog.config.guild(interaction.guild).buttons() as buttons:
+            if self.key not in buttons:
+                await interaction.response.send_message("That button no longer exists.", ephemeral=True)
+                return
+            buttons[self.key]["ping_role_id"] = role_id
+        refreshed = await self.cog.refresh_panel_messages(interaction.guild)
+        await interaction.response.edit_message(
+            content=(
+                f"Ping role updated. Refreshed {refreshed} panel message(s).\n\n"
+                f"{await self.cog.target_config_message(interaction.guild, self.key)}"
+            ),
+            view=self.cog.target_config_view(self.key, interaction.user.id),
+        )
+
+
+class ButtonTargetConfigView(discord.ui.View):
+    def __init__(self, cog: "AnnouncementPanel", key: str, user_id: int):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.key = key
+        self.user_id = user_id
+        self.add_item(TargetChannelSelect(cog, key))
+        self.add_item(TargetRoleSelect(cog, key))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user_id
+
+    @discord.ui.button(label="Clear ping role", style=discord.ButtonStyle.secondary)
+    async def clear_role(self, interaction: discord.Interaction, button: discord.ui.Button):
+        del button
+        if not interaction.guild:
+            await interaction.response.send_message("This can only be used in a server.", ephemeral=True)
+            return
+        async with self.cog.config.guild(interaction.guild).buttons() as buttons:
+            if self.key in buttons:
+                buttons[self.key]["ping_role_id"] = None
+        refreshed = await self.cog.refresh_panel_messages(interaction.guild)
+        await interaction.response.edit_message(
+            content=(
+                f"Ping role cleared. Refreshed {refreshed} panel message(s).\n\n"
+                f"{await self.cog.target_config_message(interaction.guild, self.key)}"
+            ),
+            view=self.cog.target_config_view(self.key, interaction.user.id),
+        )
+
+    @discord.ui.button(label="Done", style=discord.ButtonStyle.success)
+    async def done(self, interaction: discord.Interaction, button: discord.ui.Button):
+        del button
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content=await self.cog.target_config_message(interaction.guild, self.key),
+            view=self,
         )
 
 
@@ -286,6 +416,13 @@ class ButtonKeySelect(discord.ui.Select):
         if self.action == "edit":
             await interaction.response.send_modal(
                 ButtonConfigModal(self.cog, existing_key=key, existing_config=config)
+            )
+            return
+
+        if self.action == "targets":
+            await interaction.response.edit_message(
+                content=await self.cog.target_config_message(interaction.guild, key),
+                view=self.cog.target_config_view(key, interaction.user.id),
             )
             return
 
@@ -369,6 +506,11 @@ class ManagePanelView(discord.ui.View):
         del button
         await self.cog.send_button_picker(interaction, "edit")
 
+    @discord.ui.button(label="Targets / ping", style=discord.ButtonStyle.secondary)
+    async def targets_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        del button
+        await self.cog.send_button_picker(interaction, "targets")
+
     @discord.ui.button(label="Remove button", style=discord.ButtonStyle.danger)
     async def remove_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         del button
@@ -446,7 +588,11 @@ class AnnouncementPanel(commands.Cog):
             lines = []
             for key, config in buttons.items():
                 channel_ids = config.get("channel_ids", [])
-                lines.append(f"`{key}` - {config.get('label', key)} ({len(channel_ids)} channel(s))")
+                role_text = self.format_role_label(guild, config.get("ping_role_id"))
+                lines.append(
+                    f"`{key}` - {config.get('label', key)} "
+                    f"({len(channel_ids)} channel(s), ping: {role_text})"
+                )
             embed.add_field(name="Configured buttons", value="\n".join(lines)[:1024], inline=False)
         return embed
 
@@ -455,12 +601,16 @@ class AnnouncementPanel(commands.Cog):
         guild: discord.Guild,
         config: dict[str, Any],
     ) -> discord.Embed:
-        return discord.Embed(
+        embed = discord.Embed(
             title=config.get("label", "Announcement"),
             description=config.get("message", ""),
             color=discord.Color(await self.config.guild(guild).embed_color()),
             timestamp=datetime.now(timezone.utc),
         )
+        role_id = config.get("ping_role_id")
+        if role_id:
+            embed.add_field(name="Ping role", value=self.format_role_label(guild, role_id), inline=False)
+        return embed
 
     def announcement_allowed_mentions(self):
         allowed_mentions = getattr(discord, "AllowedMentions", None)
@@ -489,8 +639,9 @@ class AnnouncementPanel(commands.Cog):
 
         embed = await self.build_announcement_embed(interaction.guild, config)
         channels = self.format_channel_list(interaction.guild, channel_ids)
+        role_text = self.format_role_label(interaction.guild, config.get("ping_role_id"))
         await interaction.response.send_message(
-            f"Post **{config.get('label', key)}** to: {channels}?",
+            f"Post **{config.get('label', key)}** to: {channels}?\nPing role: {role_text}",
             embed=embed,
             view=ConfirmPostView(self, key, interaction.user.id),
             ephemeral=True,
@@ -503,6 +654,14 @@ class AnnouncementPanel(commands.Cog):
             channels.append(channel.mention if channel else str(channel_id))
         return ", ".join(channels) or "no channels"
 
+    def format_role_label(self, guild: discord.Guild, role_id: Optional[int]) -> str:
+        if not role_id:
+            return "none"
+        role = guild.get_role(int(role_id)) if guild else None
+        if role:
+            return f"@{getattr(role, 'name', role_id)}"
+        return str(role_id)
+
     async def post_button_announcement(self, guild: discord.Guild, key: str) -> int:
         buttons = await self.config.guild(guild).buttons()
         config = buttons.get(key)
@@ -512,6 +671,7 @@ class AnnouncementPanel(commands.Cog):
         chunks = format_announcement_content_chunks(
             config.get("label", "Announcement"),
             config.get("message", ""),
+            ping_role_id=config.get("ping_role_id"),
         )
         allowed_mentions = self.announcement_allowed_mentions()
         send_kwargs = {"allowed_mentions": allowed_mentions} if allowed_mentions else {}
@@ -573,6 +733,21 @@ class AnnouncementPanel(commands.Cog):
         await self.config.guild(guild).panel_messages.set(kept)
         return refreshed
 
+    def target_config_view(self, key: str, user_id: int):
+        return ButtonTargetConfigView(self, key, user_id)
+
+    async def target_config_message(self, guild: discord.Guild, key: str) -> str:
+        buttons = await self.config.guild(guild).buttons()
+        config = buttons.get(key, {})
+        channel_ids = [int(channel_id) for channel_id in config.get("channel_ids", [])]
+        return "\n".join(
+            [
+                f"Configure targets for `{key}`.",
+                f"Channels: {self.format_channel_list(guild, channel_ids)}",
+                f"Ping role: {self.format_role_label(guild, config.get('ping_role_id'))}",
+            ]
+        )
+
     async def send_button_picker(self, interaction: discord.Interaction, action: str):
         if not interaction.guild:
             await interaction.response.send_message("This can only be used in a server.", ephemeral=True)
@@ -596,6 +771,13 @@ class AnnouncementPanel(commands.Cog):
                 await interaction.response.send_message(
                     f"Remove `{key}` ({config.get('label', key)})?",
                     view=RemoveButtonConfirmView(self, key, interaction.user.id),
+                    ephemeral=True,
+                )
+                return
+            if action == "targets":
+                await interaction.response.send_message(
+                    await self.target_config_message(interaction.guild, key),
+                    view=self.target_config_view(key, interaction.user.id),
                     ephemeral=True,
                 )
                 return
@@ -650,6 +832,7 @@ class AnnouncementPanel(commands.Cog):
                 "label": label,
                 "message": message,
                 "channel_ids": existing.get("channel_ids", []),
+                "ping_role_id": existing.get("ping_role_id"),
             }
         refreshed = await self.refresh_after_config_change(ctx.guild)
         await ctx.send(f"Button `{button_key}` saved. Refreshed {refreshed} panel message(s).")
@@ -682,6 +865,31 @@ class AnnouncementPanel(commands.Cog):
         refreshed = await self.refresh_after_config_change(ctx.guild)
         await ctx.send(f"{channel.mention} removed from `{button_key}`. Refreshed {refreshed} panel message(s).")
 
+    @annpanelset.command(name="role")
+    async def annpanelset_role(self, ctx: commands.Context, key: str, role: discord.Role):
+        """Set the role that should be pinged by a button."""
+        button_key = normalize_button_key(key)
+        async with self.config.guild(ctx.guild).buttons() as buttons:
+            if button_key not in buttons:
+                await ctx.send("That button does not exist.")
+                return
+            buttons[button_key]["ping_role_id"] = role.id
+        refreshed = await self.refresh_after_config_change(ctx.guild)
+        role_name = f"@{getattr(role, 'name', role.id)}"
+        await ctx.send(f"{role_name} set as ping role for `{button_key}`. Refreshed {refreshed} panel message(s).")
+
+    @annpanelset.command(name="clearrole")
+    async def annpanelset_clearrole(self, ctx: commands.Context, key: str):
+        """Clear the ping role from a button."""
+        button_key = normalize_button_key(key)
+        async with self.config.guild(ctx.guild).buttons() as buttons:
+            if button_key not in buttons:
+                await ctx.send("That button does not exist.")
+                return
+            buttons[button_key]["ping_role_id"] = None
+        refreshed = await self.refresh_after_config_change(ctx.guild)
+        await ctx.send(f"Ping role cleared for `{button_key}`. Refreshed {refreshed} panel message(s).")
+
     @annpanelset.command(name="remove")
     async def annpanelset_remove(self, ctx: commands.Context, key: str):
         """Remove a button."""
@@ -708,7 +916,11 @@ class AnnouncementPanel(commands.Cog):
                 (ctx.guild.get_channel(channel_id).mention if ctx.guild.get_channel(channel_id) else str(channel_id))
                 for channel_id in item.get("channel_ids", [])
             ]
-            lines.append(f"`{key}` {item.get('label', key)} -> {', '.join(channels) or 'no channels'}")
+            role_text = self.format_role_label(ctx.guild, item.get("ping_role_id"))
+            lines.append(
+                f"`{key}` {item.get('label', key)} -> "
+                f"{', '.join(channels) or 'no channels'} | ping: {role_text}"
+            )
         for page in pagify("\n".join(lines), page_length=1800):
             await ctx.send(page)
 
