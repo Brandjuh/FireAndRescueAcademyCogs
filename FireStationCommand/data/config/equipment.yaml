@@ -1,58 +1,229 @@
-equipment:
-  - id: hose
-    name: "Fire Hose Set"
-    category: "fire"
-    unlock_level: 1
-    base_cost: 1500
-    durability: 100
-    required_training: []
-    capabilities:
-      fire_suppression: 15
-      water_supply: 10
-
-  - id: ba_basic
-    name: "Basic Breathing Apparatus"
-    category: "ba"
-    unlock_level: 3
-    base_cost: 3000
-    durability: 100
-    required_training:
-      - breathing_apparatus
-    capabilities:
-      breathing_apparatus: 20
-      firefighter_safety: 10
-
-  - id: rescue_tools
-    name: "Hydraulic Rescue Tools"
-    category: "rescue"
-    unlock_level: 2
-    base_cost: 5000
-    durability: 100
-    required_training:
-      - technical_rescue
-    capabilities:
-      technical_rescue: 25
-      forcible_entry: 15
-
-  - id: stabilization_kit
-    name: "Vehicle Stabilization Kit"
-    category: "rescue"
-    unlock_level: 2
-    base_cost: 2500
-    durability: 100
-    required_training:
-      - technical_rescue
-    capabilities:
-      stabilization: 25
-      scene_safety: 10
-
-  - id: basic_tools
-    name: "Basic Hand Tools"
-    category: "general"
-    unlock_level: 1
-    base_cost: 1000
-    durability: 100
-    required_training: []
-    capabilities:
-      forcible_entry: 10
-      scene_safety: 10
+{
+  "equipment": [
+    {
+      "id": "hose",
+      "name": "Fire Hose Set",
+      "category": "fire",
+      "unlock_level": 1,
+      "base_cost": 1500,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "fire_suppression": 15,
+        "water_supply": 10
+      },
+      "image": "Images/Equipment/hose.png"
+    },
+    {
+      "id": "ba_basic",
+      "name": "Basic Breathing Apparatus",
+      "category": "ba",
+      "unlock_level": 3,
+      "base_cost": 3000,
+      "durability": 100,
+      "required_training": [
+        "breathing_apparatus"
+      ],
+      "capabilities": {
+        "breathing_apparatus": 20,
+        "firefighter_safety": 10
+      },
+      "image": "Images/Equipment/ba_basic.png"
+    },
+    {
+      "id": "rescue_tools",
+      "name": "Hydraulic Rescue Tools",
+      "category": "rescue",
+      "unlock_level": 2,
+      "base_cost": 5000,
+      "durability": 100,
+      "required_training": [
+        "technical_rescue"
+      ],
+      "capabilities": {
+        "technical_rescue": 25,
+        "forcible_entry": 15
+      },
+      "image": "Images/Equipment/rescue_tools.png"
+    },
+    {
+      "id": "stabilization_kit",
+      "name": "Vehicle Stabilization Kit",
+      "category": "rescue",
+      "unlock_level": 2,
+      "base_cost": 2500,
+      "durability": 100,
+      "required_training": [
+        "technical_rescue"
+      ],
+      "capabilities": {
+        "stabilization": 25,
+        "scene_safety": 10
+      },
+      "image": "Images/Equipment/stabilization_kit.png"
+    },
+    {
+      "id": "basic_tools",
+      "name": "Basic Hand Tools",
+      "category": "general",
+      "unlock_level": 1,
+      "base_cost": 1000,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "forcible_entry": 10,
+        "scene_safety": 10
+      },
+      "image": "Images/Equipment/basic_tools.png"
+    },
+    {
+      "id": "foam_supply",
+      "name": "Foam required",
+      "category": "fire",
+      "unlock_level": 10,
+      "base_cost": 18000,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "foam_operations": 100,
+        "fire_suppression": 60
+      },
+      "image": "Images/Equipment/foam_supply.png"
+    },
+    {
+      "id": "litter",
+      "name": "Litter",
+      "category": "rescue",
+      "unlock_level": 1,
+      "base_cost": 4000,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "technical_rescue": 28,
+        "stabilization": 14
+      },
+      "image": "Images/Equipment/litter.png"
+    },
+    {
+      "id": "fire_crane_equipment",
+      "name": "Fire Crane Equipment",
+      "category": "support",
+      "unlock_level": 2,
+      "base_cost": 3500,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 16
+      },
+      "image": "Images/Equipment/fire_crane_equipment.png"
+    },
+    {
+      "id": "flood_equipment",
+      "name": "Flood Equipment",
+      "category": "water",
+      "unlock_level": 2,
+      "base_cost": 4900,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "water_supply": 36,
+        "water_rescue": 20
+      },
+      "image": "Images/Equipment/flood_equipment.png"
+    },
+    {
+      "id": "personnel",
+      "name": "Personnel",
+      "category": "support",
+      "unlock_level": 10,
+      "base_cost": 11500,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 48
+      },
+      "image": "Images/Equipment/personnel.png"
+    },
+    {
+      "id": "personnel_available",
+      "name": "Personnel Available",
+      "category": "support",
+      "unlock_level": 10,
+      "base_cost": 11500,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 48
+      },
+      "image": "Images/Equipment/personnel_available.png"
+    },
+    {
+      "id": "police_drone_equipment",
+      "name": "Police Drone Equipment",
+      "category": "police",
+      "unlock_level": 1,
+      "base_cost": 6800,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "search": 31,
+        "scene_safety": 12
+      },
+      "image": "Images/Equipment/police_drone_equipment.png"
+    },
+    {
+      "id": "search_and_rescue_equipment",
+      "name": "SAR Equipment",
+      "category": "support",
+      "unlock_level": 3,
+      "base_cost": 4500,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 20
+      },
+      "image": "Images/Equipment/search_and_rescue_equipment.png"
+    },
+    {
+      "id": "swat_personnel_in_swat_vehicle",
+      "name": "SWAT Personnel (In SWAT Vehicle)",
+      "category": "support",
+      "unlock_level": 8,
+      "base_cost": 9500,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 40
+      },
+      "image": "Images/Equipment/swat_personnel_in_swat_vehicle.png"
+    },
+    {
+      "id": "sked",
+      "name": "Sked",
+      "category": "rescue",
+      "unlock_level": 1,
+      "base_cost": 4000,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "technical_rescue": 28,
+        "stabilization": 14
+      },
+      "image": "Images/Equipment/sked.png"
+    },
+    {
+      "id": "water_supply_equipment",
+      "name": "Water required",
+      "category": "water",
+      "unlock_level": 10,
+      "base_cost": 14500,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "water_supply": 100,
+        "water_rescue": 60
+      },
+      "image": "Images/Equipment/water_supply_equipment.png"
+    }
+  ]
+}

@@ -7,6 +7,7 @@ from FireStationCommand.fire_station_command import (
     ConfirmCareerView,
     ConfirmUpgradeView,
     ConfirmVehiclePurchaseView,
+    EquipmentShopSelect,
     EquipmentShopView,
     FireStationCommand,
     FscDashboardView,
@@ -688,6 +689,45 @@ def test_vehicle_purchase_confirm_edits_message_and_stores_vehicle():
         ]
     assert user_data["next_vehicle_id"] == 2
     assert user_data["credits"] == 50000
+
+
+def test_vehicle_shop_select_paginates_large_catalog():
+    cog = _cog_with_game_data({})
+    cog.VEHICLE_CATALOG = {
+        f"vehicle_{idx}": {
+            "name": f"Vehicle {idx}",
+            "crew_capacity": 2,
+            "price": 1000,
+            "unlock_level": 1,
+        }
+        for idx in range(30)
+    }
+
+    first_page = VehicleShopSelect(cog, object(), object(), command_level=1, page=0)
+    second_page = VehicleShopSelect(cog, object(), object(), command_level=1, page=1)
+
+    assert len(first_page.options) == 25
+    assert len(second_page.options) == 5
+    assert second_page.placeholder == "Select a vehicle to buy (page 2)"
+
+
+def test_equipment_shop_select_paginates_large_catalog():
+    cog = _cog_with_game_data({})
+    cog.EQUIPMENT_CATALOG = {
+        f"equipment_{idx}": {
+            "name": f"Equipment {idx}",
+            "price": 1000,
+            "unlock_level": 1,
+        }
+        for idx in range(30)
+    }
+
+    first_page = EquipmentShopSelect(cog, object(), object(), command_level=1, page=0)
+    second_page = EquipmentShopSelect(cog, object(), object(), command_level=1, page=1)
+
+    assert len(first_page.options) == 25
+    assert len(second_page.options) == 5
+    assert second_page.placeholder == "Select equipment to buy (page 2)"
 
 
 def test_equipment_shop_embed_shows_owned_and_locked_equipment():
