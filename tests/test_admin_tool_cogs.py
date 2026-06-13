@@ -8,7 +8,13 @@ from admintimednotifications.admintimednotifications import (
     split_due_reminders,
 )
 from announcer.announcer import parse_title_body as parse_announcement_title_body
-from announcementpanel.announcementpanel import normalize_button_key, parse_label_message
+from announcementpanel.announcementpanel import (
+    normalize_button_key,
+    panel_message_record,
+    parse_channel_ids,
+    parse_label_message,
+    unique_button_key,
+)
 from botstatus.botstatus import (
     StatusActivity,
     choose_activity,
@@ -44,6 +50,18 @@ def test_panel_button_key_and_message_parsing():
         "Double Credits",
         "Credits are doubled for 24 hours",
     )
+    assert parse_channel_ids("<#123456789012345678>, 987654321098765432") == [
+        123456789012345678,
+        987654321098765432,
+    ]
+    assert parse_channel_ids("123456789012345678 123456789012345678") == [
+        123456789012345678
+    ]
+    assert unique_button_key("Double Credits!", {"doublecredits"}) == "doublecredits-2"
+    assert panel_message_record("123456789012345678", "987654321098765432") == {
+        "channel_id": 123456789012345678,
+        "message_id": 987654321098765432,
+    }
 
 
 def test_admin_timer_due_split_and_next_run():
