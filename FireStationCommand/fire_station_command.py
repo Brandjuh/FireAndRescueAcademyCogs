@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - dependency is declared in info.json
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.2.8"
+    __version__ = "1.2.9"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
@@ -1759,6 +1759,64 @@ class FireStationCommand(commands.Cog):
         shown = ", ".join(items[:limit])
         return f"{shown}, +{len(items) - limit} more"
 
+    @staticmethod
+    def _compact_bullet_list(items: List[str], *, limit: int = 8) -> str:
+        if not items:
+            return "None"
+        shown = [f"- {item}" for item in items[:limit]]
+        if len(items) > limit:
+            shown.append(f"- +{len(items) - limit} more")
+        return "\n".join(shown)
+
+    @staticmethod
+    def _grouped_unlock_list(items: List[Dict[str, Any]], *, limit: int = 8) -> str:
+        if not items:
+            return "None"
+        grouped: Dict[int, List[str]] = {}
+        for item in items:
+            level = int(item.get("unlock_level", 1))
+            grouped.setdefault(level, []).append(str(item.get("name", "Unknown")))
+
+        lines: List[str] = []
+        shown = 0
+        total = sum(len(names) for names in grouped.values())
+        for level in sorted(grouped):
+            names = sorted(grouped[level])
+            remaining = limit - shown
+            if remaining <= 0:
+                break
+            selected = names[:remaining]
+            lines.append(f"- Level {level}: {', '.join(selected)}")
+            shown += len(selected)
+
+        if total > shown:
+            lines.append(f"- +{total - shown} more")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _grouped_requirement_list(items: List[tuple[str, str]], *, limit: int = 8) -> str:
+        if not items:
+            return "None"
+        grouped: Dict[str, List[str]] = {}
+        for name, requirement in items:
+            grouped.setdefault(requirement, []).append(name)
+
+        lines: List[str] = []
+        shown = 0
+        total = sum(len(names) for names in grouped.values())
+        for requirement in sorted(grouped):
+            names = sorted(grouped[requirement])
+            remaining = limit - shown
+            if remaining <= 0:
+                break
+            selected = names[:remaining]
+            lines.append(f"- {requirement}: {', '.join(selected)}")
+            shown += len(selected)
+
+        if total > shown:
+            lines.append(f"- +{total - shown} more")
+        return "\n".join(lines)
+
     def _build_vehicle_shop_embed(self, data: Dict[str, Any]) -> discord.Embed:
         xp = int(data.get("xp", 0))
         command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
@@ -1775,23 +1833,23 @@ class FireStationCommand(commands.Cog):
             inline=False,
         )
         locked = [
-            f"{vehicle['name']} (level {vehicle.get('unlock_level', 1)})"
+            vehicle
             for vehicle in self.VEHICLE_CATALOG.values()
             if command_level < int(vehicle.get("unlock_level", 1))
         ]
         expansion_locked = [
-            f"{vehicle['name']} ({self._expansion_requirement_display_text(missing)})"
+            (vehicle["name"], self._expansion_requirement_display_text(missing) or "Expansion required")
             for vehicle in self.VEHICLE_CATALOG.values()
             if command_level >= int(vehicle.get("unlock_level", 1))
             for missing in [self._missing_required_expansion_ids(vehicle, data)]
             if missing
         ]
         if locked:
-            embed.add_field(name="Locked vehicles", value=self._compact_display_list(locked), inline=False)
+            embed.add_field(name="Locked vehicles", value=self._grouped_unlock_list(locked), inline=False)
         if expansion_locked:
             embed.add_field(
                 name="Expansion locked vehicles",
-                value=self._compact_display_list(expansion_locked),
+                value=self._grouped_requirement_list(expansion_locked),
                 inline=False,
             )
         return embed
@@ -1805,12 +1863,12 @@ class FireStationCommand(commands.Cog):
             for item_id, quantity in sorted(counts.items())
         ]
         locked = [
-            f"{equipment['name']} (level {equipment.get('unlock_level', 1)})"
+            equipment
             for equipment in self.EQUIPMENT_CATALOG.values()
             if command_level < int(equipment.get("unlock_level", 1))
         ]
         expansion_locked = [
-            f"{equipment['name']} ({self._expansion_requirement_display_text(missing)})"
+            (equipment["name"], self._expansion_requirement_display_text(missing) or "Expansion required")
             for equipment in self.EQUIPMENT_CATALOG.values()
             if command_level >= int(equipment.get("unlock_level", 1))
             for missing in [self._missing_required_expansion_ids(equipment, data)]
@@ -1822,14 +1880,14 @@ class FireStationCommand(commands.Cog):
             description="Buy equipment to improve mission readiness.",
             color=discord.Color.blue(),
         )
-        embed.add_field(name="Owned equipment", value=", ".join(owned) if owned else "None", inline=False)
+        embed.add_field(name="Owned equipment", value=self._compact_bullet_list(owned, limit=6), inline=False)
         embed.add_field(name="Command XP", value=self._xp_progress_text(int(data.get("xp", 0)), command_level), inline=False)
         if locked:
-            embed.add_field(name="Locked equipment", value=self._compact_display_list(locked), inline=False)
+            embed.add_field(name="Locked equipment", value=self._grouped_unlock_list(locked), inline=False)
         if expansion_locked:
             embed.add_field(
                 name="Expansion locked equipment",
-                value=self._compact_display_list(expansion_locked),
+                value=self._grouped_requirement_list(expansion_locked),
                 inline=False,
             )
         return embed
@@ -3727,7 +3785,7 @@ class FscDashboardView(discord.ui.View):
         embed = await self.cog._build_dashboard_embed(self.user)
         await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
 
-    @discord.ui.button(label="Station", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Station overview", style=discord.ButtonStyle.secondary)
     async def station(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = await self.cog.config.user(self.user).all()
         if not data["started"]:
@@ -3738,7 +3796,7 @@ class FscDashboardView(discord.ui.View):
         embed = self.cog._build_station_overview_embed(data)
         await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
 
-    @discord.ui.button(label="Recruit", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Hire staff", style=discord.ButtonStyle.success)
     async def recruit(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = await self.cog.config.user(self.user).all()
         if not data["started"]:
@@ -3750,7 +3808,7 @@ class FscDashboardView(discord.ui.View):
         view = RecruitmentView(self.cog, self.user, interaction.channel or self.channel, interaction.guild or self.guild)
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
-    @discord.ui.button(label="Shop", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Vehicle shop", style=discord.ButtonStyle.secondary)
     async def shop(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = await self.cog.config.user(self.user).all()
         if not data["started"]:
@@ -3777,7 +3835,7 @@ class FscDashboardView(discord.ui.View):
             view=VehicleShopView(self.cog, self.channel, self.user, self.guild, data=data),
         )
 
-    @discord.ui.button(label="Equipment", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Equipment shop", style=discord.ButtonStyle.secondary)
     async def equipment(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = await self.cog.config.user(self.user).all()
         if not data["started"]:
@@ -3796,7 +3854,7 @@ class FscDashboardView(discord.ui.View):
         )
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
-    @discord.ui.button(label="Training", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Training desk", style=discord.ButtonStyle.secondary)
     async def training(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = await self.cog.config.user(self.user).all()
         if not data["started"]:
@@ -3815,7 +3873,7 @@ class FscDashboardView(discord.ui.View):
         )
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
-    @discord.ui.button(label="Expansions", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Build expansions", style=discord.ButtonStyle.secondary)
     async def expansions(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = await self.cog.config.user(self.user).all()
         if not data["started"]:
@@ -3834,7 +3892,7 @@ class FscDashboardView(discord.ui.View):
         )
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
-    @discord.ui.button(label="Maintenance", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Maintenance bay", style=discord.ButtonStyle.secondary)
     async def maintenance(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = await self.cog.config.user(self.user).all()
         if not data["started"]:
@@ -3852,7 +3910,7 @@ class FscDashboardView(discord.ui.View):
         )
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
-    @discord.ui.button(label="Upgrade", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Upgrade station", style=discord.ButtonStyle.primary)
     async def upgrade(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = await self.cog.config.user(self.user).all()
         if not data["started"]:
@@ -3920,7 +3978,7 @@ class FscDashboardView(discord.ui.View):
         )
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
-    @discord.ui.button(label="Career", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Career station", style=discord.ButtonStyle.secondary)
     async def career(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = await self.cog.config.user(self.user).all()
         if not data["started"]:
@@ -3983,7 +4041,7 @@ class FscDashboardView(discord.ui.View):
         )
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
-    @discord.ui.button(label="Mission", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Start mission", style=discord.ButtonStyle.danger)
     async def mission(self, interaction: discord.Interaction, button: discord.ui.Button):
         channel = interaction.channel or self.channel
         data = await self.cog.config.user(self.user).all()
@@ -4052,7 +4110,7 @@ class FscDashboardView(discord.ui.View):
             view=AlertChoiceView(self.cog, channel, self.user),
         )
 
-    @discord.ui.button(label="Commands", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Command help", style=discord.ButtonStyle.secondary)
     async def commands(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = discord.Embed(
             title="Fire Station Command options",

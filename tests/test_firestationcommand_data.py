@@ -1089,8 +1089,40 @@ def test_equipment_shop_embed_shows_owned_and_locked_equipment():
     )
 
     fields = {field["name"]: field["value"] for field in embed.fields}
-    assert fields["Owned equipment"] == "Fire Hose Set x2"
-    assert fields["Locked equipment"] == "Hydraulic Rescue Tools (level 3)"
+    assert fields["Owned equipment"] == "- Fire Hose Set x2"
+    assert fields["Locked equipment"] == "- Level 3: Hydraulic Rescue Tools"
+
+
+def test_equipment_shop_embed_groups_locked_lists_for_readability():
+    cog = _cog_with_game_data(
+        {
+            "equipment": {
+                "equipment": [
+                    {
+                        "id": f"locked_{idx}",
+                        "name": f"Locked Equipment {idx}",
+                        "base_cost": 1000,
+                        "unlock_level": 2 + (idx % 2),
+                    }
+                    for idx in range(12)
+                ]
+            }
+        }
+    )
+
+    embed = FireStationCommand._build_equipment_shop_embed(
+        cog,
+        {
+            "xp": 0,
+            "command_level": 1,
+            "equipment": [],
+        },
+    )
+
+    fields = {field["name"]: field["value"] for field in embed.fields}
+    assert fields["Locked equipment"].startswith("- Level 2:")
+    assert "\n- Level 3:" in fields["Locked equipment"]
+    assert "\n- +4 more" in fields["Locked equipment"]
 
 
 def test_equipment_purchase_confirm_edits_message_and_stores_inventory():
