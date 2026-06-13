@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - dependency is declared in info.json
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.2.5"
+    __version__ = "1.2.6"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
@@ -183,6 +183,35 @@ class FireStationCommand(commands.Cog):
 
     def _maintenance_multiplier(self) -> float:
         return max(0.0, self._balance_float("maintenance_cost_multiplier", 1.0))
+
+    def _economy_scaled_cost(self, base_cost: int, credits: int) -> int:
+        base = max(0, int(base_cost))
+        if base <= 0:
+            return 0
+        threshold_multiplier = max(
+            1.0,
+            self._balance_float("economy_cost_scaling_threshold_multiplier", 10.0),
+        )
+        rate = max(0.0, self._balance_float("economy_cost_scaling_rate", 0.08))
+        max_multiplier = max(1.0, self._balance_float("economy_cost_scaling_max_multiplier", 1.5))
+        threshold = int(base * threshold_multiplier)
+        if credits <= threshold or rate <= 0:
+            return base
+        scaled = base + int((credits - threshold) * rate)
+        return min(int(base * max_multiplier), max(base, scaled))
+
+    @staticmethod
+    def _add_economy_pricing_note(embed: discord.Embed, base_cost: int, final_cost: int, credits: int) -> None:
+        if final_cost <= base_cost:
+            return
+        embed.add_field(
+            name="Economy pricing",
+            value=(
+                f"Base cost: {base_cost:,} credits. "
+                f"Adjusted cost: {final_cost:,} credits based on your current balance of {credits:,}."
+            ),
+            inline=False,
+        )
 
     def _reputation_delta_for_outcome(self, outcome_key: str) -> int:
         if outcome_key == "success":
@@ -1701,8 +1730,13 @@ class FireStationCommand(commands.Cog):
 
         embed = discord.Embed(
             title="Training desk",
-            description="Complete station training to unlock safer and more capable responses.",
+            description="Complete permanent station certifications to unlock safer and more capable responses.",
             color=discord.Color.gold(),
+        )
+        embed.add_field(
+            name="Training scope",
+            value="Station-wide certification. It applies to current and future staff and is not consumed per member.",
+            inline=False,
         )
         embed.add_field(name="Completed training", value=", ".join(owned) if owned else "None", inline=False)
         embed.add_field(name="Command XP", value=self._xp_progress_text(xp, command_level), inline=False)
@@ -2109,10 +2143,20 @@ class FireStationCommand(commands.Cog):
             await ctx.send("Your station is already at the maximum level.")
             return
 
+        new_lvl = lvl + 1
+        if command_level < new_lvl:
+            await ctx.send(
+                f"Station upgrade to level {new_lvl} is not available yet. "
+                f"Reach command level {new_lvl} first. Current progress: {self._xp_progress_text(xp, command_level)}."
+            )
+            return
+
         base = int(glb.get("upgrade_base_cost", 50000))
         cost = base * lvl
 
         credits = await self._get_credits(ctx.author)
+        base_cost = cost
+        cost = self._economy_scaled_cost(base_cost, credits)
         if credits < cost:
             await ctx.send(
                 f"You do not have enough credits to upgrade. "
@@ -2139,6 +2183,7 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="New staff capacity", value=f"max {max_staff}", inline=True)
         embed.add_field(name="New vehicle capacity", value=f"max {max_veh}", inline=True)
         embed.add_field(name="Required command level", value=str(new_lvl), inline=True)
+        self._add_economy_pricing_note(embed, base_cost, cost, credits)
 
         view = ConfirmUpgradeView(self, ctx.author, new_lvl, cost)
         await ctx.send(embed=embed, view=view)
@@ -2174,9 +2219,9 @@ class FireStationCommand(commands.Cog):
             if edit_message:
                 embed = await self._build_dashboard_embed(user)
                 embed.add_field(
-                    name="Upgrade locked",
+                    name="Upgrade not available yet",
                     value=(
-                        f"You need command level {new_level} first. "
+                        f"Station level {new_level} unlocks at command level {new_level}. "
                         f"Current progress: {self._xp_progress_text(xp, command_level)}."
                     ),
                     inline=False,
@@ -2185,11 +2230,14 @@ class FireStationCommand(commands.Cog):
                 await interaction.response.edit_message(content=None, embed=embed, view=view)
                 return
             await interaction.response.send_message(
-                f"Upgrade locked: command level {new_level} required.", ephemeral=True
+                f"Upgrade not available yet: command level {new_level} required.", ephemeral=True
             )
             return
 
         credits = await self._get_credits(user)
+        glb = await self.config.all()
+        base_upgrade_cost = int(glb.get("upgrade_base_cost", 50000)) * current_lvl
+        cost = self._economy_scaled_cost(base_upgrade_cost, credits)
         if credits < cost or not await self._spend(user, cost):
             if edit_message:
                 embed = await self._build_dashboard_embed(user)
@@ -2213,6 +2261,7 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Staff capacity", value=f"max {max_staff}", inline=True)
         embed.add_field(name="Vehicle capacity", value=f"max {max_veh}", inline=True)
         embed.add_field(name="Cost", value=f"{cost:,} credits", inline=True)
+        self._add_economy_pricing_note(embed, base_upgrade_cost, cost, credits)
         if edit_message:
             view = FscDashboardView(self, user, channel or interaction.channel, guild or interaction.guild)
             await interaction.response.edit_message(content=None, embed=embed, view=view)
@@ -2240,8 +2289,9 @@ class FireStationCommand(commands.Cog):
             await ctx.send(f"You must be at least station level {required_lvl} to convert to a career station.")
             return
 
-        cost = int(glb.get("career_convert_cost", 250000))
+        base_cost = int(glb.get("career_convert_cost", 250000))
         credits = await self._get_credits(ctx.author)
+        cost = self._economy_scaled_cost(base_cost, credits)
         if credits < cost:
             await ctx.send(
                 f"You do not have enough credits. Converting to a career station costs {cost:,}, "
@@ -2259,6 +2309,7 @@ class FireStationCommand(commands.Cog):
             value="Turnout becomes effectively instant and more reliable.",
             inline=False,
         )
+        self._add_economy_pricing_note(embed, base_cost, cost, credits)
 
         view = ConfirmCareerView(self, ctx.author, cost)
         await ctx.send(embed=embed, view=view)
@@ -2287,6 +2338,9 @@ class FireStationCommand(commands.Cog):
             return
 
         credits = await self._get_credits(user)
+        glb = await self.config.all()
+        base_cost = int(glb.get("career_convert_cost", 250000))
+        cost = self._economy_scaled_cost(base_cost, credits)
         if credits < cost or not await self._spend(user, cost):
             if edit_message:
                 embed = await self._build_dashboard_embed(user)
@@ -2305,6 +2359,7 @@ class FireStationCommand(commands.Cog):
             color=discord.Color.gold(),
         )
         embed.add_field(name="Cost", value=f"{cost:,} credits", inline=True)
+        self._add_economy_pricing_note(embed, base_cost, cost, credits)
         if edit_message:
             view = FscDashboardView(self, user, channel or interaction.channel, guild or interaction.guild)
             await interaction.response.edit_message(content=None, embed=embed, view=view)
@@ -2929,7 +2984,7 @@ class FireStationCommand(commands.Cog):
             )
             return
 
-        price = int(vdef["price"])
+        base_price = int(vdef["price"])
 
         # Check capacity again
         vehicles = data.get("vehicles", [])
@@ -2951,6 +3006,7 @@ class FireStationCommand(commands.Cog):
             return
 
         credits = await self._get_credits(user)
+        price = self._economy_scaled_cost(base_price, credits)
         if credits < price or not await self._spend(user, price):
             if edit_message:
                 embed = self._build_vehicle_shop_embed(data)
@@ -2987,6 +3043,7 @@ class FireStationCommand(commands.Cog):
             description=f"Purchased **{vdef['name']}** for **{price:,}** credits.",
             color=discord.Color.green(),
         )
+        self._add_economy_pricing_note(embed, base_price, price, credits)
         embed.add_field(name="Crew capacity", value=str(vdef["crew_capacity"]), inline=True)
         embed.add_field(name="Condition", value="100%", inline=True)
         self._apply_vehicle_image(embed, vdef)
@@ -3042,20 +3099,21 @@ class FireStationCommand(commands.Cog):
             if edit_message:
                 embed = self._build_expansion_embed(data)
                 embed.add_field(
-                    name="Expansion locked",
-                    value=f"{expansion['name']} requires command level {required_level}.",
+                    name="Expansion not available yet",
+                    value=f"{expansion['name']} unlocks at command level {required_level}.",
                     inline=False,
                 )
                 view = ExpansionView(self, channel, user, guild or interaction.guild, data=data)
                 await interaction.response.edit_message(content=None, embed=embed, view=view)
                 return
             await interaction.response.send_message(
-                f"Expansion locked: command level {required_level} required.", ephemeral=True
+                f"Expansion not available yet: command level {required_level} required.", ephemeral=True
             )
             return
 
-        price = int(expansion.get("price", 0))
         credits = await self._get_credits(user)
+        base_price = int(expansion.get("price", 0))
+        price = self._economy_scaled_cost(base_price, credits)
         if credits < price or not await self._spend(user, price):
             if edit_message:
                 embed = self._build_expansion_embed(data)
@@ -3087,6 +3145,7 @@ class FireStationCommand(commands.Cog):
         if isinstance(effects, dict) and effects:
             effect_text = ", ".join(f"{name}: {value}" for name, value in effects.items())
             embed.add_field(name="Effects", value=effect_text, inline=False)
+        self._add_economy_pricing_note(embed, base_price, price, credits)
         embed.add_field(
             name="Vehicle capacity",
             value=f"{len(updated_data.get('vehicles', []))} / {self._max_vehicles_for_data(updated_data)}",
@@ -3152,8 +3211,9 @@ class FireStationCommand(commands.Cog):
             )
             return
 
-        price = int(training.get("price", 0))
         credits = await self._get_credits(user)
+        base_price = int(training.get("price", 0))
+        price = self._economy_scaled_cost(base_price, credits)
         if credits < price or not await self._spend(user, price):
             if edit_message:
                 embed = self._build_training_embed(data)
@@ -3178,12 +3238,18 @@ class FireStationCommand(commands.Cog):
         updated_data["trainings"] = updated_trainings
         embed = discord.Embed(
             title="Training completed",
-            description=f"Completed **{training['name']}** for **{price:,}** credits.",
+            description=f"Completed station certification **{training['name']}** for **{price:,}** credits.",
             color=discord.Color.green(),
+        )
+        embed.add_field(
+            name="Training scope",
+            value="Permanent station certification for current and future staff.",
+            inline=False,
         )
         duration = int(training.get("duration_hours", 0))
         if duration > 0:
             embed.add_field(name="Training duration", value=f"{duration} hour(s)", inline=True)
+        self._add_economy_pricing_note(embed, base_price, price, credits)
         if edit_message:
             view = TrainingView(self, channel, user, guild or interaction.guild, data=updated_data)
             await interaction.response.edit_message(content=None, embed=embed, view=view)
@@ -3262,8 +3328,9 @@ class FireStationCommand(commands.Cog):
             )
             return
 
-        price = int(equipment.get("price", 0))
         credits = await self._get_credits(user)
+        base_price = int(equipment.get("price", 0))
+        price = self._economy_scaled_cost(base_price, credits)
         if credits < price or not await self._spend(user, price):
             if edit_message:
                 embed = self._build_equipment_shop_embed(data)
@@ -3298,6 +3365,7 @@ class FireStationCommand(commands.Cog):
             color=discord.Color.green(),
         )
         embed.add_field(name="Owned", value=f"{counts[equipment_id]} total", inline=True)
+        self._add_economy_pricing_note(embed, base_price, price, credits)
         self._apply_equipment_image(embed, equipment)
         if edit_message:
             view = EquipmentShopView(self, channel, user, guild or interaction.guild, data=updated_data)
@@ -3495,30 +3563,31 @@ class FscDashboardView(discord.ui.View):
             await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
             return
 
-        base = int(glb.get("upgrade_base_cost", 50000))
-        cost = base * lvl
-        credits = await self.cog._get_credits(self.user)
-        if credits < cost:
-            embed = await self.cog._build_dashboard_embed(self.user)
-            embed.add_field(
-                name="Station upgrade",
-                value=f"Level {lvl} to {lvl + 1} costs {cost:,} credits, but you only have {credits:,}.",
-                inline=False,
-            )
-            await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
-            return
-
         new_lvl = lvl + 1
         xp = int(data.get("xp", 0))
         command_level = int(data.get("command_level", self.cog._command_level_for_xp(xp)))
         if command_level < new_lvl:
             embed = await self.cog._build_dashboard_embed(self.user)
             embed.add_field(
-                name="Station upgrade",
+                name="Upgrade not available yet",
                 value=(
-                    f"You need command level {new_lvl} before upgrading this station. "
+                    f"Station level {new_lvl} unlocks at command level {new_lvl}. "
                     f"Current progress: {self.cog._xp_progress_text(xp, command_level)}."
                 ),
+                inline=False,
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
+            return
+
+        base = int(glb.get("upgrade_base_cost", 50000))
+        base_cost = base * lvl
+        credits = await self.cog._get_credits(self.user)
+        cost = self.cog._economy_scaled_cost(base_cost, credits)
+        if credits < cost:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(
+                name="Station upgrade",
+                value=f"Level {lvl} to {lvl + 1} costs {cost:,} credits, but you only have {credits:,}.",
                 inline=False,
             )
             await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
@@ -3532,6 +3601,7 @@ class FscDashboardView(discord.ui.View):
         embed.add_field(name="New staff capacity", value=f"max {self.cog._max_staff(new_lvl)}", inline=True)
         embed.add_field(name="New vehicle capacity", value=f"max {self.cog._max_vehicles(new_lvl)}", inline=True)
         embed.add_field(name="Required command level", value=str(new_lvl), inline=True)
+        self.cog._add_economy_pricing_note(embed, base_cost, cost, credits)
         view = ConfirmUpgradeView(
             self.cog,
             self.user,
@@ -3572,8 +3642,9 @@ class FscDashboardView(discord.ui.View):
             return
 
         glb = await self.cog.config.all()
-        cost = int(glb.get("career_convert_cost", 250000))
+        base_cost = int(glb.get("career_convert_cost", 250000))
         credits = await self.cog._get_credits(self.user)
+        cost = self.cog._economy_scaled_cost(base_cost, credits)
         if credits < cost:
             embed = await self.cog._build_dashboard_embed(self.user)
             embed.add_field(
@@ -3594,6 +3665,7 @@ class FscDashboardView(discord.ui.View):
             value="Turnout becomes effectively instant and more reliable.",
             inline=False,
         )
+        self.cog._add_economy_pricing_note(embed, base_cost, cost, credits)
         view = ConfirmCareerView(
             self.cog,
             self.user,
@@ -4113,13 +4185,16 @@ class VehicleShopSelect(discord.ui.Select):
             )
             return
 
-        price = int(vdef["price"])
+        base_price = int(vdef["price"])
+        credits = await self.cog._get_credits(self.user)
+        price = self.cog._economy_scaled_cost(base_price, credits)
         embed = discord.Embed(
             title="Confirm vehicle purchase",
             description=f"Buy **{vdef['name']}** for **{price:,}** credits?",
             color=discord.Color.blurple(),
         )
         embed.add_field(name="Crew capacity", value=str(vdef["crew_capacity"]), inline=True)
+        self.cog._add_economy_pricing_note(embed, base_price, price, credits)
         self.cog._apply_vehicle_image(embed, vdef)
 
         view = ConfirmVehiclePurchaseView(
@@ -4327,12 +4402,15 @@ class EquipmentShopSelect(discord.ui.Select):
             await interaction.response.edit_message(content=None, embed=embed, view=view)
             return
 
-        price = int(equipment["price"])
+        base_price = int(equipment["price"])
+        credits = await self.cog._get_credits(self.user)
+        price = self.cog._economy_scaled_cost(base_price, credits)
         embed = discord.Embed(
             title="Confirm equipment purchase",
             description=f"Buy **{equipment['name']}** for **{price:,}** credits?",
             color=discord.Color.blue(),
         )
+        self.cog._add_economy_pricing_note(embed, base_price, price, credits)
         capabilities = equipment.get("capabilities", {})
         if isinstance(capabilities, dict) and capabilities:
             capability_text = ", ".join(f"{name}: {value}" for name, value in capabilities.items())
@@ -4499,12 +4577,20 @@ class TrainingSelect(discord.ui.Select):
             )
             return
 
-        price = int(training["price"])
+        base_price = int(training["price"])
+        credits = await self.cog._get_credits(self.user)
+        price = self.cog._economy_scaled_cost(base_price, credits)
         embed = discord.Embed(
             title="Confirm training",
-            description=f"Complete **{training['name']}** for **{price:,}** credits?",
+            description=f"Complete station certification **{training['name']}** for **{price:,}** credits?",
             color=discord.Color.gold(),
         )
+        embed.add_field(
+            name="Training scope",
+            value="Permanent station certification for current and future staff.",
+            inline=False,
+        )
+        self.cog._add_economy_pricing_note(embed, base_price, price, credits)
         duration = int(training.get("duration_hours", 0))
         if duration > 0:
             embed.add_field(name="Training duration", value=f"{duration} hour(s)", inline=True)
@@ -4625,8 +4711,8 @@ class ExpansionSelect(discord.ui.Select):
             required_level = int(expansion.get("unlock_level", 1))
             embed = self.cog._build_expansion_embed(data)
             embed.add_field(
-                name="Expansion locked",
-                value=f"{expansion['name']} requires command level {required_level}.",
+                name="Expansion not available yet",
+                value=f"{expansion['name']} unlocks at command level {required_level}.",
                 inline=False,
             )
             await interaction.response.edit_message(
@@ -4636,7 +4722,9 @@ class ExpansionSelect(discord.ui.Select):
             )
             return
 
-        price = int(expansion["price"])
+        base_price = int(expansion["price"])
+        credits = await self.cog._get_credits(self.user)
+        price = self.cog._economy_scaled_cost(base_price, credits)
         embed = discord.Embed(
             title="Confirm expansion",
             description=f"Build **{expansion['name']}** for **{price:,}** credits?",
@@ -4649,6 +4737,7 @@ class ExpansionSelect(discord.ui.Select):
         if isinstance(effects, dict) and effects:
             effect_text = ", ".join(f"{name}: {value}" for name, value in effects.items())
             embed.add_field(name="Effects", value=effect_text, inline=False)
+        self.cog._add_economy_pricing_note(embed, base_price, price, credits)
 
         view = ConfirmExpansionView(
             self.cog,

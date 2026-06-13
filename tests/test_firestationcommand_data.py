@@ -1,9 +1,9 @@
 import asyncio
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 
 import discord
+import yaml
 
 from FireStationCommand.fire_station_command import (
     ConfirmCareerView,
@@ -38,18 +38,18 @@ def _cog_with_game_data(game_data):
     return cog
 
 
-def _load_json_catalog(name):
+def _load_yaml_catalog(name):
     path = _FSC_ROOT / "data" / "config" / f"{name}.yaml"
-    return json.loads(path.read_text(encoding="utf-8"))[name]
+    return yaml.safe_load(path.read_text(encoding="utf-8"))[name]
 
 
-def test_config_files_are_json_compatible_yaml():
+def test_config_files_parse_as_yaml_with_expected_roots():
     config_dir = _FSC_ROOT / "data" / "config"
     config_files = sorted(config_dir.glob("*.yaml"))
 
     assert config_files
     for path in config_files:
-        parsed = json.loads(path.read_text(encoding="utf-8"))
+        parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert isinstance(parsed, dict)
         assert path.stem in parsed
 
@@ -138,7 +138,7 @@ def test_build_vehicle_catalog_uses_yaml_vehicle_data():
 
 
 def test_imported_mission_catalog_has_balanced_xp_and_complete_narratives():
-    missions = _load_json_catalog("missions")
+    missions = _load_yaml_catalog("missions")
 
     assert len(missions) >= 1200
     xp_values = [int(mission["base_xp"]) for mission in missions]
@@ -169,9 +169,9 @@ def test_imported_mission_catalog_has_balanced_xp_and_complete_narratives():
 
 
 def test_imported_catalog_references_existing_vehicles_and_equipment():
-    missions = _load_json_catalog("missions")
-    vehicle_ids = {vehicle["id"] for vehicle in _load_json_catalog("vehicles")}
-    equipment_ids = {equipment["id"] for equipment in _load_json_catalog("equipment")}
+    missions = _load_yaml_catalog("missions")
+    vehicle_ids = {vehicle["id"] for vehicle in _load_yaml_catalog("vehicles")}
+    equipment_ids = {equipment["id"] for equipment in _load_yaml_catalog("equipment")}
 
     missing_vehicle_refs = [
         (mission["id"], vehicle_id)
@@ -191,7 +191,7 @@ def test_imported_catalog_references_existing_vehicles_and_equipment():
 
 
 def test_imported_equipment_catalog_has_images_and_progression_depth():
-    equipment = _load_json_catalog("equipment")
+    equipment = _load_yaml_catalog("equipment")
 
     assert len(equipment) >= 30
     assert {item["id"] for item in equipment} >= {
@@ -212,8 +212,8 @@ def test_imported_equipment_catalog_has_images_and_progression_depth():
 
 
 def test_imported_missions_have_equipment_depth_without_losing_quantities():
-    missions = _load_json_catalog("missions")
-    equipment_ids = {equipment["id"] for equipment in _load_json_catalog("equipment")}
+    missions = _load_yaml_catalog("missions")
+    equipment_ids = {equipment["id"] for equipment in _load_yaml_catalog("equipment")}
     missing_equipment = [mission["id"] for mission in missions if not mission.get("required_equipment")]
     personnel_count = sum(
         1
@@ -234,8 +234,8 @@ def test_imported_missions_have_equipment_depth_without_losing_quantities():
 
 
 def test_imported_vehicle_equipment_slots_reference_catalog():
-    vehicles = _load_json_catalog("vehicles")
-    equipment_ids = {equipment["id"] for equipment in _load_json_catalog("equipment")}
+    vehicles = _load_yaml_catalog("vehicles")
+    equipment_ids = {equipment["id"] for equipment in _load_yaml_catalog("equipment")}
 
     assert all(vehicle.get("equipment_slots") for vehicle in vehicles)
     assert [
@@ -247,7 +247,7 @@ def test_imported_vehicle_equipment_slots_reference_catalog():
 
 
 def test_imported_expansions_unlock_specialized_services():
-    expansions = _load_json_catalog("expansions")
+    expansions = _load_yaml_catalog("expansions")
     expansion_ids = {expansion["id"] for expansion in expansions}
 
     assert expansion_ids >= {
@@ -265,8 +265,8 @@ def test_imported_expansions_unlock_specialized_services():
 
 
 def test_imported_ambulance_and_police_content_requires_extensions():
-    vehicles = _load_json_catalog("vehicles")
-    missions = _load_json_catalog("missions")
+    vehicles = _load_yaml_catalog("vehicles")
+    missions = _load_yaml_catalog("missions")
 
     assert all(
         "ems_bay" in vehicle.get("required_expansions", [])
@@ -291,7 +291,7 @@ def test_imported_ambulance_and_police_content_requires_extensions():
 
 
 def test_imported_expansion_gating_keeps_fire_core_primary():
-    missions = _load_json_catalog("missions")
+    missions = _load_yaml_catalog("missions")
     core_missions = [mission for mission in missions if not mission.get("required_expansions")]
 
     assert len(core_missions) >= 30
@@ -299,9 +299,9 @@ def test_imported_expansion_gating_keeps_fire_core_primary():
 
 
 def test_imported_missions_include_expansion_gates_from_required_loadout():
-    missions = _load_json_catalog("missions")
-    vehicles = _load_json_catalog("vehicles")
-    equipment = _load_json_catalog("equipment")
+    missions = _load_yaml_catalog("missions")
+    vehicles = _load_yaml_catalog("vehicles")
+    equipment = _load_yaml_catalog("equipment")
     vehicle_expansions = {
         vehicle["id"]: set(vehicle.get("required_expansions", []))
         for vehicle in vehicles
@@ -328,8 +328,8 @@ def test_imported_missions_include_expansion_gates_from_required_loadout():
 
 
 def test_imported_early_extensions_are_affordable_from_core_missions():
-    missions = _load_json_catalog("missions")
-    expansions = _load_json_catalog("expansions")
+    missions = _load_yaml_catalog("missions")
+    expansions = _load_yaml_catalog("expansions")
     early_core_rewards = [
         int(mission.get("base_credits", 0))
         for mission in missions
@@ -835,6 +835,37 @@ def test_dashboard_upgrade_button_opens_confirm_view():
     assert edited["view"].edit_message is True
 
 
+def test_dashboard_upgrade_button_explains_locked_level():
+    user = type("User", (), {"id": 123})()
+    cog = _cog_with_game_data({})
+    cog.config = _Config(
+        {
+            "started": True,
+            "station_level": 2,
+            "command_level": 1,
+            "xp": 0,
+            "station_type": "volunteer",
+            "staff_total": 6,
+            "staff_trained": 0,
+            "vehicles": [],
+            "active_mission": {},
+            "credits": 100000,
+        },
+        {"max_station_level": 5, "upgrade_base_cost": 50000},
+    )
+    view = FscDashboardView(cog, user, object(), object())
+    interaction = _Interaction(user)
+
+    asyncio.run(view.upgrade(interaction, None))
+
+    edited = interaction.response.edited
+    fields = {field["name"]: field["value"] for field in edited["embed"].fields}
+    assert fields["Upgrade not available yet"].startswith(
+        "Station level 3 unlocks at command level 3."
+    )
+    assert isinstance(edited["view"], FscDashboardView)
+
+
 def test_dashboard_career_button_opens_confirm_view():
     user = type("User", (), {"id": 123})()
     cog = _cog_with_game_data({})
@@ -1074,6 +1105,10 @@ def test_training_embed_shows_completed_available_and_locked_training():
     )
 
     fields = {field["name"]: field["value"] for field in embed.fields}
+    assert (
+        fields["Training scope"]
+        == "Station-wide certification. It applies to current and future staff and is not consumed per member."
+    )
     assert fields["Completed training"] == "Basic Firefighting"
     assert fields["Available training"] == "Technical Rescue (3,000 cr)"
     assert fields["Locked training"] == "Breathing Apparatus (level 3)"
@@ -1114,6 +1149,8 @@ def test_training_purchase_confirm_edits_message_and_stores_training():
 
     edited = interaction.response.edited
     assert edited["embed"].kwargs["title"] == "Training completed"
+    fields = {field["name"]: field["value"] for field in edited["embed"].fields}
+    assert fields["Training scope"] == "Permanent station certification for current and future staff."
     assert user_data["trainings"] == ["basic_firefighting", "technical_rescue"]
     assert user_data["credits"] == 7000
 
@@ -1473,6 +1510,24 @@ def test_reputation_delta_uses_balance_config():
     assert FireStationCommand._reputation_delta_for_outcome(cog, "partial") == 0
     assert FireStationCommand._reputation_delta_for_outcome(cog, "failure") == -6
     assert FireStationCommand._reputation_delta_for_outcome(cog, "skip") == -2
+
+
+def test_economy_scaled_cost_uses_current_balance_with_cap():
+    cog = _cog_with_game_data(
+        {
+            "balance": {
+                "balance": {
+                    "economy_cost_scaling_threshold_multiplier": 10.0,
+                    "economy_cost_scaling_rate": 0.08,
+                    "economy_cost_scaling_max_multiplier": 1.5,
+                }
+            }
+        }
+    )
+
+    assert FireStationCommand._economy_scaled_cost(cog, 1000, 9000) == 1000
+    assert FireStationCommand._economy_scaled_cost(cog, 1000, 12000) == 1160
+    assert FireStationCommand._economy_scaled_cost(cog, 1000, 50000) == 1500
 
 
 def test_invalid_yaml_shapes_fall_back_to_static_catalog_and_incidents():
