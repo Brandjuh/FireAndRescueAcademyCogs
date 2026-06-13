@@ -20,8 +20,9 @@ except ImportError:  # pragma: no cover - dependency is declared in info.json
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.1.2"
+    __version__ = "1.1.3"
     MISSION_SCHEMA_VERSION = 1
+    MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
     STAGE_STAFF_TURNOUT = "STAFF_TURNOUT"
     STAGE_VEHICLE_SELECT = "VEHICLE_SELECT"
@@ -45,6 +46,9 @@ class FireStationCommand(commands.Cog):
             "vehicles": [],
             "next_vehicle_id": 1,
             "station_level": 1,
+            "command_level": 1,
+            "xp": 0,
+            "missions_completed": 0,
             "station_type": "volunteer",  # volunteer | career
             "staff_total": 6,
             "staff_trained": 0,
@@ -139,6 +143,7 @@ class FireStationCommand(commands.Cog):
             "equipment": self._load_yaml_config("equipment.yaml"),
             "trainings": self._load_yaml_config("trainings.yaml"),
             "expansions": self._load_yaml_config("expansions.yaml"),
+            "progression": self._load_yaml_config("progression.yaml"),
         }
 
     def _balance_config(self) -> Dict[str, Any]:
@@ -165,6 +170,161 @@ class FireStationCommand(commands.Cog):
 
     def _reward_multiplier(self) -> float:
         return max(0.0, self._balance_float("credits_reward_multiplier", 1.0))
+
+    def _progression_config(self) -> Dict[str, Any]:
+        progression = self.game_data.get("progression", {}).get("progression", {})
+        return progression if isinstance(progression, dict) else {}
+
+    def _level_xp_thresholds(self) -> Dict[int, int]:
+        configured = self._progression_config().get("level_xp", {})
+        defaults = {
+            1: 0,
+            2: 100,
+            3: 275,
+            4: 550,
+            5: 975,
+            6: 1600,
+            7: 2500,
+            8: 3750,
+            9: 5450,
+            10: 7700,
+        }
+        if not isinstance(configured, dict):
+            return defaults
+
+        thresholds: Dict[int, int] = {}
+        for raw_level, raw_xp in configured.items():
+            try:
+                level = int(raw_level)
+                xp = int(raw_xp)
+            except (TypeError, ValueError):
+                continue
+            if level >= 1 and xp >= 0:
+                thresholds[level] = xp
+        return thresholds or defaults
+
+    def _command_level_for_xp(self, xp: int) -> int:
+        thresholds = self._level_xp_thresholds()
+        level = 1
+        for candidate, required_xp in sorted(thresholds.items()):
+            if xp >= required_xp:
+                level = candidate
+        return max(1, min(self.MAX_COMMAND_LEVEL, level))
+
+    def _xp_for_next_command_level(self, level: int) -> int | None:
+        thresholds = self._level_xp_thresholds()
+        next_level = level + 1
+        if next_level > self.MAX_COMMAND_LEVEL:
+            return None
+        return thresholds.get(next_level)
+
+    def _unlock_level(self, item: Dict[str, Any]) -> int:
+        for key in ("unlock_level", "required_level", "recommended_level", "tier_min", "min_tier"):
+            try:
+                value = int(item.get(key, 1))
+            except (TypeError, ValueError):
+                continue
+            return max(1, value)
+        return 1
+
+    @staticmethod
+    def _capabilities_from(item: Dict[str, Any]) -> Dict[str, float]:
+        capabilities = item.get("capabilities", {})
+        if not isinstance(capabilities, dict):
+            return {}
+
+        parsed: Dict[str, float] = {}
+        for name, raw_value in capabilities.items():
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(name, str) and name and value > 0:
+                parsed[name] = value
+        return parsed
+
+    def _equipment_definitions(self) -> Dict[str, Dict[str, Any]]:
+        equipment = self.game_data.get("equipment", {}).get("equipment", [])
+        if not isinstance(equipment, list):
+            return {}
+
+        definitions: Dict[str, Dict[str, Any]] = {}
+        for item in equipment:
+            if not isinstance(item, dict):
+                continue
+            item_id = item.get("id")
+            if isinstance(item_id, str) and item_id:
+                definitions[item_id] = item
+        return definitions
+
+    def _station_capabilities(self, vehicles: Any) -> Dict[str, float]:
+        if not isinstance(vehicles, list):
+            vehicles = []
+
+        equipment_definitions = self._equipment_definitions()
+        totals: Dict[str, float] = {}
+        for owned in vehicles:
+            if not isinstance(owned, dict):
+                continue
+            vehicle_id = owned.get("catalog_id")
+            vehicle = self.vehicle_definitions.get(str(vehicle_id))
+            if not vehicle:
+                continue
+
+            for capability, value in self._capabilities_from(vehicle).items():
+                totals[capability] = totals.get(capability, 0.0) + value
+
+            equipment_slots = vehicle.get("equipment_slots", [])
+            if isinstance(equipment_slots, list):
+                for equipment_id in equipment_slots:
+                    equipment = equipment_definitions.get(str(equipment_id))
+                    if not equipment:
+                        continue
+                    for capability, value in self._capabilities_from(equipment).items():
+                        totals[capability] = totals.get(capability, 0.0) + value
+
+        return totals
+
+    def _readiness_score(self, mission: Dict[str, Any], data: Dict[str, Any]) -> int:
+        vehicles = data.get("vehicles", [])
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
+        staff_total = int(data.get("staff_total", 0))
+        required_staff = int(mission.get("required_staff", self._required_staff_for_mission(mission)))
+
+        required_caps = self._capabilities_from(mission)
+        station_caps = self._station_capabilities(vehicles)
+        if required_caps:
+            covered = 0.0
+            needed = 0.0
+            for capability, required_value in required_caps.items():
+                needed += required_value
+                covered += min(station_caps.get(capability, 0.0), required_value)
+            capability_score = covered / needed if needed > 0 else 1.0
+        else:
+            capability_score = 1.0
+
+        staff_score = min(1.0, staff_total / required_staff) if required_staff > 0 else 1.0
+        missing_vehicles = self._missing_required_vehicle_ids(mission, vehicles)
+        vehicle_score = 1.0 if not missing_vehicles else max(0.0, 1.0 - (len(missing_vehicles) * 0.5))
+        level_required = self._unlock_level(mission)
+        level_score = 1.0 if command_level >= level_required else max(0.0, command_level / level_required)
+
+        score = (
+            capability_score * 0.45
+            + staff_score * 0.20
+            + vehicle_score * 0.25
+            + level_score * 0.10
+        )
+        return int(round(max(0.0, min(1.0, score)) * 100))
+
+    def _mission_challenge_limit(self, command_level: int) -> int:
+        roll = random.random()
+        if roll < 0.05:
+            return command_level + 2
+        if roll < 0.20:
+            return command_level + 1
+        return command_level
 
     def _build_default_global_config(self) -> Dict[str, Any]:
         return {
@@ -218,6 +378,10 @@ class FireStationCommand(commands.Cog):
             "image": incident.get("image"),
             "required_vehicles": incident.get("required_vehicles", []),
             "required_equipment": incident.get("required_equipment", []),
+            "base_xp": incident.get("base_xp", self._balance_int("xp_per_mission_base", 50)),
+            "tier": incident.get("tier", incident.get("min_tier", 1)),
+            "recommended_level": incident.get("recommended_level", incident.get("min_tier", 1)),
+            "capabilities": incident.get("capabilities", {}),
             "stage": self.STAGE_ALERT_CHOICE,
             "alert_mode": None,
             "channel_id": channel_id,
@@ -339,6 +503,9 @@ class FireStationCommand(commands.Cog):
         equipment_text = self._equipment_display_text(mission.get("required_equipment"))
         if equipment_text:
             embed.add_field(name="Required equipment", value=equipment_text, inline=False)
+        readiness = mission.get("readiness_score")
+        if isinstance(readiness, int):
+            embed.add_field(name="Readiness", value=f"{readiness} / 100", inline=True)
         missing_vehicles = mission.get("missing_required_vehicles", [])
         missing_text = self._vehicle_requirement_display_text(missing_vehicles)
         if missing_text:
@@ -378,6 +545,11 @@ class FireStationCommand(commands.Cog):
                     "image": mission.get("image"),
                     "required_vehicles": mission.get("required_vehicles", []),
                     "required_equipment": mission.get("required_equipment", []),
+                    "base_xp": int(mission.get("base_xp", self._balance_int("xp_per_mission_base", 50))),
+                    "tier": int(mission.get("tier", mission.get("min_tier", 1))),
+                    "recommended_level": int(mission.get("recommended_level", mission.get("min_tier", 1))),
+                    "unlock_level": self._unlock_level(mission),
+                    "capabilities": mission.get("capabilities", {}),
                 }
             )
 
@@ -394,6 +566,8 @@ class FireStationCommand(commands.Cog):
                 "crew_capacity": int(vehicle.get("required_staff", 1)),
                 "price": int(vehicle.get("base_cost", 0)),
                 "image": vehicle.get("image"),
+                "unlock_level": self._unlock_level(vehicle),
+                "capabilities": vehicle.get("capabilities", {}),
             }
 
         return catalog or self._fallback_vehicle_catalog()
@@ -451,6 +625,47 @@ class FireStationCommand(commands.Cog):
         data = await self.config.user(user).all()
         return data.get("vehicles", [])
 
+    async def _award_mission_xp(
+        self,
+        user_conf,
+        data: Dict[str, Any],
+        mission: Dict[str, Any],
+        outcome_key: str,
+    ) -> Dict[str, Any]:
+        xp = int(data.get("xp", 0))
+        old_level = int(data.get("command_level", self._command_level_for_xp(xp)))
+        mission_level = int(mission.get("recommended_level", mission.get("tier", 1)))
+        base_xp = int(mission.get("base_xp", self._balance_int("xp_per_mission_base", 50)))
+        outcome_multiplier = {
+            "success": 1.0,
+            "partial": 0.6,
+            "failure": 0.2,
+        }.get(outcome_key, 0.0)
+
+        level_delta = mission_level - old_level
+        if level_delta <= -2:
+            challenge_multiplier = 0.75
+        elif level_delta <= 0:
+            challenge_multiplier = 1.0
+        elif level_delta == 1:
+            challenge_multiplier = 1.15
+        else:
+            challenge_multiplier = 1.35
+
+        earned = max(1, int(round(base_xp * outcome_multiplier * challenge_multiplier)))
+        new_xp = xp + earned
+        new_level = self._command_level_for_xp(new_xp)
+        await user_conf.xp.set(new_xp)
+        await user_conf.command_level.set(new_level)
+        await user_conf.missions_completed.set(int(data.get("missions_completed", 0)) + 1)
+        return {
+            "earned": earned,
+            "total": new_xp,
+            "old_level": old_level,
+            "new_level": new_level,
+            "leveled_up": new_level > old_level,
+        }
+
     async def _create_station(self, user: discord.abc.User) -> bool:
         user_conf = self.config.user(user)
         data = await user_conf.all()
@@ -468,6 +683,9 @@ class FireStationCommand(commands.Cog):
         await user_conf.vehicles.set([starter_vehicle])
         await user_conf.next_vehicle_id.set(2)
         await user_conf.station_level.set(1)
+        await user_conf.command_level.set(1)
+        await user_conf.xp.set(0)
+        await user_conf.missions_completed.set(0)
         await user_conf.station_type.set("volunteer")
         await user_conf.staff_total.set(6)
         await user_conf.staff_trained.set(0)
@@ -498,7 +716,41 @@ class FireStationCommand(commands.Cog):
             level = 1
         return 1 + (level - 1)
 
-    def _pick_random_incident(self) -> Dict[str, Any]:
+    def _xp_progress_text(self, xp: int, command_level: int) -> str:
+        next_xp = self._xp_for_next_command_level(command_level)
+        if next_xp is None:
+            return f"Level {command_level} - {xp:,} XP (max)"
+        return f"Level {command_level} - {xp:,} / {next_xp:,} XP"
+
+    def _vehicle_is_unlocked(self, vehicle: Dict[str, Any], command_level: int) -> bool:
+        return command_level >= int(vehicle.get("unlock_level", 1))
+
+    def _pick_random_incident(self, data: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        if not data:
+            return random.choice(self.INCIDENTS)
+
+        command_level = int(data.get("command_level", 1))
+        challenge_limit = self._mission_challenge_limit(command_level)
+        eligible: List[Dict[str, Any]] = []
+        challenge: List[Dict[str, Any]] = []
+        fallback: List[Dict[str, Any]] = []
+
+        for incident in self.INCIDENTS:
+            unlock_level = self._unlock_level(incident)
+            readiness = self._readiness_score(incident, data)
+            if unlock_level <= command_level and readiness >= 50:
+                eligible.append(incident)
+            elif unlock_level <= challenge_limit and readiness >= 35:
+                challenge.append(incident)
+            elif unlock_level <= challenge_limit:
+                fallback.append(incident)
+
+        if eligible:
+            return random.choice(eligible)
+        if challenge:
+            return random.choice(challenge)
+        if fallback:
+            return random.choice(fallback)
         return random.choice(self.INCIDENTS)
 
     def _make_relative_text(self, minutes: float) -> str:
@@ -599,6 +851,8 @@ class FireStationCommand(commands.Cog):
         vehicles = data.get("vehicles", [])
         credits = await self._get_credits(user)
         lvl = int(data.get("station_level", 1))
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
         stype = data.get("station_type", "volunteer")
         staff_total = int(data.get("staff_total", 0))
         staff_trained = int(data.get("staff_trained", 0))
@@ -610,8 +864,9 @@ class FireStationCommand(commands.Cog):
             color=discord.Color.red(),
         )
         embed.add_field(name="Credits", value=f"{credits:,}", inline=True)
-        embed.add_field(name="Level", value=str(lvl), inline=True)
+        embed.add_field(name="Station level", value=str(lvl), inline=True)
         embed.add_field(name="Type", value=stype.capitalize(), inline=True)
+        embed.add_field(name="Command XP", value=self._xp_progress_text(xp, command_level), inline=False)
         embed.add_field(
             name="Staff",
             value=f"{staff_total} total ({staff_trained} trained) / max {self._max_staff(lvl)}",
@@ -715,6 +970,8 @@ class FireStationCommand(commands.Cog):
 
     def _build_station_overview_embed(self, data: Dict[str, Any]) -> discord.Embed:
         lvl = int(data.get("station_level", 1))
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
         stype = data.get("station_type", "volunteer")
         staff_total = int(data.get("staff_total", 0))
         staff_trained = int(data.get("staff_trained", 0))
@@ -728,6 +985,7 @@ class FireStationCommand(commands.Cog):
             color=discord.Color.dark_red(),
         )
         embed.add_field(name="Level", value=str(lvl), inline=True)
+        embed.add_field(name="Command XP", value=self._xp_progress_text(xp, command_level), inline=False)
         embed.add_field(name="Type", value=stype.capitalize(), inline=True)
         embed.add_field(name="Vehicle capacity", value=f"{len(vehicles)} / {max_veh}", inline=True)
 
@@ -838,6 +1096,8 @@ class FireStationCommand(commands.Cog):
 
     def _build_vehicle_shop_embed(self, data: Dict[str, Any]) -> discord.Embed:
         lvl = int(data.get("station_level", 1))
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
         vehicles = data.get("vehicles", [])
         max_veh = self._max_vehicles(lvl)
         embed = discord.Embed(
@@ -850,6 +1110,13 @@ class FireStationCommand(commands.Cog):
             value=f"{len(vehicles)} / {max_veh} vehicles currently in your station.",
             inline=False,
         )
+        locked = [
+            f"{vehicle['name']} (level {vehicle.get('unlock_level', 1)})"
+            for vehicle in self.VEHICLE_CATALOG.values()
+            if not self._vehicle_is_unlocked(vehicle, command_level)
+        ]
+        if locked:
+            embed.add_field(name="Locked vehicles", value=", ".join(locked), inline=False)
         return embed
 
     async def _send_vehicle_shop(
@@ -872,7 +1139,7 @@ class FireStationCommand(commands.Cog):
             )
             return
 
-        view = VehicleShopView(self, channel, user)
+        view = VehicleShopView(self, channel, user, data=data)
         embed = self._build_vehicle_shop_embed(data)
         kwargs = {"ephemeral": True} if ephemeral else {}
         await send(embed=embed, view=view, **kwargs)
@@ -906,13 +1173,14 @@ class FireStationCommand(commands.Cog):
             )
             return
 
-        incident = self._pick_random_incident()
+        incident = self._pick_random_incident(data)
         mission = self._new_mission_state(
             incident,
             channel_id=channel.id,
             guild_id=guild.id if guild else None,
         )
         mission["missing_required_vehicles"] = self._missing_required_vehicle_ids(incident, data.get("vehicles", []))
+        mission["readiness_score"] = self._readiness_score(incident, data)
         await user_conf.active_mission.set(mission)
 
         view = AlertChoiceView(self, channel, user)
@@ -922,7 +1190,7 @@ class FireStationCommand(commands.Cog):
             color=discord.Color.red(),
         )
         self._apply_mission_image(embed, mission)
-        self._add_mission_requirement_fields(embed, incident)
+        self._add_mission_requirement_fields(embed, mission)
         embed.add_field(name="Initial report", value=incident["hint"], inline=False)
         embed.set_footer(text="Choose how to alert your crew below.")
         kwargs = {"ephemeral": True} if ephemeral else {}
@@ -976,6 +1244,8 @@ class FireStationCommand(commands.Cog):
         credits = await self._get_credits(ctx.author)
 
         lvl = int(data.get("station_level", 1))
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
         stype = data.get("station_type", "volunteer")
         staff_total = int(data.get("staff_total", 0))
         staff_trained = int(data.get("staff_trained", 0))
@@ -991,6 +1261,7 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Credits", value=f"{credits:,}", inline=True)
         embed.add_field(name="Station level", value=str(lvl), inline=True)
         embed.add_field(name="Type", value=stype.capitalize(), inline=True)
+        embed.add_field(name="Command XP", value=self._xp_progress_text(xp, command_level), inline=False)
 
         embed.add_field(
             name="Staff",
@@ -1022,6 +1293,8 @@ class FireStationCommand(commands.Cog):
 
         data = await self.config.user(ctx.author).all()
         lvl = int(data.get("station_level", 1))
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
         stype = data.get("station_type", "volunteer")
         staff_total = int(data.get("staff_total", 0))
         staff_trained = int(data.get("staff_trained", 0))
@@ -1037,6 +1310,7 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Level", value=str(lvl), inline=True)
         embed.add_field(name="Type", value=stype.capitalize(), inline=True)
         embed.add_field(name="Vehicle capacity", value=f"{len(vehicles)} / {max_veh}", inline=True)
+        embed.add_field(name="Command XP", value=self._xp_progress_text(xp, command_level), inline=False)
 
         embed.add_field(
             name="Staff",
@@ -1177,6 +1451,8 @@ class FireStationCommand(commands.Cog):
         user_conf = self.config.user(ctx.author)
         data = await user_conf.all()
         lvl = int(data.get("station_level", 1))
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
 
         glb = await self.config.all()
         max_lvl = int(glb.get("max_station_level", 10))
@@ -1196,6 +1472,13 @@ class FireStationCommand(commands.Cog):
             return
 
         new_lvl = lvl + 1
+        if command_level < new_lvl:
+            await ctx.send(
+                f"You need command level {new_lvl} before upgrading this station. "
+                f"Current progress: {self._xp_progress_text(xp, command_level)}."
+            )
+            return
+
         max_staff = self._max_staff(new_lvl)
         max_veh = self._max_vehicles(new_lvl)
 
@@ -1206,6 +1489,7 @@ class FireStationCommand(commands.Cog):
         )
         embed.add_field(name="New staff capacity", value=f"max {max_staff}", inline=True)
         embed.add_field(name="New vehicle capacity", value=f"max {max_veh}", inline=True)
+        embed.add_field(name="Required command level", value=str(new_lvl), inline=True)
 
         view = ConfirmUpgradeView(self, ctx.author, new_lvl, cost)
         await ctx.send(embed=embed, view=view)
@@ -1224,6 +1508,8 @@ class FireStationCommand(commands.Cog):
         user_conf = self.config.user(user)
         data = await user_conf.all()
         current_lvl = int(data.get("station_level", 1))
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
 
         if new_level <= current_lvl:
             if edit_message:
@@ -1233,6 +1519,25 @@ class FireStationCommand(commands.Cog):
                 await interaction.response.edit_message(content=None, embed=embed, view=view)
                 return
             await interaction.response.send_message("Upgrade cancelled: level already changed.", ephemeral=True)
+            return
+
+        if command_level < new_level:
+            if edit_message:
+                embed = await self._build_dashboard_embed(user)
+                embed.add_field(
+                    name="Upgrade locked",
+                    value=(
+                        f"You need command level {new_level} first. "
+                        f"Current progress: {self._xp_progress_text(xp, command_level)}."
+                    ),
+                    inline=False,
+                )
+                view = FscDashboardView(self, user, channel or interaction.channel, guild or interaction.guild)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
+            await interaction.response.send_message(
+                f"Upgrade locked: command level {new_level} required.", ephemeral=True
+            )
             return
 
         credits = await self._get_credits(user)
@@ -1371,7 +1676,7 @@ class FireStationCommand(commands.Cog):
             await ctx.send("You are at maximum vehicle capacity. Upgrade your station to buy more vehicles.")
             return
 
-        view = VehicleShopView(self, ctx.channel, ctx.author, ctx.guild)
+        view = VehicleShopView(self, ctx.channel, ctx.author, ctx.guild, data=data)
         embed = self._build_vehicle_shop_embed(data)
         await ctx.send(embed=embed, view=view)
 
@@ -1393,13 +1698,14 @@ class FireStationCommand(commands.Cog):
             await ctx.send("You have no staff at your station. Recruit staff before taking incidents.")
             return
 
-        incident = self._pick_random_incident()
+        incident = self._pick_random_incident(data)
         mission = self._new_mission_state(
             incident,
             channel_id=ctx.channel.id,
             guild_id=ctx.guild.id if ctx.guild else None,
         )
         mission["missing_required_vehicles"] = self._missing_required_vehicle_ids(incident, data.get("vehicles", []))
+        mission["readiness_score"] = self._readiness_score(incident, data)
         await user_conf.active_mission.set(mission)
 
         view = AlertChoiceView(self, ctx.channel, ctx.author)
@@ -1410,7 +1716,7 @@ class FireStationCommand(commands.Cog):
             color=discord.Color.red(),
         )
         self._apply_mission_image(embed, mission)
-        self._add_mission_requirement_fields(embed, incident)
+        self._add_mission_requirement_fields(embed, mission)
         embed.set_footer(text="Choose how to alert your crew below.")
         await ctx.send(embed=embed, view=view)
 
@@ -1717,16 +2023,20 @@ class FireStationCommand(commands.Cog):
         if success_score >= 1.0:
             outcome = "✅ Incident successfully handled."
             reward = int(base_reward * success_score)
+            outcome_key = "success"
             narrative = mission.get("success_narrative") or "The incident is wrapped up cleanly."
         elif success_score >= 0.6:
             outcome = "⚠️ Incident handled with difficulties."
             reward = int(base_reward * 0.5 * success_score)
+            outcome_key = "partial"
             narrative = mission.get("partial_narrative") or "The incident is handled, but the response was stretched."
         else:
             outcome = "❌ Incident not successfully handled."
             reward = int(base_reward * 0.1 * success_score)
+            outcome_key = "failure"
             narrative = mission.get("failure_narrative") or "The incident outcome is poor and needs review."
 
+        xp_result = await self._award_mission_xp(user_conf, data, mission, outcome_key)
         await self._give(user, reward)
         total_credits = await self._get_credits(user)
         await user_conf.active_mission.set({})
@@ -1742,7 +2052,19 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Outcome", value=outcome, inline=False)
         embed.add_field(name="Narrative", value=narrative, inline=False)
         embed.add_field(name="Reward", value=f"{reward:,} credits", inline=True)
+        embed.add_field(name="XP gained", value=f"{xp_result['earned']:,} XP", inline=True)
         embed.add_field(name="Total credits", value=f"{total_credits:,}", inline=True)
+        embed.add_field(
+            name="Command XP",
+            value=self._xp_progress_text(xp_result["total"], xp_result["new_level"]),
+            inline=False,
+        )
+        if xp_result["leveled_up"]:
+            embed.add_field(
+                name="Level up",
+                value=f"Command level increased to {xp_result['new_level']}. New unlocks may be available.",
+                inline=False,
+            )
 
         try:
             await channel.send(embed=embed)
@@ -1774,13 +2096,32 @@ class FireStationCommand(commands.Cog):
             if edit_message:
                 embed = self._build_vehicle_shop_embed(data)
                 embed.add_field(name="Purchase failed", value="Unknown vehicle type.", inline=False)
-                view = VehicleShopView(self, channel, user, guild or interaction.guild)
+                view = VehicleShopView(self, channel, user, guild or interaction.guild, data=data)
                 await interaction.response.edit_message(content=None, embed=embed, view=view)
                 return
             await interaction.response.send_message("Unknown vehicle type.", ephemeral=True)
             return
 
         vdef = catalog[vehicle_id]
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
+        if not self._vehicle_is_unlocked(vdef, command_level):
+            required_level = int(vdef.get("unlock_level", 1))
+            if edit_message:
+                embed = self._build_vehicle_shop_embed(data)
+                embed.add_field(
+                    name="Purchase locked",
+                    value=f"{vdef['name']} requires command level {required_level}.",
+                    inline=False,
+                )
+                view = VehicleShopView(self, channel, user, guild or interaction.guild, data=data)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
+            await interaction.response.send_message(
+                f"Purchase locked: command level {required_level} required.", ephemeral=True
+            )
+            return
+
         price = int(vdef["price"])
 
         # Check capacity again
@@ -1812,7 +2153,7 @@ class FireStationCommand(commands.Cog):
                     value="You do not have enough credits to complete this purchase.",
                     inline=False,
                 )
-                view = VehicleShopView(self, channel, user, guild or interaction.guild)
+                view = VehicleShopView(self, channel, user, guild or interaction.guild, data=data)
                 await interaction.response.edit_message(content=None, embed=embed, view=view)
                 return
             await interaction.response.send_message(
@@ -1846,7 +2187,7 @@ class FireStationCommand(commands.Cog):
             if len(vehicles) >= max_veh:
                 view = FscDashboardView(self, user, channel, guild or interaction.guild)
             else:
-                view = VehicleShopView(self, channel, user, guild or interaction.guild)
+                view = VehicleShopView(self, channel, user, guild or interaction.guild, data=data)
             await interaction.response.edit_message(content=None, embed=embed, view=view)
             return
         await interaction.response.send_message(embed=embed, ephemeral=False)
@@ -1946,7 +2287,7 @@ class FscDashboardView(discord.ui.View):
         await interaction.response.edit_message(
             content=None,
             embed=embed,
-            view=VehicleShopView(self.cog, self.channel, self.user, self.guild),
+            view=VehicleShopView(self.cog, self.channel, self.user, self.guild, data=data),
         )
 
     @discord.ui.button(label="Upgrade", style=discord.ButtonStyle.primary)
@@ -1981,6 +2322,21 @@ class FscDashboardView(discord.ui.View):
             return
 
         new_lvl = lvl + 1
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", self.cog._command_level_for_xp(xp)))
+        if command_level < new_lvl:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(
+                name="Station upgrade",
+                value=(
+                    f"You need command level {new_lvl} before upgrading this station. "
+                    f"Current progress: {self.cog._xp_progress_text(xp, command_level)}."
+                ),
+                inline=False,
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
+            return
+
         embed = discord.Embed(
             title="Confirm station upgrade",
             description=f"Upgrade station from level **{lvl}** to **{new_lvl}** for **{cost:,}** credits?",
@@ -1988,6 +2344,7 @@ class FscDashboardView(discord.ui.View):
         )
         embed.add_field(name="New staff capacity", value=f"max {self.cog._max_staff(new_lvl)}", inline=True)
         embed.add_field(name="New vehicle capacity", value=f"max {self.cog._max_vehicles(new_lvl)}", inline=True)
+        embed.add_field(name="Required command level", value=str(new_lvl), inline=True)
         view = ConfirmUpgradeView(
             self.cog,
             self.user,
@@ -2088,7 +2445,7 @@ class FscDashboardView(discord.ui.View):
             await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
             return
 
-        incident = self.cog._pick_random_incident()
+        incident = self.cog._pick_random_incident(data)
         mission = self.cog._new_mission_state(
             incident,
             channel_id=channel.id,
@@ -2098,6 +2455,7 @@ class FscDashboardView(discord.ui.View):
             incident,
             data.get("vehicles", []),
         )
+        mission["readiness_score"] = self.cog._readiness_score(incident, data)
         await self.cog.config.user(self.user).active_mission.set(mission)
 
         embed = discord.Embed(
@@ -2106,7 +2464,7 @@ class FscDashboardView(discord.ui.View):
             color=discord.Color.red(),
         )
         self.cog._apply_mission_image(embed, mission)
-        self.cog._add_mission_requirement_fields(embed, incident)
+        self.cog._add_mission_requirement_fields(embed, mission)
         embed.add_field(name="Initial report", value=incident["hint"], inline=False)
         embed.set_footer(text="Choose how to alert your crew below.")
         await interaction.response.edit_message(
@@ -2448,6 +2806,7 @@ class VehicleShopSelect(discord.ui.Select):
         channel: discord.abc.Messageable,
         user: discord.abc.User,
         guild: discord.Guild | None = None,
+        command_level: int = 1,
     ):
         self.cog = cog
         self.channel = channel
@@ -2456,8 +2815,22 @@ class VehicleShopSelect(discord.ui.Select):
 
         options: List[discord.SelectOption] = []
         for vid, v in self.cog.VEHICLE_CATALOG.items():
+            unlock_level = int(v.get("unlock_level", 1))
+            locked = command_level < unlock_level
             label = f"{v['name']} ({v['price']:,} cr, cap {v['crew_capacity']})"
-            options.append(discord.SelectOption(label=label, value=vid))
+            description = None
+            if locked:
+                description = f"Requires command level {unlock_level}"
+                label = f"Locked - {label}"
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    value=vid,
+                    description=description,
+                    default=False,
+                    emoji=None,
+                )
+            )
 
         super().__init__(
             placeholder="Select a vehicle to buy",
@@ -2471,6 +2844,29 @@ class VehicleShopSelect(discord.ui.Select):
         vdef = self.cog.VEHICLE_CATALOG.get(choice)
         if not vdef:
             await interaction.response.send_message("Unknown vehicle type.", ephemeral=True)
+            return
+        data = await self.cog.config.user(self.user).all()
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", self.cog._command_level_for_xp(xp)))
+        if not self.cog._vehicle_is_unlocked(vdef, command_level):
+            required_level = int(vdef.get("unlock_level", 1))
+            embed = self.cog._build_vehicle_shop_embed(data)
+            embed.add_field(
+                name="Purchase locked",
+                value=f"{vdef['name']} requires command level {required_level}.",
+                inline=False,
+            )
+            await interaction.response.edit_message(
+                content=None,
+                embed=embed,
+                view=VehicleShopView(
+                    self.cog,
+                    self.channel,
+                    self.user,
+                    interaction.guild or self.guild,
+                    data=data,
+                ),
+            )
             return
 
         price = int(vdef["price"])
@@ -2500,13 +2896,17 @@ class VehicleShopView(discord.ui.View):
         channel: discord.abc.Messageable,
         user: discord.abc.User,
         guild: discord.Guild | None = None,
+        data: Dict[str, Any] | None = None,
     ):
         super().__init__(timeout=180)
         self.cog = cog
         self.channel = channel
         self.user = user
         self.guild = guild
-        self.add_item(VehicleShopSelect(cog, channel, user, guild))
+        data = data or {}
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", cog._command_level_for_xp(xp)))
+        self.add_item(VehicleShopSelect(cog, channel, user, guild, command_level=command_level))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user.id
@@ -2764,6 +3164,7 @@ class ConfirmVehiclePurchaseView(discord.ui.View):
                 self.channel,
                 self.user,
                 interaction.guild or self.guild,
+                data=data,
             )
             await interaction.response.edit_message(content=None, embed=embed, view=view)
             self.stop()

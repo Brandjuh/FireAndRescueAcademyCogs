@@ -2,6 +2,7 @@ expansions:
   - id: extra_bay
     name: "Extra Vehicle Bay"
     description: "Adds one additional vehicle slot."
+    unlock_level: 2
     base_cost: 30000
     build_time_hours: 4
     effects:
@@ -10,6 +11,7 @@ expansions:
   - id: workshop
     name: "Workshop"
     description: "Enables in-house vehicle repairs."
+    unlock_level: 4
     base_cost: 100000
     build_time_hours: 8
     effects:
@@ -19,6 +21,7 @@ expansions:
   - id: training_facility
     name: "Training Facility"
     description: "Reduces training time and cost."
+    unlock_level: 5
     base_cost: 80000
     build_time_hours: 6
     effects:

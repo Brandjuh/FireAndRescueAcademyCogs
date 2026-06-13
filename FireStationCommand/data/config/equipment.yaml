@@ -5,6 +5,9 @@ equipment:
     base_cost: 1500
     durability: 100
     required_training: []
+    capabilities:
+      fire_suppression: 15
+      water_supply: 10
 
   - id: ba_basic
     name: "Basic Breathing Apparatus"
@@ -13,6 +16,9 @@ equipment:
     durability: 100
     required_training:
       - breathing_apparatus
+    capabilities:
+      breathing_apparatus: 20
+      firefighter_safety: 10
 
   - id: rescue_tools
     name: "Hydraulic Rescue Tools"
@@ -21,6 +27,9 @@ equipment:
     durability: 100
     required_training:
       - technical_rescue
+    capabilities:
+      technical_rescue: 25
+      forcible_entry: 15
 
   - id: stabilization_kit
     name: "Vehicle Stabilization Kit"
@@ -29,6 +38,9 @@ equipment:
     durability: 100
     required_training:
       - technical_rescue
+    capabilities:
+      stabilization: 25
+      scene_safety: 10
 
   - id: basic_tools
     name: "Basic Hand Tools"
@@ -36,3 +48,6 @@ equipment:
     base_cost: 1000
     durability: 100
     required_training: []
+    capabilities:
+      forcible_entry: 10
+      scene_safety: 10

@@ -3,6 +3,7 @@ vehicles:
     name: "Standard Fire Engine"
     category: "fire"
     tier_min: 1
+    unlock_level: 1
     image: "Images/Vehicles/engine_basic.png"
     base_cost: 50000
     maintenance_cost: 500
@@ -11,6 +12,10 @@ vehicles:
     required_staff: 4
     required_training:
       - basic_firefighting
+    capabilities:
+      fire_suppression: 45
+      water_supply: 30
+      scene_safety: 10
     equipment_slots:
       - hose
       - ba_basic
@@ -19,7 +24,8 @@ vehicles:
   - id: rescue_basic
     name: "Basic Rescue Truck"
     category: "rescue"
-    tier_min: 1
+    tier_min: 2
+    unlock_level: 2
     image: "Images/Vehicles/rescue_basic.png"
     base_cost: 75000
     maintenance_cost: 700
@@ -28,6 +34,10 @@ vehicles:
     required_staff: 3
     required_training:
       - technical_rescue
+    capabilities:
+      technical_rescue: 45
+      stabilization: 20
+      scene_safety: 15
     equipment_slots:
       - rescue_tools
       - stabilization_kit

@@ -1,6 +1,7 @@
 trainings:
   - id: basic_firefighting
     name: "Basic Firefighting"
+    unlock_level: 1
     duration_hours: 2
     cost: 1000
     unlocks_vehicles:
@@ -9,6 +10,7 @@ trainings:
 
   - id: breathing_apparatus
     name: "Breathing Apparatus (BA)"
+    unlock_level: 3
     duration_hours: 3
     cost: 2000
     unlocks_vehicles: []
@@ -16,6 +18,7 @@ trainings:
 
   - id: technical_rescue
     name: "Technical Rescue"
+    unlock_level: 3
     duration_hours: 4
     cost: 3000
     unlocks_vehicles:

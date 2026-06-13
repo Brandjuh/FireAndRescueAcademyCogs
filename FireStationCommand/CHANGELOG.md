@@ -22,10 +22,14 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added dashboard recruitment buttons for hiring station staff without typing the recruit command.
 - Added dashboard buttons for station upgrades and career conversion.
 - Added generated station images for station levels 1 through 10.
+- Added command XP and command levels as the first progression layer.
+- Added `progression.yaml` with level XP thresholds and planned unlock data.
+- Added mission readiness scoring based on capabilities, staffing, vehicle requirements, and command level.
+- Added capability values to the initial mission, vehicle, and equipment config data.
 
 ### Changed
 
-- Bumped the cog version to `1.1.2`.
+- Bumped the cog version to `1.1.3`.
 - Vehicle shop options now come from `data/config/vehicles.yaml` when available.
 - Mission definitions now come from `data/config/missions.yaml` when available.
 - Mission embeds now show configured mission images when available.
@@ -48,6 +52,12 @@ All notable changes to FireStationCommand will be documented in this file.
 - Short positive wait times now display as at least `in 1 minute` instead of `now`.
 - Station overview images now use the station level instead of vehicle capacity.
 - Default maximum station level is now 10.
+- Mission selection now prefers incidents around the player's command level and readiness, with occasional challenge calls.
+- Mission results now award XP, update command level automatically, and show XP progress in the result embed.
+- Dashboard, status, and station embeds now show command XP progress.
+- Station upgrades now require the matching command level in addition to credits.
+- Vehicle shop entries now show locked vehicles, and purchases are blocked until the required command level is reached.
+- Rescue Call is now level 2 content instead of a regular level 1 incident.
 
 ### Fixed
 
@@ -63,8 +73,7 @@ All notable changes to FireStationCommand will be documented in this file.
 ### Known Issues
 
 - Mission timers still rely on in-memory `asyncio.sleep` calls.
-- Training, equipment, expansions, maintenance, XP, and reputation config files are present but not fully wired into gameplay yet.
-- Active mission data still uses a single dict without schema versioning.
+- Training, equipment purchasing, expansions, maintenance, and reputation config files are present but not fully wired into gameplay yet.
 
 ## [1.1.1]
 
