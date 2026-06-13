@@ -6,6 +6,7 @@ import discord
 import yaml
 
 from FireStationCommand.fire_station_command import (
+    AlertChoiceView,
     ConfirmCareerView,
     ConfirmUpgradeView,
     ConfirmVehiclePurchaseView,
@@ -15,6 +16,7 @@ from FireStationCommand.fire_station_command import (
     FscDashboardView,
     MaintenanceView,
     RecruitmentView,
+    TurnoutTakeoverView,
     VehicleShopSelect,
     VehicleShopView,
 )
@@ -87,19 +89,56 @@ class _Config:
         return dict(self.global_data)
 
 
+class _MultiUserConfig:
+    def __init__(self, users, global_data):
+        self.users = users
+        self.global_data = global_data
+
+    def user(self, user):
+        return _UserConfig(self.users[user.id])
+
+    async def all(self):
+        return dict(self.global_data)
+
+
+class _Message:
+    def __init__(self):
+        self.edited = None
+
+    async def edit(self, **kwargs):
+        self.edited = kwargs
+
+
+class _Channel:
+    id = 987
+
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, **kwargs):
+        message = _Message()
+        self.sent.append({**kwargs, "message": message})
+        return message
+
+
 class _InteractionResponse:
     def __init__(self):
         self.edited = None
+        self.sent = None
 
     async def edit_message(self, **kwargs):
         self.edited = kwargs
 
+    async def send_message(self, *args, **kwargs):
+        self.sent = {"args": args, **kwargs}
+
 
 class _Interaction:
-    def __init__(self, user):
+    def __init__(self, user, channel=None, guild=None):
         self.user = user
-        self.channel = object()
-        self.guild = object()
+        self.channel = channel or object()
+        self.guild = guild or object()
+        self.message = _Message()
         self.response = _InteractionResponse()
 
 
@@ -770,6 +809,97 @@ def test_scene_backup_helpers_use_dispatched_vehicle_selection():
         "rescue_basic"
     ]
     assert FireStationCommand._backup_candidate_vehicles(cog, vehicles, mission) == [vehicles[1]]
+
+
+def test_handle_takeover_incident_transfers_turnout_to_new_user():
+    original_user = type("User", (), {"id": 1001})()
+    new_user = type("User", (), {"id": 2002})()
+    guild = type("Guild", (), {"id": 3003})()
+    channel = _Channel()
+    original_mission = {
+        "id": "shed_fire",
+        "title": "Shed Fire",
+        "stage": FireStationCommand.STAGE_STAFF_TURNOUT,
+        "required_staff": 4,
+        "base_credits": 750,
+        "hint": "Caller reports a shed fire behind the house.",
+        "detail": "Smoke is visible from the rear garden.",
+        "dispatch_narrative": "Initial dispatch narrative.",
+        "success_narrative": "Crews cool the shed and save the fence.",
+        "partial_narrative": "The shed is lost, but exposures are protected.",
+        "failure_narrative": "The fire reaches the house.",
+        "required_vehicles": ["engine_basic"],
+        "required_equipment": ["hose"],
+        "base_xp": 45,
+        "tier": 1,
+        "recommended_level": 1,
+        "capabilities": {"fire_suppression": 20},
+    }
+    users = {
+        original_user.id: {"active_mission": original_mission},
+        new_user.id: {
+            "started": True,
+            "staff_total": 6,
+            "active_mission": {},
+            "vehicles": [{"id": 1, "catalog_id": "engine_basic", "crew_capacity": 6}],
+            "equipment": [{"catalog_id": "hose", "quantity": 1}],
+            "trainings": [],
+            "command_level": 1,
+        },
+    }
+    cog = _cog_with_game_data(
+        {
+            "vehicles": {
+                "vehicles": [
+                    {
+                        "id": "engine_basic",
+                        "name": "Standard Fire Engine",
+                        "required_staff": 4,
+                        "capabilities": {"fire_suppression": 30},
+                    }
+                ]
+            },
+            "equipment": {"equipment": [{"id": "hose", "name": "Fire Hose Set"}]},
+        }
+    )
+    cog.config = _MultiUserConfig(users, {"xp_per_mission_base": 50})
+    interaction = _Interaction(new_user, channel=channel, guild=guild)
+
+    asyncio.run(cog.handle_takeover_incident(interaction, channel, guild, original_user, new_user))
+
+    assert users[original_user.id]["active_mission"] == {}
+    new_mission = users[new_user.id]["active_mission"]
+    assert new_mission["stage"] == FireStationCommand.STAGE_ALERT_CHOICE
+    assert new_mission["title"] == "Shed Fire"
+    assert new_mission["dispatch_narrative"] == cog._takeover_dispatch_narrative()
+    assert new_mission["missing_required_vehicles"] == []
+    assert new_mission["missing_required_equipment"] == []
+    assert interaction.response.edited["embed"].kwargs["title"] == "Transferred incident: Shed Fire"
+    assert isinstance(interaction.response.edited["view"], AlertChoiceView)
+
+
+def test_turnout_takeover_timeout_clears_original_mission_and_disables_buttons():
+    original_user = type("User", (), {"id": 1001})()
+    channel = _Channel()
+    users = {
+        original_user.id: {
+            "active_mission": {
+                "id": "shed_fire",
+                "title": "Shed Fire",
+                "stage": FireStationCommand.STAGE_STAFF_TURNOUT,
+            }
+        }
+    }
+    cog = _cog_with_game_data({})
+    cog.config = _MultiUserConfig(users, {})
+    view = TurnoutTakeoverView(cog, channel, original_user)
+    view.message = _Message()
+
+    asyncio.run(view.on_timeout())
+
+    assert users[original_user.id]["active_mission"] == {}
+    assert view.message.edited["embed"].kwargs["title"] == "Dispatch abandoned"
+    assert all(child.disabled for child in view.children)
 
 
 def test_missing_required_equipment_ids_compares_required_types_to_owned_inventory():
