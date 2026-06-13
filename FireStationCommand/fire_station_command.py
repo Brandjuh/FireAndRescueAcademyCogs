@@ -216,6 +216,8 @@ class FireStationCommand(commands.Cog):
             "partial_narrative": incident.get("partial_narrative", ""),
             "failure_narrative": incident.get("failure_narrative", ""),
             "image": incident.get("image"),
+            "required_vehicles": incident.get("required_vehicles", []),
+            "required_equipment": incident.get("required_equipment", []),
             "stage": self.STAGE_ALERT_CHOICE,
             "alert_mode": None,
             "channel_id": channel_id,
@@ -315,6 +317,20 @@ class FireStationCommand(commands.Cog):
             names.append(name if isinstance(name, str) else vehicle_key)
         return ", ".join(names)
 
+    def _missing_required_vehicle_ids(self, mission: Dict[str, Any], owned_vehicles: Any) -> List[str]:
+        required = mission.get("required_vehicles", [])
+        if not isinstance(required, list) or not required:
+            return []
+        if not isinstance(owned_vehicles, list):
+            owned_vehicles = []
+
+        owned_catalog_ids = {
+            str(vehicle.get("catalog_id"))
+            for vehicle in owned_vehicles
+            if isinstance(vehicle, dict) and vehicle.get("catalog_id")
+        }
+        return [str(vehicle_id) for vehicle_id in required if str(vehicle_id) not in owned_catalog_ids]
+
     def _add_mission_requirement_fields(self, embed: discord.Embed, mission: Dict[str, Any]) -> None:
         embed.add_field(name="Required staff", value=str(mission.get("required_staff", "Unknown")), inline=True)
         vehicle_text = self._vehicle_requirement_display_text(mission.get("required_vehicles"))
@@ -323,6 +339,14 @@ class FireStationCommand(commands.Cog):
         equipment_text = self._equipment_display_text(mission.get("required_equipment"))
         if equipment_text:
             embed.add_field(name="Required equipment", value=equipment_text, inline=False)
+        missing_vehicles = mission.get("missing_required_vehicles", [])
+        missing_text = self._vehicle_requirement_display_text(missing_vehicles)
+        if missing_text:
+            embed.add_field(
+                name="Station readiness",
+                value=f"Missing vehicle types: {missing_text}",
+                inline=False,
+            )
 
     def _build_incidents(self) -> List[Dict[str, Any]]:
         missions = self.game_data.get("missions", {}).get("missions", [])
@@ -888,6 +912,7 @@ class FireStationCommand(commands.Cog):
             channel_id=channel.id,
             guild_id=guild.id if guild else None,
         )
+        mission["missing_required_vehicles"] = self._missing_required_vehicle_ids(incident, data.get("vehicles", []))
         await user_conf.active_mission.set(mission)
 
         view = AlertChoiceView(self, channel, user)
@@ -1374,6 +1399,7 @@ class FireStationCommand(commands.Cog):
             channel_id=ctx.channel.id,
             guild_id=ctx.guild.id if ctx.guild else None,
         )
+        mission["missing_required_vehicles"] = self._missing_required_vehicle_ids(incident, data.get("vehicles", []))
         await user_conf.active_mission.set(mission)
 
         view = AlertChoiceView(self, ctx.channel, ctx.author)
@@ -2067,6 +2093,10 @@ class FscDashboardView(discord.ui.View):
             incident,
             channel_id=channel.id,
             guild_id=self.guild.id if self.guild else None,
+        )
+        mission["missing_required_vehicles"] = self.cog._missing_required_vehicle_ids(
+            incident,
+            data.get("vehicles", []),
         )
         await self.cog.config.user(self.user).active_mission.set(mission)
 

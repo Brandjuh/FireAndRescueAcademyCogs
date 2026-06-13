@@ -299,6 +299,19 @@ def test_vehicle_requirement_display_text_uses_catalog_names_and_fallback_ids():
     assert FireStationCommand._vehicle_requirement_display_text(cog, "engine_basic") is None
 
 
+def test_missing_required_vehicle_ids_compares_required_types_to_owned_catalog_ids():
+    cog = _cog_with_game_data({})
+    mission = {"required_vehicles": ["engine_basic", "rescue_basic"]}
+    owned_vehicles = [
+        {"id": 1, "catalog_id": "engine_basic", "name": "Standard Fire Engine"},
+        {"id": 2, "catalog_id": "engine_basic", "name": "Second Fire Engine"},
+    ]
+
+    assert FireStationCommand._missing_required_vehicle_ids(cog, mission, owned_vehicles) == ["rescue_basic"]
+    assert FireStationCommand._missing_required_vehicle_ids(cog, {"required_vehicles": []}, owned_vehicles) == []
+    assert FireStationCommand._missing_required_vehicle_ids(cog, mission, "bad") == ["engine_basic", "rescue_basic"]
+
+
 def test_recruitment_embed_shows_hireable_staff():
     user = object()
     cog = _cog_with_game_data({})
@@ -488,6 +501,8 @@ def test_new_mission_state_includes_schema_and_initial_stage():
         "success_narrative": "The fire is knocked down quickly.",
         "partial_narrative": "The fire is controlled with minor extension.",
         "failure_narrative": "The fire spreads before crews gain control.",
+        "required_vehicles": ["engine_basic"],
+        "required_equipment": ["hose", "basic_tools"],
     }
 
     mission = FireStationCommand._new_mission_state(
@@ -510,6 +525,8 @@ def test_new_mission_state_includes_schema_and_initial_stage():
         "success_narrative": "The fire is knocked down quickly.",
         "partial_narrative": "The fire is controlled with minor extension.",
         "failure_narrative": "The fire spreads before crews gain control.",
+        "required_vehicles": ["engine_basic"],
+        "required_equipment": ["hose", "basic_tools"],
         "stage": FireStationCommand.STAGE_ALERT_CHOICE,
         "alert_mode": None,
         "channel_id": 123,
@@ -580,6 +597,7 @@ def test_build_mission_control_embed_shows_turnout_and_next_update():
             "vehicles": {
                 "vehicles": [
                     {"id": "engine_basic", "name": "Standard Fire Engine"},
+                    {"id": "rescue_basic", "name": "Basic Rescue Truck"},
                 ]
             },
             "equipment": {
@@ -595,6 +613,7 @@ def test_build_mission_control_embed_shows_turnout_and_next_update():
         "required_staff": 6,
         "required_vehicles": ["engine_basic"],
         "required_equipment": ["hose", "basic_tools"],
+        "missing_required_vehicles": ["rescue_basic"],
         "stage": FireStationCommand.STAGE_STAFF_TURNOUT,
         "turnout_total_arrived": 3,
         "turnout_available": 6,
@@ -607,6 +626,7 @@ def test_build_mission_control_embed_shows_turnout_and_next_update():
     fields = {field["name"]: field["value"] for field in embed.fields}
     assert fields["Required vehicles"] == "Standard Fire Engine"
     assert fields["Required equipment"] == "Fire Hose Set, Basic Hand Tools"
+    assert fields["Station readiness"] == "Missing vehicle types: Basic Rescue Truck"
     assert fields["Guidance"] == "Crew turnout is in progress. Refresh this panel after the expected turnout time."
     assert fields["Turnout"] == "3 / 6 arrived"
     assert fields["Next update"] == "2026-06-12T12:01:00Z"

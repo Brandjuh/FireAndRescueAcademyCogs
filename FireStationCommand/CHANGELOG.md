@@ -33,9 +33,11 @@ All notable changes to FireStationCommand will be documented in this file.
 - Mission images now use the same flat illustrated fire-station style as vehicle assets.
 - Mission embeds now show configured required equipment names when available.
 - Mission embeds now show configured required vehicle names when available.
+- Mission embeds now warn when the station is missing required vehicle types for the incident.
 - Mission rewards now use each mission's `base_credits` value when available.
 - Career conversion cost and career turnout time now use matching `balance.yaml` values when available.
 - New missions now store a mission state schema version.
+- New missions now retain configured required vehicle and equipment IDs in mission state.
 - Mission state now tracks `created_at`, `updated_at`, `next_action`, and `next_action_at`.
 - `[p]fsc` now opens the station dashboard instead of showing command help.
 - `[p]fsc mission` now opens mission controls when an incident is already active.
