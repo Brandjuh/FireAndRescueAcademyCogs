@@ -5,7 +5,6 @@ import discord
 
 from FireStationCommand.fire_station_command import (
     ConfirmCareerView,
-    ConfirmEquipmentPurchaseView,
     ConfirmUpgradeView,
     ConfirmVehiclePurchaseView,
     EquipmentShopView,
