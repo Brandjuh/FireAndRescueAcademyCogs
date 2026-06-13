@@ -773,6 +773,22 @@ class FireStationCommand(commands.Cog):
         if image_url:
             embed.set_image(url=image_url)
 
+    def _build_vehicle_shop_embed(self, data: Dict[str, Any]) -> discord.Embed:
+        lvl = int(data.get("station_level", 1))
+        vehicles = data.get("vehicles", [])
+        max_veh = self._max_vehicles(lvl)
+        embed = discord.Embed(
+            title="Vehicle shop",
+            description="Select a vehicle to purchase from the menu below.",
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(
+            name="Capacity",
+            value=f"{len(vehicles)} / {max_veh} vehicles currently in your station.",
+            inline=False,
+        )
+        return embed
+
     async def _send_vehicle_shop(
         self,
         send,
@@ -794,16 +810,7 @@ class FireStationCommand(commands.Cog):
             return
 
         view = VehicleShopView(self, channel, user)
-        embed = discord.Embed(
-            title="Vehicle shop",
-            description="Select a vehicle to purchase from the menu below.",
-            color=discord.Color.blurple(),
-        )
-        embed.add_field(
-            name="Capacity",
-            value=f"{len(vehicles)} / {max_veh} vehicles currently in your station.",
-            inline=False,
-        )
+        embed = self._build_vehicle_shop_embed(data)
         kwargs = {"ephemeral": True} if ephemeral else {}
         await send(embed=embed, view=view, **kwargs)
 
@@ -1301,16 +1308,7 @@ class FireStationCommand(commands.Cog):
             return
 
         view = VehicleShopView(self, ctx.channel, ctx.author, ctx.guild)
-        embed = discord.Embed(
-            title="Vehicle shop",
-            description="Select a vehicle to purchase from the menu below.",
-            color=discord.Color.blurple(),
-        )
-        embed.add_field(
-            name="Capacity",
-            value=f"{len(vehicles)} / {max_veh} vehicles currently in your station.",
-            inline=False,
-        )
+        embed = self._build_vehicle_shop_embed(data)
         await ctx.send(embed=embed, view=view)
 
     @fsc_group.command(name="mission")
@@ -1699,12 +1697,21 @@ class FireStationCommand(commands.Cog):
         channel: discord.abc.Messageable,
         user: discord.abc.User,
         vehicle_id: str,
+        *,
+        edit_message: bool = False,
+        guild: discord.Guild | None = None,
     ):
         user_conf = self.config.user(user)
         data = await user_conf.all()
 
         catalog = self.VEHICLE_CATALOG
         if vehicle_id not in catalog:
+            if edit_message:
+                embed = self._build_vehicle_shop_embed(data)
+                embed.add_field(name="Purchase failed", value="Unknown vehicle type.", inline=False)
+                view = VehicleShopView(self, channel, user, guild or interaction.guild)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
             await interaction.response.send_message("Unknown vehicle type.", ephemeral=True)
             return
 
@@ -1716,6 +1723,16 @@ class FireStationCommand(commands.Cog):
         vehicles = data.get("vehicles", [])
         max_veh = self._max_vehicles(lvl)
         if len(vehicles) >= max_veh:
+            if edit_message:
+                embed = await self._build_dashboard_embed(user)
+                embed.add_field(
+                    name="Vehicle shop",
+                    value="Purchase failed: you are at maximum vehicle capacity.",
+                    inline=False,
+                )
+                view = FscDashboardView(self, user, channel, guild or interaction.guild)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
             await interaction.response.send_message(
                 "Purchase failed: you are at maximum vehicle capacity.", ephemeral=True
             )
@@ -1723,6 +1740,16 @@ class FireStationCommand(commands.Cog):
 
         credits = await self._get_credits(user)
         if credits < price or not await self._spend(user, price):
+            if edit_message:
+                embed = self._build_vehicle_shop_embed(data)
+                embed.add_field(
+                    name="Purchase failed",
+                    value="You do not have enough credits to complete this purchase.",
+                    inline=False,
+                )
+                view = VehicleShopView(self, channel, user, guild or interaction.guild)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
             await interaction.response.send_message(
                 "You do not have enough credits to complete this purchase.",
                 ephemeral=True,
@@ -1749,6 +1776,14 @@ class FireStationCommand(commands.Cog):
         )
         embed.add_field(name="Crew capacity", value=str(vdef["crew_capacity"]), inline=True)
         self._apply_vehicle_image(embed, vdef)
+        if edit_message:
+            embed.add_field(name="Vehicle capacity", value=f"{len(vehicles)} / {max_veh}", inline=True)
+            if len(vehicles) >= max_veh:
+                view = FscDashboardView(self, user, channel, guild or interaction.guild)
+            else:
+                view = VehicleShopView(self, channel, user, guild or interaction.guild)
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+            return
         await interaction.response.send_message(embed=embed, ephemeral=False)
 
 
@@ -1842,16 +1877,7 @@ class FscDashboardView(discord.ui.View):
             await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
             return
 
-        embed = discord.Embed(
-            title="Vehicle shop",
-            description="Select a vehicle to purchase from the menu below.",
-            color=discord.Color.blurple(),
-        )
-        embed.add_field(
-            name="Capacity",
-            value=f"{len(vehicles)} / {max_veh} vehicles currently in your station.",
-            inline=False,
-        )
+        embed = self.cog._build_vehicle_shop_embed(data)
         await interaction.response.edit_message(
             content=None,
             embed=embed,
@@ -2347,10 +2373,17 @@ class MissionControlView(discord.ui.View):
 
 
 class VehicleShopSelect(discord.ui.Select):
-    def __init__(self, cog: FireStationCommand, channel: discord.abc.Messageable, user: discord.abc.User):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        guild: discord.Guild | None = None,
+    ):
         self.cog = cog
         self.channel = channel
         self.user = user
+        self.guild = guild
 
         options: List[discord.SelectOption] = []
         for vid, v in self.cog.VEHICLE_CATALOG.items():
@@ -2380,8 +2413,15 @@ class VehicleShopSelect(discord.ui.Select):
         embed.add_field(name="Crew capacity", value=str(vdef["crew_capacity"]), inline=True)
         self.cog._apply_vehicle_image(embed, vdef)
 
-        view = ConfirmVehiclePurchaseView(self.cog, self.channel, self.user, choice)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        view = ConfirmVehiclePurchaseView(
+            self.cog,
+            self.channel,
+            self.user,
+            choice,
+            guild=interaction.guild or self.guild,
+            edit_message=True,
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
 
 
 class VehicleShopView(discord.ui.View):
@@ -2397,7 +2437,7 @@ class VehicleShopView(discord.ui.View):
         self.channel = channel
         self.user = user
         self.guild = guild
-        self.add_item(VehicleShopSelect(cog, channel, user))
+        self.add_item(VehicleShopSelect(cog, channel, user, guild))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user.id
@@ -2601,12 +2641,23 @@ class ConfirmCareerView(discord.ui.View):
 
 
 class ConfirmVehiclePurchaseView(discord.ui.View):
-    def __init__(self, cog: FireStationCommand, channel: discord.abc.Messageable, user: discord.abc.User, vehicle_id: str):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        vehicle_id: str,
+        *,
+        guild: discord.Guild | None = None,
+        edit_message: bool = False,
+    ):
         super().__init__(timeout=60)
         self.cog = cog
         self.channel = channel
         self.user = user
         self.vehicle_id = vehicle_id
+        self.guild = guild
+        self.edit_message = edit_message
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user.id
@@ -2615,8 +2666,16 @@ class ConfirmVehiclePurchaseView(discord.ui.View):
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         for child in self.children:
             child.disabled = True
-        await interaction.message.edit(view=self)
-        await self.cog._confirm_vehicle_purchase(interaction, self.channel, self.user, self.vehicle_id)
+        if not self.edit_message:
+            await interaction.message.edit(view=self)
+        await self.cog._confirm_vehicle_purchase(
+            interaction,
+            self.channel,
+            self.user,
+            self.vehicle_id,
+            edit_message=self.edit_message,
+            guild=self.guild,
+        )
         self.stop()
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
@@ -2627,5 +2686,18 @@ class ConfirmVehiclePurchaseView(discord.ui.View):
             await interaction.message.edit(view=self)
         except Exception:
             pass
+        if self.edit_message:
+            data = await self.cog.config.user(self.user).all()
+            embed = self.cog._build_vehicle_shop_embed(data)
+            embed.add_field(name="Purchase cancelled", value="No vehicle was purchased.", inline=False)
+            view = VehicleShopView(
+                self.cog,
+                self.channel,
+                self.user,
+                interaction.guild or self.guild,
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+            self.stop()
+            return
         await interaction.response.send_message("Purchase cancelled.", ephemeral=True)
         self.stop()

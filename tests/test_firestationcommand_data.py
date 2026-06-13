@@ -6,9 +6,12 @@ import discord
 from FireStationCommand.fire_station_command import (
     ConfirmCareerView,
     ConfirmUpgradeView,
+    ConfirmVehiclePurchaseView,
     FireStationCommand,
     FscDashboardView,
     RecruitmentView,
+    VehicleShopSelect,
+    VehicleShopView,
 )
 
 
@@ -32,10 +35,12 @@ class _ValueSetter:
 class _UserConfig:
     def __init__(self, data):
         self.data = data
-        self.staff_total = _ValueSetter(data, "staff_total")
 
     async def all(self):
         return dict(self.data)
+
+    def __getattr__(self, name):
+        return _ValueSetter(self.data, name)
 
 
 class _Config:
@@ -329,6 +334,82 @@ def test_dashboard_career_button_opens_confirm_view():
     assert isinstance(edited["view"], ConfirmCareerView)
     assert edited["view"].cost == 250000
     assert edited["view"].edit_message is True
+
+
+def test_vehicle_shop_select_edits_message_to_confirm_purchase():
+    user = type("User", (), {"id": 123})()
+    cog = _cog_with_game_data({})
+    cog.VEHICLE_CATALOG = {
+        "engine_basic": {
+            "name": "Standard Fire Engine",
+            "crew_capacity": 4,
+            "price": 50000,
+            "image": "Images/Vehicles/engine_basic.png",
+        }
+    }
+    select = VehicleShopSelect(cog, object(), user, object())
+    select.values = ["engine_basic"]
+    interaction = _Interaction(user)
+
+    asyncio.run(select.callback(interaction))
+
+    edited = interaction.response.edited
+    assert edited["embed"].kwargs["title"] == "Confirm vehicle purchase"
+    assert isinstance(edited["view"], ConfirmVehiclePurchaseView)
+    assert edited["view"].vehicle_id == "engine_basic"
+    assert edited["view"].edit_message is True
+
+
+def test_vehicle_purchase_confirm_edits_message_and_stores_vehicle():
+    user = type("User", (), {"id": 123})()
+    user_data = {
+        "started": True,
+        "station_level": 2,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "vehicles": [],
+        "next_vehicle_id": 1,
+        "active_mission": {},
+        "credits": 100000,
+    }
+    cog = _cog_with_game_data({})
+    cog.config = _Config(user_data, {})
+    cog.VEHICLE_CATALOG = {
+        "engine_basic": {
+            "name": "Standard Fire Engine",
+            "crew_capacity": 4,
+            "price": 50000,
+            "image": "Images/Vehicles/engine_basic.png",
+        }
+    }
+    interaction = _Interaction(user)
+
+    asyncio.run(
+        cog._confirm_vehicle_purchase(
+            interaction,
+            object(),
+            user,
+            "engine_basic",
+            edit_message=True,
+            guild=object(),
+        )
+    )
+
+    edited = interaction.response.edited
+    assert edited["embed"].kwargs["title"] == "Vehicle purchased"
+    assert isinstance(edited["view"], VehicleShopView)
+    assert user_data["vehicles"] == [
+        {
+            "id": 1,
+            "catalog_id": "engine_basic",
+            "name": "Standard Fire Engine",
+            "crew_capacity": 4,
+            "image": "Images/Vehicles/engine_basic.png",
+        }
+    ]
+    assert user_data["next_vehicle_id"] == 2
+    assert user_data["credits"] == 50000
 
 
 def test_invalid_yaml_shapes_fall_back_to_static_catalog_and_incidents():

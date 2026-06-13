@@ -136,6 +136,7 @@ def pytest_configure():
     discord.Embed = _Embed
     discord.Color = types.SimpleNamespace(
         blue=lambda: "blue",
+        blurple=lambda: "blurple",
         dark_blue=lambda: "dark_blue",
         dark_gray=lambda: "dark_gray",
         dark_gold=lambda: "dark_gold",
