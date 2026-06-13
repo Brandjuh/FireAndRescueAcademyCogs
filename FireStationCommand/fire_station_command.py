@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - dependency is declared in info.json
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.1.6"
+    __version__ = "1.1.7"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
@@ -51,6 +51,7 @@ class FireStationCommand(commands.Cog):
             "station_level": 1,
             "command_level": 1,
             "xp": 0,
+            "reputation": 0,
             "missions_completed": 0,
             "station_type": "volunteer",  # volunteer | career
             "staff_total": 6,
@@ -179,6 +180,18 @@ class FireStationCommand(commands.Cog):
 
     def _reward_multiplier(self) -> float:
         return max(0.0, self._balance_float("credits_reward_multiplier", 1.0))
+
+    def _maintenance_multiplier(self) -> float:
+        return max(0.0, self._balance_float("maintenance_cost_multiplier", 1.0))
+
+    def _reputation_delta_for_outcome(self, outcome_key: str) -> int:
+        if outcome_key == "success":
+            return self._balance_int("reputation_gain_success", 2)
+        if outcome_key == "failure":
+            return -self._balance_int("reputation_loss_fail", 3)
+        if outcome_key == "skip":
+            return -self._balance_int("reputation_loss_skip", 1)
+        return 0
 
     def _progression_config(self) -> Dict[str, Any]:
         progression = self.game_data.get("progression", {}).get("progression", {})
@@ -375,6 +388,88 @@ class FireStationCommand(commands.Cog):
                 counts[str(item_id)] = counts.get(str(item_id), 0) + count
         return counts
 
+    @staticmethod
+    def _vehicle_condition(vehicle: Dict[str, Any]) -> int:
+        try:
+            condition = int(vehicle.get("condition", 100))
+        except (TypeError, ValueError):
+            condition = 100
+        return max(0, min(100, condition))
+
+    def _vehicle_maintenance_cost(self, vehicle: Dict[str, Any]) -> int:
+        condition = self._vehicle_condition(vehicle)
+        if condition >= 100:
+            return 0
+
+        vehicle_id = str(vehicle.get("catalog_id", ""))
+        configured = self.vehicle_definitions.get(vehicle_id, {})
+        catalog = self.VEHICLE_CATALOG.get(vehicle_id, {})
+        base_cost = configured.get("maintenance_cost", catalog.get("maintenance_cost", 500))
+        try:
+            base = int(base_cost)
+        except (TypeError, ValueError):
+            base = 500
+        return int(math.ceil(base * self._maintenance_multiplier() * ((100 - condition) / 100)))
+
+    def _fleet_maintenance_cost(self, vehicles: Any) -> int:
+        if not isinstance(vehicles, list):
+            return 0
+        return sum(self._vehicle_maintenance_cost(vehicle) for vehicle in vehicles if isinstance(vehicle, dict))
+
+    def _fleet_condition_text(self, vehicles: Any) -> str:
+        if not isinstance(vehicles, list) or not vehicles:
+            return "No vehicles."
+
+        damaged: List[str] = []
+        for vehicle in vehicles:
+            if not isinstance(vehicle, dict):
+                continue
+            condition = self._vehicle_condition(vehicle)
+            name = vehicle.get("name", "Vehicle")
+            if condition < 100:
+                damaged.append(f"{name}: {condition}% ({self._vehicle_maintenance_cost(vehicle):,} cr)")
+
+        if not damaged:
+            return "All vehicles are at 100% condition."
+        return "\n".join(damaged[:10])
+
+    @staticmethod
+    def _vehicle_wear_for_outcome(outcome_key: str) -> int:
+        if outcome_key == "success":
+            return random.randint(3, 7)
+        if outcome_key == "partial":
+            return random.randint(6, 12)
+        return random.randint(10, 18)
+
+    def _apply_vehicle_wear(
+        self,
+        vehicles: Any,
+        selected_ids: Any,
+        outcome_key: str,
+    ) -> List[Dict[str, Any]]:
+        if not isinstance(vehicles, list):
+            return []
+        selected = {int(vehicle_id) for vehicle_id in selected_ids if str(vehicle_id).isdigit()}
+        if not selected:
+            return vehicles
+
+        updated: List[Dict[str, Any]] = []
+        for vehicle in vehicles:
+            if not isinstance(vehicle, dict):
+                continue
+            current = dict(vehicle)
+            try:
+                vehicle_id = int(current.get("id"))
+            except (TypeError, ValueError):
+                vehicle_id = -1
+            if vehicle_id in selected:
+                current["condition"] = max(
+                    0,
+                    self._vehicle_condition(current) - self._vehicle_wear_for_outcome(outcome_key),
+                )
+            updated.append(current)
+        return updated
+
     def _station_capabilities(self, vehicles: Any, equipment_inventory: Any = None) -> Dict[str, float]:
         if not isinstance(vehicles, list):
             vehicles = []
@@ -388,9 +483,10 @@ class FireStationCommand(commands.Cog):
             vehicle = self.vehicle_definitions.get(str(vehicle_id))
             if not vehicle:
                 continue
+            condition_factor = self._vehicle_condition(owned) / 100
 
             for capability, value in self._capabilities_from(vehicle).items():
-                totals[capability] = totals.get(capability, 0.0) + value
+                totals[capability] = totals.get(capability, 0.0) + (value * condition_factor)
 
             equipment_slots = vehicle.get("equipment_slots", [])
             if isinstance(equipment_slots, list):
@@ -403,7 +499,7 @@ class FireStationCommand(commands.Cog):
                         continue
                     equipment_counts[equipment_key] -= 1
                     for capability, value in self._capabilities_from(equipment).items():
-                        totals[capability] = totals.get(capability, 0.0) + value
+                        totals[capability] = totals.get(capability, 0.0) + (value * condition_factor)
 
         return totals
 
@@ -767,6 +863,7 @@ class FireStationCommand(commands.Cog):
                 "unlock_level": self._unlock_level(vehicle),
                 "capabilities": vehicle.get("capabilities", {}),
                 "required_training": vehicle.get("required_training", []),
+                "maintenance_cost": int(vehicle.get("maintenance_cost", 500)),
             }
 
         return catalog or self._fallback_vehicle_catalog()
@@ -922,6 +1019,7 @@ class FireStationCommand(commands.Cog):
             "name": "Starter Fire Engine",
             "crew_capacity": 6,
             "image": "Images/Vehicles/engine_basic.png",
+            "condition": 100,
         }
         await user_conf.started.set(True)
         await user_conf.vehicles.set([starter_vehicle])
@@ -937,6 +1035,7 @@ class FireStationCommand(commands.Cog):
         await user_conf.station_level.set(1)
         await user_conf.command_level.set(1)
         await user_conf.xp.set(0)
+        await user_conf.reputation.set(0)
         await user_conf.missions_completed.set(0)
         await user_conf.station_type.set("volunteer")
         await user_conf.staff_total.set(6)
@@ -1123,6 +1222,7 @@ class FireStationCommand(commands.Cog):
         lvl = int(data.get("station_level", 1))
         xp = int(data.get("xp", 0))
         command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
+        reputation = int(data.get("reputation", 0))
         stype = data.get("station_type", "volunteer")
         staff_total = int(data.get("staff_total", 0))
         staff_trained = int(data.get("staff_trained", 0))
@@ -1136,6 +1236,7 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Credits", value=f"{credits:,}", inline=True)
         embed.add_field(name="Station level", value=str(lvl), inline=True)
         embed.add_field(name="Type", value=stype.capitalize(), inline=True)
+        embed.add_field(name="Reputation", value=str(reputation), inline=True)
         embed.add_field(name="Command XP", value=self._xp_progress_text(xp, command_level), inline=False)
         embed.add_field(
             name="Staff",
@@ -1150,6 +1251,11 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Equipment", value=f"{equipment_count} item(s)", inline=True)
         embed.add_field(name="Training", value=f"{training_count} certification(s)", inline=True)
         embed.add_field(name="Expansions", value=f"{expansion_count} built", inline=True)
+        embed.add_field(
+            name="Maintenance",
+            value=f"Repair estimate: {self._fleet_maintenance_cost(vehicles):,} credits",
+            inline=False,
+        )
         if active:
             embed.add_field(
                 name="Active incident",
@@ -1245,6 +1351,7 @@ class FireStationCommand(commands.Cog):
         lvl = int(data.get("station_level", 1))
         xp = int(data.get("xp", 0))
         command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
+        reputation = int(data.get("reputation", 0))
         stype = data.get("station_type", "volunteer")
         staff_total = int(data.get("staff_total", 0))
         staff_trained = int(data.get("staff_trained", 0))
@@ -1258,6 +1365,7 @@ class FireStationCommand(commands.Cog):
             color=discord.Color.dark_red(),
         )
         embed.add_field(name="Level", value=str(lvl), inline=True)
+        embed.add_field(name="Reputation", value=str(reputation), inline=True)
         embed.add_field(name="Command XP", value=self._xp_progress_text(xp, command_level), inline=False)
         embed.add_field(name="Type", value=stype.capitalize(), inline=True)
         embed.add_field(name="Vehicle capacity", value=f"{len(vehicles)} / {max_veh}", inline=True)
@@ -1284,6 +1392,27 @@ class FireStationCommand(commands.Cog):
         image_url = self._station_image_url(lvl)
         if image_url:
             embed.set_image(url=image_url)
+        return embed
+
+    def _build_maintenance_embed(self, data: Dict[str, Any]) -> discord.Embed:
+        vehicles = data.get("vehicles", [])
+        total_cost = self._fleet_maintenance_cost(vehicles)
+
+        embed = discord.Embed(
+            title="Maintenance bay",
+            description="Vehicle condition affects mission readiness and capability output.",
+            color=discord.Color.dark_gray(),
+        )
+        embed.add_field(name="Fleet condition", value=self._fleet_condition_text(vehicles), inline=False)
+        embed.add_field(name="Repair estimate", value=f"{total_cost:,} credits", inline=True)
+        if total_cost <= 0:
+            embed.add_field(name="Status", value="No repairs are needed.", inline=False)
+        else:
+            embed.add_field(
+                name="Repair action",
+                value="Use Repair fleet to restore all damaged vehicles to 100%.",
+                inline=False,
+            )
         return embed
 
     async def _build_recruitment_embed(self, user: discord.abc.User) -> discord.Embed:
@@ -1621,6 +1750,7 @@ class FireStationCommand(commands.Cog):
         lvl = int(data.get("station_level", 1))
         xp = int(data.get("xp", 0))
         command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
+        reputation = int(data.get("reputation", 0))
         stype = data.get("station_type", "volunteer")
         staff_total = int(data.get("staff_total", 0))
         staff_trained = int(data.get("staff_trained", 0))
@@ -1636,6 +1766,7 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Credits", value=f"{credits:,}", inline=True)
         embed.add_field(name="Station level", value=str(lvl), inline=True)
         embed.add_field(name="Type", value=stype.capitalize(), inline=True)
+        embed.add_field(name="Reputation", value=str(reputation), inline=True)
         embed.add_field(name="Command XP", value=self._xp_progress_text(xp, command_level), inline=False)
 
         embed.add_field(
@@ -1646,6 +1777,11 @@ class FireStationCommand(commands.Cog):
         embed.add_field(
             name="Vehicles",
             value=f"{len(vehicles)} / max {max_veh}",
+            inline=False,
+        )
+        embed.add_field(
+            name="Maintenance",
+            value=f"Repair estimate: {self._fleet_maintenance_cost(vehicles):,} credits",
             inline=False,
         )
 
@@ -1670,10 +1806,14 @@ class FireStationCommand(commands.Cog):
         lvl = int(data.get("station_level", 1))
         xp = int(data.get("xp", 0))
         command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
+        reputation = int(data.get("reputation", 0))
         stype = data.get("station_type", "volunteer")
         staff_total = int(data.get("staff_total", 0))
         staff_trained = int(data.get("staff_trained", 0))
         vehicles = data.get("vehicles", [])
+        expansion_count = len(self._expansion_inventory_set(data.get("expansions", [])))
+        equipment_count = sum(self._equipment_inventory_counts(data.get("equipment", [])).values())
+        training_count = len(self._training_inventory_set(data.get("trainings", [])))
 
         max_staff = self._max_staff(lvl)
         max_veh = self._max_vehicles_for_data(data)
@@ -1684,6 +1824,7 @@ class FireStationCommand(commands.Cog):
         )
         embed.add_field(name="Level", value=str(lvl), inline=True)
         embed.add_field(name="Type", value=stype.capitalize(), inline=True)
+        embed.add_field(name="Reputation", value=str(reputation), inline=True)
         embed.add_field(name="Vehicle capacity", value=f"{len(vehicles)} / {max_veh}", inline=True)
         embed.add_field(name="Expansions", value=f"{expansion_count} built", inline=True)
         embed.add_field(name="Equipment", value=f"{equipment_count} item(s)", inline=True)
@@ -2091,6 +2232,17 @@ class FireStationCommand(commands.Cog):
         view = ExpansionView(self, ctx.channel, ctx.author, ctx.guild, data=data)
         await ctx.send(embed=embed, view=view)
 
+    @fsc_group.command(name="maintenance")
+    async def fsc_maintenance(self, ctx: commands.Context):
+        """Open the maintenance bay."""
+        if not await self._ensure_started(ctx):
+            return
+
+        data = await self.config.user(ctx.author).all()
+        embed = self._build_maintenance_embed(data)
+        view = MaintenanceView(self, ctx.channel, ctx.author, ctx.guild)
+        await ctx.send(embed=embed, view=view)
+
     @fsc_group.command(name="mission")
     async def fsc_mission(self, ctx: commands.Context):
         """Start a new incident if none is active."""
@@ -2330,8 +2482,15 @@ class FireStationCommand(commands.Cog):
         user: discord.abc.User,
     ):
         user_conf = self.config.user(user)
+        data = await user_conf.all()
+        reputation = int(data.get("reputation", 0))
+        reputation_delta = self._reputation_delta_for_outcome("skip")
+        await user_conf.reputation.set(reputation + reputation_delta)
         await user_conf.active_mission.set({})
-        await interaction.response.send_message("Incident cancelled.", ephemeral=False)
+        await interaction.response.send_message(
+            f"Incident cancelled. Reputation change: {reputation_delta:+}.",
+            ephemeral=False,
+        )
 
     async def handle_vehicle_selection(
         self,
@@ -2453,9 +2612,15 @@ class FireStationCommand(commands.Cog):
             narrative = mission.get("failure_narrative") or "The incident outcome is poor and needs review."
 
         xp_result = await self._award_mission_xp(user_conf, data, mission, outcome_key)
+        reputation_delta = self._reputation_delta_for_outcome(outcome_key)
+        new_reputation = int(data.get("reputation", 0)) + reputation_delta
+        await user_conf.reputation.set(new_reputation)
+        updated_vehicles = self._apply_vehicle_wear(vehicles, selected_ids, outcome_key)
+        await user_conf.vehicles.set(updated_vehicles)
         await self._give(user, reward)
         total_credits = await self._get_credits(user)
         await user_conf.active_mission.set({})
+        repair_estimate = self._fleet_maintenance_cost(updated_vehicles)
 
         embed = discord.Embed(
             title=f"Incident result – {mission.get('title', 'Unknown')}",
@@ -2469,7 +2634,9 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Narrative", value=narrative, inline=False)
         embed.add_field(name="Reward", value=f"{reward:,} credits", inline=True)
         embed.add_field(name="XP gained", value=f"{xp_result['earned']:,} XP", inline=True)
+        embed.add_field(name="Reputation", value=f"{new_reputation} ({reputation_delta:+})", inline=True)
         embed.add_field(name="Total credits", value=f"{total_credits:,}", inline=True)
+        embed.add_field(name="Repair estimate", value=f"{repair_estimate:,} credits", inline=True)
         embed.add_field(
             name="Command XP",
             value=self._xp_progress_text(xp_result["total"], xp_result["new_level"]),
@@ -2489,6 +2656,63 @@ class FireStationCommand(commands.Cog):
                 await user.send(embed=embed)
             except Exception:
                 pass
+
+    async def _repair_fleet(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        guild: discord.Guild | None = None,
+        *,
+        edit_message: bool = False,
+    ) -> None:
+        user_conf = self.config.user(user)
+        data = await user_conf.all()
+        vehicles = data.get("vehicles", [])
+        cost = self._fleet_maintenance_cost(vehicles)
+        if cost <= 0:
+            embed = self._build_maintenance_embed(data)
+            embed.add_field(name="Repair skipped", value="No vehicle repairs are needed.", inline=False)
+            view = MaintenanceView(self, channel, user, guild or interaction.guild)
+            if edit_message:
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+            else:
+                await interaction.response.send_message(embed=embed, ephemeral=False)
+            return
+
+        credits = await self._get_credits(user)
+        if credits < cost or not await self._spend(user, cost):
+            embed = self._build_maintenance_embed(data)
+            embed.add_field(
+                name="Repair failed",
+                value=f"Fleet repair costs {cost:,} credits, but you only have {credits:,}.",
+                inline=False,
+            )
+            view = MaintenanceView(self, channel, user, guild or interaction.guild)
+            if edit_message:
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+            else:
+                await interaction.response.send_message(embed=embed, ephemeral=False)
+            return
+
+        repaired = []
+        vehicle_list = vehicles if isinstance(vehicles, list) else []
+        for vehicle in vehicle_list:
+            if not isinstance(vehicle, dict):
+                continue
+            current = dict(vehicle)
+            current["condition"] = 100
+            repaired.append(current)
+
+        await user_conf.vehicles.set(repaired)
+        fresh_data = await user_conf.all()
+        embed = self._build_maintenance_embed(fresh_data)
+        embed.add_field(name="Fleet repaired", value=f"Spent {cost:,} credits.", inline=False)
+        view = MaintenanceView(self, channel, user, guild or interaction.guild)
+        if edit_message:
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+            return
+        await interaction.response.send_message(embed=embed, ephemeral=False)
 
     # --------------------------------------------------
     # Vehicle shop handling
@@ -2608,6 +2832,7 @@ class FireStationCommand(commands.Cog):
             "name": vdef["name"],
             "crew_capacity": int(vdef["crew_capacity"]),
             "image": vdef.get("image"),
+            "condition": 100,
         }
         vehicles.append(new_vehicle)
 
@@ -2620,6 +2845,7 @@ class FireStationCommand(commands.Cog):
             color=discord.Color.green(),
         )
         embed.add_field(name="Crew capacity", value=str(vdef["crew_capacity"]), inline=True)
+        embed.add_field(name="Condition", value="100%", inline=True)
         self._apply_vehicle_image(embed, vdef)
         if edit_message:
             embed.add_field(name="Vehicle capacity", value=f"{len(vehicles)} / {max_veh}", inline=True)
@@ -3080,6 +3306,24 @@ class FscDashboardView(discord.ui.View):
             self.user,
             interaction.guild or self.guild,
             data=data,
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+    @discord.ui.button(label="Maintenance", style=discord.ButtonStyle.secondary)
+    async def maintenance(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.config.user(self.user).all()
+        if not data["started"]:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Action required", value="Create a station first.", inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=FscStartView(self.cog, self.user))
+            return
+
+        embed = self.cog._build_maintenance_embed(data)
+        view = MaintenanceView(
+            self.cog,
+            interaction.channel or self.channel,
+            self.user,
+            interaction.guild or self.guild,
         )
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
@@ -3711,6 +3955,44 @@ class VehicleShopView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = await self.cog._build_dashboard_embed(self.user)
+        channel = interaction.channel or self.channel
+        guild = interaction.guild or self.guild
+        view = FscDashboardView(self.cog, self.user, channel, guild)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+
+class MaintenanceView(discord.ui.View):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        guild: discord.Guild | None = None,
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+        self.guild = guild
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Repair fleet", style=discord.ButtonStyle.success)
+    async def repair(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel = interaction.channel or self.channel
+        guild = interaction.guild or self.guild
+        await self.cog._repair_fleet(
+            interaction,
+            channel,
+            self.user,
+            guild,
+            edit_message=True,
+        )
 
     @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):

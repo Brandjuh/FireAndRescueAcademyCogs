@@ -10,6 +10,7 @@ from FireStationCommand.fire_station_command import (
     EquipmentShopView,
     FireStationCommand,
     FscDashboardView,
+    MaintenanceView,
     RecruitmentView,
     VehicleShopSelect,
     VehicleShopView,
@@ -23,6 +24,7 @@ def _cog_with_game_data(game_data):
     cog.equipment_definitions = FireStationCommand._equipment_definitions(cog)
     cog.training_definitions = FireStationCommand._training_definitions(cog)
     cog.expansion_definitions = FireStationCommand._expansion_definitions(cog)
+    cog.VEHICLE_CATALOG = FireStationCommand._build_vehicle_catalog(cog)
     cog.EQUIPMENT_CATALOG = FireStationCommand._build_equipment_catalog(cog)
     cog.TRAINING_CATALOG = FireStationCommand._build_training_catalog(cog)
     cog.EXPANSION_CATALOG = FireStationCommand._build_expansion_catalog(cog)
@@ -107,6 +109,7 @@ def test_build_vehicle_catalog_uses_yaml_vehicle_data():
             "unlock_level": 1,
             "capabilities": {},
             "required_training": [],
+            "maintenance_cost": 500,
         }
     }
 
@@ -674,14 +677,15 @@ def test_vehicle_purchase_confirm_edits_message_and_stores_vehicle():
     assert edited["embed"].kwargs["title"] == "Vehicle purchased"
     assert isinstance(edited["view"], VehicleShopView)
     assert user_data["vehicles"] == [
-        {
-            "id": 1,
-            "catalog_id": "engine_basic",
-            "name": "Standard Fire Engine",
-            "crew_capacity": 4,
-            "image": "Images/Vehicles/engine_basic.png",
-        }
-    ]
+            {
+                "id": 1,
+                "catalog_id": "engine_basic",
+                "name": "Standard Fire Engine",
+                "crew_capacity": 4,
+                "image": "Images/Vehicles/engine_basic.png",
+                "condition": 100,
+            }
+        ]
     assert user_data["next_vehicle_id"] == 2
     assert user_data["credits"] == 50000
 
@@ -937,6 +941,148 @@ def test_expansion_purchase_confirm_edits_message_and_stores_expansion():
     assert edited["embed"].kwargs["title"] == "Expansion built"
     assert user_data["expansions"] == ["extra_bay"]
     assert user_data["credits"] == 70000
+
+
+def test_vehicle_condition_scales_station_capabilities():
+    cog = _cog_with_game_data(
+        {
+            "vehicles": {
+                "vehicles": [
+                    {
+                        "id": "engine_basic",
+                        "name": "Standard Fire Engine",
+                        "required_staff": 4,
+                        "base_cost": 50000,
+                        "capabilities": {"fire_suppression": 40},
+                        "equipment_slots": ["hose"],
+                    }
+                ]
+            },
+            "equipment": {
+                "equipment": [
+                    {
+                        "id": "hose",
+                        "name": "Hose",
+                        "base_cost": 500,
+                        "capabilities": {"fire_suppression": 20},
+                    }
+                ]
+            },
+        }
+    )
+
+    capabilities = FireStationCommand._station_capabilities(
+        cog,
+        [{"id": 1, "catalog_id": "engine_basic", "condition": 50}],
+        [{"catalog_id": "hose", "quantity": 1}],
+    )
+
+    assert capabilities["fire_suppression"] == 30
+
+
+def test_maintenance_embed_lists_damaged_vehicles_and_cost():
+    cog = _cog_with_game_data(
+        {
+            "balance": {"balance": {"maintenance_cost_multiplier": 1.0}},
+            "vehicles": {
+                "vehicles": [
+                    {
+                        "id": "engine_basic",
+                        "name": "Standard Fire Engine",
+                        "required_staff": 4,
+                        "base_cost": 50000,
+                        "maintenance_cost": 500,
+                    }
+                ]
+            },
+        }
+    )
+
+    embed = FireStationCommand._build_maintenance_embed(
+        cog,
+        {
+            "vehicles": [
+                {
+                    "id": 1,
+                    "catalog_id": "engine_basic",
+                    "name": "Starter Fire Engine",
+                    "condition": 80,
+                }
+            ],
+        },
+    )
+
+    fields = {field["name"]: field["value"] for field in embed.fields}
+    assert fields["Fleet condition"] == "Starter Fire Engine: 80% (100 cr)"
+    assert fields["Repair estimate"] == "100 credits"
+
+
+def test_repair_fleet_spends_credits_and_restores_condition():
+    user = type("User", (), {"id": 123})()
+    user_data = {
+        "started": True,
+        "credits": 1000,
+        "vehicles": [
+            {
+                "id": 1,
+                "catalog_id": "engine_basic",
+                "name": "Starter Fire Engine",
+                "condition": 80,
+            }
+        ],
+    }
+    cog = _cog_with_game_data(
+        {
+            "balance": {"balance": {"maintenance_cost_multiplier": 1.0}},
+            "vehicles": {
+                "vehicles": [
+                    {
+                        "id": "engine_basic",
+                        "name": "Standard Fire Engine",
+                        "required_staff": 4,
+                        "base_cost": 50000,
+                        "maintenance_cost": 500,
+                    }
+                ]
+            },
+        }
+    )
+    cog.config = _Config(user_data, {})
+    interaction = _Interaction(user)
+
+    asyncio.run(
+        cog._repair_fleet(
+            interaction,
+            object(),
+            user,
+            object(),
+            edit_message=True,
+        )
+    )
+
+    assert user_data["credits"] == 900
+    assert user_data["vehicles"][0]["condition"] == 100
+    assert isinstance(interaction.response.edited["view"], MaintenanceView)
+    assert interaction.response.edited["embed"].kwargs["title"] == "Maintenance bay"
+
+
+def test_reputation_delta_uses_balance_config():
+    cog = _cog_with_game_data(
+        {
+            "balance": {
+                "balance": {
+                    "reputation_gain_success": 4,
+                    "reputation_loss_fail": 6,
+                    "reputation_loss_skip": 2,
+                }
+            }
+        }
+    )
+
+    assert FireStationCommand._reputation_delta_for_outcome(cog, "success") == 4
+    assert FireStationCommand._reputation_delta_for_outcome(cog, "partial") == 0
+    assert FireStationCommand._reputation_delta_for_outcome(cog, "failure") == -6
+    assert FireStationCommand._reputation_delta_for_outcome(cog, "skip") == -2
 
 
 def test_invalid_yaml_shapes_fall_back_to_static_catalog_and_incidents():

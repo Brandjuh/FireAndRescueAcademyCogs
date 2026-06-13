@@ -33,10 +33,13 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added training purchase confirmation flow with command-level locks.
 - Added station expansion inventory with an expansion desk command and dashboard button.
 - Added expansion build confirmation flow with command-level locks.
+- Added vehicle condition tracking with a maintenance bay command and dashboard button.
+- Added fleet repair actions that restore damaged vehicles for balance-backed maintenance costs.
+- Added mission reputation gains and losses from balance config.
 
 ### Changed
 
-- Bumped the cog version to `1.1.6`.
+- Bumped the cog version to `1.1.7`.
 - Vehicle shop options now come from `data/config/vehicles.yaml` when available.
 - Mission definitions now come from `data/config/missions.yaml` when available.
 - Mission embeds now show configured mission images when available.
@@ -74,6 +77,9 @@ All notable changes to FireStationCommand will be documented in this file.
 - Technical Rescue now unlocks at command level 2 so level 2 rescue progression is playable.
 - Built expansions now appear on dashboard and station overview embeds.
 - Extra Vehicle Bay now increases vehicle capacity when built.
+- Vehicle condition now affects station capability and mission readiness calculations.
+- Mission results now apply vehicle wear to dispatched vehicles and show repair estimates.
+- Dashboard, status, and station embeds now show reputation and maintenance information.
 
 ### Fixed
 
@@ -81,6 +87,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - Dashboard buttons now update the existing dashboard message instead of opening private responses.
 - Vehicle shop now has a back button to return to the station dashboard.
 - Vehicle purchase confirmation now edits the shop message instead of opening a private interaction flow.
+- Fixed the station overview command using expansion, equipment, and training counts before calculating them.
 
 ### Planned
 
@@ -89,7 +96,6 @@ All notable changes to FireStationCommand will be documented in this file.
 ### Known Issues
 
 - Mission timers still rely on in-memory `asyncio.sleep` calls.
-- Maintenance and reputation config files are present but not fully wired into gameplay yet.
 
 ## [1.1.1]
 
