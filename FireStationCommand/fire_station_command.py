@@ -1139,17 +1139,39 @@ class FireStationCommand(commands.Cog):
         view = ConfirmUpgradeView(self, ctx.author, new_lvl, cost)
         await ctx.send(embed=embed, view=view)
 
-    async def _confirm_upgrade(self, interaction: discord.Interaction, user: discord.abc.User, new_level: int, cost: int):
+    async def _confirm_upgrade(
+        self,
+        interaction: discord.Interaction,
+        user: discord.abc.User,
+        new_level: int,
+        cost: int,
+        *,
+        edit_message: bool = False,
+        channel: discord.abc.Messageable | None = None,
+        guild: discord.Guild | None = None,
+    ):
         user_conf = self.config.user(user)
         data = await user_conf.all()
         current_lvl = int(data.get("station_level", 1))
 
         if new_level <= current_lvl:
+            if edit_message:
+                embed = await self._build_dashboard_embed(user)
+                embed.add_field(name="Upgrade cancelled", value="Station level already changed.", inline=False)
+                view = FscDashboardView(self, user, channel or interaction.channel, guild or interaction.guild)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
             await interaction.response.send_message("Upgrade cancelled: level already changed.", ephemeral=True)
             return
 
         credits = await self._get_credits(user)
         if credits < cost or not await self._spend(user, cost):
+            if edit_message:
+                embed = await self._build_dashboard_embed(user)
+                embed.add_field(name="Upgrade failed", value="Not enough credits.", inline=False)
+                view = FscDashboardView(self, user, channel or interaction.channel, guild or interaction.guild)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
             await interaction.response.send_message("Upgrade failed: not enough credits.", ephemeral=True)
             return
 
@@ -1166,6 +1188,10 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Staff capacity", value=f"max {max_staff}", inline=True)
         embed.add_field(name="Vehicle capacity", value=f"max {max_veh}", inline=True)
         embed.add_field(name="Cost", value=f"{cost:,} credits", inline=True)
+        if edit_message:
+            view = FscDashboardView(self, user, channel or interaction.channel, guild or interaction.guild)
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+            return
         await interaction.response.send_message(embed=embed, ephemeral=False)
 
     @fsc_group.command(name="career")
@@ -1212,16 +1238,37 @@ class FireStationCommand(commands.Cog):
         view = ConfirmCareerView(self, ctx.author, cost)
         await ctx.send(embed=embed, view=view)
 
-    async def _confirm_career(self, interaction: discord.Interaction, user: discord.abc.User, cost: int):
+    async def _confirm_career(
+        self,
+        interaction: discord.Interaction,
+        user: discord.abc.User,
+        cost: int,
+        *,
+        edit_message: bool = False,
+        channel: discord.abc.Messageable | None = None,
+        guild: discord.Guild | None = None,
+    ):
         user_conf = self.config.user(user)
         data = await user_conf.all()
         stype = data.get("station_type", "volunteer")
         if stype == "career":
+            if edit_message:
+                embed = await self._build_dashboard_embed(user)
+                embed.add_field(name="Career conversion", value="Your station is already a career station.", inline=False)
+                view = FscDashboardView(self, user, channel or interaction.channel, guild or interaction.guild)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
             await interaction.response.send_message("Your station is already a career station.", ephemeral=True)
             return
 
         credits = await self._get_credits(user)
         if credits < cost or not await self._spend(user, cost):
+            if edit_message:
+                embed = await self._build_dashboard_embed(user)
+                embed.add_field(name="Conversion failed", value="Not enough credits.", inline=False)
+                view = FscDashboardView(self, user, channel or interaction.channel, guild or interaction.guild)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
             await interaction.response.send_message("Conversion failed: not enough credits.", ephemeral=True)
             return
 
@@ -1233,6 +1280,10 @@ class FireStationCommand(commands.Cog):
             color=discord.Color.gold(),
         )
         embed.add_field(name="Cost", value=f"{cost:,} credits", inline=True)
+        if edit_message:
+            view = FscDashboardView(self, user, channel or interaction.channel, guild or interaction.guild)
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+            return
         await interaction.response.send_message(embed=embed, ephemeral=False)
 
     @fsc_group.command(name="shop")
@@ -1807,6 +1858,117 @@ class FscDashboardView(discord.ui.View):
             view=VehicleShopView(self.cog, self.channel, self.user, self.guild),
         )
 
+    @discord.ui.button(label="Upgrade", style=discord.ButtonStyle.primary)
+    async def upgrade(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.config.user(self.user).all()
+        if not data["started"]:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Action required", value="Create a station first.", inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=FscStartView(self.cog, self.user))
+            return
+
+        lvl = int(data.get("station_level", 1))
+        glb = await self.cog.config.all()
+        max_lvl = int(glb.get("max_station_level", 5))
+        if lvl >= max_lvl:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Station upgrade", value="Your station is already at the maximum level.", inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
+            return
+
+        base = int(glb.get("upgrade_base_cost", 50000))
+        cost = base * lvl
+        credits = await self.cog._get_credits(self.user)
+        if credits < cost:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(
+                name="Station upgrade",
+                value=f"Level {lvl} to {lvl + 1} costs {cost:,} credits, but you only have {credits:,}.",
+                inline=False,
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
+            return
+
+        new_lvl = lvl + 1
+        embed = discord.Embed(
+            title="Confirm station upgrade",
+            description=f"Upgrade station from level **{lvl}** to **{new_lvl}** for **{cost:,}** credits?",
+            color=discord.Color.blue(),
+        )
+        embed.add_field(name="New staff capacity", value=f"max {self.cog._max_staff(new_lvl)}", inline=True)
+        embed.add_field(name="New vehicle capacity", value=f"max {self.cog._max_vehicles(new_lvl)}", inline=True)
+        view = ConfirmUpgradeView(
+            self.cog,
+            self.user,
+            new_lvl,
+            cost,
+            channel=interaction.channel or self.channel,
+            guild=interaction.guild or self.guild,
+            edit_message=True,
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+    @discord.ui.button(label="Career", style=discord.ButtonStyle.secondary)
+    async def career(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.config.user(self.user).all()
+        if not data["started"]:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Action required", value="Create a station first.", inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=FscStartView(self.cog, self.user))
+            return
+
+        stype = data.get("station_type", "volunteer")
+        if stype == "career":
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Career station", value="Your station is already a career station.", inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
+            return
+
+        required_lvl = 2
+        lvl = int(data.get("station_level", 1))
+        if lvl < required_lvl:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(
+                name="Career station",
+                value=f"You must be at least station level {required_lvl} to convert to a career station.",
+                inline=False,
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
+            return
+
+        glb = await self.cog.config.all()
+        cost = int(glb.get("career_convert_cost", 250000))
+        credits = await self.cog._get_credits(self.user)
+        if credits < cost:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(
+                name="Career station",
+                value=f"Career conversion costs {cost:,} credits, but you only have {credits:,}.",
+                inline=False,
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
+            return
+
+        embed = discord.Embed(
+            title="Confirm career conversion",
+            description=f"Convert your station to **career** for **{cost:,}** credits?",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(
+            name="Effect",
+            value="Turnout becomes effectively instant and more reliable.",
+            inline=False,
+        )
+        view = ConfirmCareerView(
+            self.cog,
+            self.user,
+            cost,
+            channel=interaction.channel or self.channel,
+            guild=interaction.guild or self.guild,
+            edit_message=True,
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
     @discord.ui.button(label="Mission", style=discord.ButtonStyle.danger)
     async def mission(self, interaction: discord.Interaction, button: discord.ui.Button):
         channel = interaction.channel or self.channel
@@ -2314,12 +2476,25 @@ class ConfirmRecruitView(discord.ui.View):
 
 
 class ConfirmUpgradeView(discord.ui.View):
-    def __init__(self, cog: FireStationCommand, user: discord.abc.User, new_level: int, cost: int):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        user: discord.abc.User,
+        new_level: int,
+        cost: int,
+        *,
+        channel: discord.abc.Messageable | None = None,
+        guild: discord.Guild | None = None,
+        edit_message: bool = False,
+    ):
         super().__init__(timeout=60)
         self.cog = cog
         self.user = user
         self.new_level = new_level
         self.cost = cost
+        self.channel = channel
+        self.guild = guild
+        self.edit_message = edit_message
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user.id
@@ -2329,7 +2504,15 @@ class ConfirmUpgradeView(discord.ui.View):
         for child in self.children:
             child.disabled = True
         await interaction.message.edit(view=self)
-        await self.cog._confirm_upgrade(interaction, self.user, self.new_level, self.cost)
+        await self.cog._confirm_upgrade(
+            interaction,
+            self.user,
+            self.new_level,
+            self.cost,
+            edit_message=self.edit_message,
+            channel=self.channel,
+            guild=self.guild,
+        )
         self.stop()
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
@@ -2340,16 +2523,40 @@ class ConfirmUpgradeView(discord.ui.View):
             await interaction.message.edit(view=self)
         except Exception:
             pass
+        if self.edit_message:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Upgrade cancelled", value="Station level was not changed.", inline=False)
+            view = FscDashboardView(
+                self.cog,
+                self.user,
+                interaction.channel or self.channel,
+                interaction.guild or self.guild,
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+            self.stop()
+            return
         await interaction.response.send_message("Upgrade cancelled.", ephemeral=True)
         self.stop()
 
 
 class ConfirmCareerView(discord.ui.View):
-    def __init__(self, cog: FireStationCommand, user: discord.abc.User, cost: int):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        user: discord.abc.User,
+        cost: int,
+        *,
+        channel: discord.abc.Messageable | None = None,
+        guild: discord.Guild | None = None,
+        edit_message: bool = False,
+    ):
         super().__init__(timeout=60)
         self.cog = cog
         self.user = user
         self.cost = cost
+        self.channel = channel
+        self.guild = guild
+        self.edit_message = edit_message
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user.id
@@ -2359,7 +2566,14 @@ class ConfirmCareerView(discord.ui.View):
         for child in self.children:
             child.disabled = True
         await interaction.message.edit(view=self)
-        await self.cog._confirm_career(interaction, self.user, self.cost)
+        await self.cog._confirm_career(
+            interaction,
+            self.user,
+            self.cost,
+            edit_message=self.edit_message,
+            channel=self.channel,
+            guild=self.guild,
+        )
         self.stop()
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
@@ -2370,6 +2584,18 @@ class ConfirmCareerView(discord.ui.View):
             await interaction.message.edit(view=self)
         except Exception:
             pass
+        if self.edit_message:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Conversion cancelled", value="Station type was not changed.", inline=False)
+            view = FscDashboardView(
+                self.cog,
+                self.user,
+                interaction.channel or self.channel,
+                interaction.guild or self.guild,
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+            self.stop()
+            return
         await interaction.response.send_message("Conversion cancelled.", ephemeral=True)
         self.stop()
 

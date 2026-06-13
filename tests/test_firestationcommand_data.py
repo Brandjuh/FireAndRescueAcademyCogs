@@ -3,7 +3,13 @@ from datetime import datetime, timezone
 
 import discord
 
-from FireStationCommand.fire_station_command import FireStationCommand, RecruitmentView
+from FireStationCommand.fire_station_command import (
+    ConfirmCareerView,
+    ConfirmUpgradeView,
+    FireStationCommand,
+    FscDashboardView,
+    RecruitmentView,
+)
 
 
 def _cog_with_game_data(game_data):
@@ -265,6 +271,63 @@ def test_recruitment_hire_max_caps_to_slots_and_credits():
     assert edited["embed"].kwargs["description"] == "Hire **2** new staff for **4,000** credits?"
     assert edited["view"].amount == 2
     assert edited["view"].cost == 4000
+    assert edited["view"].edit_message is True
+
+
+def test_dashboard_upgrade_button_opens_confirm_view():
+    user = type("User", (), {"id": 123})()
+    cog = _cog_with_game_data({})
+    cog.config = _Config(
+        {
+            "started": True,
+            "station_level": 1,
+            "station_type": "volunteer",
+            "staff_total": 6,
+            "staff_trained": 0,
+            "vehicles": [],
+            "active_mission": {},
+            "credits": 100000,
+        },
+        {"max_station_level": 5, "upgrade_base_cost": 50000},
+    )
+    view = FscDashboardView(cog, user, object(), object())
+    interaction = _Interaction(user)
+
+    asyncio.run(view.upgrade(interaction, None))
+
+    edited = interaction.response.edited
+    assert edited["embed"].kwargs["title"] == "Confirm station upgrade"
+    assert isinstance(edited["view"], ConfirmUpgradeView)
+    assert edited["view"].new_level == 2
+    assert edited["view"].cost == 50000
+    assert edited["view"].edit_message is True
+
+
+def test_dashboard_career_button_opens_confirm_view():
+    user = type("User", (), {"id": 123})()
+    cog = _cog_with_game_data({})
+    cog.config = _Config(
+        {
+            "started": True,
+            "station_level": 2,
+            "station_type": "volunteer",
+            "staff_total": 6,
+            "staff_trained": 0,
+            "vehicles": [],
+            "active_mission": {},
+            "credits": 300000,
+        },
+        {"career_convert_cost": 250000},
+    )
+    view = FscDashboardView(cog, user, object(), object())
+    interaction = _Interaction(user)
+
+    asyncio.run(view.career(interaction, None))
+
+    edited = interaction.response.edited
+    assert edited["embed"].kwargs["title"] == "Confirm career conversion"
+    assert isinstance(edited["view"], ConfirmCareerView)
+    assert edited["view"].cost == 250000
     assert edited["view"].edit_message is True
 
 
