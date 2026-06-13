@@ -31,10 +31,12 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added equipment purchase confirmation flow with command-level locks.
 - Added station training certifications with a training desk command and dashboard button.
 - Added training purchase confirmation flow with command-level locks.
+- Added station expansion inventory with an expansion desk command and dashboard button.
+- Added expansion build confirmation flow with command-level locks.
 
 ### Changed
 
-- Bumped the cog version to `1.1.5`.
+- Bumped the cog version to `1.1.6`.
 - Vehicle shop options now come from `data/config/vehicles.yaml` when available.
 - Mission definitions now come from `data/config/missions.yaml` when available.
 - Mission embeds now show configured mission images when available.
@@ -70,6 +72,8 @@ All notable changes to FireStationCommand will be documented in this file.
 - Vehicle and equipment purchases now enforce configured training requirements.
 - New stations now start with Basic Firefighting certification.
 - Technical Rescue now unlocks at command level 2 so level 2 rescue progression is playable.
+- Built expansions now appear on dashboard and station overview embeds.
+- Extra Vehicle Bay now increases vehicle capacity when built.
 
 ### Fixed
 
@@ -85,7 +89,7 @@ All notable changes to FireStationCommand will be documented in this file.
 ### Known Issues
 
 - Mission timers still rely on in-memory `asyncio.sleep` calls.
-- Expansions, maintenance, and reputation config files are present but not fully wired into gameplay yet.
+- Maintenance and reputation config files are present but not fully wired into gameplay yet.
 
 ## [1.1.1]
 

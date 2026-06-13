@@ -22,8 +22,10 @@ def _cog_with_game_data(game_data):
     cog.vehicle_definitions = FireStationCommand._build_vehicle_definitions(cog)
     cog.equipment_definitions = FireStationCommand._equipment_definitions(cog)
     cog.training_definitions = FireStationCommand._training_definitions(cog)
+    cog.expansion_definitions = FireStationCommand._expansion_definitions(cog)
     cog.EQUIPMENT_CATALOG = FireStationCommand._build_equipment_catalog(cog)
     cog.TRAINING_CATALOG = FireStationCommand._build_training_catalog(cog)
+    cog.EXPANSION_CATALOG = FireStationCommand._build_expansion_catalog(cog)
     cog._utcnow = lambda: datetime(2026, 6, 12, 12, 0, tzinfo=timezone.utc)
     return cog
 
@@ -820,6 +822,121 @@ def test_training_purchase_confirm_edits_message_and_stores_training():
     assert edited["embed"].kwargs["title"] == "Training completed"
     assert user_data["trainings"] == ["basic_firefighting", "technical_rescue"]
     assert user_data["credits"] == 7000
+
+
+def test_expansion_effects_add_vehicle_capacity():
+    cog = _cog_with_game_data(
+        {
+            "expansions": {
+                "expansions": [
+                    {
+                        "id": "extra_bay",
+                        "name": "Extra Vehicle Bay",
+                        "base_cost": 30000,
+                        "effects": {"extra_vehicle_slots": 1},
+                    },
+                ]
+            }
+        }
+    )
+
+    assert FireStationCommand._max_vehicles_for_data(
+        cog,
+        {"station_level": 2, "expansions": []},
+    ) == 2
+    assert FireStationCommand._max_vehicles_for_data(
+        cog,
+        {"station_level": 2, "expansions": ["extra_bay"]},
+    ) == 3
+
+
+def test_expansion_embed_shows_available_locked_and_capacity():
+    cog = _cog_with_game_data(
+        {
+            "expansions": {
+                "expansions": [
+                    {
+                        "id": "extra_bay",
+                        "name": "Extra Vehicle Bay",
+                        "description": "Adds one additional vehicle slot.",
+                        "base_cost": 30000,
+                        "unlock_level": 2,
+                        "effects": {"extra_vehicle_slots": 1},
+                    },
+                    {
+                        "id": "workshop",
+                        "name": "Workshop",
+                        "description": "Enables in-house vehicle repairs.",
+                        "base_cost": 100000,
+                        "unlock_level": 4,
+                    },
+                ]
+            }
+        }
+    )
+
+    embed = FireStationCommand._build_expansion_embed(
+        cog,
+        {
+            "xp": 100,
+            "command_level": 2,
+            "station_level": 2,
+            "vehicles": [{"id": 1}],
+            "expansions": [],
+        },
+    )
+
+    fields = {field["name"]: field["value"] for field in embed.fields}
+    assert fields["Built expansions"] == "None"
+    assert fields["Available expansions"] == "Extra Vehicle Bay (30,000 cr)"
+    assert fields["Locked expansions"] == "Workshop (level 4)"
+    assert fields["Vehicle capacity"] == "1 / 2"
+
+
+def test_expansion_purchase_confirm_edits_message_and_stores_expansion():
+    user = type("User", (), {"id": 123})()
+    user_data = {
+        "started": True,
+        "station_level": 2,
+        "command_level": 2,
+        "xp": 100,
+        "vehicles": [{"id": 1}],
+        "expansions": [],
+        "credits": 100000,
+    }
+    cog = _cog_with_game_data(
+        {
+            "expansions": {
+                "expansions": [
+                    {
+                        "id": "extra_bay",
+                        "name": "Extra Vehicle Bay",
+                        "base_cost": 30000,
+                        "unlock_level": 2,
+                        "effects": {"extra_vehicle_slots": 1},
+                    },
+                ]
+            }
+        }
+    )
+    cog.config = _Config(user_data, {})
+    interaction = _Interaction(user)
+
+    asyncio.run(
+        cog._confirm_expansion_purchase(
+            interaction,
+            object(),
+            user,
+            "extra_bay",
+            edit_message=True,
+            guild=object(),
+        )
+    )
+
+    edited = interaction.response.edited
+    assert edited["embed"].kwargs["title"] == "Expansion built"
+    assert user_data["expansions"] == ["extra_bay"]
+    assert user_data["credits"] == 70000
 
 
 def test_invalid_yaml_shapes_fall_back_to_static_catalog_and_incidents():
