@@ -4,7 +4,10 @@ import pytest
 
 from admintimednotifications.admintimednotifications import (
     LOCAL_TIMEZONE,
+    MANAGEMENT_PANEL_TITLE,
+    format_channel_reference,
     first_scheduled_run,
+    is_management_panel_message,
     next_scheduled_run,
     next_run,
     parse_title_body as parse_timer_title_body,
@@ -179,6 +182,36 @@ def test_admin_timer_due_split_includes_snoozed_reminders():
 
     assert [item["id"] for item in due] == [1]
     assert [item["id"] for item in pending] == [2]
+
+
+def test_admin_timer_panel_message_detection_and_channel_display():
+    class FakeEmbed:
+        title = MANAGEMENT_PANEL_TITLE
+
+    class OtherEmbed:
+        title = "Other"
+
+    class FakeAuthor:
+        id = 123
+
+    class FakeMessage:
+        author = FakeAuthor()
+        embeds = [FakeEmbed()]
+
+    class OtherMessage:
+        author = FakeAuthor()
+        embeds = [OtherEmbed()]
+
+    class FakeChannel:
+        id = 1421625293130567690
+        name = "action-required"
+        mention = "<#1421625293130567690>"
+
+    assert is_management_panel_message(FakeMessage(), bot_user_id=123)
+    assert not is_management_panel_message(FakeMessage(), bot_user_id=456)
+    assert not is_management_panel_message(OtherMessage(), bot_user_id=123)
+    assert format_channel_reference(FakeChannel(), 1) == "#action-required (`1421625293130567690`)"
+    assert format_channel_reference(None, 1421625293130567690) == "Missing channel `1421625293130567690`"
 
 
 def test_botstatus_accepts_only_supported_activity_types():
