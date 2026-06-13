@@ -1,8 +1,9 @@
+import asyncio
 from datetime import datetime, timezone
 
 import discord
 
-from FireStationCommand.fire_station_command import FireStationCommand
+from FireStationCommand.fire_station_command import FireStationCommand, RecruitmentView
 
 
 def _cog_with_game_data(game_data):
@@ -11,6 +12,53 @@ def _cog_with_game_data(game_data):
     cog.vehicle_definitions = FireStationCommand._build_vehicle_definitions(cog)
     cog._utcnow = lambda: datetime(2026, 6, 12, 12, 0, tzinfo=timezone.utc)
     return cog
+
+
+class _ValueSetter:
+    def __init__(self, data, key):
+        self.data = data
+        self.key = key
+
+    async def set(self, value):
+        self.data[self.key] = value
+
+
+class _UserConfig:
+    def __init__(self, data):
+        self.data = data
+        self.staff_total = _ValueSetter(data, "staff_total")
+
+    async def all(self):
+        return dict(self.data)
+
+
+class _Config:
+    def __init__(self, user_data, global_data):
+        self.user_data = user_data
+        self.global_data = global_data
+
+    def user(self, user):
+        del user
+        return _UserConfig(self.user_data)
+
+    async def all(self):
+        return dict(self.global_data)
+
+
+class _InteractionResponse:
+    def __init__(self):
+        self.edited = None
+
+    async def edit_message(self, **kwargs):
+        self.edited = kwargs
+
+
+class _Interaction:
+    def __init__(self, user):
+        self.user = user
+        self.channel = object()
+        self.guild = object()
+        self.response = _InteractionResponse()
 
 
 def test_build_vehicle_catalog_uses_yaml_vehicle_data():
@@ -183,6 +231,41 @@ def test_vehicle_image_helpers_build_raw_urls_and_apply_embed_image():
             "refs/heads/main/FireStationCommand/Images/Vehicles/engine_basic.png"
         )
     }
+
+
+def test_recruitment_embed_shows_hireable_staff():
+    user = object()
+    cog = _cog_with_game_data({})
+    cog.config = _Config(
+        {"station_level": 2, "staff_total": 6, "credits": 4500},
+        {"staff_cost": 2000},
+    )
+
+    embed = asyncio.run(FireStationCommand._build_recruitment_embed(cog, user))
+
+    assert embed.kwargs["title"] == "Recruitment desk"
+    assert {"name": "Open positions", "value": "2", "inline": True} in embed.fields
+    assert {"name": "Available actions", "value": "You can currently hire up to **2** staff.", "inline": False} in embed.fields
+
+
+def test_recruitment_hire_max_caps_to_slots_and_credits():
+    user = type("User", (), {"id": 123})()
+    cog = _cog_with_game_data({})
+    cog.config = _Config(
+        {"station_level": 3, "staff_total": 6, "credits": 5000},
+        {"staff_cost": 2000},
+    )
+    view = RecruitmentView(cog, user, object(), object())
+    interaction = _Interaction(user)
+
+    asyncio.run(view._confirm_hire(interaction, None))
+
+    edited = interaction.response.edited
+    assert edited["embed"].kwargs["title"] == "Confirm recruitment"
+    assert edited["embed"].kwargs["description"] == "Hire **2** new staff for **4,000** credits?"
+    assert edited["view"].amount == 2
+    assert edited["view"].cost == 4000
+    assert edited["view"].edit_message is True
 
 
 def test_invalid_yaml_shapes_fall_back_to_static_catalog_and_incidents():
