@@ -21,6 +21,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added generated vehicle images for the initial vehicle catalog.
 - Added dashboard recruitment buttons for hiring station staff without typing the recruit command.
 - Added dashboard buttons for station upgrades and career conversion.
+- Added generated station images for station levels 1 through 10.
 
 ### Changed
 
@@ -41,6 +42,8 @@ All notable changes to FireStationCommand will be documented in this file.
 - Crew alert, turnout result, re-alert, vehicle selection, and en-route updates now use richer embeds instead of short plain status messages.
 - Early manual gameplay timers are shorter until automatic dispatch is implemented.
 - Short positive wait times now display as at least `in 1 minute` instead of `now`.
+- Station overview images now use the station level instead of vehicle capacity.
+- Default maximum station level is now 10.
 
 ### Fixed
 
