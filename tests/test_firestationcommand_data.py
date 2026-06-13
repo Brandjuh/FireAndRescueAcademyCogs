@@ -623,6 +623,29 @@ def test_mission_image_helpers_build_raw_urls_and_apply_embed_image():
     }
 
 
+def test_mission_result_image_helpers_use_outcome_images_and_overrides():
+    cog = _cog_with_game_data({})
+    mission = {"success_image": "Images/Missions/small_bin_fire_success.png"}
+    embed = discord.Embed()
+
+    assert FireStationCommand._mission_result_image_url(cog, mission, "success") == (
+        "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/"
+        "refs/heads/main/FireStationCommand/Images/Missions/small_bin_fire_success.png"
+    )
+    assert FireStationCommand._mission_result_image_url(cog, {}, "partial") == (
+        "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/"
+        "refs/heads/main/FireStationCommand/Images/Outcomes/incident_partial.png"
+    )
+
+    FireStationCommand._apply_mission_result_image(cog, embed, {}, "failure")
+    assert embed.image == {
+        "url": (
+            "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/"
+            "refs/heads/main/FireStationCommand/Images/Outcomes/incident_failure.png"
+        )
+    }
+
+
 def test_station_image_helper_builds_level_urls_and_clamps_range():
     assert FireStationCommand._station_image_url(1) == (
         "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/"
