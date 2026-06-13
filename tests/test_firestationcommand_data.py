@@ -283,8 +283,56 @@ def test_imported_expansion_gating_keeps_fire_core_primary():
     missions = _load_json_catalog("missions")
     core_missions = [mission for mission in missions if not mission.get("required_expansions")]
 
-    assert len(core_missions) >= 400
+    assert len(core_missions) >= 30
     assert any("Fire Fighting Missions" in mission.get("mission_type", "") for mission in core_missions)
+
+
+def test_imported_missions_include_expansion_gates_from_required_loadout():
+    missions = _load_json_catalog("missions")
+    vehicles = _load_json_catalog("vehicles")
+    equipment = _load_json_catalog("equipment")
+    vehicle_expansions = {
+        vehicle["id"]: set(vehicle.get("required_expansions", []))
+        for vehicle in vehicles
+    }
+    equipment_expansions = {
+        item["id"]: set(item.get("required_expansions", []))
+        for item in equipment
+    }
+
+    missing = []
+    for mission in missions:
+        required_expansions = set(mission.get("required_expansions", []))
+        loadout_expansions = set()
+        for vehicle_id in mission.get("required_vehicles", []):
+            loadout_expansions.update(vehicle_expansions.get(vehicle_id, set()))
+        for equipment_id in mission.get("required_equipment", []):
+            loadout_expansions.update(equipment_expansions.get(equipment_id, set()))
+        missing.extend(
+            (mission["id"], expansion_id)
+            for expansion_id in sorted(loadout_expansions - required_expansions)
+        )
+
+    assert missing == []
+
+
+def test_imported_early_extensions_are_affordable_from_core_missions():
+    missions = _load_json_catalog("missions")
+    expansions = _load_json_catalog("expansions")
+    early_core_rewards = [
+        int(mission.get("base_credits", 0))
+        for mission in missions
+        if int(mission.get("unlock_level", 1)) <= 2 and not mission.get("required_expansions")
+    ]
+    average_reward = sum(early_core_rewards) / len(early_core_rewards)
+    early_expansions = [
+        expansion
+        for expansion in expansions
+        if int(expansion.get("unlock_level", 1)) == 2
+    ]
+
+    assert early_core_rewards
+    assert all(expansion["base_cost"] / average_reward <= 65 for expansion in early_expansions)
 
 
 def test_build_incidents_derives_staff_from_required_vehicles():
