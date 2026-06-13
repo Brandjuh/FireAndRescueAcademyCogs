@@ -41,10 +41,13 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added expanded vehicle and equipment catalogs derived from MissionChief mission requirements.
 - Added generated flat-style mission, vehicle, and equipment images for the expanded catalogs.
 - Added catalog quality tests for imported mission XP, narrative coverage, and referenced vehicle/equipment IDs.
+- Added specialist equipment kits for traffic control, EMS, law enforcement, HazMat, water rescue, command, rescue, and aviation progression.
+- Added equipment image support to equipment purchase confirmation and purchase result embeds.
+- Added mutual aid and extension unlock roadmap notes.
 
 ### Changed
 
-- Bumped the cog version to `1.2.1`.
+- Bumped the cog version to `1.2.2`.
 - Vehicle shop options now come from `data/config/vehicles.yaml` when available.
 - Mission definitions now come from `data/config/missions.yaml` when available.
 - Mission embeds now show configured mission images when available.
@@ -78,6 +81,9 @@ All notable changes to FireStationCommand will be documented in this file.
 - Station and dashboard embeds now show owned equipment counts.
 - Mission readiness now factors in missing required training from vehicles and equipment.
 - Vehicle and equipment purchases now enforce configured training requirements.
+- Imported missions now have broader equipment requirements while preserving repeated MissionChief equipment quantities.
+- Imported vehicles now expose equipment slots so owned equipment contributes to mission readiness across the full catalog.
+- Vehicle and equipment shop locked lists are now compacted to avoid oversized Discord embed fields.
 - New stations now start with Basic Firefighting certification.
 - Technical Rescue now unlocks at command level 2 so level 2 rescue progression is playable.
 - Built expansions now appear on dashboard and station overview embeds.

@@ -178,6 +178,62 @@ def test_imported_catalog_references_existing_vehicles_and_equipment():
     assert missing_equipment_refs == []
 
 
+def test_imported_equipment_catalog_has_images_and_progression_depth():
+    equipment = _load_json_catalog("equipment")
+
+    assert len(equipment) >= 30
+    assert {item["id"] for item in equipment} >= {
+        "traffic_control_kit",
+        "ems_bag",
+        "law_enforcement_kit",
+        "hazmat_kit",
+        "decon_kit",
+        "water_rescue_gear",
+        "command_tablet",
+        "tactical_gear",
+        "aviation_rescue_kit",
+    }
+    for item in equipment:
+        assert 1 <= int(item.get("unlock_level", 0)) <= FireStationCommand.MAX_COMMAND_LEVEL
+        assert item.get("capabilities")
+        assert (_FSC_ROOT / item["image"]).exists()
+
+
+def test_imported_missions_have_equipment_depth_without_losing_quantities():
+    missions = _load_json_catalog("missions")
+    equipment_ids = {equipment["id"] for equipment in _load_json_catalog("equipment")}
+    missing_equipment = [mission["id"] for mission in missions if not mission.get("required_equipment")]
+    personnel_count = sum(
+        1
+        for mission in missions
+        for equipment_id in mission.get("required_equipment", [])
+        if equipment_id == "personnel"
+    )
+    equipment_requirement_count = sum(
+        1
+        for mission in missions
+        for equipment_id in mission.get("required_equipment", [])
+        if equipment_id in equipment_ids
+    )
+
+    assert missing_equipment == []
+    assert personnel_count >= 650
+    assert equipment_requirement_count >= 4000
+
+
+def test_imported_vehicle_equipment_slots_reference_catalog():
+    vehicles = _load_json_catalog("vehicles")
+    equipment_ids = {equipment["id"] for equipment in _load_json_catalog("equipment")}
+
+    assert all(vehicle.get("equipment_slots") for vehicle in vehicles)
+    assert [
+        (vehicle["id"], slot)
+        for vehicle in vehicles
+        for slot in vehicle.get("equipment_slots", [])
+        if slot not in equipment_ids
+    ] == []
+
+
 def test_build_incidents_derives_staff_from_required_vehicles():
     cog = _cog_with_game_data(
         {
@@ -478,6 +534,24 @@ def test_vehicle_image_helpers_build_raw_urls_and_apply_embed_image():
         "url": (
             "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/"
             "refs/heads/main/FireStationCommand/Images/Vehicles/engine_basic.png"
+        )
+    }
+
+
+def test_equipment_image_helpers_build_raw_urls_and_apply_embed_image():
+    cog = _cog_with_game_data({})
+    equipment = {"image": "Images/Equipment/hose.png"}
+    embed = discord.Embed()
+
+    assert FireStationCommand._equipment_image_url(cog, equipment) == (
+        "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/"
+        "refs/heads/main/FireStationCommand/Images/Equipment/hose.png"
+    )
+    FireStationCommand._apply_equipment_image(cog, embed, equipment)
+    assert embed.image == {
+        "url": (
+            "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/"
+            "refs/heads/main/FireStationCommand/Images/Equipment/hose.png"
         )
     }
 

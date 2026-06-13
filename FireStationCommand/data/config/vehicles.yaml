@@ -22,8 +22,11 @@
       },
       "equipment_slots": [
         "hose",
+        "basic_tools",
         "ba_basic",
-        "basic_tools"
+        "wildland_gear",
+        "foam_supply",
+        "water_supply_equipment"
       ]
     },
     {
@@ -48,7 +51,12 @@
       },
       "equipment_slots": [
         "rescue_tools",
-        "stabilization_kit"
+        "stabilization_kit",
+        "technical_rescue_kit",
+        "search_camera",
+        "rope_rescue_kit",
+        "sked",
+        "litter"
       ]
     },
     {
@@ -69,7 +77,15 @@
         "water_supply": 36,
         "scene_safety": 17
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "hose",
+        "basic_tools",
+        "ba_basic",
+        "wildland_gear",
+        "foam_supply",
+        "water_supply_equipment",
+        "aviation_rescue_kit"
+      ]
     },
     {
       "id": "arffs_or_firetruck",
@@ -89,7 +105,14 @@
         "water_supply": 29,
         "scene_safety": 14
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "hose",
+        "basic_tools",
+        "ba_basic",
+        "wildland_gear",
+        "foam_supply",
+        "water_supply_equipment"
+      ]
     },
     {
       "id": "atf_lab_vehicle",
@@ -108,7 +131,15 @@
         "law_enforcement": 32,
         "scene_safety": 19
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "law_enforcement_kit",
+        "traffic_control_kit",
+        "investigation_kit",
+        "police_drone_equipment",
+        "tactical_gear",
+        "crowd_control_gear",
+        "hazmat_kit"
+      ]
     },
     {
       "id": "atf_unit",
@@ -127,7 +158,14 @@
         "law_enforcement": 39,
         "scene_safety": 23
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "law_enforcement_kit",
+        "traffic_control_kit",
+        "investigation_kit",
+        "police_drone_equipment",
+        "tactical_gear",
+        "crowd_control_gear"
+      ]
     },
     {
       "id": "atv",
@@ -145,7 +183,12 @@
       "capabilities": {
         "scene_safety": 15
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "basic_tools",
+        "command_tablet",
+        "traffic_control_kit",
+        "light_tower_kit"
+      ]
     },
     {
       "id": "atv_trailer",
@@ -163,7 +206,12 @@
       "capabilities": {
         "scene_safety": 15
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "basic_tools",
+        "command_tablet",
+        "traffic_control_kit",
+        "light_tower_kit"
+      ]
     },
     {
       "id": "ambulances",
@@ -182,7 +230,11 @@
         "medical_response": 38,
         "patient_transport": 26
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "ems_bag",
+        "patient_monitor",
+        "litter"
+      ]
     },
     {
       "id": "battalion_chief_vehicle",
@@ -200,7 +252,12 @@
       "capabilities": {
         "scene_safety": 35
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "basic_tools",
+        "command_tablet",
+        "traffic_control_kit",
+        "light_tower_kit"
+      ]
     },
     {
       "id": "cwft",
@@ -218,7 +275,12 @@
       "capabilities": {
         "scene_safety": 15
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "basic_tools",
+        "command_tablet",
+        "traffic_control_kit",
+        "light_tower_kit"
+      ]
     },
     {
       "id": "coastal_guard_plane",
@@ -237,7 +299,13 @@
         "water_rescue": 38,
         "scene_safety": 14
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "throw_bag",
+        "water_rescue_gear",
+        "flood_equipment",
+        "search_and_rescue_equipment",
+        "sked"
+      ]
     },
     {
       "id": "coastal_helicopter",
@@ -256,7 +324,13 @@
         "water_rescue": 46,
         "scene_safety": 18
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "throw_bag",
+        "water_rescue_gear",
+        "flood_equipment",
+        "search_and_rescue_equipment",
+        "sked"
+      ]
     },
     {
       "id": "dea_unit",
@@ -275,7 +349,14 @@
         "law_enforcement": 39,
         "scene_safety": 23
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "law_enforcement_kit",
+        "traffic_control_kit",
+        "investigation_kit",
+        "police_drone_equipment",
+        "tactical_gear",
+        "crowd_control_gear"
+      ]
     },
     {
       "id": "fbi_bomb_technician_vehicles",
@@ -294,7 +375,14 @@
         "law_enforcement": 32,
         "scene_safety": 19
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "law_enforcement_kit",
+        "traffic_control_kit",
+        "investigation_kit",
+        "police_drone_equipment",
+        "tactical_gear",
+        "crowd_control_gear"
+      ]
     },
     {
       "id": "fbi_drone_or_fbi_investigation_wagon",
@@ -313,7 +401,15 @@
         "law_enforcement": 32,
         "scene_safety": 19
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "law_enforcement_kit",
+        "traffic_control_kit",
+        "investigation_kit",
+        "police_drone_equipment",
+        "tactical_gear",
+        "crowd_control_gear",
+        "search_camera"
+      ]
     },
     {
       "id": "fbi_investigation_wagons",
@@ -332,7 +428,14 @@
         "law_enforcement": 32,
         "scene_safety": 19
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "law_enforcement_kit",
+        "traffic_control_kit",
+        "investigation_kit",
+        "police_drone_equipment",
+        "tactical_gear",
+        "crowd_control_gear"
+      ]
     },
     {
       "id": "fbi_surveillance_drone",
@@ -351,7 +454,15 @@
         "law_enforcement": 32,
         "scene_safety": 19
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "law_enforcement_kit",
+        "traffic_control_kit",
+        "investigation_kit",
+        "police_drone_equipment",
+        "tactical_gear",
+        "crowd_control_gear",
+        "search_camera"
+      ]
     },
     {
       "id": "fbi_unit",
@@ -370,7 +481,14 @@
         "law_enforcement": 46,
         "scene_safety": 27
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "law_enforcement_kit",
+        "traffic_control_kit",
+        "investigation_kit",
+        "police_drone_equipment",
+        "tactical_gear",
+        "crowd_control_gear"
+      ]
     },
     {
       "id": "fbpc",
@@ -388,7 +506,12 @@
       "capabilities": {
         "scene_safety": 15
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "basic_tools",
+        "command_tablet",
+        "traffic_control_kit",
+        "light_tower_kit"
+      ]
     },
     {
       "id": "fwdc",
@@ -406,7 +529,12 @@
       "capabilities": {
         "scene_safety": 15
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "basic_tools",
+        "command_tablet",
+        "traffic_control_kit",
+        "light_tower_kit"
+      ]
     },
     {
       "id": "fire_boat_docks",
@@ -425,7 +553,13 @@
         "water_rescue": 46,
         "scene_safety": 18
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "throw_bag",
+        "water_rescue_gear",
+        "flood_equipment",
+        "search_and_rescue_equipment",
+        "sked"
+      ]
     },
     {
       "id": "fire_cranes",
@@ -445,7 +579,16 @@
         "stabilization": 22,
         "scene_safety": 18
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "rescue_tools",
+        "stabilization_kit",
+        "technical_rescue_kit",
+        "search_camera",
+        "rope_rescue_kit",
+        "sked",
+        "litter",
+        "fire_crane_equipment"
+      ]
     },
     {
       "id": "fire_investigation_unit",
@@ -463,7 +606,13 @@
       "capabilities": {
         "scene_safety": 20
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "basic_tools",
+        "command_tablet",
+        "traffic_control_kit",
+        "light_tower_kit",
+        "investigation_kit"
+      ]
     },
     {
       "id": "foam_tender",
@@ -483,7 +632,14 @@
         "water_supply": 29,
         "scene_safety": 14
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "hose",
+        "basic_tools",
+        "ba_basic",
+        "wildland_gear",
+        "foam_supply",
+        "water_supply_equipment"
+      ]
     },
     {
       "id": "hazmat_vehicle",
@@ -501,7 +657,15 @@
       "capabilities": {
         "scene_safety": 20
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "basic_tools",
+        "command_tablet",
+        "traffic_control_kit",
+        "light_tower_kit",
+        "hazmat_kit",
+        "decon_kit",
+        "ba_basic"
+      ]
     },
     {
       "id": "icpc",
@@ -519,7 +683,12 @@
       "capabilities": {
         "scene_safety": 15
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "basic_tools",
+        "command_tablet",
+        "traffic_control_kit",
+        "light_tower_kit"
+      ]
     },
     {
       "id": "k_9_unit",
@@ -538,7 +707,14 @@
         "law_enforcement": 39,
         "scene_safety": 23
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "law_enforcement_kit",
+        "traffic_control_kit",
+        "investigation_kit",
+        "police_drone_equipment",
+        "tactical_gear",
+        "crowd_control_gear"
+      ]
     },
     {
       "id": "large_coastal_boat",
@@ -557,7 +733,13 @@
         "water_rescue": 46,
         "scene_safety": 18
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "throw_bag",
+        "water_rescue_gear",
+        "flood_equipment",
+        "search_and_rescue_equipment",
+        "sked"
+      ]
     },
     {
       "id": "lifeguard_supervisors",
@@ -575,7 +757,12 @@
       "capabilities": {
         "scene_safety": 15
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "basic_tools",
+        "command_tablet",
+        "traffic_control_kit",
+        "light_tower_kit"
+      ]
     },
     {
       "id": "lifeguard_truck",
@@ -593,7 +780,12 @@
       "capabilities": {
         "scene_safety": 15
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "basic_tools",
+        "command_tablet",
+        "traffic_control_kit",
+        "light_tower_kit"
+      ]
     },
     {
       "id": "light_boat",
@@ -612,7 +804,13 @@
         "water_rescue": 46,
         "scene_safety": 18
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "throw_bag",
+        "water_rescue_gear",
+        "flood_equipment",
+        "search_and_rescue_equipment",
+        "sked"
+      ]
     },
     {
       "id": "light_tower_trailer",
@@ -630,7 +828,12 @@
       "capabilities": {
         "scene_safety": 30
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "basic_tools",
+        "command_tablet",
+        "traffic_control_kit",
+        "light_tower_kit"
+      ]
     },
     {
       "id": "mobile_air_vehicle",
@@ -649,7 +852,11 @@
         "medical_response": 46,
         "patient_transport": 32
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "ems_bag",
+        "patient_monitor",
+        "litter"
+      ]
     },
     {
       "id": "mobile_command_vehicle",
@@ -667,7 +874,12 @@
       "capabilities": {
         "scene_safety": 20
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "basic_tools",
+        "command_tablet",
+        "traffic_control_kit",
+        "light_tower_kit"
+      ]
     },
     {
       "id": "patrol_boat",
@@ -686,7 +898,13 @@
         "water_rescue": 38,
         "scene_safety": 14
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "throw_bag",
+        "water_rescue_gear",
+        "flood_equipment",
+        "search_and_rescue_equipment",
+        "sked"
+      ]
     },
     {
       "id": "platform_truck",
@@ -705,7 +923,14 @@
         "law_enforcement": 74,
         "scene_safety": 43
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "law_enforcement_kit",
+        "traffic_control_kit",
+        "investigation_kit",
+        "police_drone_equipment",
+        "tactical_gear",
+        "crowd_control_gear"
+      ]
     },
     {
       "id": "police_atv_trailer",
@@ -724,7 +949,14 @@
         "law_enforcement": 32,
         "scene_safety": 19
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "law_enforcement_kit",
+        "traffic_control_kit",
+        "investigation_kit",
+        "police_drone_equipment",
+        "tactical_gear",
+        "crowd_control_gear"
+      ]
     },
     {
       "id": "police_car",
@@ -743,7 +975,14 @@
         "law_enforcement": 88,
         "scene_safety": 51
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "law_enforcement_kit",
+        "traffic_control_kit",
+        "investigation_kit",
+        "police_drone_equipment",
+        "tactical_gear",
+        "crowd_control_gear"
+      ]
     },
     {
       "id": "police_car_or_swat_suvs",
@@ -762,7 +1001,14 @@
         "law_enforcement": 39,
         "scene_safety": 23
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "law_enforcement_kit",
+        "traffic_control_kit",
+        "investigation_kit",
+        "police_drone_equipment",
+        "tactical_gear",
+        "crowd_control_gear"
+      ]
     },
     {
       "id": "police_drone",
@@ -781,7 +1027,15 @@
         "law_enforcement": 32,
         "scene_safety": 19
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "law_enforcement_kit",
+        "traffic_control_kit",
+        "investigation_kit",
+        "police_drone_equipment",
+        "tactical_gear",
+        "crowd_control_gear",
+        "search_camera"
+      ]
     },
     {
       "id": "police_helicopter",
@@ -800,7 +1054,14 @@
         "law_enforcement": 32,
         "scene_safety": 19
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "law_enforcement_kit",
+        "traffic_control_kit",
+        "investigation_kit",
+        "police_drone_equipment",
+        "tactical_gear",
+        "crowd_control_gear"
+      ]
     },
     {
       "id": "police_mcv",
@@ -819,7 +1080,14 @@
         "law_enforcement": 32,
         "scene_safety": 19
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "law_enforcement_kit",
+        "traffic_control_kit",
+        "investigation_kit",
+        "police_drone_equipment",
+        "tactical_gear",
+        "crowd_control_gear"
+      ]
     },
     {
       "id": "police_supervisors_sheriffs",
@@ -838,7 +1106,14 @@
         "law_enforcement": 39,
         "scene_safety": 23
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "law_enforcement_kit",
+        "traffic_control_kit",
+        "investigation_kit",
+        "police_drone_equipment",
+        "tactical_gear",
+        "crowd_control_gear"
+      ]
     },
     {
       "id": "rescue_boat_docks",
@@ -858,7 +1133,15 @@
         "stabilization": 16,
         "scene_safety": 14
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "rescue_tools",
+        "stabilization_kit",
+        "technical_rescue_kit",
+        "search_camera",
+        "rope_rescue_kit",
+        "sked",
+        "litter"
+      ]
     },
     {
       "id": "riot_police_trailer",
@@ -877,7 +1160,14 @@
         "law_enforcement": 32,
         "scene_safety": 19
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "law_enforcement_kit",
+        "traffic_control_kit",
+        "investigation_kit",
+        "police_drone_equipment",
+        "tactical_gear",
+        "crowd_control_gear"
+      ]
     },
     {
       "id": "riot_police_unit",
@@ -896,7 +1186,14 @@
         "law_enforcement": 39,
         "scene_safety": 23
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "law_enforcement_kit",
+        "traffic_control_kit",
+        "investigation_kit",
+        "police_drone_equipment",
+        "tactical_gear",
+        "crowd_control_gear"
+      ]
     },
     {
       "id": "swat_armoured_vehicle",
@@ -915,7 +1212,14 @@
         "law_enforcement": 32,
         "scene_safety": 19
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "law_enforcement_kit",
+        "traffic_control_kit",
+        "investigation_kit",
+        "police_drone_equipment",
+        "tactical_gear",
+        "crowd_control_gear"
+      ]
     },
     {
       "id": "small_coastal_boat",
@@ -934,7 +1238,13 @@
         "water_rescue": 46,
         "scene_safety": 18
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "throw_bag",
+        "water_rescue_gear",
+        "flood_equipment",
+        "search_and_rescue_equipment",
+        "sked"
+      ]
     },
     {
       "id": "smoke_jumpers_in_smoke_jumper_plane",
@@ -953,7 +1263,11 @@
         "air_support": 115,
         "scene_safety": 40
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "aviation_rescue_kit",
+        "wildland_gear",
+        "search_and_rescue_equipment"
+      ]
     },
     {
       "id": "snow_trailer",
@@ -971,7 +1285,12 @@
       "capabilities": {
         "scene_safety": 15
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "basic_tools",
+        "command_tablet",
+        "traffic_control_kit",
+        "light_tower_kit"
+      ]
     },
     {
       "id": "wtc",
@@ -989,7 +1308,12 @@
       "capabilities": {
         "scene_safety": 15
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "basic_tools",
+        "command_tablet",
+        "traffic_control_kit",
+        "light_tower_kit"
+      ]
     },
     {
       "id": "warden_truck",
@@ -1008,7 +1332,14 @@
         "law_enforcement": 39,
         "scene_safety": 23
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "law_enforcement_kit",
+        "traffic_control_kit",
+        "investigation_kit",
+        "police_drone_equipment",
+        "tactical_gear",
+        "crowd_control_gear"
+      ]
     },
     {
       "id": "wildland_lead_plane",
@@ -1028,7 +1359,15 @@
         "water_supply": 22,
         "scene_safety": 11
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "hose",
+        "basic_tools",
+        "ba_basic",
+        "wildland_gear",
+        "foam_supply",
+        "water_supply_equipment",
+        "command_tablet"
+      ]
     },
     {
       "id": "wildland_mccs",
@@ -1048,7 +1387,15 @@
         "water_supply": 29,
         "scene_safety": 14
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "hose",
+        "basic_tools",
+        "ba_basic",
+        "wildland_gear",
+        "foam_supply",
+        "water_supply_equipment",
+        "command_tablet"
+      ]
     },
     {
       "id": "airborne_firefighting_vehicles",
@@ -1068,7 +1415,14 @@
         "water_supply": 22,
         "scene_safety": 11
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "hose",
+        "basic_tools",
+        "ba_basic",
+        "wildland_gear",
+        "foam_supply",
+        "water_supply_equipment"
+      ]
     },
     {
       "id": "large_fire_boats",
@@ -1087,7 +1441,15 @@
         "water_rescue": 46,
         "scene_safety": 18
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "throw_bag",
+        "water_rescue_gear",
+        "flood_equipment",
+        "search_and_rescue_equipment",
+        "sked",
+        "foam_supply",
+        "water_supply_equipment"
+      ]
     },
     {
       "id": "large_rescue_boats",
@@ -1107,7 +1469,16 @@
         "stabilization": 16,
         "scene_safety": 14
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "rescue_tools",
+        "stabilization_kit",
+        "technical_rescue_kit",
+        "search_camera",
+        "rope_rescue_kit",
+        "sked",
+        "litter",
+        "water_rescue_gear"
+      ]
     },
     {
       "id": "ambulance",
@@ -1126,7 +1497,11 @@
         "medical_response": 38,
         "patient_transport": 26
       },
-      "equipment_slots": []
+      "equipment_slots": [
+        "ems_bag",
+        "patient_monitor",
+        "litter"
+      ]
     }
   ]
 }
