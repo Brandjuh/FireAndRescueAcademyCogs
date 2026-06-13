@@ -1185,6 +1185,54 @@ def test_set_and_clear_mission_due_tracks_next_action():
     assert mission["updated_at"] == "2026-06-12T12:00:00Z"
 
 
+def test_mission_due_action_ready_handles_due_and_future_timestamps():
+    cog = _cog_with_game_data({})
+
+    assert FireStationCommand._mission_due_action_ready(
+        cog,
+        {
+            "next_action": FireStationCommand.ACTION_SHOW_TURNOUT_RESULT,
+            "next_action_at": "2026-06-12T11:59:00Z",
+        },
+    )
+    assert not FireStationCommand._mission_due_action_ready(
+        cog,
+        {
+            "next_action": FireStationCommand.ACTION_SHOW_TURNOUT_RESULT,
+            "next_action_at": "2026-06-12T12:01:00Z",
+        },
+    )
+    assert not FireStationCommand._mission_due_action_ready(
+        cog,
+        {
+            "next_action": FireStationCommand.ACTION_SHOW_TURNOUT_RESULT,
+            "next_action_at": "not-a-date",
+        },
+    )
+
+
+def test_run_due_mission_action_dispatches_turnout_result():
+    user = type("User", (), {"id": 123})()
+    user_data = {
+        "active_mission": {
+            "next_action": FireStationCommand.ACTION_SHOW_TURNOUT_RESULT,
+            "next_action_at": "2026-06-12T11:59:00Z",
+        }
+    }
+    cog = _cog_with_game_data({})
+    cog.config = _Config(user_data, {})
+    calls = []
+
+    async def fake_turnout(channel, actor):
+        calls.append((channel, actor))
+
+    cog._show_turnout_result = fake_turnout
+    channel = object()
+
+    assert asyncio.run(cog._run_due_mission_action(channel, user)) is True
+    assert calls == [(channel, user)]
+
+
 def test_build_mission_control_embed_guides_alert_choice():
     cog = _cog_with_game_data({})
     mission = {

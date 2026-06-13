@@ -36,10 +36,11 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added vehicle condition tracking with a maintenance bay command and dashboard button.
 - Added fleet repair actions that restore damaged vehicles for balance-backed maintenance costs.
 - Added mission reputation gains and losses from balance config.
+- Added manual recovery for due mission timer actions through `[p]fsc mission` and mission control refresh.
 
 ### Changed
 
-- Bumped the cog version to `1.1.7`.
+- Bumped the cog version to `1.1.8`.
 - Vehicle shop options now come from `data/config/vehicles.yaml` when available.
 - Mission definitions now come from `data/config/missions.yaml` when available.
 - Mission embeds now show configured mission images when available.
@@ -80,6 +81,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - Vehicle condition now affects station capability and mission readiness calculations.
 - Mission results now apply vehicle wear to dispatched vehicles and show repair estimates.
 - Dashboard, status, and station embeds now show reputation and maintenance information.
+- Mission control refresh now advances overdue turnout, travel, and result steps instead of only showing stale timers.
 
 ### Fixed
 
@@ -95,7 +97,7 @@ All notable changes to FireStationCommand will be documented in this file.
 
 ### Known Issues
 
-- Mission timers still rely on in-memory `asyncio.sleep` calls.
+- Mission timers still use in-memory `asyncio.sleep` for automatic follow-up while the bot stays online.
 
 ## [1.1.1]
 
