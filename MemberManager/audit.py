@@ -33,6 +33,12 @@ ADMIN_EVENT_TYPES = {
     "role_changed",
     "contribution_drop",
     "role_restored",
+    "admin_timer_created",
+    "admin_timer_removed",
+    "admin_timer_posted",
+    "admin_timer_accepted",
+    "admin_timer_ignored",
+    "admin_timer_snoozed",
 }
 
 EXCLUDED_PERSON_AUDIT_ACTION_KEYS = {
@@ -163,7 +169,7 @@ def normalize_member_event(event: dict[str, Any]) -> Optional[AuditTimelineEvent
         event_data = {}
 
     details = []
-    for key in ("reason", "note", "status", "old_value", "new_value"):
+    for key in ("reason", "note", "status", "old_value", "new_value", "title", "recurrence"):
         value = event_data.get(key)
         if value:
             details.append(str(value))
@@ -173,6 +179,8 @@ def normalize_member_event(event: dict[str, Any]) -> Optional[AuditTimelineEvent
         reference = str(event_data["ref_code"])
     elif event_data.get("sanction_id"):
         reference = f"Sanction #{event_data['sanction_id']}"
+    elif event_data.get("reminder_id"):
+        reference = f"Timer #{event_data['reminder_id']}"
 
     return AuditTimelineEvent(
         source="MemberManager",

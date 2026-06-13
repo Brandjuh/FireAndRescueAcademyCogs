@@ -39,6 +39,28 @@ class MemberManagerAuditTests(unittest.TestCase):
 
         self.assertIsNone(normalize_member_event({"event_type": "profile_viewed"}))
 
+    def test_admin_timer_events_normalize_for_audit_overview(self):
+        event = normalize_member_event(
+            {
+                "event_type": "admin_timer_snoozed",
+                "timestamp": 1_765_000_000,
+                "triggered_by": "admintimednotifications",
+                "actor_id": 123,
+                "event_data": {
+                    "reminder_id": 42,
+                    "title": "Weekly report",
+                    "recurrence": "weekly",
+                    "status": "snoozed",
+                },
+            }
+        )
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event.title, "Admin Timer Snoozed")
+        self.assertEqual(event.reference, "Timer #42")
+        self.assertIn("Weekly report", event.details)
+        self.assertIn("snoozed", event.details)
+
     def test_course_completed_logs_are_not_member_audit_entries(self):
         self.assertFalse(should_include_log_row({"action_key": "course_completed"}))
         self.assertFalse(should_include_log_row({"action_key": "course_created"}))
