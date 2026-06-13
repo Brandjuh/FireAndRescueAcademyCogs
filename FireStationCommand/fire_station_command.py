@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - dependency is declared in info.json
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.1.3"
+    __version__ = "1.1.4"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
@@ -45,6 +45,7 @@ class FireStationCommand(commands.Cog):
             "credits": 0,
             "vehicles": [],
             "next_vehicle_id": 1,
+            "equipment": [],
             "station_level": 1,
             "command_level": 1,
             "xp": 0,
@@ -59,8 +60,10 @@ class FireStationCommand(commands.Cog):
         self.config.register_user(**default_user)
 
         self.vehicle_definitions = self._build_vehicle_definitions()
+        self.equipment_definitions = self._equipment_definitions()
         self.INCIDENTS = self._build_incidents()
         self.VEHICLE_CATALOG = self._build_vehicle_catalog()
+        self.EQUIPMENT_CATALOG = self._build_equipment_catalog()
 
     # --------------------------------------------------
     # Static fallback data
@@ -257,11 +260,46 @@ class FireStationCommand(commands.Cog):
                 definitions[item_id] = item
         return definitions
 
-    def _station_capabilities(self, vehicles: Any) -> Dict[str, float]:
+    def _equipment_inventory_counts(self, equipment_inventory: Any) -> Dict[str, int]:
+        if isinstance(equipment_inventory, dict):
+            counts: Dict[str, int] = {}
+            for item_id, quantity in equipment_inventory.items():
+                try:
+                    count = int(quantity)
+                except (TypeError, ValueError):
+                    continue
+                if count > 0:
+                    counts[str(item_id)] = count
+            return counts
+
+        if not isinstance(equipment_inventory, list):
+            return {}
+
+        counts: Dict[str, int] = {}
+        for item in equipment_inventory:
+            if isinstance(item, str):
+                item_id = item
+                quantity = 1
+            elif isinstance(item, dict):
+                item_id = item.get("catalog_id") or item.get("id")
+                quantity = item.get("quantity", 1)
+            else:
+                continue
+            if not item_id:
+                continue
+            try:
+                count = int(quantity)
+            except (TypeError, ValueError):
+                count = 1
+            if count > 0:
+                counts[str(item_id)] = counts.get(str(item_id), 0) + count
+        return counts
+
+    def _station_capabilities(self, vehicles: Any, equipment_inventory: Any = None) -> Dict[str, float]:
         if not isinstance(vehicles, list):
             vehicles = []
 
-        equipment_definitions = self._equipment_definitions()
+        equipment_counts = self._equipment_inventory_counts(equipment_inventory)
         totals: Dict[str, float] = {}
         for owned in vehicles:
             if not isinstance(owned, dict):
@@ -277,9 +315,13 @@ class FireStationCommand(commands.Cog):
             equipment_slots = vehicle.get("equipment_slots", [])
             if isinstance(equipment_slots, list):
                 for equipment_id in equipment_slots:
-                    equipment = equipment_definitions.get(str(equipment_id))
+                    equipment_key = str(equipment_id)
+                    if equipment_counts.get(equipment_key, 0) <= 0:
+                        continue
+                    equipment = self.equipment_definitions.get(equipment_key)
                     if not equipment:
                         continue
+                    equipment_counts[equipment_key] -= 1
                     for capability, value in self._capabilities_from(equipment).items():
                         totals[capability] = totals.get(capability, 0.0) + value
 
@@ -293,7 +335,7 @@ class FireStationCommand(commands.Cog):
         required_staff = int(mission.get("required_staff", self._required_staff_for_mission(mission)))
 
         required_caps = self._capabilities_from(mission)
-        station_caps = self._station_capabilities(vehicles)
+        station_caps = self._station_capabilities(vehicles, data.get("equipment", []))
         if required_caps:
             covered = 0.0
             needed = 0.0
@@ -481,6 +523,21 @@ class FireStationCommand(commands.Cog):
             names.append(name if isinstance(name, str) else vehicle_key)
         return ", ".join(names)
 
+    def _missing_required_equipment_ids(self, mission: Dict[str, Any], owned_equipment: Any) -> List[str]:
+        required = mission.get("required_equipment", [])
+        if not isinstance(required, list) or not required:
+            return []
+
+        counts = self._equipment_inventory_counts(owned_equipment)
+        missing: List[str] = []
+        for equipment_id in required:
+            equipment_key = str(equipment_id)
+            if counts.get(equipment_key, 0) <= 0:
+                missing.append(equipment_key)
+            else:
+                counts[equipment_key] -= 1
+        return missing
+
     def _missing_required_vehicle_ids(self, mission: Dict[str, Any], owned_vehicles: Any) -> List[str]:
         required = mission.get("required_vehicles", [])
         if not isinstance(required, list) or not required:
@@ -512,6 +569,14 @@ class FireStationCommand(commands.Cog):
             embed.add_field(
                 name="Station readiness",
                 value=f"Missing vehicle types: {missing_text}",
+                inline=False,
+            )
+        missing_equipment = mission.get("missing_required_equipment", [])
+        missing_equipment_text = self._equipment_display_text(missing_equipment)
+        if missing_equipment_text:
+            embed.add_field(
+                name="Equipment readiness",
+                value=f"Missing equipment: {missing_equipment_text}",
                 inline=False,
             )
 
@@ -571,6 +636,21 @@ class FireStationCommand(commands.Cog):
             }
 
         return catalog or self._fallback_vehicle_catalog()
+
+    def _build_equipment_catalog(self) -> Dict[str, Dict[str, Any]]:
+        catalog: Dict[str, Dict[str, Any]] = {}
+        for equipment_id, equipment in self.equipment_definitions.items():
+            name = equipment.get("name")
+            if not isinstance(name, str):
+                continue
+            catalog[equipment_id] = {
+                "name": name,
+                "price": int(equipment.get("base_cost", 0)),
+                "unlock_level": self._unlock_level(equipment),
+                "capabilities": equipment.get("capabilities", {}),
+                "required_training": equipment.get("required_training", []),
+            }
+        return catalog
 
     # --------------------------------------------------
     # Helpers
@@ -682,6 +762,12 @@ class FireStationCommand(commands.Cog):
         await user_conf.started.set(True)
         await user_conf.vehicles.set([starter_vehicle])
         await user_conf.next_vehicle_id.set(2)
+        await user_conf.equipment.set(
+            [
+                {"catalog_id": "hose", "quantity": 1},
+                {"catalog_id": "basic_tools", "quantity": 1},
+            ]
+        )
         await user_conf.station_level.set(1)
         await user_conf.command_level.set(1)
         await user_conf.xp.set(0)
@@ -724,6 +810,9 @@ class FireStationCommand(commands.Cog):
 
     def _vehicle_is_unlocked(self, vehicle: Dict[str, Any], command_level: int) -> bool:
         return command_level >= int(vehicle.get("unlock_level", 1))
+
+    def _equipment_is_unlocked(self, equipment: Dict[str, Any], command_level: int) -> bool:
+        return command_level >= int(equipment.get("unlock_level", 1))
 
     def _pick_random_incident(self, data: Dict[str, Any] | None = None) -> Dict[str, Any]:
         if not data:
@@ -849,6 +938,7 @@ class FireStationCommand(commands.Cog):
             )
 
         vehicles = data.get("vehicles", [])
+        equipment_count = sum(self._equipment_inventory_counts(data.get("equipment", [])).values())
         credits = await self._get_credits(user)
         lvl = int(data.get("station_level", 1))
         xp = int(data.get("xp", 0))
@@ -877,6 +967,7 @@ class FireStationCommand(commands.Cog):
             value=f"{len(vehicles)} / max {self._max_vehicles(lvl)}",
             inline=False,
         )
+        embed.add_field(name="Equipment", value=f"{equipment_count} item(s)", inline=True)
         if active:
             embed.add_field(
                 name="Active incident",
@@ -1099,6 +1190,7 @@ class FireStationCommand(commands.Cog):
         xp = int(data.get("xp", 0))
         command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
         vehicles = data.get("vehicles", [])
+        equipment_count = sum(self._equipment_inventory_counts(data.get("equipment", [])).values())
         max_veh = self._max_vehicles(lvl)
         embed = discord.Embed(
             title="Vehicle shop",
@@ -1117,6 +1209,31 @@ class FireStationCommand(commands.Cog):
         ]
         if locked:
             embed.add_field(name="Locked vehicles", value=", ".join(locked), inline=False)
+        return embed
+
+    def _build_equipment_shop_embed(self, data: Dict[str, Any]) -> discord.Embed:
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
+        counts = self._equipment_inventory_counts(data.get("equipment", []))
+        owned = [
+            f"{self.EQUIPMENT_CATALOG.get(item_id, {}).get('name', item_id)} x{quantity}"
+            for item_id, quantity in sorted(counts.items())
+        ]
+        locked = [
+            f"{equipment['name']} (level {equipment.get('unlock_level', 1)})"
+            for equipment in self.EQUIPMENT_CATALOG.values()
+            if not self._equipment_is_unlocked(equipment, command_level)
+        ]
+
+        embed = discord.Embed(
+            title="Equipment shop",
+            description="Buy equipment to improve mission readiness.",
+            color=discord.Color.blue(),
+        )
+        embed.add_field(name="Owned equipment", value=", ".join(owned) if owned else "None", inline=False)
+        embed.add_field(name="Command XP", value=self._xp_progress_text(int(data.get("xp", 0)), command_level), inline=False)
+        if locked:
+            embed.add_field(name="Locked equipment", value=", ".join(locked), inline=False)
         return embed
 
     async def _send_vehicle_shop(
@@ -1180,6 +1297,10 @@ class FireStationCommand(commands.Cog):
             guild_id=guild.id if guild else None,
         )
         mission["missing_required_vehicles"] = self._missing_required_vehicle_ids(incident, data.get("vehicles", []))
+        mission["missing_required_equipment"] = self._missing_required_equipment_ids(
+            incident,
+            data.get("equipment", []),
+        )
         mission["readiness_score"] = self._readiness_score(incident, data)
         await user_conf.active_mission.set(mission)
 
@@ -1310,6 +1431,7 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Level", value=str(lvl), inline=True)
         embed.add_field(name="Type", value=stype.capitalize(), inline=True)
         embed.add_field(name="Vehicle capacity", value=f"{len(vehicles)} / {max_veh}", inline=True)
+        embed.add_field(name="Equipment", value=f"{equipment_count} item(s)", inline=True)
         embed.add_field(name="Command XP", value=self._xp_progress_text(xp, command_level), inline=False)
 
         embed.add_field(
@@ -1680,6 +1802,17 @@ class FireStationCommand(commands.Cog):
         embed = self._build_vehicle_shop_embed(data)
         await ctx.send(embed=embed, view=view)
 
+    @fsc_group.command(name="equipment")
+    async def fsc_equipment(self, ctx: commands.Context):
+        """Open the equipment shop."""
+        if not await self._ensure_started(ctx):
+            return
+
+        data = await self.config.user(ctx.author).all()
+        embed = self._build_equipment_shop_embed(data)
+        view = EquipmentShopView(self, ctx.channel, ctx.author, ctx.guild, data=data)
+        await ctx.send(embed=embed, view=view)
+
     @fsc_group.command(name="mission")
     async def fsc_mission(self, ctx: commands.Context):
         """Start a new incident if none is active."""
@@ -1705,6 +1838,10 @@ class FireStationCommand(commands.Cog):
             guild_id=ctx.guild.id if ctx.guild else None,
         )
         mission["missing_required_vehicles"] = self._missing_required_vehicle_ids(incident, data.get("vehicles", []))
+        mission["missing_required_equipment"] = self._missing_required_equipment_ids(
+            incident,
+            data.get("equipment", []),
+        )
         mission["readiness_score"] = self._readiness_score(incident, data)
         await user_conf.active_mission.set(mission)
 
@@ -2192,6 +2329,91 @@ class FireStationCommand(commands.Cog):
             return
         await interaction.response.send_message(embed=embed, ephemeral=False)
 
+    async def _confirm_equipment_purchase(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        equipment_id: str,
+        *,
+        edit_message: bool = False,
+        guild: discord.Guild | None = None,
+    ):
+        user_conf = self.config.user(user)
+        data = await user_conf.all()
+
+        if equipment_id not in self.EQUIPMENT_CATALOG:
+            if edit_message:
+                embed = self._build_equipment_shop_embed(data)
+                embed.add_field(name="Purchase failed", value="Unknown equipment type.", inline=False)
+                view = EquipmentShopView(self, channel, user, guild or interaction.guild, data=data)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
+            await interaction.response.send_message("Unknown equipment type.", ephemeral=True)
+            return
+
+        equipment = self.EQUIPMENT_CATALOG[equipment_id]
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
+        if not self._equipment_is_unlocked(equipment, command_level):
+            required_level = int(equipment.get("unlock_level", 1))
+            if edit_message:
+                embed = self._build_equipment_shop_embed(data)
+                embed.add_field(
+                    name="Purchase locked",
+                    value=f"{equipment['name']} requires command level {required_level}.",
+                    inline=False,
+                )
+                view = EquipmentShopView(self, channel, user, guild or interaction.guild, data=data)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
+            await interaction.response.send_message(
+                f"Purchase locked: command level {required_level} required.", ephemeral=True
+            )
+            return
+
+        price = int(equipment.get("price", 0))
+        credits = await self._get_credits(user)
+        if credits < price or not await self._spend(user, price):
+            if edit_message:
+                embed = self._build_equipment_shop_embed(data)
+                embed.add_field(
+                    name="Purchase failed",
+                    value="You do not have enough credits to complete this purchase.",
+                    inline=False,
+                )
+                view = EquipmentShopView(self, channel, user, guild or interaction.guild, data=data)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
+            await interaction.response.send_message(
+                "You do not have enough credits to complete this purchase.",
+                ephemeral=True,
+            )
+            return
+
+        equipment_inventory = data.get("equipment", [])
+        counts = self._equipment_inventory_counts(equipment_inventory)
+        counts[equipment_id] = counts.get(equipment_id, 0) + 1
+        updated_inventory = [
+            {"catalog_id": item_id, "quantity": quantity}
+            for item_id, quantity in sorted(counts.items())
+        ]
+        await user_conf.equipment.set(updated_inventory)
+
+        updated_data = dict(data)
+        updated_data["equipment"] = updated_inventory
+        embed = discord.Embed(
+            title="Equipment purchased",
+            description=f"Purchased **{equipment['name']}** for **{price:,}** credits.",
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="Owned", value=f"{counts[equipment_id]} total", inline=True)
+        if edit_message:
+            view = EquipmentShopView(self, channel, user, guild or interaction.guild, data=updated_data)
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+            return
+        await interaction.response.send_message(embed=embed, ephemeral=False)
+
 
 class FscStartView(discord.ui.View):
     def __init__(self, cog: FireStationCommand, user: discord.abc.User):
@@ -2289,6 +2511,25 @@ class FscDashboardView(discord.ui.View):
             embed=embed,
             view=VehicleShopView(self.cog, self.channel, self.user, self.guild, data=data),
         )
+
+    @discord.ui.button(label="Equipment", style=discord.ButtonStyle.secondary)
+    async def equipment(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.config.user(self.user).all()
+        if not data["started"]:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Action required", value="Create a station first.", inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=FscStartView(self.cog, self.user))
+            return
+
+        embed = self.cog._build_equipment_shop_embed(data)
+        view = EquipmentShopView(
+            self.cog,
+            interaction.channel or self.channel,
+            self.user,
+            interaction.guild or self.guild,
+            data=data,
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
 
     @discord.ui.button(label="Upgrade", style=discord.ButtonStyle.primary)
     async def upgrade(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2455,6 +2696,10 @@ class FscDashboardView(discord.ui.View):
             incident,
             data.get("vehicles", []),
         )
+        mission["missing_required_equipment"] = self.cog._missing_required_equipment_ids(
+            incident,
+            data.get("equipment", []),
+        )
         mission["readiness_score"] = self.cog._readiness_score(incident, data)
         await self.cog.config.user(self.user).active_mission.set(mission)
 
@@ -2483,6 +2728,7 @@ class FscDashboardView(discord.ui.View):
         embed.add_field(name="Recruit", value="`[p]fsc recruit <amount>`", inline=False)
         embed.add_field(name="Upgrade", value="`[p]fsc upgrade`", inline=False)
         embed.add_field(name="Career station", value="`[p]fsc career`", inline=False)
+        embed.add_field(name="Equipment", value="`[p]fsc equipment`", inline=False)
         await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
 
 
@@ -2920,6 +3166,134 @@ class VehicleShopView(discord.ui.View):
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
 
+class EquipmentShopSelect(discord.ui.Select):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        guild: discord.Guild | None = None,
+        command_level: int = 1,
+    ):
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+        self.guild = guild
+
+        options: List[discord.SelectOption] = []
+        for equipment_id, equipment in self.cog.EQUIPMENT_CATALOG.items():
+            unlock_level = int(equipment.get("unlock_level", 1))
+            locked = command_level < unlock_level
+            label = f"{equipment['name']} ({equipment['price']:,} cr)"
+            description = None
+            if locked:
+                description = f"Requires command level {unlock_level}"
+                label = f"Locked - {label}"
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    value=equipment_id,
+                    description=description,
+                    default=False,
+                    emoji=None,
+                )
+            )
+
+        if not options:
+            options = [discord.SelectOption(label="No equipment available", value="none")]
+
+        super().__init__(
+            placeholder="Select equipment to buy",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        choice = self.values[0]
+        if choice == "none":
+            await interaction.response.send_message("No equipment available.", ephemeral=True)
+            return
+
+        equipment = self.cog.EQUIPMENT_CATALOG.get(choice)
+        if not equipment:
+            await interaction.response.send_message("Unknown equipment type.", ephemeral=True)
+            return
+
+        data = await self.cog.config.user(self.user).all()
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", self.cog._command_level_for_xp(xp)))
+        if not self.cog._equipment_is_unlocked(equipment, command_level):
+            required_level = int(equipment.get("unlock_level", 1))
+            embed = self.cog._build_equipment_shop_embed(data)
+            embed.add_field(
+                name="Purchase locked",
+                value=f"{equipment['name']} requires command level {required_level}.",
+                inline=False,
+            )
+            view = EquipmentShopView(
+                self.cog,
+                self.channel,
+                self.user,
+                interaction.guild or self.guild,
+                data=data,
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+            return
+
+        price = int(equipment["price"])
+        embed = discord.Embed(
+            title="Confirm equipment purchase",
+            description=f"Buy **{equipment['name']}** for **{price:,}** credits?",
+            color=discord.Color.blue(),
+        )
+        capabilities = equipment.get("capabilities", {})
+        if isinstance(capabilities, dict) and capabilities:
+            capability_text = ", ".join(f"{name}: {value}" for name, value in capabilities.items())
+            embed.add_field(name="Capabilities", value=capability_text, inline=False)
+
+        view = ConfirmEquipmentPurchaseView(
+            self.cog,
+            self.channel,
+            self.user,
+            choice,
+            guild=interaction.guild or self.guild,
+            edit_message=True,
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+
+class EquipmentShopView(discord.ui.View):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        guild: discord.Guild | None = None,
+        data: Dict[str, Any] | None = None,
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+        self.guild = guild
+        data = data or {}
+        xp = int(data.get("xp", 0))
+        command_level = int(data.get("command_level", cog._command_level_for_xp(xp)))
+        self.add_item(EquipmentShopSelect(cog, channel, user, guild, command_level=command_level))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = await self.cog._build_dashboard_embed(self.user)
+        channel = interaction.channel or self.channel
+        guild = interaction.guild or self.guild
+        view = FscDashboardView(self.cog, self.user, channel, guild)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+
 class ConfirmRecruitView(discord.ui.View):
     def __init__(
         self,
@@ -3160,6 +3534,69 @@ class ConfirmVehiclePurchaseView(discord.ui.View):
             embed = self.cog._build_vehicle_shop_embed(data)
             embed.add_field(name="Purchase cancelled", value="No vehicle was purchased.", inline=False)
             view = VehicleShopView(
+                self.cog,
+                self.channel,
+                self.user,
+                interaction.guild or self.guild,
+                data=data,
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+            self.stop()
+            return
+        await interaction.response.send_message("Purchase cancelled.", ephemeral=True)
+        self.stop()
+
+
+class ConfirmEquipmentPurchaseView(discord.ui.View):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        equipment_id: str,
+        *,
+        guild: discord.Guild | None = None,
+        edit_message: bool = False,
+    ):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+        self.equipment_id = equipment_id
+        self.guild = guild
+        self.edit_message = edit_message
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.message.edit(view=self)
+        await self.cog._confirm_equipment_purchase(
+            interaction,
+            self.channel,
+            self.user,
+            self.equipment_id,
+            edit_message=self.edit_message,
+            guild=self.guild,
+        )
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        if self.edit_message:
+            data = await self.cog.config.user(self.user).all()
+            embed = self.cog._build_equipment_shop_embed(data)
+            embed.add_field(name="Purchase cancelled", value="No equipment was purchased.", inline=False)
+            view = EquipmentShopView(
                 self.cog,
                 self.channel,
                 self.user,

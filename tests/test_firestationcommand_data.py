@@ -7,6 +7,7 @@ from FireStationCommand.fire_station_command import (
     ConfirmCareerView,
     ConfirmUpgradeView,
     ConfirmVehiclePurchaseView,
+    EquipmentShopView,
     FireStationCommand,
     FscDashboardView,
     RecruitmentView,
@@ -19,6 +20,8 @@ def _cog_with_game_data(game_data):
     cog = object.__new__(FireStationCommand)
     cog.game_data = game_data
     cog.vehicle_definitions = FireStationCommand._build_vehicle_definitions(cog)
+    cog.equipment_definitions = FireStationCommand._equipment_definitions(cog)
+    cog.EQUIPMENT_CATALOG = FireStationCommand._build_equipment_catalog(cog)
     cog._utcnow = lambda: datetime(2026, 6, 12, 12, 0, tzinfo=timezone.utc)
     return cog
 
@@ -245,6 +248,48 @@ def test_readiness_score_combines_capabilities_staff_vehicles_and_level():
     assert FireStationCommand._readiness_score(cog, mission, data) == 100
 
 
+def test_readiness_score_requires_owned_equipment_for_slot_capabilities():
+    cog = _cog_with_game_data(
+        {
+            "vehicles": {
+                "vehicles": [
+                    {
+                        "id": "engine_basic",
+                        "name": "Standard Fire Engine",
+                        "required_staff": 4,
+                        "capabilities": {"fire_suppression": 20},
+                        "equipment_slots": ["hose"],
+                    }
+                ]
+            },
+            "equipment": {
+                "equipment": [
+                    {"id": "hose", "capabilities": {"fire_suppression": 30}},
+                ]
+            },
+        }
+    )
+    mission = {
+        "required_staff": 4,
+        "required_vehicles": ["engine_basic"],
+        "recommended_level": 1,
+        "capabilities": {"fire_suppression": 50},
+    }
+    without_equipment = {
+        "command_level": 1,
+        "staff_total": 4,
+        "vehicles": [{"id": 1, "catalog_id": "engine_basic"}],
+        "equipment": [],
+    }
+    with_equipment = {
+        **without_equipment,
+        "equipment": [{"catalog_id": "hose", "quantity": 1}],
+    }
+
+    assert FireStationCommand._readiness_score(cog, mission, without_equipment) < 100
+    assert FireStationCommand._readiness_score(cog, mission, with_equipment) == 100
+
+
 def test_random_incident_selection_prefers_current_level_ready_missions(monkeypatch):
     cog = _cog_with_game_data({})
     cog.INCIDENTS = [
@@ -417,6 +462,16 @@ def test_missing_required_vehicle_ids_compares_required_types_to_owned_catalog_i
     assert FireStationCommand._missing_required_vehicle_ids(cog, mission, "bad") == ["engine_basic", "rescue_basic"]
 
 
+def test_missing_required_equipment_ids_compares_required_types_to_owned_inventory():
+    cog = _cog_with_game_data({})
+    mission = {"required_equipment": ["hose", "rescue_tools"]}
+    owned_equipment = [{"catalog_id": "hose", "quantity": 1}]
+
+    assert FireStationCommand._missing_required_equipment_ids(cog, mission, owned_equipment) == ["rescue_tools"]
+    assert FireStationCommand._missing_required_equipment_ids(cog, {"required_equipment": []}, owned_equipment) == []
+    assert FireStationCommand._missing_required_equipment_ids(cog, mission, "bad") == ["hose", "rescue_tools"]
+
+
 def test_recruitment_embed_shows_hireable_staff():
     user = object()
     cog = _cog_with_game_data({})
@@ -586,6 +641,77 @@ def test_vehicle_purchase_confirm_edits_message_and_stores_vehicle():
     ]
     assert user_data["next_vehicle_id"] == 2
     assert user_data["credits"] == 50000
+
+
+def test_equipment_shop_embed_shows_owned_and_locked_equipment():
+    cog = _cog_with_game_data(
+        {
+            "equipment": {
+                "equipment": [
+                    {"id": "hose", "name": "Fire Hose Set", "base_cost": 1500, "unlock_level": 1},
+                    {
+                        "id": "rescue_tools",
+                        "name": "Hydraulic Rescue Tools",
+                        "base_cost": 5000,
+                        "unlock_level": 3,
+                    },
+                ]
+            }
+        }
+    )
+
+    embed = FireStationCommand._build_equipment_shop_embed(
+        cog,
+        {
+            "xp": 0,
+            "command_level": 1,
+            "equipment": [{"catalog_id": "hose", "quantity": 2}],
+        },
+    )
+
+    fields = {field["name"]: field["value"] for field in embed.fields}
+    assert fields["Owned equipment"] == "Fire Hose Set x2"
+    assert fields["Locked equipment"] == "Hydraulic Rescue Tools (level 3)"
+
+
+def test_equipment_purchase_confirm_edits_message_and_stores_inventory():
+    user = type("User", (), {"id": 123})()
+    user_data = {
+        "started": True,
+        "station_level": 1,
+        "command_level": 1,
+        "xp": 0,
+        "equipment": [{"catalog_id": "hose", "quantity": 1}],
+        "credits": 10000,
+    }
+    cog = _cog_with_game_data(
+        {
+            "equipment": {
+                "equipment": [
+                    {"id": "hose", "name": "Fire Hose Set", "base_cost": 1500, "unlock_level": 1},
+                ]
+            }
+        }
+    )
+    cog.config = _Config(user_data, {})
+    interaction = _Interaction(user)
+
+    asyncio.run(
+        cog._confirm_equipment_purchase(
+            interaction,
+            object(),
+            user,
+            "hose",
+            edit_message=True,
+            guild=object(),
+        )
+    )
+
+    edited = interaction.response.edited
+    assert edited["embed"].kwargs["title"] == "Equipment purchased"
+    assert isinstance(edited["view"], EquipmentShopView)
+    assert user_data["equipment"] == [{"catalog_id": "hose", "quantity": 2}]
+    assert user_data["credits"] == 8500
 
 
 def test_invalid_yaml_shapes_fall_back_to_static_catalog_and_incidents():

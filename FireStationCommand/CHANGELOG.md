@@ -26,10 +26,13 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added `progression.yaml` with level XP thresholds and planned unlock data.
 - Added mission readiness scoring based on capabilities, staffing, vehicle requirements, and command level.
 - Added capability values to the initial mission, vehicle, and equipment config data.
+- Added starter equipment inventory for new stations.
+- Added an equipment shop command and dashboard button.
+- Added equipment purchase confirmation flow with command-level locks.
 
 ### Changed
 
-- Bumped the cog version to `1.1.3`.
+- Bumped the cog version to `1.1.4`.
 - Vehicle shop options now come from `data/config/vehicles.yaml` when available.
 - Mission definitions now come from `data/config/missions.yaml` when available.
 - Mission embeds now show configured mission images when available.
@@ -58,6 +61,9 @@ All notable changes to FireStationCommand will be documented in this file.
 - Station upgrades now require the matching command level in addition to credits.
 - Vehicle shop entries now show locked vehicles, and purchases are blocked until the required command level is reached.
 - Rescue Call is now level 2 content instead of a regular level 1 incident.
+- Mission readiness now only counts equipment that the station actually owns.
+- Mission embeds now warn when required equipment is missing.
+- Station and dashboard embeds now show owned equipment counts.
 
 ### Fixed
 
@@ -73,7 +79,7 @@ All notable changes to FireStationCommand will be documented in this file.
 ### Known Issues
 
 - Mission timers still rely on in-memory `asyncio.sleep` calls.
-- Training, equipment purchasing, expansions, maintenance, and reputation config files are present but not fully wired into gameplay yet.
+- Training, expansions, maintenance, and reputation config files are present but not fully wired into gameplay yet.
 
 ## [1.1.1]
 
