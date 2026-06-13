@@ -224,6 +224,266 @@
         "water_rescue": 60
       },
       "image": "Images/Equipment/water_supply_equipment.png"
+    },
+    {
+      "id": "traffic_control_kit",
+      "name": "Traffic Control Kit",
+      "category": "safety",
+      "unlock_level": 1,
+      "base_cost": 1800,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 22,
+        "traffic_control": 20
+      },
+      "image": "Images/Equipment/traffic_control_kit.png"
+    },
+    {
+      "id": "ems_bag",
+      "name": "EMS Response Bag",
+      "category": "ems",
+      "unlock_level": 1,
+      "base_cost": 2200,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "medical_care": 24,
+        "patient_stabilization": 18
+      },
+      "image": "Images/Equipment/ems_bag.png"
+    },
+    {
+      "id": "law_enforcement_kit",
+      "name": "Law Enforcement Kit",
+      "category": "police",
+      "unlock_level": 1,
+      "base_cost": 2400,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 25,
+        "scene_safety": 12
+      },
+      "image": "Images/Equipment/law_enforcement_kit.png"
+    },
+    {
+      "id": "throw_bag",
+      "name": "Water Rescue Throw Bag",
+      "category": "water",
+      "unlock_level": 1,
+      "base_cost": 1600,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "water_rescue": 18,
+        "scene_safety": 10
+      },
+      "image": "Images/Equipment/throw_bag.png"
+    },
+    {
+      "id": "wildland_gear",
+      "name": "Wildland Fire Gear",
+      "category": "fire",
+      "unlock_level": 2,
+      "base_cost": 4200,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "wildland_firefighting": 28,
+        "fire_suppression": 16
+      },
+      "image": "Images/Equipment/wildland_gear.png"
+    },
+    {
+      "id": "technical_rescue_kit",
+      "name": "Technical Rescue Kit",
+      "category": "rescue",
+      "unlock_level": 2,
+      "base_cost": 6200,
+      "durability": 100,
+      "required_training": [
+        "technical_rescue"
+      ],
+      "capabilities": {
+        "technical_rescue": 34,
+        "stabilization": 18
+      },
+      "image": "Images/Equipment/technical_rescue_kit.png"
+    },
+    {
+      "id": "water_rescue_gear",
+      "name": "Water Rescue Gear",
+      "category": "water",
+      "unlock_level": 2,
+      "base_cost": 5200,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "water_rescue": 34,
+        "search": 12
+      },
+      "image": "Images/Equipment/water_rescue_gear.png"
+    },
+    {
+      "id": "command_tablet",
+      "name": "Incident Command Tablet",
+      "category": "command",
+      "unlock_level": 2,
+      "base_cost": 5000,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "incident_command": 30,
+        "scene_safety": 14
+      },
+      "image": "Images/Equipment/command_tablet.png"
+    },
+    {
+      "id": "investigation_kit",
+      "name": "Investigation Kit",
+      "category": "investigation",
+      "unlock_level": 2,
+      "base_cost": 4600,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "investigation": 30,
+        "law_enforcement": 12
+      },
+      "image": "Images/Equipment/investigation_kit.png"
+    },
+    {
+      "id": "patient_monitor",
+      "name": "Patient Monitor",
+      "category": "ems",
+      "unlock_level": 3,
+      "base_cost": 6500,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "medical_care": 38,
+        "patient_stabilization": 28
+      },
+      "image": "Images/Equipment/patient_monitor.png"
+    },
+    {
+      "id": "hazmat_kit",
+      "name": "HazMat Detection Kit",
+      "category": "hazmat",
+      "unlock_level": 3,
+      "base_cost": 9000,
+      "durability": 100,
+      "required_training": [
+        "breathing_apparatus"
+      ],
+      "capabilities": {
+        "hazmat": 40,
+        "scene_safety": 18
+      },
+      "image": "Images/Equipment/hazmat_kit.png"
+    },
+    {
+      "id": "search_camera",
+      "name": "Search Camera",
+      "category": "rescue",
+      "unlock_level": 3,
+      "base_cost": 6800,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "search": 36,
+        "technical_rescue": 14
+      },
+      "image": "Images/Equipment/search_camera.png"
+    },
+    {
+      "id": "light_tower_kit",
+      "name": "Portable Light Tower Kit",
+      "category": "support",
+      "unlock_level": 4,
+      "base_cost": 7800,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 32,
+        "incident_support": 22
+      },
+      "image": "Images/Equipment/light_tower_kit.png"
+    },
+    {
+      "id": "decon_kit",
+      "name": "Decontamination Kit",
+      "category": "hazmat",
+      "unlock_level": 4,
+      "base_cost": 11000,
+      "durability": 100,
+      "required_training": [
+        "breathing_apparatus"
+      ],
+      "capabilities": {
+        "hazmat": 34,
+        "decontamination": 40
+      },
+      "image": "Images/Equipment/decon_kit.png"
+    },
+    {
+      "id": "rope_rescue_kit",
+      "name": "Rope Rescue Kit",
+      "category": "rescue",
+      "unlock_level": 5,
+      "base_cost": 12500,
+      "durability": 100,
+      "required_training": [
+        "technical_rescue"
+      ],
+      "capabilities": {
+        "technical_rescue": 42,
+        "search": 18
+      },
+      "image": "Images/Equipment/rope_rescue_kit.png"
+    },
+    {
+      "id": "crowd_control_gear",
+      "name": "Crowd Control Gear",
+      "category": "police",
+      "unlock_level": 6,
+      "base_cost": 13000,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 36,
+        "scene_safety": 30
+      },
+      "image": "Images/Equipment/crowd_control_gear.png"
+    },
+    {
+      "id": "tactical_gear",
+      "name": "Tactical Entry Gear",
+      "category": "police",
+      "unlock_level": 7,
+      "base_cost": 16000,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 45,
+        "forcible_entry": 20
+      },
+      "image": "Images/Equipment/tactical_gear.png"
+    },
+    {
+      "id": "aviation_rescue_kit",
+      "name": "Aviation Rescue Kit",
+      "category": "aviation",
+      "unlock_level": 8,
+      "base_cost": 19000,
+      "durability": 100,
+      "required_training": [],
+      "capabilities": {
+        "aviation_rescue": 46,
+        "fire_suppression": 22
+      },
+      "image": "Images/Equipment/aviation_rescue_kit.png"
     }
   ]
 }

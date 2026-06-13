@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - dependency is declared in info.json
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.2.1"
+    __version__ = "1.2.2"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
@@ -919,6 +919,7 @@ class FireStationCommand(commands.Cog):
             catalog[equipment_id] = {
                 "name": name,
                 "price": int(equipment.get("base_cost", 0)),
+                "image": equipment.get("image"),
                 "unlock_level": self._unlock_level(equipment),
                 "capabilities": equipment.get("capabilities", {}),
                 "required_training": equipment.get("required_training", []),
@@ -1538,6 +1539,22 @@ class FireStationCommand(commands.Cog):
         if image_url:
             embed.set_image(url=image_url)
 
+    def _equipment_image_url(self, equipment: Dict[str, Any]) -> str | None:
+        image = equipment.get("image")
+        return self._asset_image_url(image if isinstance(image, str) else None)
+
+    def _apply_equipment_image(self, embed: discord.Embed, equipment: Dict[str, Any]) -> None:
+        image_url = self._equipment_image_url(equipment)
+        if image_url:
+            embed.set_image(url=image_url)
+
+    @staticmethod
+    def _compact_display_list(items: List[str], *, limit: int = 12) -> str:
+        if len(items) <= limit:
+            return ", ".join(items)
+        shown = ", ".join(items[:limit])
+        return f"{shown}, +{len(items) - limit} more"
+
     def _build_vehicle_shop_embed(self, data: Dict[str, Any]) -> discord.Embed:
         xp = int(data.get("xp", 0))
         command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
@@ -1559,7 +1576,7 @@ class FireStationCommand(commands.Cog):
             if not self._vehicle_is_unlocked(vehicle, command_level)
         ]
         if locked:
-            embed.add_field(name="Locked vehicles", value=", ".join(locked), inline=False)
+            embed.add_field(name="Locked vehicles", value=self._compact_display_list(locked), inline=False)
         return embed
 
     def _build_equipment_shop_embed(self, data: Dict[str, Any]) -> discord.Embed:
@@ -1584,7 +1601,7 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Owned equipment", value=", ".join(owned) if owned else "None", inline=False)
         embed.add_field(name="Command XP", value=self._xp_progress_text(int(data.get("xp", 0)), command_level), inline=False)
         if locked:
-            embed.add_field(name="Locked equipment", value=", ".join(locked), inline=False)
+            embed.add_field(name="Locked equipment", value=self._compact_display_list(locked), inline=False)
         return embed
 
     def _build_training_embed(self, data: Dict[str, Any]) -> discord.Embed:
@@ -3193,6 +3210,7 @@ class FireStationCommand(commands.Cog):
             color=discord.Color.green(),
         )
         embed.add_field(name="Owned", value=f"{counts[equipment_id]} total", inline=True)
+        self._apply_equipment_image(embed, equipment)
         if edit_message:
             view = EquipmentShopView(self, channel, user, guild or interaction.guild, data=updated_data)
             await interaction.response.edit_message(content=None, embed=embed, view=view)
@@ -4202,6 +4220,7 @@ class EquipmentShopSelect(discord.ui.Select):
         if isinstance(capabilities, dict) and capabilities:
             capability_text = ", ".join(f"{name}: {value}" for name, value in capabilities.items())
             embed.add_field(name="Capabilities", value=capability_text, inline=False)
+        self.cog._apply_equipment_image(embed, equipment)
 
         view = ConfirmEquipmentPurchaseView(
             self.cog,
