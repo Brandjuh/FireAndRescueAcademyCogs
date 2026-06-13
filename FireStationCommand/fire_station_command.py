@@ -303,8 +303,23 @@ class FireStationCommand(commands.Cog):
         names = [names_by_id.get(str(item_id), str(item_id)) for item_id in equipment_ids]
         return ", ".join(names)
 
+    def _vehicle_requirement_display_text(self, vehicle_ids: Any) -> str | None:
+        if not isinstance(vehicle_ids, list) or not vehicle_ids:
+            return None
+
+        names = []
+        for vehicle_id in vehicle_ids:
+            vehicle_key = str(vehicle_id)
+            vehicle = self.vehicle_definitions.get(vehicle_key)
+            name = vehicle.get("name") if vehicle else None
+            names.append(name if isinstance(name, str) else vehicle_key)
+        return ", ".join(names)
+
     def _add_mission_requirement_fields(self, embed: discord.Embed, mission: Dict[str, Any]) -> None:
         embed.add_field(name="Required staff", value=str(mission.get("required_staff", "Unknown")), inline=True)
+        vehicle_text = self._vehicle_requirement_display_text(mission.get("required_vehicles"))
+        if vehicle_text:
+            embed.add_field(name="Required vehicles", value=vehicle_text, inline=False)
         equipment_text = self._equipment_display_text(mission.get("required_equipment"))
         if equipment_text:
             embed.add_field(name="Required equipment", value=equipment_text, inline=False)
