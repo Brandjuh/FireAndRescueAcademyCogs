@@ -589,6 +589,11 @@ def test_default_global_config_keeps_manual_gameplay_timers_short():
     assert config["travel_minutes_max"] == 2.0
     assert config["scene_work_minutes_min"] == 0.5
     assert config["scene_work_minutes_max"] == 1.5
+    assert config["scene_backup_chance"] == 0.25
+    assert config["scene_backup_window_minutes_min"] == 0.5
+    assert config["scene_backup_window_minutes_max"] == 1.0
+    assert config["scene_backup_travel_minutes_min"] == 0.5
+    assert config["scene_backup_travel_minutes_max"] == 1.5
     assert config["max_station_level"] == 10
 
 
@@ -719,6 +724,29 @@ def test_missing_required_vehicle_ids_compares_required_types_to_owned_catalog_i
     assert FireStationCommand._missing_required_vehicle_ids(cog, mission, owned_vehicles) == ["rescue_basic"]
     assert FireStationCommand._missing_required_vehicle_ids(cog, {"required_vehicles": []}, owned_vehicles) == []
     assert FireStationCommand._missing_required_vehicle_ids(cog, mission, "bad") == ["engine_basic", "rescue_basic"]
+
+
+def test_scene_backup_helpers_use_dispatched_vehicle_selection():
+    cog = _cog_with_game_data({})
+    mission = {
+        "required_vehicles": ["engine_basic", "rescue_basic"],
+        "selected_vehicle_ids": [1],
+        "backup_vehicle_ids": [3],
+    }
+    vehicles = [
+        {"id": 1, "catalog_id": "engine_basic", "name": "Engine", "crew_capacity": 4},
+        {"id": 2, "catalog_id": "rescue_basic", "name": "Rescue", "crew_capacity": 4},
+        {"id": 3, "catalog_id": "ladder", "name": "Ladder", "crew_capacity": 2},
+    ]
+    selected = [vehicles[0]]
+
+    assert FireStationCommand._missing_required_vehicle_ids_from_selection(cog, mission, selected) == [
+        "rescue_basic"
+    ]
+    assert FireStationCommand._scene_backup_vehicle_requirements(cog, mission, selected) == [
+        "rescue_basic"
+    ]
+    assert FireStationCommand._backup_candidate_vehicles(cog, vehicles, mission) == [vehicles[1]]
 
 
 def test_missing_required_equipment_ids_compares_required_types_to_owned_inventory():
@@ -1680,6 +1708,28 @@ def test_run_due_mission_action_dispatches_turnout_result():
     assert calls == [(channel, user)]
 
 
+def test_run_due_mission_action_dispatches_backup_window_without_sleep():
+    user = type("User", (), {"id": 123})()
+    user_data = {
+        "active_mission": {
+            "next_action": FireStationCommand.ACTION_RESOLVE_BACKUP_WINDOW,
+            "next_action_at": "2026-06-12T11:59:00Z",
+        }
+    }
+    cog = _cog_with_game_data({})
+    cog.config = _Config(user_data, {})
+    calls = []
+
+    async def fake_backup_window(channel, actor, *, sleep_after=True):
+        calls.append((channel, actor, sleep_after))
+
+    cog._resolve_backup_window = fake_backup_window
+    channel = object()
+
+    assert asyncio.run(cog._run_due_mission_action(channel, user)) is True
+    assert calls == [(channel, user, False)]
+
+
 def test_build_mission_control_embed_guides_alert_choice():
     cog = _cog_with_game_data({})
     mission = {
@@ -1755,6 +1805,35 @@ def test_build_mission_control_embed_guides_scene_work():
     fields = {field["name"]: field["value"] for field in embed.fields}
     assert fields["Stage"] == FireStationCommand.STAGE_SCENE_WORK
     assert fields["Guidance"] == "Crews are working on scene. Refresh this panel while waiting for the incident result."
+    assert fields["Next update"] == "2026-06-12T12:04:00Z"
+
+
+def test_build_mission_control_embed_guides_scene_backup():
+    cog = _cog_with_game_data(
+        {
+            "vehicles": {
+                "vehicles": [
+                    {"id": "rescue_basic", "name": "Basic Rescue Truck"},
+                ]
+            }
+        }
+    )
+    mission = {
+        "title": "Warehouse Fire",
+        "required_staff": 8,
+        "stage": FireStationCommand.STAGE_SCENE_BACKUP,
+        "selected_vehicle_ids": [1],
+        "backup_required_vehicle_ids": ["rescue_basic"],
+        "next_action": FireStationCommand.ACTION_RESOLVE_BACKUP_WINDOW,
+        "next_action_at": "2026-06-12T12:04:00Z",
+    }
+
+    embed = FireStationCommand._build_mission_control_embed(cog, mission)
+
+    fields = {field["name"]: field["value"] for field in embed.fields}
+    assert fields["Stage"] == FireStationCommand.STAGE_SCENE_BACKUP
+    assert fields["Guidance"].startswith("On-scene command is requesting more resources.")
+    assert fields["Requested backup"] == "Basic Rescue Truck"
     assert fields["Next update"] == "2026-06-12T12:04:00Z"
 
 

@@ -20,16 +20,18 @@ except ImportError:  # pragma: no cover - dependency is declared in info.json
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.2.6"
+    __version__ = "1.2.7"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
     STAGE_STAFF_TURNOUT = "STAFF_TURNOUT"
     STAGE_VEHICLE_SELECT = "VEHICLE_SELECT"
     STAGE_TRAVEL = "TRAVEL"
+    STAGE_SCENE_BACKUP = "SCENE_BACKUP"
     STAGE_SCENE_WORK = "SCENE_WORK"
     ACTION_SHOW_TURNOUT_RESULT = "SHOW_TURNOUT_RESULT"
     ACTION_SHOW_TRAVEL_UPDATE = "SHOW_TRAVEL_UPDATE"
+    ACTION_RESOLVE_BACKUP_WINDOW = "RESOLVE_BACKUP_WINDOW"
     ACTION_RESOLVE_INCIDENT = "RESOLVE_INCIDENT"
 
     def __init__(self, bot):
@@ -611,6 +613,11 @@ class FireStationCommand(commands.Cog):
             "travel_minutes_max": 2.0,
             "scene_work_minutes_min": 0.5,
             "scene_work_minutes_max": 1.5,
+            "scene_backup_chance": 0.25,
+            "scene_backup_window_minutes_min": 0.5,
+            "scene_backup_window_minutes_max": 1.0,
+            "scene_backup_travel_minutes_min": 0.5,
+            "scene_backup_travel_minutes_max": 1.5,
             "staff_cost": 2000,
             "upgrade_base_cost": 50000,
             "career_convert_cost": self._balance_int("career_upgrade_cost", 250000),
@@ -728,6 +735,9 @@ class FireStationCommand(commands.Cog):
             return True
         if action == self.ACTION_SHOW_TRAVEL_UPDATE:
             await self._send_travel_update(channel, user, sleep_after=False)
+            return True
+        if action == self.ACTION_RESOLVE_BACKUP_WINDOW:
+            await self._resolve_backup_window(channel, user, sleep_after=False)
             return True
         if action == self.ACTION_RESOLVE_INCIDENT:
             await self._resolve_incident(channel, user)
@@ -866,6 +876,83 @@ class FireStationCommand(commands.Cog):
             if isinstance(vehicle, dict) and vehicle.get("catalog_id")
         }
         return [str(vehicle_id) for vehicle_id in required if str(vehicle_id) not in owned_catalog_ids]
+
+    def _missing_required_vehicle_ids_from_selection(
+        self,
+        mission: Dict[str, Any],
+        selected_vehicles: Any,
+    ) -> List[str]:
+        required = mission.get("required_vehicles", [])
+        if not isinstance(required, list) or not required:
+            return []
+        if not isinstance(selected_vehicles, list):
+            selected_vehicles = []
+
+        selected_catalog_ids = {
+            str(vehicle.get("catalog_id"))
+            for vehicle in selected_vehicles
+            if isinstance(vehicle, dict) and vehicle.get("catalog_id")
+        }
+        return [str(vehicle_id) for vehicle_id in required if str(vehicle_id) not in selected_catalog_ids]
+
+    def _backup_candidate_vehicles(
+        self,
+        vehicles: Any,
+        mission: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        if not isinstance(vehicles, list):
+            return []
+        selected_ids = mission.get("selected_vehicle_ids", [])
+        backup_ids = mission.get("backup_vehicle_ids", [])
+        if not isinstance(selected_ids, list):
+            selected_ids = []
+        if not isinstance(backup_ids, list):
+            backup_ids = []
+        dispatched_ids = {
+            int(vehicle_id)
+            for vehicle_id in selected_ids + backup_ids
+            if isinstance(vehicle_id, int) or (isinstance(vehicle_id, str) and vehicle_id.isdigit())
+        }
+        return [
+            vehicle
+            for vehicle in vehicles
+            if isinstance(vehicle, dict)
+            and isinstance(vehicle.get("id"), int)
+            and int(vehicle["id"]) not in dispatched_ids
+        ]
+
+    def _scene_backup_vehicle_requirements(
+        self,
+        mission: Dict[str, Any],
+        selected_vehicles: Any,
+    ) -> List[str]:
+        missing = self._missing_required_vehicle_ids_from_selection(mission, selected_vehicles)
+        if missing:
+            return missing
+
+        required = mission.get("required_vehicles", [])
+        if isinstance(required, list) and required:
+            return [str(required[0])]
+        return []
+
+    def _should_request_scene_backup(
+        self,
+        mission: Dict[str, Any],
+        data: Dict[str, Any],
+        selected_vehicles: Any,
+        chance: float,
+    ) -> bool:
+        del data
+        if mission.get("backup_window_opened") or mission.get("backup_vehicle_ids"):
+            return False
+        if self._missing_required_vehicle_ids_from_selection(mission, selected_vehicles):
+            return True
+
+        readiness = mission.get("readiness_score")
+        if isinstance(readiness, int) and readiness < 80:
+            return True
+
+        return random.random() < max(0.0, min(1.0, chance))
 
     def _add_mission_requirement_fields(self, embed: discord.Embed, mission: Dict[str, Any]) -> None:
         embed.add_field(name="Required staff", value=str(mission.get("required_staff", "Unknown")), inline=True)
@@ -1403,6 +1490,11 @@ class FireStationCommand(commands.Cog):
             guidance = "Select vehicles to dispatch with the available crew."
         elif stage == self.STAGE_TRAVEL:
             guidance = "Units are en route. Refresh this panel while waiting for the next update."
+        elif stage == self.STAGE_SCENE_BACKUP:
+            guidance = (
+                "On-scene command is requesting more resources. Dispatch backup before the deadline "
+                "or the incident will continue to the result with current resources."
+            )
         elif stage == self.STAGE_SCENE_WORK:
             guidance = "Crews are working on scene. Refresh this panel while waiting for the incident result."
         else:
@@ -1434,6 +1526,15 @@ class FireStationCommand(commands.Cog):
         if selected:
             embed.add_field(name="Vehicles dispatched", value=str(len(selected)), inline=True)
 
+        backup_ids = mission.get("backup_vehicle_ids", [])
+        if isinstance(backup_ids, list) and backup_ids:
+            embed.add_field(name="Backup vehicles", value=str(len(backup_ids)), inline=True)
+
+        backup_required = mission.get("backup_required_vehicle_ids", [])
+        backup_text = self._vehicle_requirement_display_text(backup_required)
+        if backup_text:
+            embed.add_field(name="Requested backup", value=backup_text, inline=False)
+
         embed.set_footer(text="Use the buttons below to continue this mission.")
         return embed
 
@@ -1445,7 +1546,9 @@ class FireStationCommand(commands.Cog):
         mission: Dict[str, Any],
     ) -> discord.ui.View:
         vehicles: List[Dict[str, Any]] = []
-        if self._mission_is_stage(mission, self.STAGE_VEHICLE_SELECT):
+        if self._mission_is_stage(mission, self.STAGE_VEHICLE_SELECT) or self._mission_is_stage(
+            mission, self.STAGE_SCENE_BACKUP
+        ):
             vehicles = await self._get_user_vehicles(user)
         return MissionControlView(self, user, channel, guild, mission, vehicles)
 
@@ -2730,6 +2833,72 @@ class FireStationCommand(commands.Cog):
         if not self._mission_is_stage(mission, self.STAGE_TRAVEL):
             return
         glb = await self.config.all()
+        vehicles = await self._get_user_vehicles(user)
+        selected_ids = mission.get("selected_vehicle_ids", [])
+        if not isinstance(selected_ids, list):
+            selected_ids = []
+        selected = [
+            vehicle
+            for vehicle in vehicles
+            if isinstance(vehicle, dict) and vehicle.get("id") in selected_ids
+        ]
+        backup_chance = float(glb.get("scene_backup_chance", 0.25))
+        if self._should_request_scene_backup(mission, data, selected, backup_chance):
+            min_minutes = float(glb.get("scene_backup_window_minutes_min", 0.5))
+            max_minutes = float(glb.get("scene_backup_window_minutes_max", 1.0))
+            minutes = random.uniform(min_minutes, max_minutes)
+            mission["backup_window_opened"] = True
+            mission["backup_required_vehicle_ids"] = self._scene_backup_vehicle_requirements(mission, selected)
+            mission["backup_vehicle_ids"] = []
+            mission["mutual_aid_requests"] = []
+            self._set_mission_stage(mission, self.STAGE_SCENE_BACKUP)
+            self._set_mission_due(mission, self.ACTION_RESOLVE_BACKUP_WINDOW, minutes)
+            await user_conf.active_mission.set(mission)
+
+            title = mission.get("title", "Incident")
+            detail = mission.get("detail", "Units report additional information en route.")
+            backup_text = self._vehicle_requirement_display_text(mission.get("backup_required_vehicle_ids"))
+            backup_candidates = self._backup_candidate_vehicles(vehicles, mission)
+
+            embed = discord.Embed(
+                title=f"On-scene update - {title}",
+                description=(
+                    f"{detail}\n\n"
+                    "The officer on scene asks dispatch for additional resources before committing "
+                    "to the final incident plan."
+                ),
+                color=discord.Color.orange(),
+            )
+            self._apply_mission_image(embed, mission)
+            if backup_text:
+                embed.add_field(name="Requested backup", value=backup_text, inline=False)
+            embed.add_field(
+                name="Decision window",
+                value=f"Backup can be assigned {self._make_relative_text(minutes)}.",
+                inline=True,
+            )
+            embed.add_field(
+                name="Local backup available",
+                value=str(len(backup_candidates)),
+                inline=True,
+            )
+            embed.set_footer(
+                text="Future mutual aid will let other members receive and run this backup as their own dispatch."
+            )
+            view = SceneBackupView(self, channel, user, backup_candidates)
+            try:
+                await channel.send(embed=embed, view=view)
+            except Exception:
+                try:
+                    await user.send(embed=embed, view=view)
+                except Exception:
+                    pass
+
+            if sleep_after:
+                await asyncio.sleep(int(minutes * 60))
+                await self._resolve_backup_window(channel, user)
+            return
+
         min_minutes = float(glb.get("scene_work_minutes_min", 0.5))
         max_minutes = float(glb.get("scene_work_minutes_max", 1.5))
         minutes = random.uniform(min_minutes, max_minutes)
@@ -2761,6 +2930,111 @@ class FireStationCommand(commands.Cog):
             await asyncio.sleep(int(minutes * 60))
             await self._resolve_incident(channel, user)
 
+    async def handle_backup_vehicle_selection(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        values: List[str],
+    ):
+        user_conf = self.config.user(user)
+        data = await user_conf.all()
+        mission = data.get("active_mission", {}) or {}
+        if not self._mission_is_stage(mission, self.STAGE_SCENE_BACKUP):
+            await interaction.response.send_message("This incident is not waiting for scene backup.", ephemeral=True)
+            return
+
+        if not values:
+            await interaction.response.send_message("No backup vehicles selected.", ephemeral=True)
+            return
+
+        available = self._backup_candidate_vehicles(await self._get_user_vehicles(user), mission)
+        available_ids = {str(vehicle["id"]) for vehicle in available}
+        selected_ids = [int(vehicle_id) for vehicle_id in values if vehicle_id in available_ids]
+        if not selected_ids:
+            await interaction.response.send_message("Those vehicles are no longer available for backup.", ephemeral=True)
+            return
+
+        glb = await self.config.all()
+        min_minutes = float(glb.get("scene_backup_travel_minutes_min", 0.5))
+        max_minutes = float(glb.get("scene_backup_travel_minutes_max", 1.5))
+        minutes = random.uniform(min_minutes, max_minutes)
+        mission["backup_vehicle_ids"] = selected_ids
+        mission["backup_status"] = "en_route"
+        self._set_mission_stage(mission, self.STAGE_SCENE_WORK)
+        self._set_mission_due(mission, self.ACTION_RESOLVE_INCIDENT, minutes)
+        await user_conf.active_mission.set(mission)
+
+        embed = discord.Embed(
+            title="Backup assigned",
+            description=(
+                "Additional units are responding to the scene. Dispatch keeps the channel open while "
+                "the first crew works defensively and waits for the extra apparatus."
+            ),
+            color=discord.Color.blue(),
+        )
+        embed.add_field(name="Backup vehicles", value=str(len(selected_ids)), inline=True)
+        embed.add_field(name="Backup ETA", value=self._make_relative_text(minutes), inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=False)
+
+        await asyncio.sleep(int(minutes * 60))
+        await self._resolve_incident(channel, user)
+
+    async def handle_continue_without_scene_backup(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+    ):
+        await interaction.response.send_message(
+            "Command continues with the resources already on scene.",
+            ephemeral=False,
+        )
+        await self._resolve_backup_window(channel, user)
+
+    async def _resolve_backup_window(
+        self,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        *,
+        sleep_after: bool = True,
+    ):
+        user_conf = self.config.user(user)
+        data = await user_conf.all()
+        mission = data.get("active_mission", {}) or {}
+        if not self._mission_is_stage(mission, self.STAGE_SCENE_BACKUP):
+            return
+
+        glb = await self.config.all()
+        min_minutes = float(glb.get("scene_work_minutes_min", 0.5))
+        max_minutes = float(glb.get("scene_work_minutes_max", 1.5))
+        minutes = random.uniform(min_minutes, max_minutes)
+        mission["backup_status"] = "missed"
+        self._set_mission_stage(mission, self.STAGE_SCENE_WORK)
+        self._set_mission_due(mission, self.ACTION_RESOLVE_INCIDENT, minutes)
+        await user_conf.active_mission.set(mission)
+
+        embed = discord.Embed(
+            title="Backup window closed",
+            description=(
+                "No additional units were assigned before the window closed. The incident commander "
+                "continues with the original dispatch and accepts the operational risk."
+            ),
+            color=discord.Color.orange(),
+        )
+        embed.add_field(name="Incident result", value=f"Expected {self._make_relative_text(minutes)}.", inline=False)
+        try:
+            await channel.send(embed=embed)
+        except Exception:
+            try:
+                await user.send(embed=embed)
+            except Exception:
+                pass
+
+        if sleep_after:
+            await asyncio.sleep(int(minutes * 60))
+            await self._resolve_incident(channel, user)
+
     async def _resolve_incident(self, channel: discord.abc.Messageable, user: discord.abc.User):
         user_conf = self.config.user(user)
         data = await user_conf.all()
@@ -2768,6 +3042,7 @@ class FireStationCommand(commands.Cog):
         if self._mission_stage(mission) not in {
             self.STAGE_TRAVEL,
             self.STAGE_VEHICLE_SELECT,
+            self.STAGE_SCENE_BACKUP,
             self.STAGE_SCENE_WORK,
         }:
             return
@@ -2777,7 +3052,13 @@ class FireStationCommand(commands.Cog):
         arrived = int(mission.get("turnout_total_arrived", 0))
         vehicles = await self._get_user_vehicles(user)
         selected_ids = mission.get("selected_vehicle_ids", [])
-        selected = [v for v in vehicles if v["id"] in selected_ids]
+        backup_ids = mission.get("backup_vehicle_ids", [])
+        if not isinstance(selected_ids, list):
+            selected_ids = []
+        if not isinstance(backup_ids, list):
+            backup_ids = []
+        dispatched_ids = selected_ids + backup_ids
+        selected = [v for v in vehicles if v["id"] in dispatched_ids]
 
         total_capacity = sum(v.get("crew_capacity", 0) for v in selected)
 
@@ -2808,7 +3089,7 @@ class FireStationCommand(commands.Cog):
         reputation_delta = self._reputation_delta_for_outcome(outcome_key)
         new_reputation = int(data.get("reputation", 0)) + reputation_delta
         await user_conf.reputation.set(new_reputation)
-        updated_vehicles = self._apply_vehicle_wear(vehicles, selected_ids, outcome_key)
+        updated_vehicles = self._apply_vehicle_wear(vehicles, dispatched_ids, outcome_key)
         await user_conf.vehicles.set(updated_vehicles)
         await self._give(user, reward)
         total_credits = await self._get_credits(user)
@@ -2823,6 +3104,10 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Required staff", value=str(required), inline=True)
         embed.add_field(name="Arrived staff", value=str(arrived), inline=True)
         embed.add_field(name="Vehicles dispatched", value=f"{len(selected)} (cap {total_capacity})", inline=True)
+        if backup_ids:
+            embed.add_field(name="Backup vehicles", value=str(len(backup_ids)), inline=True)
+        elif mission.get("backup_status") == "missed":
+            embed.add_field(name="Backup", value="Requested but not assigned in time.", inline=True)
         embed.add_field(name="Outcome", value=outcome, inline=False)
         embed.add_field(name="Narrative", value=narrative, inline=False)
         embed.add_field(name="Reward", value=f"{reward:,} credits", inline=True)
@@ -3971,6 +4256,70 @@ class VehicleSelectView(discord.ui.View):
         self.add_item(VehicleSelect(cog, channel, user, vehicles))
 
 
+class BackupVehicleSelect(discord.ui.Select):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        vehicles: List[Dict[str, Any]],
+    ):
+        options: List[discord.SelectOption] = []
+        for vehicle in vehicles:
+            label = f"{vehicle['name']} (cap {vehicle['crew_capacity']})"
+            options.append(discord.SelectOption(label=label, value=str(vehicle["id"])))
+        if not options:
+            options = [discord.SelectOption(label="No local backup vehicles available", value="none")]
+
+        super().__init__(
+            placeholder="Select backup vehicles to dispatch",
+            min_values=1,
+            max_values=len(options),
+            options=options,
+        )
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values == ["none"]:
+            await interaction.response.send_message(
+                "No local backup vehicles are available. Mutual aid from other members is planned next.",
+                ephemeral=True,
+            )
+            return
+        await self.cog.handle_backup_vehicle_selection(interaction, self.channel, self.user, list(self.values))
+
+
+class SceneBackupView(discord.ui.View):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        vehicles: List[Dict[str, Any]],
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+        self.add_item(BackupVehicleSelect(cog, channel, user, vehicles))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Continue without backup", style=discord.ButtonStyle.secondary)
+    async def continue_without_backup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        await self.cog.handle_continue_without_scene_backup(interaction, self.channel, self.user)
+        self.stop()
+
+
 class MissionControlView(discord.ui.View):
     def __init__(
         self,
@@ -3999,6 +4348,9 @@ class MissionControlView(discord.ui.View):
             self._add_button("Proceed to vehicles", discord.ButtonStyle.success, self._proceed)
         elif stage == self.cog.STAGE_VEHICLE_SELECT:
             self.add_item(VehicleSelect(cog, channel, user, vehicles))
+        elif stage == self.cog.STAGE_SCENE_BACKUP:
+            self.add_item(BackupVehicleSelect(cog, channel, user, cog._backup_candidate_vehicles(vehicles, mission)))
+            self._add_button("Continue without backup", discord.ButtonStyle.secondary, self._continue_without_backup)
         elif stage in {self.cog.STAGE_TRAVEL, self.cog.STAGE_SCENE_WORK}:
             self._add_button("Refresh", discord.ButtonStyle.primary, self._refresh)
 
@@ -4039,6 +4391,11 @@ class MissionControlView(discord.ui.View):
     async def _proceed(self, interaction: discord.Interaction):
         await self._disable_and_edit(interaction)
         await self.cog.handle_proceed_to_vehicles(interaction, self.channel, self.user)
+        self.stop()
+
+    async def _continue_without_backup(self, interaction: discord.Interaction):
+        await self._disable_and_edit(interaction)
+        await self.cog.handle_continue_without_scene_backup(interaction, self.channel, self.user)
         self.stop()
 
     async def _cancel(self, interaction: discord.Interaction):

@@ -51,10 +51,12 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added a config format regression test so every FireStationCommand config file parses as YAML.
 - Added economy-aware purchase scaling for upgrades, vehicles, equipment, training, expansions, and career conversion based on the player's current Red economy balance.
 - Added station-wide training scope messaging so players know certifications apply permanently to current and future staff.
+- Added an on-scene backup request phase where some incidents can ask for additional vehicles before the result is calculated.
+- Added local backup vehicle dispatch from the on-scene update, including backup ETA and result scoring that counts the extra vehicles.
 
 ### Changed
 
-- Bumped the cog version to `1.2.6`.
+- Bumped the cog version to `1.2.7`.
 - Vehicle shop options now come from `data/config/vehicles.yaml` when available.
 - Mission definitions now come from `data/config/missions.yaml` when available.
 - Mission embeds now show configured mission images when available.
@@ -109,6 +111,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - Rewrote every imported mission narrative field with category-aware dispatch, scene, success, partial, and failure text.
 - Upgrade and expansion locks now explain that the option is not available yet and show the required command level more clearly.
 - Config validation now accepts real YAML instead of requiring JSON-compatible YAML syntax.
+- Mission control now shows `SCENE_BACKUP` guidance, requested backup vehicle types, and backup deadlines.
 
 ### Fixed
 
@@ -121,6 +124,7 @@ All notable changes to FireStationCommand will be documented in this file.
 ### Planned
 
 - Add automatic dispatch later, after the manual mission flow is more complete.
+- Add full member-to-member mutual aid so other players can receive backup requests as their own linked dispatch with turnout and travel updates.
 
 ### Known Issues
 
