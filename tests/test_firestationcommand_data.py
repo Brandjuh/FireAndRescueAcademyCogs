@@ -1,5 +1,7 @@
 import asyncio
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import discord
 
@@ -18,6 +20,9 @@ from FireStationCommand.fire_station_command import (
 )
 
 
+_FSC_ROOT = Path(__file__).resolve().parents[1] / "FireStationCommand"
+
+
 def _cog_with_game_data(game_data):
     cog = object.__new__(FireStationCommand)
     cog.game_data = game_data
@@ -31,6 +36,11 @@ def _cog_with_game_data(game_data):
     cog.EXPANSION_CATALOG = FireStationCommand._build_expansion_catalog(cog)
     cog._utcnow = lambda: datetime(2026, 6, 12, 12, 0, tzinfo=timezone.utc)
     return cog
+
+
+def _load_json_catalog(name):
+    path = _FSC_ROOT / "data" / "config" / f"{name}.yaml"
+    return json.loads(path.read_text(encoding="utf-8"))[name]
 
 
 class _ValueSetter:
@@ -113,6 +123,59 @@ def test_build_vehicle_catalog_uses_yaml_vehicle_data():
             "maintenance_cost": 500,
         }
     }
+
+
+def test_imported_mission_catalog_has_balanced_xp_and_complete_narratives():
+    missions = _load_json_catalog("missions")
+
+    assert len(missions) >= 1200
+    xp_values = [int(mission["base_xp"]) for mission in missions]
+    assert min(xp_values) >= 35
+    assert max(xp_values) >= 700
+    assert len(set(xp_values)) >= 40
+
+    high_credit_low_level = [
+        mission
+        for mission in missions
+        if int(mission["base_credits"]) >= 10000 and int(mission["unlock_level"]) < 6
+    ]
+    assert high_credit_low_level == []
+
+    narrative_fields = [
+        "description",
+        "dispatch_narrative",
+        "scene_narrative",
+        "success_narrative",
+        "partial_narrative",
+        "failure_narrative",
+    ]
+    for mission in missions:
+        for field in narrative_fields:
+            assert mission[field].strip()
+        for field in ["description", "dispatch_narrative", "scene_narrative"]:
+            assert mission["name"].lower() in mission[field].lower()
+
+
+def test_imported_catalog_references_existing_vehicles_and_equipment():
+    missions = _load_json_catalog("missions")
+    vehicle_ids = {vehicle["id"] for vehicle in _load_json_catalog("vehicles")}
+    equipment_ids = {equipment["id"] for equipment in _load_json_catalog("equipment")}
+
+    missing_vehicle_refs = [
+        (mission["id"], vehicle_id)
+        for mission in missions
+        for vehicle_id in mission.get("required_vehicles", [])
+        if vehicle_id not in vehicle_ids
+    ]
+    missing_equipment_refs = [
+        (mission["id"], equipment_id)
+        for mission in missions
+        for equipment_id in mission.get("required_equipment", [])
+        if equipment_id not in equipment_ids
+    ]
+
+    assert missing_vehicle_refs == []
+    assert missing_equipment_refs == []
 
 
 def test_build_incidents_derives_staff_from_required_vehicles():

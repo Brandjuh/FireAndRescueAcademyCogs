@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - dependency is declared in info.json
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.2.0"
+    __version__ = "1.2.1"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
