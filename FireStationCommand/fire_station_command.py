@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - dependency is declared in info.json
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.2.7"
+    __version__ = "1.2.8"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
@@ -1712,6 +1712,28 @@ class FireStationCommand(commands.Cog):
         if image_url:
             embed.set_image(url=image_url)
 
+    def _mission_result_image_url(self, mission: Dict[str, Any], outcome_key: str) -> str | None:
+        outcome_images = {
+            "success": "Images/Outcomes/incident_success.png",
+            "partial": "Images/Outcomes/incident_partial.png",
+            "failure": "Images/Outcomes/incident_failure.png",
+        }
+        specific_key = f"{outcome_key}_image"
+        specific_image = mission.get(specific_key)
+        if isinstance(specific_image, str) and specific_image:
+            return self._asset_image_url(specific_image)
+        return self._asset_image_url(outcome_images.get(outcome_key))
+
+    def _apply_mission_result_image(
+        self,
+        embed: discord.Embed,
+        mission: Dict[str, Any],
+        outcome_key: str,
+    ) -> None:
+        image_url = self._mission_result_image_url(mission, outcome_key)
+        if image_url:
+            embed.set_image(url=image_url)
+
     def _vehicle_image_url(self, vehicle: Dict[str, Any]) -> str | None:
         image = vehicle.get("image")
         return self._asset_image_url(image if isinstance(image, str) else None)
@@ -3100,7 +3122,7 @@ class FireStationCommand(commands.Cog):
             title=f"Incident result – {mission.get('title', 'Unknown')}",
             color=discord.Color.green() if success_score >= 1.0 else discord.Color.orange(),
         )
-        self._apply_mission_image(embed, mission)
+        self._apply_mission_result_image(embed, mission, outcome_key)
         embed.add_field(name="Required staff", value=str(required), inline=True)
         embed.add_field(name="Arrived staff", value=str(arrived), inline=True)
         embed.add_field(name="Vehicles dispatched", value=f"{len(selected)} (cap {total_capacity})", inline=True)
