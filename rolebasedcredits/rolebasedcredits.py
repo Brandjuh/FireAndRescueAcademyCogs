@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -193,6 +194,16 @@ class RoleBasedCredits(commands.Cog):
     def dependencies(self):
         return self.bot.get_cog("MembersScraper"), self.bot.get_cog("MemberSync")
 
+    @asynccontextmanager
+    async def _bot_status(self, detail: str, *, priority: int = 80):
+        bot = getattr(self, "bot", None)
+        botstatus = bot.get_cog("BotStatus") if bot else None
+        if botstatus and hasattr(botstatus, "track_activity"):
+            async with botstatus.track_activity("RoleBasedCredits", detail, priority=priority):
+                yield
+        else:
+            yield
+
     async def sync_loop(self):
         await self.bot.wait_until_red_ready()
         while True:
@@ -212,6 +223,13 @@ class RoleBasedCredits(commands.Cog):
                 await asyncio.sleep(300)
 
     async def sync_guild(self, guild: discord.Guild, *, dry_run: bool) -> dict[str, int]:
+        detail = f"syncing credit rank roles in {guild.name}"
+        if dry_run:
+            detail = f"checking credit rank roles in {guild.name}"
+        async with self._bot_status(detail):
+            return await self.sync_guild_impl(guild, dry_run=dry_run)
+
+    async def sync_guild_impl(self, guild: discord.Guild, *, dry_run: bool) -> dict[str, int]:
         members_scraper, member_sync = self.dependencies()
         if not members_scraper or not member_sync:
             return {
@@ -350,6 +368,24 @@ class RoleBasedCredits(commands.Cog):
         }
 
     async def cleanup_departed_members(
+        self,
+        guild: discord.Guild,
+        member_sync: Any,
+        configured_role_ids: set[int],
+        *,
+        dry_run: bool,
+        last_ranks: dict[str, Any],
+    ) -> dict[str, int]:
+        async with self._bot_status("removing departed member rank roles", priority=85):
+            return await self.cleanup_departed_members_impl(
+                guild,
+                member_sync,
+                configured_role_ids,
+                dry_run=dry_run,
+                last_ranks=last_ranks,
+            )
+
+    async def cleanup_departed_members_impl(
         self,
         guild: discord.Guild,
         member_sync: Any,

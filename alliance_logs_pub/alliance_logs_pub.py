@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import aiosqlite
+from contextlib import asynccontextmanager
 import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -124,6 +125,27 @@ class AllianceLogsPub(commands.Cog):
     async def cog_unload(self):
         if self._bg_task:
             self._bg_task.cancel()
+
+    @asynccontextmanager
+    async def _bot_status(self, detail, *, priority=65):
+        bot = getattr(self, "bot", None)
+        botstatus = bot.get_cog("BotStatus") if bot else None
+        if botstatus and hasattr(botstatus, "track_activity"):
+            async with botstatus.track_activity("AllianceLogsPub", detail, priority=priority):
+                yield
+        else:
+            yield
+
+    async def _report_bot_status(self, detail, *, priority=70, ttl_seconds=120):
+        bot = getattr(self, "bot", None)
+        botstatus = bot.get_cog("BotStatus") if bot else None
+        if botstatus and hasattr(botstatus, "report_activity"):
+            await botstatus.report_activity(
+                "AllianceLogsPub",
+                detail,
+                priority=priority,
+                ttl_seconds=ttl_seconds,
+            )
 
     async def _init_db(self):
         """Initialize database - ONLY stores last_id, no posted_logs table"""
@@ -369,6 +391,10 @@ class AllianceLogsPub(commands.Cog):
         return True
 
     async def _tick_once(self) -> int:
+        async with self._bot_status("checking alliance log publishing queue"):
+            return await self._tick_once_impl()
+
+    async def _tick_once_impl(self) -> int:
         """Process one batch of logs - sequential, no duplicate checking needed"""
         if self._posting_lock.locked():
             log.info("Skipping tick - already posting")
@@ -409,6 +435,8 @@ class AllianceLogsPub(commands.Cog):
             
             if not rows:
                 return 0
+
+            await self._report_bot_status(f"publishing {len(rows)} alliance log entries")
             
             log.info("Fetched %d logs after ID %d (IDs: %s to %s)", 
                     len(rows), last_id, rows[0]["id"], rows[-1]["id"])

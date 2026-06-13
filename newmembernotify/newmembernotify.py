@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import logging
 from typing import Optional, List, Dict, Any, Set
 from datetime import datetime
@@ -126,6 +127,16 @@ class NewMemberNotify(commands.Cog):
         """Cleanup on unload."""
         if self._check_task:
             self._check_task.cancel()
+
+    @asynccontextmanager
+    async def _bot_status(self, detail: str, *, priority: int = 70):
+        bot = getattr(self, "bot", None)
+        botstatus = bot.get_cog("BotStatus") if bot else None
+        if botstatus and hasattr(botstatus, "track_activity"):
+            async with botstatus.track_activity("NewMemberNotify", detail, priority=priority):
+                yield
+        else:
+            yield
     
     async def _start_background_task(self):
         """Start the background check task after bot is ready."""
@@ -273,6 +284,10 @@ class NewMemberNotify(commands.Cog):
             return False, str(e)
     
     async def _check_for_new_applications(self, skip_first_run_check: bool = False):
+        async with self._bot_status("checking new alliance applications"):
+            return await self._check_for_new_applications_impl(skip_first_run_check)
+
+    async def _check_for_new_applications_impl(self, skip_first_run_check: bool = False):
         """Check for new applications and handle them.
         
         Args:

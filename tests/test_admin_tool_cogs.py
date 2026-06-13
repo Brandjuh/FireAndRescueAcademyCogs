@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -9,7 +9,12 @@ from admintimednotifications.admintimednotifications import (
 )
 from announcer.announcer import parse_title_body as parse_announcement_title_body
 from announcementpanel.announcementpanel import normalize_button_key, parse_label_message
-from botstatus.botstatus import clean_activity_type
+from botstatus.botstatus import (
+    StatusActivity,
+    choose_activity,
+    clean_activity_type,
+    format_activity_text,
+)
 from rolebasedcredits.rolebasedcredits import (
     CREDIT_RANKS,
     DEFAULT_GUILD,
@@ -66,6 +71,45 @@ def test_botstatus_accepts_only_supported_activity_types():
     assert clean_activity_type("Watching") == "watching"
     with pytest.raises(ValueError):
         clean_activity_type("sleeping")
+
+
+def test_botstatus_formats_and_prioritizes_background_activity():
+    now = datetime(2026, 6, 13, 12, 0, tzinfo=timezone.utc)
+    low = StatusActivity(
+        token="low",
+        source="MembersScraper",
+        detail="scraping alliance members",
+        priority=50,
+        activity_type="watching",
+        started_at=now,
+        updated_at=now,
+    )
+    high = StatusActivity(
+        token="high",
+        source="RoleBasedCredits",
+        detail="syncing credit rank roles",
+        priority=80,
+        activity_type="watching",
+        started_at=now,
+        updated_at=now,
+    )
+    expired = StatusActivity(
+        token="expired",
+        source="LogsScraper",
+        detail="scraping alliance logs",
+        priority=100,
+        activity_type="watching",
+        started_at=now,
+        updated_at=now,
+        expires_at=now - timedelta(seconds=1),
+    )
+
+    assert choose_activity([low, high, expired], now=now) is high
+    assert (
+        format_activity_text("MembersScraper", "scraping alliance members page 10")
+        == "MembersScraper: scraping alliance members page 10"
+    )
+    assert len(format_activity_text("Source", "x" * 200)) == 128
 
 
 def test_credit_rank_table_matches_requested_thresholds():

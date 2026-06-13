@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import asyncio
+from contextlib import asynccontextmanager
 import json
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime, timedelta
@@ -69,6 +70,16 @@ class CookieManager(commands.Cog):
             self._bg_task.cancel()
         if self._shared_session and not self._shared_session.closed:
             await self._shared_session.close()
+
+    @asynccontextmanager
+    async def _bot_status(self, detail: str, *, priority: int = 85):
+        bot = getattr(self, "bot", None)
+        botstatus = bot.get_cog("BotStatus") if bot else None
+        if botstatus and hasattr(botstatus, "track_activity"):
+            async with botstatus.track_activity("CookieManager", detail, priority=priority):
+                yield
+        else:
+            yield
 
     # Encryption
     def _init_key(self):
@@ -350,6 +361,10 @@ class CookieManager(commands.Cog):
                 return out
 
     async def _perform_login(self) -> bool:
+        async with self._bot_status("refreshing MissionChief session"):
+            return await self._perform_login_impl()
+
+    async def _perform_login_impl(self) -> bool:
         res = await self._do_login_flow()
         if res.get("ok"):
             await self._log_admin("Login successful; cookies stored.")
@@ -577,27 +592,28 @@ class CookieManager(commands.Cog):
 
     async def _quick_session_check(self) -> bool:
         """Lightweight check if current cookies still pass the check_url validation."""
-        session = await self.get_session()
-        try:
-            url = await self.config.check_url()
-            r = await session.get(url, allow_redirects=True)
-            text = await r.text()
-            final_url = str(r.url)
-            failure = any(f in final_url for f in (await self.config.login_failure_url_contains()))
-            success_frags = await self.config.success_url_contains()
-            markers = await self.config.success_markers()
-            mode = await self.config.validation_mode()
-            ok_by_url = any(s in final_url for s in success_frags) and not failure
-            ok_by_markers = any(m in text for m in markers)
-            if mode == "url_only":
-                ok = ok_by_url
-            elif mode == "markers_only":
-                ok = ok_by_markers and not failure
-            else:
-                ok = (ok_by_url or ok_by_markers) and not failure
-            return ok
-        except Exception:
-            return False
+        async with self._bot_status("checking MissionChief session", priority=75):
+            session = await self.get_session()
+            try:
+                url = await self.config.check_url()
+                r = await session.get(url, allow_redirects=True)
+                text = await r.text()
+                final_url = str(r.url)
+                failure = any(f in final_url for f in (await self.config.login_failure_url_contains()))
+                success_frags = await self.config.success_url_contains()
+                markers = await self.config.success_markers()
+                mode = await self.config.validation_mode()
+                ok_by_url = any(s in final_url for s in success_frags) and not failure
+                ok_by_markers = any(m in text for m in markers)
+                if mode == "url_only":
+                    ok = ok_by_url
+                elif mode == "markers_only":
+                    ok = ok_by_markers and not failure
+                else:
+                    ok = (ok_by_url or ok_by_markers) and not failure
+                return ok
+            except Exception:
+                return False
 
     async def _log_admin(self, message: str):
         cfg = await self.config.all()

@@ -2,6 +2,7 @@ from __future__ import annotations
 import pathlib
 import aiosqlite
 import asyncio
+from contextlib import asynccontextmanager
 import logging
 import re
 import sqlite3
@@ -86,6 +87,16 @@ class MemberSync(commands.Cog):
             self._prune_task.cancel()
             self._prune_task = None
             log.info("MemberSync prune loop stopped")
+
+    @asynccontextmanager
+    async def _bot_status(self, detail: str, *, priority: int = 70):
+        bot = getattr(self, "bot", None)
+        botstatus = bot.get_cog("BotStatus") if bot else None
+        if botstatus and hasattr(botstatus, "track_activity"):
+            async with botstatus.track_activity("MemberSync", detail, priority=priority):
+                yield
+        else:
+            yield
 
     async def _debug_log(self, message: str, level: str = "info") -> None:
         """Log debug messages to both console and Discord if debug mode is enabled"""
@@ -637,11 +648,18 @@ class MemberSync(commands.Cog):
 
     async def _process_queue_once(self):
         """Process verification queue once"""
+        queue = await self.config.queue()
+        if not queue:
+            return
+        async with self._bot_status(
+            f"processing verification queue ({len(queue)} items)",
+            priority=75,
+        ):
+            return await self._process_queue_once_impl(queue)
+
+    async def _process_queue_once_impl(self, queue):
+        """Process verification queue once"""
         try:
-            queue = await self.config.queue()
-            if not queue:
-                return
-            
             await self._debug_log(f"Processing queue ({len(queue)} items)")
             
             guild_id = await self.config.guild_id()
@@ -805,6 +823,11 @@ class MemberSync(commands.Cog):
             await asyncio.sleep(3600)
 
     async def _prune_once(self):
+        """Remove verified role from members who are no longer in the alliance"""
+        async with self._bot_status("checking departed alliance members", priority=70):
+            return await self._prune_once_impl()
+
+    async def _prune_once_impl(self):
         """Remove verified role from members who are no longer in the alliance"""
         try:
             guild_id = await self.config.guild_id()
