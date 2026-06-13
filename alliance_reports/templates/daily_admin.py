@@ -30,7 +30,7 @@ class DailyAdminReport:
 
             embed = discord.Embed(
                 title="🛡️ ADMIN DAILY REPORT",
-                description=f"📅 {now.strftime('%A, %B %d, %Y')}",
+                description=f"Reporting date: **{now.strftime('%A, %B %d, %Y')}** ({tz_str})",
                 color=discord.Color.dark_blue(),
                 timestamp=now,
             )

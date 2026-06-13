@@ -4,7 +4,10 @@ Generates the complete daily member report.
 """
 
 import logging
+from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
+
 import discord
 
 from ..data_aggregator import DataAggregator
@@ -31,12 +34,18 @@ class DailyMemberReport:
         """
         try:
             log.info("Generating daily member report...")
+            tz_str = await self.config_manager.config.timezone()
+            now = datetime.now(ZoneInfo(tz_str))
             
             # Get daily data
             data = await self.aggregator.get_daily_data()
             
             # Create embed
-            embed = EmbedFormatter.create_daily_member_embed(data)
+            embed = EmbedFormatter.create_daily_member_embed(
+                data,
+                now=now,
+                timezone_label=tz_str,
+            )
             
             log.info("Daily member report generated")
             return embed
