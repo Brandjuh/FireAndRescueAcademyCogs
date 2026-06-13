@@ -307,17 +307,24 @@ class MemberManagerSanctionsTests(unittest.TestCase):
                 "created_at": now - 200,
                 "status": "removed",
             },
+            {
+                "sanction_id": 4,
+                "sanction_type": "Kick",
+                "created_at": now - 300,
+                "status": "unverified",
+            },
         ]
 
         summary = SanctionsDatabase.summarize_sanctions(sanctions, now=now)
 
         self.assertEqual(summary["active_count"], 1)
+        self.assertEqual(summary["unverified_count"], 1)
         self.assertEqual(summary["expired_count"], 1)
         self.assertEqual(summary["removed_count"], 1)
-        self.assertEqual(summary["historical_count"], 3)
+        self.assertEqual(summary["historical_count"], 4)
         self.assertEqual(
             {sanction["sanction_id"]: sanction["effective_status"] for sanction in summary["sanctions"]},
-            {1: "expired", 2: "active", 3: "removed"},
+            {1: "expired", 2: "active", 3: "removed", 4: "unverified"},
         )
 
     def test_sanction_stats_contract_defines_status_and_staff_activity_counts(self):
@@ -363,6 +370,19 @@ class MemberManagerSanctionsTests(unittest.TestCase):
                 reason_detail="Removed kick",
                 additional_notes=None,
             )
+            unverified_id = database.add_sanction(
+                guild_id=1,
+                discord_user_id=126,
+                mc_user_id="459",
+                mc_username="PendingUser",
+                admin_user_id=9003,
+                admin_username="AdminThree",
+                sanction_type="Ban",
+                reason_category="Game Log",
+                reason_detail="Pending game-log confirmation",
+                additional_notes=None,
+                status="unverified",
+            )
             database.update_sanction_status(
                 removed_id,
                 "removed",
@@ -374,19 +394,23 @@ class MemberManagerSanctionsTests(unittest.TestCase):
             manager.db = database
 
             stats = manager.get_sanction_stats(1)
+            stored_unverified = database.get_sanction(unverified_id)
 
         self.assertNotEqual(active_id, expired_id)
-        self.assertEqual(stats["issued_total"], 3)
-        self.assertEqual(stats["historical_count"], 3)
+        self.assertEqual(stats["issued_total"], 4)
+        self.assertEqual(stats["historical_count"], 4)
         self.assertEqual(stats["active_count"], 1)
+        self.assertEqual(stats["unverified_count"], 1)
         self.assertEqual(stats["expired_count"], 1)
         self.assertEqual(stats["removed_count"], 1)
         self.assertEqual(stats["type_counts"]["Warning - Official 1st"], 2)
         self.assertEqual(stats["type_counts"]["Kick"], 1)
+        self.assertEqual(stats["type_counts"]["Ban"], 1)
         self.assertEqual(stats["reason_counts"]["Conduct"], 2)
-        self.assertEqual(stats["history_action_counts"]["created"], 3)
+        self.assertEqual(stats["history_action_counts"]["created"], 4)
         self.assertEqual(stats["history_action_counts"]["status_changed_to_removed"], 1)
-        self.assertEqual(stats["staff_activity_total"], 4)
+        self.assertEqual(stats["staff_activity_total"], 5)
+        self.assertEqual(stored_unverified["status"], "unverified")
 
     def test_sanction_stats_contract_supports_period_counts(self):
         SanctionsDatabase = load_sanctions_database_class()
@@ -592,11 +616,23 @@ class MemberManagerSanctionsTests(unittest.TestCase):
                             "effective_status": "removed",
                             "_display_expired": False,
                         },
+                        {
+                            "sanction_id": 3,
+                            "sanction_type": "Ban",
+                            "reason_category": "Game Log",
+                            "reason_detail": "Pending game-log confirmation",
+                            "admin_username": "Admin",
+                            "created_at": 1_700_000_200,
+                            "status": "unverified",
+                            "effective_status": "unverified",
+                            "_display_expired": False,
+                        },
                     ],
                     "active_count": 0,
+                    "unverified_count": 1,
                     "expired_count": 1,
                     "removed_count": 1,
-                    "historical_count": 2,
+                    "historical_count": 3,
                 }
 
         sanction_manager = FakeSanctionManager()
@@ -625,6 +661,7 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         )
         self.assertIn("Expired warnings: 1", embed.fields[0]["value"])
         self.assertIn("Removed sanctions: 1", embed.fields[0]["value"])
+        self.assertIn("Pending review: 1", embed.fields[0]["value"])
 
     def test_sanctions_list_counts_expired_and_removed_statuses_separately(self):
         class FakeSanctionManager:
@@ -659,6 +696,13 @@ class MemberManagerSanctionsTests(unittest.TestCase):
                         "created_at": 1_700_000_100,
                         "effective_status": "removed",
                     },
+                    {
+                        "sanction_id": 5,
+                        "sanction_type": "Ban",
+                        "reason_detail": "Pending review",
+                        "created_at": 1_700_000_200,
+                        "effective_status": "unverified",
+                    },
                 ]
 
         view = MemberOverviewView.__new__(MemberOverviewView)
@@ -672,6 +716,7 @@ class MemberManagerSanctionsTests(unittest.TestCase):
 
         self.assertIn("Sanctions List", embed.kwargs["title"])
         self.assertIn("Active: 2", embed.footer["text"])
+        self.assertIn("Pending: 1", embed.footer["text"])
         self.assertIn("Expired: 1", embed.footer["text"])
         self.assertIn("Removed: 1", embed.footer["text"])
 
@@ -718,6 +763,7 @@ class MemberManagerSanctionsTests(unittest.TestCase):
             reason_category="Conduct",
             reason_detail="Reason",
             additional_notes="Notes",
+            status="unverified",
         )
         manager.edit_member_sanction(42, admin_user_id=999, reason_detail="Updated")
         manager.remove_member_sanction(42, admin_user_id=999, notes="Resolved")
@@ -729,6 +775,7 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         self.assertEqual(sanction_id, 42)
         self.assertEqual(calls["get"]["mc_user_id"], "456")
         self.assertEqual(calls["add"]["sanction_type"], "Warning")
+        self.assertEqual(calls["add"]["status"], "unverified")
         self.assertEqual(calls["edit"], (42, 999, {"reason_detail": "Updated"}))
         self.assertEqual(calls["remove"], (42, "removed", 999, "Resolved"))
 

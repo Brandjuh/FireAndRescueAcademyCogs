@@ -469,7 +469,7 @@ class MemberOverviewView(discord.ui.View):
             embed.set_footer(text="⚠️ Accounts not linked or pending verification")
         else:
             embed.set_footer(text="❌ Incomplete information")
-        
+
         return embed
 
     def _build_simple_overview_embed(self) -> discord.Embed:
@@ -707,10 +707,17 @@ class MemberOverviewView(discord.ui.View):
                 else len([s for s in all_sanctions if s.get("effective_status", s.get("status")) == "removed"])
             )
             
-            if expired_count or removed_count:
+            unverified_count = (
+                sanction_summary.get("unverified_count", 0)
+                if sanction_summary
+                else len([s for s in all_sanctions if s.get("effective_status", s.get("status")) == "unverified"])
+            )
+
+            if expired_count or removed_count or unverified_count:
                 embed.add_field(
                     name="📊 Historical Record",
                     value=(
+                        f"Pending review: {unverified_count}\n"
                         f"Expired warnings: {expired_count}\n"
                         f"Removed sanctions: {removed_count}\n"
                         f"Total historical: {len(all_sanctions)}"
@@ -798,6 +805,7 @@ class MemberOverviewView(discord.ui.View):
         
         lines = []
         active_count = 0
+        unverified_count = 0
         expired_count = 0
         removed_count = 0
         
@@ -812,6 +820,9 @@ class MemberOverviewView(discord.ui.View):
             if status == "removed":
                 emoji = "⚫"
                 removed_count += 1
+            elif status == "unverified":
+                emoji = "[Pending]"
+                unverified_count += 1
             elif status == "expired" or sanction.get("_display_expired"):
                 emoji = "⏱️"
                 expired_count += 1
@@ -827,6 +838,7 @@ class MemberOverviewView(discord.ui.View):
 
         if sanction_summary:
             active_count = sanction_summary.get("active_count", active_count)
+            unverified_count = sanction_summary.get("unverified_count", unverified_count)
             expired_count = sanction_summary.get("expired_count", expired_count)
             removed_count = sanction_summary.get("removed_count", removed_count)
         
@@ -839,11 +851,12 @@ class MemberOverviewView(discord.ui.View):
             text=(
                 f"Page {current_page}/{total_pages} • "
                 f"🔴 Active: {active_count} • "
+                f"Pending: {unverified_count} • "
                 f"⏱️ Expired: {expired_count} • "
                 f"⚫ Removed: {removed_count}"
             )
         )
-        
+
         return embed
 
     def _get_sanction_display_name(

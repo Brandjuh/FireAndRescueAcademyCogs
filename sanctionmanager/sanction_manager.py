@@ -149,7 +149,8 @@ class SanctionsDatabase:
     def add_sanction(self, guild_id: int, discord_user_id: Optional[int], mc_user_id: Optional[str],
                     mc_username: Optional[str], admin_user_id: int, admin_username: str,
                     sanction_type: str, reason_category: str, reason_detail: Optional[str],
-                    additional_notes: Optional[str], expires_at: Optional[int] = None) -> int:
+                    additional_notes: Optional[str], expires_at: Optional[int] = None,
+                    status: str = "active") -> int:
         """Add a new sanction."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -159,9 +160,9 @@ class SanctionsDatabase:
             INSERT INTO sanctions 
             (guild_id, discord_user_id, mc_user_id, mc_username, admin_user_id, admin_username,
              sanction_type, reason_category, reason_detail, additional_notes, created_at, expires_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (guild_id, discord_user_id, mc_user_id, mc_username, admin_user_id, admin_username,
-              sanction_type, reason_category, reason_detail, additional_notes, now, expires_at))
+              sanction_type, reason_category, reason_detail, additional_notes, now, expires_at, status))
         
         sanction_id = cursor.lastrowid
         
@@ -169,8 +170,13 @@ class SanctionsDatabase:
         cursor.execute('''
             INSERT INTO sanction_history
             (sanction_id, action_type, action_by, action_at, notes)
-            VALUES (?, 'created', ?, ?, 'Sanction created')
-        ''', (sanction_id, admin_user_id, now))
+            VALUES (?, 'created', ?, ?, ?)
+        ''', (
+            sanction_id,
+            admin_user_id,
+            now,
+            "Sanction created" if status == "active" else f"Sanction created as {status}",
+        ))
         
         conn.commit()
         conn.close()
@@ -252,11 +258,12 @@ class SanctionsDatabase:
 
     @classmethod
     def summarize_sanctions(cls, sanctions: List[dict], now: Optional[int] = None) -> dict:
-        """Return normalized sanctions and clear counts for active, expired, removed and history."""
+        """Return normalized sanctions and clear counts for status-specific displays."""
         normalized = [cls.normalize_sanction(sanction, now=now) for sanction in sanctions]
         return {
             "sanctions": normalized,
             "active_count": len([s for s in normalized if s.get("effective_status") == "active"]),
+            "unverified_count": len([s for s in normalized if s.get("effective_status") == "unverified"]),
             "expired_count": len([s for s in normalized if s.get("effective_status") == "expired"]),
             "removed_count": len([s for s in normalized if s.get("effective_status") == "removed"]),
             "historical_count": len(normalized),
@@ -511,6 +518,7 @@ class SanctionsDatabase:
             "by_type_period": by_type_period,
             "historical_count": summary["historical_count"],
             "active_count": summary["active_count"],
+            "unverified_count": summary["unverified_count"],
             "active_warnings": active_warnings,
             "expired_count": summary["expired_count"],
             "removed_count": summary["removed_count"],
@@ -2108,6 +2116,7 @@ class SanctionsManager(commands.Cog):
         reason_detail: Optional[str],
         additional_notes: Optional[str] = None,
         expires_at: Optional[int] = None,
+        status: str = "active",
     ) -> int:
         """Public contract for other cogs to create a sanction."""
         return self.db.add_sanction(
@@ -2122,6 +2131,7 @@ class SanctionsManager(commands.Cog):
             reason_detail=reason_detail,
             additional_notes=additional_notes,
             expires_at=expires_at,
+            status=status,
         )
 
     def edit_member_sanction(
@@ -2811,6 +2821,7 @@ class EditNotesModal(discord.ui.Modal, title="Edit Admin Notes"):
         status_text = (
             f"Total issued: {stats['issued_total']}\n"
             f"Current active: {stats['active_count']}\n"
+            f"Pending review: {stats.get('unverified_count', 0)}\n"
             f"Expired: {stats['expired_count']}\n"
             f"Removed: {stats['removed_count']}\n"
             f"Staff activity events: {stats['staff_activity_total']}"
