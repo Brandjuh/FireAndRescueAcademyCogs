@@ -285,6 +285,30 @@ class FireStationCommand(commands.Cog):
 
         return total if total > 0 else 4
 
+    def _equipment_display_text(self, equipment_ids: Any) -> str | None:
+        if not isinstance(equipment_ids, list) or not equipment_ids:
+            return None
+
+        equipment = self.game_data.get("equipment", {}).get("equipment", [])
+        names_by_id: Dict[str, str] = {}
+        if isinstance(equipment, list):
+            for item in equipment:
+                if not isinstance(item, dict):
+                    continue
+                item_id = item.get("id")
+                name = item.get("name")
+                if isinstance(item_id, str) and isinstance(name, str):
+                    names_by_id[item_id] = name
+
+        names = [names_by_id.get(str(item_id), str(item_id)) for item_id in equipment_ids]
+        return ", ".join(names)
+
+    def _add_mission_requirement_fields(self, embed: discord.Embed, mission: Dict[str, Any]) -> None:
+        embed.add_field(name="Required staff", value=str(mission.get("required_staff", "Unknown")), inline=True)
+        equipment_text = self._equipment_display_text(mission.get("required_equipment"))
+        if equipment_text:
+            embed.add_field(name="Required equipment", value=equipment_text, inline=False)
+
     def _build_incidents(self) -> List[Dict[str, Any]]:
         missions = self.game_data.get("missions", {}).get("missions", [])
         if not isinstance(missions, list):
@@ -596,7 +620,7 @@ class FireStationCommand(commands.Cog):
         )
         self._apply_mission_image(embed, mission)
         embed.add_field(name="Stage", value=stage or "Unknown", inline=True)
-        embed.add_field(name="Required staff", value=str(mission.get("required_staff", "Unknown")), inline=True)
+        self._add_mission_requirement_fields(embed, mission)
         embed.add_field(name="Guidance", value=guidance, inline=False)
 
         alert_mode = mission.get("alert_mode")
@@ -858,7 +882,7 @@ class FireStationCommand(commands.Cog):
             color=discord.Color.red(),
         )
         self._apply_mission_image(embed, mission)
-        embed.add_field(name="Required staff", value=str(incident["required_staff"]), inline=True)
+        self._add_mission_requirement_fields(embed, incident)
         embed.add_field(name="Initial report", value=incident["hint"], inline=False)
         embed.set_footer(text="Choose how to alert your crew below.")
         kwargs = {"ephemeral": True} if ephemeral else {}
@@ -1345,7 +1369,7 @@ class FireStationCommand(commands.Cog):
             color=discord.Color.red(),
         )
         self._apply_mission_image(embed, mission)
-        embed.add_field(name="Required staff", value=str(incident["required_staff"]), inline=True)
+        self._add_mission_requirement_fields(embed, incident)
         embed.set_footer(text="Choose how to alert your crew below.")
         await ctx.send(embed=embed, view=view)
 
@@ -2037,7 +2061,7 @@ class FscDashboardView(discord.ui.View):
             color=discord.Color.red(),
         )
         self.cog._apply_mission_image(embed, mission)
-        embed.add_field(name="Required staff", value=str(incident["required_staff"]), inline=True)
+        self.cog._add_mission_requirement_fields(embed, incident)
         embed.add_field(name="Initial report", value=incident["hint"], inline=False)
         embed.set_footer(text="Choose how to alert your crew below.")
         await interaction.response.edit_message(
