@@ -1,0 +1,12 @@
+{
+    "author": ["FireAndRescueAcademy"],
+    "min_bot_version": "3.5.0",
+    "description": "Repeated admin reminders for scheduled operational actions.",
+    "hidden": false,
+    "install_msg": "AdminTimedNotifications loaded. Configure channel and role, then add reminders with `[p]admintimer add <minutes> Title | message`.",
+    "required_cogs": {},
+    "requirements": [],
+    "short": "Repeated reminders for admins.",
+    "end_user_data_statement": "This cog stores guild-level reminder text, channel IDs, role IDs, and timing settings configured by admins.",
+    "tags": ["admin", "timer", "reminder", "notification"]
+}

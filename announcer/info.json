@@ -1,0 +1,12 @@
+{
+    "author": ["FireAndRescueAcademy"],
+    "min_bot_version": "3.5.0",
+    "description": "Button-driven announcement composer that formats admin input into a consistent embed without using AI.",
+    "hidden": false,
+    "install_msg": "Announcer loaded. Configure it with `[p]announcerset channel #channel`, then post the composer button with `[p]announcer button`.",
+    "required_cogs": {},
+    "requirements": [],
+    "short": "Format admin announcement input into a consistent embed.",
+    "end_user_data_statement": "This cog stores guild-level announcement channel, role, color, and footer settings. It does not store announcement content after posting.",
+    "tags": ["announcement", "embed", "admin", "modal"]
+}

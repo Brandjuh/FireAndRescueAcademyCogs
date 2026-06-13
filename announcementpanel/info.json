@@ -1,0 +1,12 @@
+{
+    "author": ["FireAndRescueAcademy"],
+    "min_bot_version": "3.5.0",
+    "description": "Configurable announcement button panel. Each button posts predefined text to one or more configured channels.",
+    "hidden": false,
+    "install_msg": "AnnouncementPanel loaded. Add buttons with `[p]annpanelset add <key> <label> | <message>`, attach channels, then post with `[p]annpanel post`.",
+    "required_cogs": {},
+    "requirements": [],
+    "short": "Configurable buttons that post preset announcements to channels.",
+    "end_user_data_statement": "This cog stores guild-level button labels, messages, target channel IDs, and role settings.",
+    "tags": ["announcement", "panel", "buttons", "admin"]
+}
