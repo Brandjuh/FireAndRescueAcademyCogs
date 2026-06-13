@@ -19,6 +19,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added narrative alert, re-alert, turnout, and en-route messages with dispatch and responder perspectives.
 - Added generated mission images for the initial incident set.
 - Added generated vehicle images for the initial vehicle catalog.
+- Added dashboard recruitment buttons for hiring station staff without typing the recruit command.
 
 ### Changed
 

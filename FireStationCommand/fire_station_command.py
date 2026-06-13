@@ -692,6 +692,49 @@ class FireStationCommand(commands.Cog):
             embed.set_image(url=image_url)
         return embed
 
+    async def _build_recruitment_embed(self, user: discord.abc.User) -> discord.Embed:
+        data = await self.config.user(user).all()
+        lvl = int(data.get("station_level", 1))
+        staff_total = int(data.get("staff_total", 0))
+        max_staff = self._max_staff(lvl)
+        open_slots = max(0, max_staff - staff_total)
+
+        glb = await self.config.all()
+        cost_per = int(glb.get("staff_cost", 2000))
+        credits = await self._get_credits(user)
+        affordable = credits // cost_per if cost_per > 0 else open_slots
+        hireable = min(open_slots, affordable)
+
+        embed = discord.Embed(
+            title="Recruitment desk",
+            description="Hire extra station staff with the buttons below.",
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="Staff", value=f"{staff_total} / {max_staff}", inline=True)
+        embed.add_field(name="Open positions", value=str(open_slots), inline=True)
+        embed.add_field(name="Credits", value=f"{credits:,}", inline=True)
+        embed.add_field(name="Cost per recruit", value=f"{cost_per:,} credits", inline=True)
+
+        if open_slots <= 0:
+            embed.add_field(
+                name="Recruitment status",
+                value="Your current station level is already at maximum staff capacity.",
+                inline=False,
+            )
+        elif hireable <= 0:
+            embed.add_field(
+                name="Recruitment status",
+                value="You do not have enough credits to hire another recruit yet.",
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Available actions",
+                value=f"You can currently hire up to **{hireable}** staff.",
+                inline=False,
+            )
+        return embed
+
     @staticmethod
     def _station_image_url(max_vehicles: int) -> str | None:
         if max_vehicles <= 1:
@@ -993,7 +1036,17 @@ class FireStationCommand(commands.Cog):
         view = ConfirmRecruitView(self, ctx.author, amount, total_cost)
         await ctx.send(embed=embed, view=view)
 
-    async def _confirm_recruit(self, interaction: discord.Interaction, user: discord.abc.User, amount: int, total_cost: int):
+    async def _confirm_recruit(
+        self,
+        interaction: discord.Interaction,
+        user: discord.abc.User,
+        amount: int,
+        total_cost: int,
+        *,
+        edit_message: bool = False,
+        channel: discord.abc.Messageable | None = None,
+        guild: discord.Guild | None = None,
+    ):
         user_conf = self.config.user(user)
         data = await user_conf.all()
         lvl = int(data.get("station_level", 1))
@@ -1001,6 +1054,12 @@ class FireStationCommand(commands.Cog):
         max_staff = self._max_staff(lvl)
 
         if staff_total >= max_staff:
+            if edit_message:
+                embed = await self._build_recruitment_embed(user)
+                embed.add_field(name="Recruitment failed", value="Already at maximum staff.", inline=False)
+                view = RecruitmentView(self, user, channel or interaction.channel, guild or interaction.guild)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
             await interaction.response.send_message("Recruitment failed: already at maximum staff.", ephemeral=True)
             return
 
@@ -1013,6 +1072,12 @@ class FireStationCommand(commands.Cog):
 
         credits = await self._get_credits(user)
         if credits < total_cost or not await self._spend(user, total_cost):
+            if edit_message:
+                embed = await self._build_recruitment_embed(user)
+                embed.add_field(name="Recruitment failed", value="Not enough credits.", inline=False)
+                view = RecruitmentView(self, user, channel or interaction.channel, guild or interaction.guild)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
             await interaction.response.send_message("Recruitment failed: not enough credits.", ephemeral=True)
             return
 
@@ -1026,6 +1091,10 @@ class FireStationCommand(commands.Cog):
         )
         embed.add_field(name="Total staff", value=f"{staff_total} / {max_staff}", inline=True)
         embed.add_field(name="Cost", value=f"{total_cost:,} credits", inline=True)
+        if edit_message:
+            view = RecruitmentView(self, user, channel or interaction.channel, guild or interaction.guild)
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+            return
         await interaction.response.send_message(embed=embed, ephemeral=False)
 
     @fsc_group.command(name="upgrade")
@@ -1689,6 +1758,18 @@ class FscDashboardView(discord.ui.View):
         embed = self.cog._build_station_overview_embed(data)
         await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
 
+    @discord.ui.button(label="Recruit", style=discord.ButtonStyle.success)
+    async def recruit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.config.user(self.user).all()
+        if not data["started"]:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Action required", value="Create a station first.", inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=FscStartView(self.cog, self.user))
+            return
+        embed = await self.cog._build_recruitment_embed(self.user)
+        view = RecruitmentView(self.cog, self.user, interaction.channel or self.channel, interaction.guild or self.guild)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
     @discord.ui.button(label="Shop", style=discord.ButtonStyle.secondary)
     async def shop(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = await self.cog.config.user(self.user).all()
@@ -1788,6 +1869,107 @@ class FscDashboardView(discord.ui.View):
         embed.add_field(name="Upgrade", value="`[p]fsc upgrade`", inline=False)
         embed.add_field(name="Career station", value="`[p]fsc career`", inline=False)
         await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
+
+
+class RecruitmentView(discord.ui.View):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        user: discord.abc.User,
+        channel: discord.abc.Messageable,
+        guild: discord.Guild | None = None,
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.user = user
+        self.channel = channel
+        self.guild = guild
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    async def _show_recruitment_status(
+        self,
+        interaction: discord.Interaction,
+        title: str,
+        message: str,
+    ) -> None:
+        embed = await self.cog._build_recruitment_embed(self.user)
+        embed.add_field(name=title, value=message, inline=False)
+        await interaction.response.edit_message(content=None, embed=embed, view=self)
+
+    async def _confirm_hire(self, interaction: discord.Interaction, requested_amount: int | None) -> None:
+        data = await self.cog.config.user(self.user).all()
+        lvl = int(data.get("station_level", 1))
+        staff_total = int(data.get("staff_total", 0))
+        max_staff = self.cog._max_staff(lvl)
+        open_slots = max(0, max_staff - staff_total)
+        if open_slots <= 0:
+            await self._show_recruitment_status(
+                interaction,
+                "Recruitment unavailable",
+                "Your current station level is already at maximum staff capacity.",
+            )
+            return
+
+        glb = await self.cog.config.all()
+        cost_per = int(glb.get("staff_cost", 2000))
+        credits = await self.cog._get_credits(self.user)
+        affordable = credits // cost_per if cost_per > 0 else open_slots
+        if affordable <= 0:
+            await self._show_recruitment_status(
+                interaction,
+                "Recruitment unavailable",
+                "You do not have enough credits to hire another recruit yet.",
+            )
+            return
+
+        amount = min(open_slots, affordable) if requested_amount is None else min(requested_amount, open_slots)
+        total_cost = amount * cost_per
+        if credits < total_cost:
+            await self._show_recruitment_status(
+                interaction,
+                "Not enough credits",
+                f"Hiring {amount} staff costs {total_cost:,} credits, but you only have {credits:,}.",
+            )
+            return
+
+        embed = discord.Embed(
+            title="Confirm recruitment",
+            description=f"Hire **{amount}** new staff for **{total_cost:,}** credits?",
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="After recruitment", value=f"{staff_total + amount} / {max_staff} staff", inline=False)
+        view = ConfirmRecruitView(
+            self.cog,
+            self.user,
+            amount,
+            total_cost,
+            channel=interaction.channel or self.channel,
+            guild=interaction.guild or self.guild,
+            edit_message=True,
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+    @discord.ui.button(label="Hire 1", style=discord.ButtonStyle.success)
+    async def hire_one(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._confirm_hire(interaction, 1)
+
+    @discord.ui.button(label="Hire 5", style=discord.ButtonStyle.success)
+    async def hire_five(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._confirm_hire(interaction, 5)
+
+    @discord.ui.button(label="Hire max", style=discord.ButtonStyle.primary)
+    async def hire_max(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._confirm_hire(interaction, None)
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = await self.cog._build_dashboard_embed(self.user)
+        channel = interaction.channel or self.channel
+        guild = interaction.guild or self.guild
+        view = FscDashboardView(self.cog, self.user, channel, guild)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
 
 
 class AlertChoiceView(discord.ui.View):
@@ -2068,12 +2250,25 @@ class VehicleShopView(discord.ui.View):
 
 
 class ConfirmRecruitView(discord.ui.View):
-    def __init__(self, cog: FireStationCommand, user: discord.abc.User, amount: int, cost: int):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        user: discord.abc.User,
+        amount: int,
+        cost: int,
+        *,
+        channel: discord.abc.Messageable | None = None,
+        guild: discord.Guild | None = None,
+        edit_message: bool = False,
+    ):
         super().__init__(timeout=60)
         self.cog = cog
         self.user = user
         self.amount = amount
         self.cost = cost
+        self.channel = channel
+        self.guild = guild
+        self.edit_message = edit_message
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user.id
@@ -2083,7 +2278,15 @@ class ConfirmRecruitView(discord.ui.View):
         for child in self.children:
             child.disabled = True
         await interaction.message.edit(view=self)
-        await self.cog._confirm_recruit(interaction, self.user, self.amount, self.cost)
+        await self.cog._confirm_recruit(
+            interaction,
+            self.user,
+            self.amount,
+            self.cost,
+            edit_message=self.edit_message,
+            channel=self.channel,
+            guild=self.guild,
+        )
         self.stop()
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
@@ -2094,6 +2297,18 @@ class ConfirmRecruitView(discord.ui.View):
             await interaction.message.edit(view=self)
         except Exception:
             pass
+        if self.edit_message:
+            embed = await self.cog._build_recruitment_embed(self.user)
+            embed.add_field(name="Recruitment cancelled", value="No staff were hired.", inline=False)
+            view = RecruitmentView(
+                self.cog,
+                self.user,
+                interaction.channel or self.channel,
+                interaction.guild or self.guild,
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+            self.stop()
+            return
         await interaction.response.send_message("Recruitment cancelled.", ephemeral=True)
         self.stop()
 
