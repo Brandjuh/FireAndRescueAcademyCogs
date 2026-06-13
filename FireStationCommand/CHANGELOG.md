@@ -48,11 +48,13 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added extension requirements for specialized vehicles, equipment, and mission dispatch families.
 - Added tests to keep ambulance and police content behind their station extensions while preserving fire service as the primary core loop.
 - Added balance tests that verify mission extension locks include all required vehicle and equipment expansion gates.
-- Added a config format regression test so every FireStationCommand config file remains JSON-compatible YAML.
+- Added a config format regression test so every FireStationCommand config file parses as YAML.
+- Added economy-aware purchase scaling for upgrades, vehicles, equipment, training, expansions, and career conversion based on the player's current Red economy balance.
+- Added station-wide training scope messaging so players know certifications apply permanently to current and future staff.
 
 ### Changed
 
-- Bumped the cog version to `1.2.5`.
+- Bumped the cog version to `1.2.6`.
 - Vehicle shop options now come from `data/config/vehicles.yaml` when available.
 - Mission definitions now come from `data/config/missions.yaml` when available.
 - Mission embeds now show configured mission images when available.
@@ -105,6 +107,8 @@ All notable changes to FireStationCommand will be documented in this file.
 - Vehicle and equipment shops now paginate catalog options so large catalogs stay within Discord select-menu limits.
 - Rebalanced imported mission unlock levels and XP using mission credits, requirement complexity, and capability weight.
 - Rewrote every imported mission narrative field with category-aware dispatch, scene, success, partial, and failure text.
+- Upgrade and expansion locks now explain that the option is not available yet and show the required command level more clearly.
+- Config validation now accepts real YAML instead of requiring JSON-compatible YAML syntax.
 
 ### Fixed
 
