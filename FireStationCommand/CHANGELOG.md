@@ -20,6 +20,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added generated mission images for the initial incident set.
 - Added generated vehicle images for the initial vehicle catalog.
 - Added dashboard recruitment buttons for hiring station staff without typing the recruit command.
+- Added dashboard buttons for station upgrades and career conversion.
 
 ### Changed
 
