@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - dependency is declared in info.json
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.2.9"
+    __version__ = "1.3.0"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
@@ -1406,6 +1406,29 @@ class FireStationCommand(commands.Cog):
             )
         return "There is no available staff to answer the call."
 
+    @staticmethod
+    def _turnout_timeout_narrative() -> str:
+        return (
+            "Dispatch calls the station again, but the decision board stays silent. "
+            "The original crew has not confirmed how to continue, so command opens the incident "
+            "for another station member before the call is lost."
+        )
+
+    @staticmethod
+    def _takeover_dispatch_narrative() -> str:
+        return (
+            "A new station officer acknowledges the open incident. Dispatch transfers the notes, "
+            "repeats the address, and restarts the assignment as a fresh response."
+        )
+
+    @staticmethod
+    def _abandoned_dispatch_narrative() -> str:
+        return (
+            "No one takes the radio. Dispatch repeats the call one last time, voice tight and urgent, "
+            "then marks the assignment abandoned. The channel goes quiet with only the hope that "
+            "someone closer can still make a difference."
+        )
+
     def _travel_narrative(self, minutes: float) -> str:
         options = [
             "The bay doors lift and the unit rolls out into traffic. Dispatch keeps the channel open while the crew builds the first picture from the notes.",
@@ -1988,7 +2011,9 @@ class FireStationCommand(commands.Cog):
         view = VehicleShopView(self, channel, user, data=data)
         embed = self._build_vehicle_shop_embed(data)
         kwargs = {"ephemeral": True} if ephemeral else {}
-        await send(embed=embed, view=view, **kwargs)
+        message = await send(embed=embed, view=view, **kwargs)
+        if message is not None:
+            view.message = message
 
     async def _start_mission_for_user(
         self,
@@ -2045,7 +2070,9 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="Initial report", value=incident["hint"], inline=False)
         embed.set_footer(text="Choose how to alert your crew below.")
         kwargs = {"ephemeral": True} if ephemeral else {}
-        await send(embed=embed, view=view, **kwargs)
+        message = await send(embed=embed, view=view, **kwargs)
+        if message is not None:
+            view.message = message
 
     async def _send_dashboard(self, ctx: commands.Context) -> None:
         data = await self.config.user(ctx.author).all()
@@ -2054,7 +2081,8 @@ class FireStationCommand(commands.Cog):
             view = FscDashboardView(self, ctx.author, ctx.channel, ctx.guild)
         else:
             view = FscStartView(self, ctx.author)
-        await ctx.send(embed=embed, view=view)
+        message = await ctx.send(embed=embed, view=view)
+        view.message = message
 
     # --------------------------------------------------
     # Commands
@@ -2245,7 +2273,8 @@ class FireStationCommand(commands.Cog):
         embed.add_field(name="After recruitment", value=f"{staff_total + amount} / {max_staff} staff", inline=False)
 
         view = ConfirmRecruitView(self, ctx.author, amount, total_cost)
-        await ctx.send(embed=embed, view=view)
+        message = await ctx.send(embed=embed, view=view)
+        view.message = message
 
     async def _confirm_recruit(
         self,
@@ -2564,7 +2593,8 @@ class FireStationCommand(commands.Cog):
 
         view = VehicleShopView(self, ctx.channel, ctx.author, ctx.guild, data=data)
         embed = self._build_vehicle_shop_embed(data)
-        await ctx.send(embed=embed, view=view)
+        message = await ctx.send(embed=embed, view=view)
+        view.message = message
 
     @fsc_group.command(name="equipment")
     async def fsc_equipment(self, ctx: commands.Context):
@@ -2575,7 +2605,8 @@ class FireStationCommand(commands.Cog):
         data = await self.config.user(ctx.author).all()
         embed = self._build_equipment_shop_embed(data)
         view = EquipmentShopView(self, ctx.channel, ctx.author, ctx.guild, data=data)
-        await ctx.send(embed=embed, view=view)
+        message = await ctx.send(embed=embed, view=view)
+        view.message = message
 
     @fsc_group.command(name="training")
     async def fsc_training(self, ctx: commands.Context):
@@ -2586,7 +2617,8 @@ class FireStationCommand(commands.Cog):
         data = await self.config.user(ctx.author).all()
         embed = self._build_training_embed(data)
         view = TrainingView(self, ctx.channel, ctx.author, ctx.guild, data=data)
-        await ctx.send(embed=embed, view=view)
+        message = await ctx.send(embed=embed, view=view)
+        view.message = message
 
     @fsc_group.command(name="expansions")
     async def fsc_expansions(self, ctx: commands.Context):
@@ -2597,7 +2629,8 @@ class FireStationCommand(commands.Cog):
         data = await self.config.user(ctx.author).all()
         embed = self._build_expansion_embed(data)
         view = ExpansionView(self, ctx.channel, ctx.author, ctx.guild, data=data)
-        await ctx.send(embed=embed, view=view)
+        message = await ctx.send(embed=embed, view=view)
+        view.message = message
 
     @fsc_group.command(name="maintenance")
     async def fsc_maintenance(self, ctx: commands.Context):
@@ -2608,7 +2641,8 @@ class FireStationCommand(commands.Cog):
         data = await self.config.user(ctx.author).all()
         embed = self._build_maintenance_embed(data)
         view = MaintenanceView(self, ctx.channel, ctx.author, ctx.guild)
-        await ctx.send(embed=embed, view=view)
+        message = await ctx.send(embed=embed, view=view)
+        view.message = message
 
     @fsc_group.command(name="mission")
     async def fsc_mission(self, ctx: commands.Context):
@@ -2655,7 +2689,8 @@ class FireStationCommand(commands.Cog):
         self._apply_mission_image(embed, mission)
         self._add_mission_requirement_fields(embed, mission)
         embed.set_footer(text="Choose how to alert your crew below.")
-        await ctx.send(embed=embed, view=view)
+        message = await ctx.send(embed=embed, view=view)
+        view.message = message
 
     # --------------------------------------------------
     # Workflow handlers
@@ -2760,10 +2795,12 @@ class FireStationCommand(commands.Cog):
         view = TurnoutDecisionView(self, channel, user)
 
         try:
-            await channel.send(embed=embed, view=view)
+            message = await channel.send(embed=embed, view=view)
+            view.message = message
         except Exception:
             try:
-                await user.send(embed=embed, view=view)
+                message = await user.send(embed=embed, view=view)
+                view.message = message
             except Exception:
                 pass
 
@@ -2860,6 +2897,93 @@ class FireStationCommand(commands.Cog):
             f"Incident cancelled. Reputation change: {reputation_delta:+}.",
             ephemeral=False,
         )
+
+    def _incident_from_active_mission(self, mission: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": mission.get("id", "takeover_incident"),
+            "name": mission.get("title", "Transferred Incident"),
+            "required_staff": int(mission.get("required_staff", 4)),
+            "base_credits": int(mission.get("base_credits", 1000)),
+            "hint": mission.get("hint", "Transferred dispatch from another station member."),
+            "detail": mission.get("detail", "Dispatch transfers the active incident notes."),
+            "dispatch_narrative": mission.get("dispatch_narrative", ""),
+            "success_narrative": mission.get("success_narrative", ""),
+            "partial_narrative": mission.get("partial_narrative", ""),
+            "failure_narrative": mission.get("failure_narrative", ""),
+            "image": mission.get("image"),
+            "required_vehicles": mission.get("required_vehicles", []),
+            "required_equipment": mission.get("required_equipment", []),
+            "required_expansions": mission.get("required_expansions", []),
+            "base_xp": int(mission.get("base_xp", self._balance_int("xp_per_mission_base", 50))),
+            "tier": int(mission.get("tier", 1)),
+            "recommended_level": int(mission.get("recommended_level", 1)),
+            "capabilities": mission.get("capabilities", {}),
+        }
+
+    async def handle_takeover_incident(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.abc.Messageable,
+        guild: discord.Guild | None,
+        original_user: discord.abc.User,
+        new_user: discord.abc.User,
+    ) -> None:
+        if new_user.id == original_user.id:
+            await interaction.response.send_message(
+                "The original station already missed this decision window. Another member must take over.",
+                ephemeral=True,
+            )
+            return
+
+        original_conf = self.config.user(original_user)
+        original_data = await original_conf.all()
+        original_mission = original_data.get("active_mission", {}) or {}
+        if not self._mission_is_stage(original_mission, self.STAGE_STAFF_TURNOUT):
+            await interaction.response.send_message("This incident is no longer available for takeover.", ephemeral=True)
+            return
+
+        new_conf = self.config.user(new_user)
+        new_data = await new_conf.all()
+        if not new_data.get("started", False):
+            await interaction.response.send_message("Create a station before taking over incidents.", ephemeral=True)
+            return
+        if new_data.get("active_mission"):
+            await interaction.response.send_message("You already have an active incident.", ephemeral=True)
+            return
+        if int(new_data.get("staff_total", 0)) <= 0:
+            await interaction.response.send_message("You need station staff before taking over incidents.", ephemeral=True)
+            return
+
+        incident = self._incident_from_active_mission(original_mission)
+        mission = self._new_mission_state(
+            incident,
+            channel_id=getattr(channel, "id", 0),
+            guild_id=guild.id if guild else None,
+        )
+        mission["dispatch_narrative"] = self._takeover_dispatch_narrative()
+        mission["missing_required_vehicles"] = self._missing_required_vehicle_ids(incident, new_data.get("vehicles", []))
+        mission["missing_required_equipment"] = self._missing_required_equipment_ids(
+            incident,
+            new_data.get("equipment", []),
+        )
+        mission["missing_required_training"] = self._missing_required_training_ids(incident, new_data)
+        mission["readiness_score"] = self._readiness_score(incident, new_data)
+
+        await original_conf.active_mission.set({})
+        await new_conf.active_mission.set(mission)
+
+        embed = discord.Embed(
+            title=f"Transferred incident: {incident['name']}",
+            description=mission["dispatch_narrative"],
+            color=discord.Color.red(),
+        )
+        self._apply_mission_image(embed, mission)
+        self._add_mission_requirement_fields(embed, mission)
+        embed.add_field(name="Initial report", value=incident["hint"], inline=False)
+        embed.set_footer(text="Choose how to alert your crew below.")
+
+        view = AlertChoiceView(self, channel, new_user)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
 
     async def handle_vehicle_selection(
         self,
@@ -3739,7 +3863,33 @@ class FireStationCommand(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=False)
 
 
-class FscStartView(discord.ui.View):
+class FscTimedView(discord.ui.View):
+    timeout_notice = "This menu timed out. Open `[p]fsc` again to continue."
+
+    def __init__(self, *, timeout: float | None = 180):
+        super().__init__(timeout=timeout)
+        self.message = None
+
+    def _disable_children(self) -> None:
+        for child in self.children:
+            child.disabled = True
+            if isinstance(child, discord.ui.Button):
+                child.style = discord.ButtonStyle.secondary
+
+    async def _edit_timeout_message(self, *, content: str | None = None, view: discord.ui.View | None = None) -> None:
+        if self.message is None:
+            return
+        self._disable_children()
+        try:
+            await self.message.edit(content=content or self.timeout_notice, view=view or self)
+        except Exception:
+            pass
+
+    async def on_timeout(self) -> None:
+        await self._edit_timeout_message()
+
+
+class FscStartView(FscTimedView):
     def __init__(self, cog: FireStationCommand, user: discord.abc.User):
         super().__init__(timeout=180)
         self.cog = cog
@@ -3760,7 +3910,7 @@ class FscStartView(discord.ui.View):
         self.stop()
 
 
-class FscDashboardView(discord.ui.View):
+class FscDashboardView(FscTimedView):
     def __init__(
         self,
         cog: FireStationCommand,
@@ -4126,7 +4276,7 @@ class FscDashboardView(discord.ui.View):
         await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
 
 
-class RecruitmentView(discord.ui.View):
+class RecruitmentView(FscTimedView):
     def __init__(
         self,
         cog: FireStationCommand,
@@ -4227,7 +4377,7 @@ class RecruitmentView(discord.ui.View):
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
 
-class AlertChoiceView(discord.ui.View):
+class AlertChoiceView(FscTimedView):
     def __init__(self, cog: FireStationCommand, channel: discord.abc.Messageable, user: discord.abc.User):
         super().__init__(timeout=120)
         self.cog = cog
@@ -4255,7 +4405,7 @@ class AlertChoiceView(discord.ui.View):
         self.stop()
 
 
-class TurnoutDecisionView(discord.ui.View):
+class TurnoutDecisionView(FscTimedView):
     def __init__(self, cog: FireStationCommand, channel: discord.abc.Messageable, user: discord.abc.User):
         super().__init__(timeout=180)
         self.cog = cog
@@ -4268,8 +4418,38 @@ class TurnoutDecisionView(discord.ui.View):
     async def _disable_and_edit(self, interaction: discord.Interaction):
         for child in self.children:
             child.disabled = True
+            if isinstance(child, discord.ui.Button):
+                child.style = discord.ButtonStyle.secondary
         try:
             await interaction.message.edit(view=self)
+        except Exception:
+            pass
+
+    async def on_timeout(self) -> None:
+        self._disable_children()
+        if self.message is not None:
+            try:
+                await self.message.edit(
+                    content="Turnout decision timed out. The original station can no longer control this call.",
+                    view=self,
+                )
+            except Exception:
+                pass
+
+        embed = discord.Embed(
+            title="Dispatch needs a new officer",
+            description=self.cog._turnout_timeout_narrative(),
+            color=discord.Color.orange(),
+        )
+        embed.add_field(
+            name="Takeover window",
+            value="Another server member can take over this incident and run it as a fresh dispatch.",
+            inline=False,
+        )
+        view = TurnoutTakeoverView(self.cog, self.channel, self.user)
+        try:
+            message = await self.channel.send(embed=embed, view=view)
+            view.message = message
         except Exception:
             pass
 
@@ -4289,6 +4469,57 @@ class TurnoutDecisionView(discord.ui.View):
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._disable_and_edit(interaction)
         await self.cog.handle_cancel_incident(interaction, self.channel, self.user)
+        self.stop()
+
+
+class TurnoutTakeoverView(FscTimedView):
+    def __init__(self, cog: FireStationCommand, channel: discord.abc.Messageable, original_user: discord.abc.User):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.channel = channel
+        self.original_user = original_user
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id != self.original_user.id
+
+    async def on_timeout(self) -> None:
+        self._disable_children()
+        user_conf = self.cog.config.user(self.original_user)
+        data = await user_conf.all()
+        mission = data.get("active_mission", {}) or {}
+        if self.cog._mission_is_stage(mission, self.cog.STAGE_STAFF_TURNOUT):
+            await user_conf.active_mission.set({})
+
+        embed = discord.Embed(
+            title="Dispatch abandoned",
+            description=self.cog._abandoned_dispatch_narrative(),
+            color=discord.Color.red(),
+        )
+        if self.message is not None:
+            try:
+                await self.message.edit(content=None, embed=embed, view=self)
+                return
+            except Exception:
+                pass
+        try:
+            await self.channel.send(embed=embed)
+        except Exception:
+            pass
+
+    @discord.ui.button(label="Take over dispatch", style=discord.ButtonStyle.danger)
+    async def take_over(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._disable_children()
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        await self.cog.handle_takeover_incident(
+            interaction,
+            interaction.channel or self.channel,
+            interaction.guild,
+            self.original_user,
+            interaction.user,
+        )
         self.stop()
 
 
@@ -4324,7 +4555,7 @@ class VehicleSelect(discord.ui.Select):
         await self.cog.handle_vehicle_selection(interaction, self.channel, self.user, list(self.values))
 
 
-class VehicleSelectView(discord.ui.View):
+class VehicleSelectView(FscTimedView):
     def __init__(
         self,
         cog: FireStationCommand,
@@ -4371,7 +4602,7 @@ class BackupVehicleSelect(discord.ui.Select):
         await self.cog.handle_backup_vehicle_selection(interaction, self.channel, self.user, list(self.values))
 
 
-class SceneBackupView(discord.ui.View):
+class SceneBackupView(FscTimedView):
     def __init__(
         self,
         cog: FireStationCommand,
@@ -4400,7 +4631,7 @@ class SceneBackupView(discord.ui.View):
         self.stop()
 
 
-class MissionControlView(discord.ui.View):
+class MissionControlView(FscTimedView):
     def __init__(
         self,
         cog: FireStationCommand,
@@ -4645,7 +4876,7 @@ class VehicleShopSelect(discord.ui.Select):
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
 
-class VehicleShopView(discord.ui.View):
+class VehicleShopView(FscTimedView):
     def __init__(
         self,
         cog: FireStationCommand,
@@ -4689,7 +4920,7 @@ class VehicleShopView(discord.ui.View):
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
 
-class MaintenanceView(discord.ui.View):
+class MaintenanceView(FscTimedView):
     def __init__(
         self,
         cog: FireStationCommand,
@@ -4865,7 +5096,7 @@ class EquipmentShopSelect(discord.ui.Select):
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
 
-class EquipmentShopView(discord.ui.View):
+class EquipmentShopView(FscTimedView):
     def __init__(
         self,
         cog: FireStationCommand,
@@ -5043,7 +5274,7 @@ class TrainingSelect(discord.ui.Select):
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
 
-class TrainingView(discord.ui.View):
+class TrainingView(FscTimedView):
     def __init__(
         self,
         cog: FireStationCommand,
@@ -5187,7 +5418,7 @@ class ExpansionSelect(discord.ui.Select):
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
 
-class ExpansionView(discord.ui.View):
+class ExpansionView(FscTimedView):
     def __init__(
         self,
         cog: FireStationCommand,
@@ -5215,7 +5446,7 @@ class ExpansionView(discord.ui.View):
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
 
-class ConfirmRecruitView(discord.ui.View):
+class ConfirmRecruitView(FscTimedView):
     def __init__(
         self,
         cog: FireStationCommand,
@@ -5279,7 +5510,7 @@ class ConfirmRecruitView(discord.ui.View):
         self.stop()
 
 
-class ConfirmUpgradeView(discord.ui.View):
+class ConfirmUpgradeView(FscTimedView):
     def __init__(
         self,
         cog: FireStationCommand,
@@ -5343,7 +5574,7 @@ class ConfirmUpgradeView(discord.ui.View):
         self.stop()
 
 
-class ConfirmCareerView(discord.ui.View):
+class ConfirmCareerView(FscTimedView):
     def __init__(
         self,
         cog: FireStationCommand,
@@ -5404,7 +5635,7 @@ class ConfirmCareerView(discord.ui.View):
         self.stop()
 
 
-class ConfirmVehiclePurchaseView(discord.ui.View):
+class ConfirmVehiclePurchaseView(FscTimedView):
     def __init__(
         self,
         cog: FireStationCommand,
@@ -5468,7 +5699,7 @@ class ConfirmVehiclePurchaseView(discord.ui.View):
         self.stop()
 
 
-class ConfirmEquipmentPurchaseView(discord.ui.View):
+class ConfirmEquipmentPurchaseView(FscTimedView):
     def __init__(
         self,
         cog: FireStationCommand,
@@ -5531,7 +5762,7 @@ class ConfirmEquipmentPurchaseView(discord.ui.View):
         self.stop()
 
 
-class ConfirmTrainingView(discord.ui.View):
+class ConfirmTrainingView(FscTimedView):
     def __init__(
         self,
         cog: FireStationCommand,
@@ -5594,7 +5825,7 @@ class ConfirmTrainingView(discord.ui.View):
         self.stop()
 
 
-class ConfirmExpansionView(discord.ui.View):
+class ConfirmExpansionView(FscTimedView):
     def __init__(
         self,
         cog: FireStationCommand,

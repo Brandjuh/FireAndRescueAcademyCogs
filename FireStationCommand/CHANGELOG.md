@@ -55,10 +55,12 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added local backup vehicle dispatch from the on-scene update, including backup ETA and result scoring that counts the extra vehicles.
 - Added illustrated incident result outcome images for successful, partial, and failed incident outcomes.
 - Added cleaner shop list formatting for locked vehicles and equipment.
+- Added timeout handling for FireStationCommand button menus so expired controls are disabled instead of staying active.
+- Added a turnout takeover dispatch flow where another server member can take over an unanswered incident.
 
 ### Changed
 
-- Bumped the cog version to `1.2.9`.
+- Bumped the cog version to `1.3.0`.
 - Vehicle shop options now come from `data/config/vehicles.yaml` when available.
 - Mission definitions now come from `data/config/missions.yaml` when available.
 - Mission embeds now show configured mission images when available.
@@ -78,6 +80,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - On-scene updates now pause briefly before sending the incident result.
 - Crew alert, turnout result, re-alert, vehicle selection, and en-route updates now use richer embeds instead of short plain status messages.
 - Early manual gameplay timers are shorter until automatic dispatch is implemented.
+- Turnout decisions now expire into a dispatch narrative, open a short takeover window, and abandon the incident if nobody responds.
 - Short positive wait times now display as at least `in 1 minute` instead of `now`.
 - Station overview images now use the station level instead of vehicle capacity.
 - Default maximum station level is now 10.
