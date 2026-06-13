@@ -9,6 +9,7 @@ from admintimednotifications.admintimednotifications import (
 )
 from announcer.announcer import parse_title_body as parse_announcement_title_body
 from announcementpanel.announcementpanel import (
+    format_announcement_content_chunks,
     normalize_button_key,
     panel_message_record,
     parse_channel_ids,
@@ -62,6 +63,14 @@ def test_panel_button_key_and_message_parsing():
         "channel_id": 123456789012345678,
         "message_id": 987654321098765432,
     }
+    content = format_announcement_content_chunks(
+        "Training",
+        "<@&123456789012345678> Training starts now",
+    )
+    assert content == ["**Training**\n<@&123456789012345678> Training starts now"]
+    long_content = format_announcement_content_chunks("Training", "x" * 4500)
+    assert len(long_content) == 3
+    assert all(len(chunk) <= 2000 for chunk in long_content)
 
 
 def test_admin_timer_due_split_and_next_run():

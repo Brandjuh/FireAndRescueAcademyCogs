@@ -18,6 +18,8 @@ DEFAULT_GUILD = {
     "panel_messages": [],
 }
 
+MESSAGE_CONTENT_LIMIT = 2000
+
 
 def normalize_button_key(value: str) -> str:
     key = "".join(ch for ch in (value or "").lower().strip() if ch.isalnum() or ch in "_-")
@@ -62,6 +64,37 @@ def unique_button_key(label: str, existing_keys: set[str]) -> str:
 
 def panel_message_record(channel_id: int, message_id: int) -> dict[str, int]:
     return {"channel_id": int(channel_id), "message_id": int(message_id)}
+
+
+def format_announcement_content_chunks(
+    label: str,
+    message: str,
+    *,
+    limit: int = MESSAGE_CONTENT_LIMIT,
+) -> list[str]:
+    title = (label or "Announcement").strip() or "Announcement"
+    body = (message or "").strip()
+    prefix = f"**{title[:80]}**\n"
+    if not body:
+        return [prefix.strip()]
+
+    full_message = f"{prefix}{body}"
+    if len(full_message) <= limit:
+        return [full_message]
+
+    chunks = []
+    remaining = body
+    first_limit = max(1, limit - len(prefix))
+    first_body = remaining[:first_limit].rstrip()
+    chunks.append(f"{prefix}{first_body}".rstrip())
+    remaining = remaining[len(first_body):].lstrip()
+
+    while remaining:
+        chunk = remaining[:limit].rstrip()
+        chunks.append(chunk)
+        remaining = remaining[len(chunk):].lstrip()
+
+    return chunks
 
 
 class PanelButton(discord.ui.Button):
@@ -429,6 +462,12 @@ class AnnouncementPanel(commands.Cog):
             timestamp=datetime.now(timezone.utc),
         )
 
+    def announcement_allowed_mentions(self):
+        allowed_mentions = getattr(discord, "AllowedMentions", None)
+        if allowed_mentions is None:
+            return None
+        return allowed_mentions(everyone=False, users=True, roles=True, replied_user=False)
+
     async def handle_button(self, interaction: discord.Interaction, key: str):
         if not interaction.guild:
             await interaction.response.send_message("This can only be used in a server.", ephemeral=True)
@@ -470,12 +509,18 @@ class AnnouncementPanel(commands.Cog):
         if not config:
             return 0
 
-        embed = await self.build_announcement_embed(guild, config)
+        chunks = format_announcement_content_chunks(
+            config.get("label", "Announcement"),
+            config.get("message", ""),
+        )
+        allowed_mentions = self.announcement_allowed_mentions()
+        send_kwargs = {"allowed_mentions": allowed_mentions} if allowed_mentions else {}
         sent = 0
         for channel_id in [int(ch_id) for ch_id in config.get("channel_ids", [])]:
             channel = guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
             if channel:
-                await channel.send(embed=embed)
+                for chunk in chunks:
+                    await channel.send(content=chunk, **send_kwargs)
                 sent += 1
         return sent
 
