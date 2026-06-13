@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - dependency is declared in info.json
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.1.8"
+    __version__ = "1.2.0"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
@@ -1539,13 +1539,9 @@ class FireStationCommand(commands.Cog):
             embed.set_image(url=image_url)
 
     def _build_vehicle_shop_embed(self, data: Dict[str, Any]) -> discord.Embed:
-        lvl = int(data.get("station_level", 1))
         xp = int(data.get("xp", 0))
         command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
         vehicles = data.get("vehicles", [])
-        expansion_count = len(self._expansion_inventory_set(data.get("expansions", [])))
-        equipment_count = sum(self._equipment_inventory_counts(data.get("equipment", [])).values())
-        training_count = len(self._training_inventory_set(data.get("trainings", [])))
         max_veh = self._max_vehicles_for_data(data)
         embed = discord.Embed(
             title="Vehicle shop",
@@ -1669,7 +1665,6 @@ class FireStationCommand(commands.Cog):
         ephemeral: bool = False,
     ) -> None:
         data = await self.config.user(user).all()
-        lvl = int(data.get("station_level", 1))
         vehicles = data.get("vehicles", [])
         max_veh = self._max_vehicles_for_data(data)
         if len(vehicles) >= max_veh:
@@ -2230,7 +2225,6 @@ class FireStationCommand(commands.Cog):
             return
 
         data = await self.config.user(ctx.author).all()
-        lvl = int(data.get("station_level", 1))
         vehicles = data.get("vehicles", [])
         max_veh = self._max_vehicles_for_data(data)
         if len(vehicles) >= max_veh:
@@ -2839,7 +2833,6 @@ class FireStationCommand(commands.Cog):
         price = int(vdef["price"])
 
         # Check capacity again
-        lvl = int(data.get("station_level", 1))
         vehicles = data.get("vehicles", [])
         max_veh = self._max_vehicles_for_data(data)
         if len(vehicles) >= max_veh:
@@ -3925,6 +3918,8 @@ class MissionControlView(discord.ui.View):
 
 
 class VehicleShopSelect(discord.ui.Select):
+    PAGE_SIZE = 25
+
     def __init__(
         self,
         cog: FireStationCommand,
@@ -3932,14 +3927,18 @@ class VehicleShopSelect(discord.ui.Select):
         user: discord.abc.User,
         guild: discord.Guild | None = None,
         command_level: int = 1,
+        page: int = 0,
     ):
         self.cog = cog
         self.channel = channel
         self.user = user
         self.guild = guild
+        self.page = max(0, page)
 
         options: List[discord.SelectOption] = []
-        for vid, v in self.cog.VEHICLE_CATALOG.items():
+        items = list(self.cog.VEHICLE_CATALOG.items())
+        start = self.page * self.PAGE_SIZE
+        for vid, v in items[start:start + self.PAGE_SIZE]:
             unlock_level = int(v.get("unlock_level", 1))
             locked = command_level < unlock_level
             label = f"{v['name']} ({v['price']:,} cr, cap {v['crew_capacity']})"
@@ -3958,7 +3957,7 @@ class VehicleShopSelect(discord.ui.Select):
             )
 
         super().__init__(
-            placeholder="Select a vehicle to buy",
+            placeholder=f"Select a vehicle to buy (page {self.page + 1})",
             min_values=1,
             max_values=1,
             options=options,
@@ -4022,6 +4021,7 @@ class VehicleShopView(discord.ui.View):
         user: discord.abc.User,
         guild: discord.Guild | None = None,
         data: Dict[str, Any] | None = None,
+        page: int = 0,
     ):
         super().__init__(timeout=180)
         self.cog = cog
@@ -4029,9 +4029,20 @@ class VehicleShopView(discord.ui.View):
         self.user = user
         self.guild = guild
         data = data or {}
+        self.data = data
+        self.page = max(0, page)
         xp = int(data.get("xp", 0))
         command_level = int(data.get("command_level", cog._command_level_for_xp(xp)))
-        self.add_item(VehicleShopSelect(cog, channel, user, guild, command_level=command_level))
+        self.add_item(
+            VehicleShopSelect(
+                cog,
+                channel,
+                user,
+                guild,
+                command_level=command_level,
+                page=self.page,
+            )
+        )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user.id
@@ -4082,8 +4093,27 @@ class MaintenanceView(discord.ui.View):
         view = FscDashboardView(self.cog, self.user, channel, guild)
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
+    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.config.user(self.user).all()
+        page = max(0, self.page - 1)
+        embed = self.cog._build_vehicle_shop_embed(data)
+        view = VehicleShopView(self.cog, interaction.channel or self.channel, self.user, interaction.guild or self.guild, data=data, page=page)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.config.user(self.user).all()
+        max_page = max(0, math.ceil(len(self.cog.VEHICLE_CATALOG) / VehicleShopSelect.PAGE_SIZE) - 1)
+        page = min(max_page, self.page + 1)
+        embed = self.cog._build_vehicle_shop_embed(data)
+        view = VehicleShopView(self.cog, interaction.channel or self.channel, self.user, interaction.guild or self.guild, data=data, page=page)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
 
 class EquipmentShopSelect(discord.ui.Select):
+    PAGE_SIZE = 25
+
     def __init__(
         self,
         cog: FireStationCommand,
@@ -4091,14 +4121,18 @@ class EquipmentShopSelect(discord.ui.Select):
         user: discord.abc.User,
         guild: discord.Guild | None = None,
         command_level: int = 1,
+        page: int = 0,
     ):
         self.cog = cog
         self.channel = channel
         self.user = user
         self.guild = guild
+        self.page = max(0, page)
 
         options: List[discord.SelectOption] = []
-        for equipment_id, equipment in self.cog.EQUIPMENT_CATALOG.items():
+        items = list(self.cog.EQUIPMENT_CATALOG.items())
+        start = self.page * self.PAGE_SIZE
+        for equipment_id, equipment in items[start:start + self.PAGE_SIZE]:
             unlock_level = int(equipment.get("unlock_level", 1))
             locked = command_level < unlock_level
             label = f"{equipment['name']} ({equipment['price']:,} cr)"
@@ -4120,7 +4154,7 @@ class EquipmentShopSelect(discord.ui.Select):
             options = [discord.SelectOption(label="No equipment available", value="none")]
 
         super().__init__(
-            placeholder="Select equipment to buy",
+            placeholder=f"Select equipment to buy (page {self.page + 1})",
             min_values=1,
             max_values=1,
             options=options,
@@ -4188,6 +4222,7 @@ class EquipmentShopView(discord.ui.View):
         user: discord.abc.User,
         guild: discord.Guild | None = None,
         data: Dict[str, Any] | None = None,
+        page: int = 0,
     ):
         super().__init__(timeout=180)
         self.cog = cog
@@ -4195,9 +4230,20 @@ class EquipmentShopView(discord.ui.View):
         self.user = user
         self.guild = guild
         data = data or {}
+        self.data = data
+        self.page = max(0, page)
         xp = int(data.get("xp", 0))
         command_level = int(data.get("command_level", cog._command_level_for_xp(xp)))
-        self.add_item(EquipmentShopSelect(cog, channel, user, guild, command_level=command_level))
+        self.add_item(
+            EquipmentShopSelect(
+                cog,
+                channel,
+                user,
+                guild,
+                command_level=command_level,
+                page=self.page,
+            )
+        )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user.id
@@ -4208,6 +4254,23 @@ class EquipmentShopView(discord.ui.View):
         channel = interaction.channel or self.channel
         guild = interaction.guild or self.guild
         view = FscDashboardView(self.cog, self.user, channel, guild)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
+    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.config.user(self.user).all()
+        page = max(0, self.page - 1)
+        embed = self.cog._build_equipment_shop_embed(data)
+        view = EquipmentShopView(self.cog, interaction.channel or self.channel, self.user, interaction.guild or self.guild, data=data, page=page)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.config.user(self.user).all()
+        max_page = max(0, math.ceil(len(self.cog.EQUIPMENT_CATALOG) / EquipmentShopSelect.PAGE_SIZE) - 1)
+        page = min(max_page, self.page + 1)
+        embed = self.cog._build_equipment_shop_embed(data)
+        view = EquipmentShopView(self.cog, interaction.channel or self.channel, self.user, interaction.guild or self.guild, data=data, page=page)
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
 

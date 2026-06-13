@@ -1,43 +1,1132 @@
-vehicles:
-  - id: engine_basic
-    name: "Standard Fire Engine"
-    category: "fire"
-    tier_min: 1
-    unlock_level: 1
-    image: "Images/Vehicles/engine_basic.png"
-    base_cost: 50000
-    maintenance_cost: 500
-    response_speed: 1.0
-    reliability: 0.9
-    required_staff: 4
-    required_training:
-      - basic_firefighting
-    capabilities:
-      fire_suppression: 45
-      water_supply: 30
-      scene_safety: 10
-    equipment_slots:
-      - hose
-      - ba_basic
-      - basic_tools
-
-  - id: rescue_basic
-    name: "Basic Rescue Truck"
-    category: "rescue"
-    tier_min: 2
-    unlock_level: 2
-    image: "Images/Vehicles/rescue_basic.png"
-    base_cost: 75000
-    maintenance_cost: 700
-    response_speed: 0.9
-    reliability: 0.85
-    required_staff: 3
-    required_training:
-      - technical_rescue
-    capabilities:
-      technical_rescue: 45
-      stabilization: 20
-      scene_safety: 15
-    equipment_slots:
-      - rescue_tools
-      - stabilization_kit
+{
+  "vehicles": [
+    {
+      "id": "engine_basic",
+      "name": "Standard Fire Engine",
+      "category": "fire",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/engine_basic.png",
+      "base_cost": 50000,
+      "maintenance_cost": 500,
+      "response_speed": 1.0,
+      "reliability": 0.9,
+      "required_staff": 4,
+      "required_training": [
+        "basic_firefighting"
+      ],
+      "capabilities": {
+        "fire_suppression": 45,
+        "water_supply": 30,
+        "scene_safety": 10
+      },
+      "equipment_slots": [
+        "hose",
+        "ba_basic",
+        "basic_tools"
+      ]
+    },
+    {
+      "id": "rescue_basic",
+      "name": "Basic Rescue Truck",
+      "category": "rescue",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/rescue_basic.png",
+      "base_cost": 75000,
+      "maintenance_cost": 700,
+      "response_speed": 0.9,
+      "reliability": 0.85,
+      "required_staff": 3,
+      "required_training": [
+        "technical_rescue"
+      ],
+      "capabilities": {
+        "technical_rescue": 45,
+        "stabilization": 20,
+        "scene_safety": 15
+      },
+      "equipment_slots": [
+        "rescue_tools",
+        "stabilization_kit"
+      ]
+    },
+    {
+      "id": "arff",
+      "name": "ARFF",
+      "category": "fire",
+      "tier_min": 3,
+      "unlock_level": 3,
+      "image": "Images/Vehicles/arff.png",
+      "base_cost": 90000,
+      "maintenance_cost": 900,
+      "response_speed": 0.96,
+      "reliability": 0.84,
+      "required_staff": 4,
+      "required_training": [],
+      "capabilities": {
+        "fire_suppression": 49,
+        "water_supply": 36,
+        "scene_safety": 17
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "arffs_or_firetruck",
+      "name": "ARFFs or Firetruck",
+      "category": "fire",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/arffs_or_firetruck.png",
+      "base_cost": 75000,
+      "maintenance_cost": 750,
+      "response_speed": 0.99,
+      "reliability": 0.82,
+      "required_staff": 4,
+      "required_training": [],
+      "capabilities": {
+        "fire_suppression": 41,
+        "water_supply": 29,
+        "scene_safety": 14
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "atf_lab_vehicle",
+      "name": "ATF Lab Vehicle",
+      "category": "police",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/atf_lab_vehicle.png",
+      "base_cost": 42000,
+      "maintenance_cost": 420,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 32,
+        "scene_safety": 19
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "atf_unit",
+      "name": "ATF Unit",
+      "category": "police",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/atf_unit.png",
+      "base_cost": 54000,
+      "maintenance_cost": 540,
+      "response_speed": 0.99,
+      "reliability": 0.82,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 39,
+        "scene_safety": 23
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "atv",
+      "name": "ATV",
+      "category": "support",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/atv.png",
+      "base_cost": 47000,
+      "maintenance_cost": 470,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 15
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "atv_trailer",
+      "name": "ATV Trailer",
+      "category": "support",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/atv_trailer.png",
+      "base_cost": 47000,
+      "maintenance_cost": 470,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 15
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "ambulances",
+      "name": "Ambulances",
+      "category": "ems",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/ambulances.png",
+      "base_cost": 57000,
+      "maintenance_cost": 570,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "medical_response": 38,
+        "patient_transport": 26
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "battalion_chief_vehicle",
+      "name": "Battalion Chief Vehicle",
+      "category": "support",
+      "tier_min": 5,
+      "unlock_level": 5,
+      "image": "Images/Vehicles/battalion_chief_vehicle.png",
+      "base_cost": 95000,
+      "maintenance_cost": 950,
+      "response_speed": 0.9,
+      "reliability": 0.88,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 35
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "cwft",
+      "name": "CWFT",
+      "category": "support",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/cwft.png",
+      "base_cost": 47000,
+      "maintenance_cost": 470,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 15
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "coastal_guard_plane",
+      "name": "Coastal Guard Plane",
+      "category": "water_rescue",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/coastal_guard_plane.png",
+      "base_cost": 74000,
+      "maintenance_cost": 740,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 3,
+      "required_training": [],
+      "capabilities": {
+        "water_rescue": 38,
+        "scene_safety": 14
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "coastal_helicopter",
+      "name": "Coastal Helicopter",
+      "category": "water_rescue",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/coastal_helicopter.png",
+      "base_cost": 88000,
+      "maintenance_cost": 880,
+      "response_speed": 0.99,
+      "reliability": 0.82,
+      "required_staff": 3,
+      "required_training": [],
+      "capabilities": {
+        "water_rescue": 46,
+        "scene_safety": 18
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "dea_unit",
+      "name": "DEA Unit",
+      "category": "police",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/dea_unit.png",
+      "base_cost": 54000,
+      "maintenance_cost": 540,
+      "response_speed": 0.99,
+      "reliability": 0.82,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 39,
+        "scene_safety": 23
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "fbi_bomb_technician_vehicles",
+      "name": "FBI Bomb Technician vehicles",
+      "category": "police",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/fbi_bomb_technician_vehicles.png",
+      "base_cost": 42000,
+      "maintenance_cost": 420,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 32,
+        "scene_safety": 19
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "fbi_drone_or_fbi_investigation_wagon",
+      "name": "FBI Drone or FBI Investigation Wagon",
+      "category": "police",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/fbi_drone_or_fbi_investigation_wagon.png",
+      "base_cost": 42000,
+      "maintenance_cost": 420,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 32,
+        "scene_safety": 19
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "fbi_investigation_wagons",
+      "name": "FBI Investigation wagons",
+      "category": "police",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/fbi_investigation_wagons.png",
+      "base_cost": 42000,
+      "maintenance_cost": 420,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 32,
+        "scene_safety": 19
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "fbi_surveillance_drone",
+      "name": "FBI Surveillance Drone",
+      "category": "police",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/fbi_surveillance_drone.png",
+      "base_cost": 42000,
+      "maintenance_cost": 420,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 32,
+        "scene_safety": 19
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "fbi_unit",
+      "name": "FBI Unit",
+      "category": "police",
+      "tier_min": 3,
+      "unlock_level": 3,
+      "image": "Images/Vehicles/fbi_unit.png",
+      "base_cost": 66000,
+      "maintenance_cost": 660,
+      "response_speed": 0.96,
+      "reliability": 0.84,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 46,
+        "scene_safety": 27
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "fbpc",
+      "name": "FBPC",
+      "category": "support",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/fbpc.png",
+      "base_cost": 47000,
+      "maintenance_cost": 470,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 15
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "fwdc",
+      "name": "FWDC",
+      "category": "support",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/fwdc.png",
+      "base_cost": 47000,
+      "maintenance_cost": 470,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 15
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "fire_boat_docks",
+      "name": "Fire Boat Docks",
+      "category": "water_rescue",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/fire_boat_docks.png",
+      "base_cost": 88000,
+      "maintenance_cost": 880,
+      "response_speed": 0.99,
+      "reliability": 0.82,
+      "required_staff": 3,
+      "required_training": [],
+      "capabilities": {
+        "water_rescue": 46,
+        "scene_safety": 18
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "fire_cranes",
+      "name": "Fire Cranes",
+      "category": "rescue",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/fire_cranes.png",
+      "base_cost": 85000,
+      "maintenance_cost": 850,
+      "response_speed": 0.99,
+      "reliability": 0.82,
+      "required_staff": 3,
+      "required_training": [],
+      "capabilities": {
+        "technical_rescue": 41,
+        "stabilization": 22,
+        "scene_safety": 18
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "fire_investigation_unit",
+      "name": "Fire Investigation Unit",
+      "category": "support",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/fire_investigation_unit.png",
+      "base_cost": 59000,
+      "maintenance_cost": 590,
+      "response_speed": 0.99,
+      "reliability": 0.82,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 20
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "foam_tender",
+      "name": "Foam Tender",
+      "category": "fire",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/foam_tender.png",
+      "base_cost": 75000,
+      "maintenance_cost": 750,
+      "response_speed": 0.99,
+      "reliability": 0.82,
+      "required_staff": 4,
+      "required_training": [],
+      "capabilities": {
+        "fire_suppression": 41,
+        "water_supply": 29,
+        "scene_safety": 14
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "hazmat_vehicle",
+      "name": "HazMat Vehicle",
+      "category": "support",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/hazmat_vehicle.png",
+      "base_cost": 59000,
+      "maintenance_cost": 590,
+      "response_speed": 0.99,
+      "reliability": 0.82,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 20
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "icpc",
+      "name": "ICPC",
+      "category": "support",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/icpc.png",
+      "base_cost": 47000,
+      "maintenance_cost": 470,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 15
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "k_9_unit",
+      "name": "K-9 Unit",
+      "category": "police",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/k_9_unit.png",
+      "base_cost": 54000,
+      "maintenance_cost": 540,
+      "response_speed": 0.99,
+      "reliability": 0.82,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 39,
+        "scene_safety": 23
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "large_coastal_boat",
+      "name": "Large Coastal Boat",
+      "category": "water_rescue",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/large_coastal_boat.png",
+      "base_cost": 88000,
+      "maintenance_cost": 880,
+      "response_speed": 0.99,
+      "reliability": 0.82,
+      "required_staff": 3,
+      "required_training": [],
+      "capabilities": {
+        "water_rescue": 46,
+        "scene_safety": 18
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "lifeguard_supervisors",
+      "name": "Lifeguard Supervisors",
+      "category": "support",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/lifeguard_supervisors.png",
+      "base_cost": 47000,
+      "maintenance_cost": 470,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 15
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "lifeguard_truck",
+      "name": "Lifeguard Truck",
+      "category": "support",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/lifeguard_truck.png",
+      "base_cost": 47000,
+      "maintenance_cost": 470,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 15
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "light_boat",
+      "name": "Light Boat",
+      "category": "water_rescue",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/light_boat.png",
+      "base_cost": 88000,
+      "maintenance_cost": 880,
+      "response_speed": 0.99,
+      "reliability": 0.82,
+      "required_staff": 3,
+      "required_training": [],
+      "capabilities": {
+        "water_rescue": 46,
+        "scene_safety": 18
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "light_tower_trailer",
+      "name": "Light Tower Trailer",
+      "category": "support",
+      "tier_min": 4,
+      "unlock_level": 4,
+      "image": "Images/Vehicles/light_tower_trailer.png",
+      "base_cost": 83000,
+      "maintenance_cost": 830,
+      "response_speed": 0.93,
+      "reliability": 0.86,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 30
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "mobile_air_vehicle",
+      "name": "Mobile Air Vehicle",
+      "category": "ems",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/mobile_air_vehicle.png",
+      "base_cost": 69000,
+      "maintenance_cost": 690,
+      "response_speed": 0.99,
+      "reliability": 0.82,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "medical_response": 46,
+        "patient_transport": 32
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "mobile_command_vehicle",
+      "name": "Mobile Command Vehicle",
+      "category": "support",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/mobile_command_vehicle.png",
+      "base_cost": 59000,
+      "maintenance_cost": 590,
+      "response_speed": 0.99,
+      "reliability": 0.82,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 20
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "patrol_boat",
+      "name": "Patrol Boat",
+      "category": "water_rescue",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/patrol_boat.png",
+      "base_cost": 74000,
+      "maintenance_cost": 740,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 3,
+      "required_training": [],
+      "capabilities": {
+        "water_rescue": 38,
+        "scene_safety": 14
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "platform_truck",
+      "name": "Platform Truck",
+      "category": "police",
+      "tier_min": 7,
+      "unlock_level": 7,
+      "image": "Images/Vehicles/platform_truck.png",
+      "base_cost": 114000,
+      "maintenance_cost": 1140,
+      "response_speed": 0.84,
+      "reliability": 0.92,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 74,
+        "scene_safety": 43
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "police_atv_trailer",
+      "name": "Police ATV Trailer",
+      "category": "police",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/police_atv_trailer.png",
+      "base_cost": 42000,
+      "maintenance_cost": 420,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 32,
+        "scene_safety": 19
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "police_car",
+      "name": "Police Car",
+      "category": "police",
+      "tier_min": 9,
+      "unlock_level": 9,
+      "image": "Images/Vehicles/police_car.png",
+      "base_cost": 138000,
+      "maintenance_cost": 1380,
+      "response_speed": 0.78,
+      "reliability": 0.95,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 88,
+        "scene_safety": 51
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "police_car_or_swat_suvs",
+      "name": "Police Car or Swat SUVs",
+      "category": "police",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/police_car_or_swat_suvs.png",
+      "base_cost": 54000,
+      "maintenance_cost": 540,
+      "response_speed": 0.99,
+      "reliability": 0.82,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 39,
+        "scene_safety": 23
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "police_drone",
+      "name": "Police Drone",
+      "category": "police",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/police_drone.png",
+      "base_cost": 42000,
+      "maintenance_cost": 420,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 32,
+        "scene_safety": 19
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "police_helicopter",
+      "name": "Police Helicopter",
+      "category": "police",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/police_helicopter.png",
+      "base_cost": 42000,
+      "maintenance_cost": 420,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 32,
+        "scene_safety": 19
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "police_mcv",
+      "name": "Police MCV",
+      "category": "police",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/police_mcv.png",
+      "base_cost": 42000,
+      "maintenance_cost": 420,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 32,
+        "scene_safety": 19
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "police_supervisors_sheriffs",
+      "name": "Police Supervisors / Sheriffs",
+      "category": "police",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/police_supervisors_sheriffs.png",
+      "base_cost": 54000,
+      "maintenance_cost": 540,
+      "response_speed": 0.99,
+      "reliability": 0.82,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 39,
+        "scene_safety": 23
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "rescue_boat_docks",
+      "name": "Rescue Boat Docks",
+      "category": "rescue",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/rescue_boat_docks.png",
+      "base_cost": 70000,
+      "maintenance_cost": 700,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 3,
+      "required_training": [],
+      "capabilities": {
+        "technical_rescue": 33,
+        "stabilization": 16,
+        "scene_safety": 14
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "riot_police_trailer",
+      "name": "Riot Police Trailer",
+      "category": "police",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/riot_police_trailer.png",
+      "base_cost": 42000,
+      "maintenance_cost": 420,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 32,
+        "scene_safety": 19
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "riot_police_unit",
+      "name": "Riot Police Unit",
+      "category": "police",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/riot_police_unit.png",
+      "base_cost": 54000,
+      "maintenance_cost": 540,
+      "response_speed": 0.99,
+      "reliability": 0.82,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 39,
+        "scene_safety": 23
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "swat_armoured_vehicle",
+      "name": "SWAT Armoured Vehicle",
+      "category": "police",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/swat_armoured_vehicle.png",
+      "base_cost": 42000,
+      "maintenance_cost": 420,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 32,
+        "scene_safety": 19
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "small_coastal_boat",
+      "name": "Small Coastal Boat",
+      "category": "water_rescue",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/small_coastal_boat.png",
+      "base_cost": 88000,
+      "maintenance_cost": 880,
+      "response_speed": 0.99,
+      "reliability": 0.82,
+      "required_staff": 3,
+      "required_training": [],
+      "capabilities": {
+        "water_rescue": 46,
+        "scene_safety": 18
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "smoke_jumpers_in_smoke_jumper_plane",
+      "name": "Smoke Jumpers (in Smoke Jumper Plane)",
+      "category": "aviation",
+      "tier_min": 10,
+      "unlock_level": 10,
+      "image": "Images/Vehicles/smoke_jumpers_in_smoke_jumper_plane.png",
+      "base_cost": 420000,
+      "maintenance_cost": 4200,
+      "response_speed": 0.75,
+      "reliability": 0.95,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "air_support": 115,
+        "scene_safety": 40
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "snow_trailer",
+      "name": "Snow Trailer",
+      "category": "support",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/snow_trailer.png",
+      "base_cost": 47000,
+      "maintenance_cost": 470,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 15
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "wtc",
+      "name": "WTC",
+      "category": "support",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/wtc.png",
+      "base_cost": 47000,
+      "maintenance_cost": 470,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "scene_safety": 15
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "warden_truck",
+      "name": "Warden Truck",
+      "category": "police",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/warden_truck.png",
+      "base_cost": 54000,
+      "maintenance_cost": 540,
+      "response_speed": 0.99,
+      "reliability": 0.82,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "law_enforcement": 39,
+        "scene_safety": 23
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "wildland_lead_plane",
+      "name": "Wildland Lead Plane",
+      "category": "fire",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/wildland_lead_plane.png",
+      "base_cost": 60000,
+      "maintenance_cost": 600,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 4,
+      "required_training": [],
+      "capabilities": {
+        "fire_suppression": 33,
+        "water_supply": 22,
+        "scene_safety": 11
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "wildland_mccs",
+      "name": "Wildland MCCs",
+      "category": "fire",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/wildland_mccs.png",
+      "base_cost": 75000,
+      "maintenance_cost": 750,
+      "response_speed": 0.99,
+      "reliability": 0.82,
+      "required_staff": 4,
+      "required_training": [],
+      "capabilities": {
+        "fire_suppression": 41,
+        "water_supply": 29,
+        "scene_safety": 14
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "airborne_firefighting_vehicles",
+      "name": "airborne firefighting vehicles",
+      "category": "fire",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/airborne_firefighting_vehicles.png",
+      "base_cost": 60000,
+      "maintenance_cost": 600,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 4,
+      "required_training": [],
+      "capabilities": {
+        "fire_suppression": 33,
+        "water_supply": 22,
+        "scene_safety": 11
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "large_fire_boats",
+      "name": "large fire boats",
+      "category": "water_rescue",
+      "tier_min": 2,
+      "unlock_level": 2,
+      "image": "Images/Vehicles/large_fire_boats.png",
+      "base_cost": 88000,
+      "maintenance_cost": 880,
+      "response_speed": 0.99,
+      "reliability": 0.82,
+      "required_staff": 3,
+      "required_training": [],
+      "capabilities": {
+        "water_rescue": 46,
+        "scene_safety": 18
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "large_rescue_boats",
+      "name": "large rescue boats",
+      "category": "rescue",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/large_rescue_boats.png",
+      "base_cost": 70000,
+      "maintenance_cost": 700,
+      "response_speed": 1.02,
+      "reliability": 0.8,
+      "required_staff": 3,
+      "required_training": [],
+      "capabilities": {
+        "technical_rescue": 33,
+        "stabilization": 16,
+        "scene_safety": 14
+      },
+      "equipment_slots": []
+    },
+    {
+      "id": "ambulance",
+      "name": "Ambulance",
+      "category": "ems",
+      "tier_min": 1,
+      "unlock_level": 1,
+      "image": "Images/Vehicles/ambulance.png",
+      "base_cost": 57000,
+      "maintenance_cost": 570,
+      "response_speed": 1.0,
+      "reliability": 0.85,
+      "required_staff": 2,
+      "required_training": [],
+      "capabilities": {
+        "medical_response": 38,
+        "patient_transport": 26
+      },
+      "equipment_slots": []
+    }
+  ]
+}
