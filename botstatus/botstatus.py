@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -17,6 +18,7 @@ DEFAULT_GLOBAL = {
     "enabled": True,
     "idle_type": "watching",
     "idle_text": "Fire And Rescue Academy dispatch",
+    "presence_max_length": 42,
 }
 
 
@@ -25,6 +27,23 @@ ACTIVITY_TYPES = {
     "listening": "listening",
     "watching": "watching",
     "competing": "competing",
+}
+
+
+SOURCE_LABELS = {
+    "AdminTimedNotifications": "Admin timer",
+    "AllianceLogsPub": "Log pub",
+    "AllianceReports": "Reports",
+    "ApplicationsScraper": "Applications",
+    "BuildingsScraper": "Buildings",
+    "CookieManager": "MC session",
+    "IncomeScraper": "Treasury",
+    "LogsScraper": "Logs",
+    "MemberSync": "Sync",
+    "MembersScraper": "Members",
+    "NewMemberNotify": "New apps",
+    "RoleBasedCredits": "Ranks",
+    "TrainingManager": "Training",
 }
 
 
@@ -60,6 +79,106 @@ def format_activity_text(source: str, detail: str, *, max_length: int = 128) -> 
     if max_length <= 3:
         return text[:max_length]
     return text[: max_length - 3].rstrip() + "..."
+
+
+def compact_detail(source: str, detail: str) -> str:
+    detail = (detail or "working").strip()
+    lowered = detail.lower()
+
+    if source == "MembersScraper":
+        page = re.search(r"page (\d+)", lowered)
+        if page:
+            return f"page {page.group(1)}"
+        if "backfilling" in lowered:
+            return "backfill"
+        return "scraping"
+
+    if source == "BuildingsScraper":
+        return "scraping"
+
+    if source == "ApplicationsScraper":
+        return "fetching" if "fetching" in lowered else "checking"
+
+    if source == "IncomeScraper":
+        page = re.search(r"expenses page (\d+)", lowered)
+        if page:
+            return f"expenses p{page.group(1)}"
+        if "daily" in lowered:
+            return "daily tab"
+        if "monthly" in lowered:
+            return "monthly tab"
+        if "pre-reset" in lowered:
+            return "pre-reset"
+        return "scraping"
+
+    if source == "LogsScraper":
+        page = re.search(r"page (\d+)", lowered)
+        if page:
+            return f"page {page.group(1)}"
+        pages = re.search(r"\((\d+) pages\)", lowered)
+        if pages:
+            return f"scraping {pages.group(1)}p"
+        return "scraping"
+
+    if source == "MemberSync":
+        items = re.search(r"\((\d+) items\)", lowered)
+        if "queue" in lowered and items:
+            return f"queue ({items.group(1)})"
+        if "departed" in lowered:
+            return "checking departures"
+        return "syncing"
+
+    if source == "RoleBasedCredits":
+        if "departed" in lowered:
+            return "removing departed"
+        if "checking" in lowered:
+            return "dry run"
+        return "syncing"
+
+    if source == "AdminTimedNotifications":
+        amount = re.search(r"posting (\d+)", lowered)
+        return f"posting {amount.group(1)}" if amount else "posting"
+
+    if source == "AllianceReports":
+        if "daily member" in lowered:
+            return "daily member"
+        if "daily admin" in lowered:
+            return "daily admin"
+        if "monthly member" in lowered:
+            return "monthly member"
+        if "monthly admin" in lowered:
+            return "monthly admin"
+        if "daily" in lowered:
+            return "daily"
+        if "monthly" in lowered:
+            return "monthly"
+        return "building"
+
+    if source == "AllianceLogsPub":
+        amount = re.search(r"publishing (\d+)", lowered)
+        return f"posting {amount.group(1)}" if amount else "checking"
+
+    if source == "NewMemberNotify":
+        return "checking"
+
+    if source == "TrainingManager":
+        amount = re.search(r"sending (\d+)", lowered)
+        return f"reminders {amount.group(1)}" if amount else "reminders"
+
+    if source == "CookieManager":
+        return "refresh" if "refreshing" in lowered else "check"
+
+    return (
+        detail.replace("MissionChief", "MC")
+        .replace("alliance ", "")
+        .replace("credit rank roles", "rank roles")
+        .strip()
+    )
+
+
+def compact_activity_text(source: str, detail: str, *, max_length: int = 42) -> str:
+    label = SOURCE_LABELS.get((source or "").strip(), (source or "Bot").strip())
+    return format_activity_text(label, compact_detail(source, detail), max_length=max_length)
 
 
 def choose_activity(
@@ -141,7 +260,8 @@ class BotStatus(commands.Cog):
 
             active = choose_activity(list(self._activities.values()))
             if active:
-                text = format_activity_text(active.source, active.detail)
+                max_length = max(16, min(128, int(await self.config.presence_max_length())))
+                text = compact_activity_text(active.source, active.detail, max_length=max_length)
                 await self.set_presence(active.activity_type, text)
                 return
 
@@ -305,6 +425,16 @@ class BotStatus(commands.Cog):
             "report, and notification tasks directly."
         )
 
+    @botstatusset.command(name="maxlength")
+    async def botstatusset_maxlength(self, ctx: commands.Context, length: int):
+        """Set compact presence text max length between 16 and 128."""
+        if length < 16 or length > 128:
+            await ctx.send("Length must be between 16 and 128.")
+            return
+        await self.config.presence_max_length.set(length)
+        await self.refresh_presence()
+        await ctx.send(f"BotStatus presence max length set to {length}.")
+
     @commands.command(name="botstatus")
     @commands.guild_only()
     @commands.admin_or_permissions(administrator=True)
@@ -316,6 +446,7 @@ class BotStatus(commands.Cog):
         lines = [
             f"Enabled: {cfg['enabled']}",
             f"Idle: {cfg['idle_type']} {cfg['idle_text']}",
+            f"Presence max length: {cfg['presence_max_length']}",
             "Current: "
             + (
                 format_activity_text(active.source, active.detail)

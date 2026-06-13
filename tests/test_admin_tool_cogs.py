@@ -13,6 +13,7 @@ from botstatus.botstatus import (
     StatusActivity,
     choose_activity,
     clean_activity_type,
+    compact_activity_text,
     format_activity_text,
 )
 from rolebasedcredits.rolebasedcredits import (
@@ -109,7 +110,16 @@ def test_botstatus_formats_and_prioritizes_background_activity():
         format_activity_text("MembersScraper", "scraping alliance members page 10")
         == "MembersScraper: scraping alliance members page 10"
     )
+    assert (
+        compact_activity_text("MembersScraper", "scraping alliance members page 10")
+        == "Members: page 10"
+    )
+    assert (
+        compact_activity_text("RoleBasedCredits", "syncing credit rank roles in FARA")
+        == "Ranks: syncing"
+    )
     assert len(format_activity_text("Source", "x" * 200)) == 128
+    assert len(compact_activity_text("Source", "x" * 200, max_length=32)) == 32
 
 
 def test_credit_rank_table_matches_requested_thresholds():
