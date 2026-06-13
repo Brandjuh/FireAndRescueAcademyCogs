@@ -279,6 +279,26 @@ def test_equipment_display_text_uses_configured_names_and_fallback_ids():
     assert FireStationCommand._equipment_display_text(cog, "hose") is None
 
 
+def test_vehicle_requirement_display_text_uses_catalog_names_and_fallback_ids():
+    cog = _cog_with_game_data(
+        {
+            "vehicles": {
+                "vehicles": [
+                    {"id": "engine_basic", "name": "Standard Fire Engine"},
+                    {"id": "rescue_basic", "name": "Basic Rescue Truck"},
+                ]
+            }
+        }
+    )
+
+    assert FireStationCommand._vehicle_requirement_display_text(
+        cog,
+        ["engine_basic", "missing_vehicle", "rescue_basic"],
+    ) == "Standard Fire Engine, missing_vehicle, Basic Rescue Truck"
+    assert FireStationCommand._vehicle_requirement_display_text(cog, []) is None
+    assert FireStationCommand._vehicle_requirement_display_text(cog, "engine_basic") is None
+
+
 def test_recruitment_embed_shows_hireable_staff():
     user = object()
     cog = _cog_with_game_data({})
@@ -557,6 +577,11 @@ def test_build_mission_control_embed_guides_alert_choice():
 def test_build_mission_control_embed_shows_turnout_and_next_update():
     cog = _cog_with_game_data(
         {
+            "vehicles": {
+                "vehicles": [
+                    {"id": "engine_basic", "name": "Standard Fire Engine"},
+                ]
+            },
             "equipment": {
                 "equipment": [
                     {"id": "hose", "name": "Fire Hose Set"},
@@ -568,6 +593,7 @@ def test_build_mission_control_embed_shows_turnout_and_next_update():
     mission = {
         "title": "Traffic Collision",
         "required_staff": 6,
+        "required_vehicles": ["engine_basic"],
         "required_equipment": ["hose", "basic_tools"],
         "stage": FireStationCommand.STAGE_STAFF_TURNOUT,
         "turnout_total_arrived": 3,
@@ -579,6 +605,7 @@ def test_build_mission_control_embed_shows_turnout_and_next_update():
     embed = FireStationCommand._build_mission_control_embed(cog, mission)
 
     fields = {field["name"]: field["value"] for field in embed.fields}
+    assert fields["Required vehicles"] == "Standard Fire Engine"
     assert fields["Required equipment"] == "Fire Hose Set, Basic Hand Tools"
     assert fields["Guidance"] == "Crew turnout is in progress. Refresh this panel after the expected turnout time."
     assert fields["Turnout"] == "3 / 6 arrived"
