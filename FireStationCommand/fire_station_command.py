@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - dependency is declared in info.json
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.1.7"
+    __version__ = "1.1.8"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
@@ -573,6 +573,18 @@ class FireStationCommand(commands.Cog):
     def _format_timestamp(value: datetime) -> str:
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
+    @staticmethod
+    def _parse_timestamp(value: Any) -> datetime | None:
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
     def _timestamp_after_minutes(self, minutes: float) -> str:
         delay = max(0.0, minutes)
         return self._format_timestamp(self._utcnow() + timedelta(minutes=delay))
@@ -639,6 +651,36 @@ class FireStationCommand(commands.Cog):
         mission["next_action"] = None
         mission["next_action_at"] = None
         mission["updated_at"] = self._format_timestamp(self._utcnow())
+
+    def _mission_due_action_ready(self, mission: Dict[str, Any]) -> bool:
+        if not mission.get("next_action"):
+            return False
+        due_at = self._parse_timestamp(mission.get("next_action_at"))
+        if due_at is None:
+            return False
+        return due_at <= self._utcnow()
+
+    async def _run_due_mission_action(
+        self,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+    ) -> bool:
+        data = await self.config.user(user).all()
+        mission = data.get("active_mission", {}) or {}
+        if not self._mission_due_action_ready(mission):
+            return False
+
+        action = mission.get("next_action")
+        if action == self.ACTION_SHOW_TURNOUT_RESULT:
+            await self._show_turnout_result(channel, user)
+            return True
+        if action == self.ACTION_SHOW_TRAVEL_UPDATE:
+            await self._send_travel_update(channel, user, sleep_after=False)
+            return True
+        if action == self.ACTION_RESOLVE_INCIDENT:
+            await self._resolve_incident(channel, user)
+            return True
+        return False
 
     def _build_vehicle_definitions(self) -> Dict[str, Dict[str, Any]]:
         vehicles = self.game_data.get("vehicles", {}).get("vehicles", [])
@@ -2253,6 +2295,8 @@ class FireStationCommand(commands.Cog):
         data = await user_conf.all()
         active = data.get("active_mission", {}) or {}
         if active:
+            if await self._run_due_mission_action(ctx.channel, ctx.author):
+                return
             await self._send_active_mission_control(ctx.send, ctx.channel, ctx.guild, ctx.author)
             return
 
@@ -2531,7 +2575,13 @@ class FireStationCommand(commands.Cog):
         await asyncio.sleep(int(minutes * 60))
         await self._send_travel_update(channel, user)
 
-    async def _send_travel_update(self, channel: discord.abc.Messageable, user: discord.abc.User):
+    async def _send_travel_update(
+        self,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        *,
+        sleep_after: bool = True,
+    ):
         user_conf = self.config.user(user)
         data = await user_conf.all()
         mission = data.get("active_mission", {}) or {}
@@ -2565,8 +2615,9 @@ class FireStationCommand(commands.Cog):
             except Exception:
                 pass
 
-        await asyncio.sleep(int(minutes * 60))
-        await self._resolve_incident(channel, user)
+        if sleep_after:
+            await asyncio.sleep(int(minutes * 60))
+            await self._resolve_incident(channel, user)
 
     async def _resolve_incident(self, channel: discord.abc.Messageable, user: discord.abc.User):
         user_conf = self.config.user(user)
@@ -3466,6 +3517,14 @@ class FscDashboardView(discord.ui.View):
 
         active = data.get("active_mission", {}) or {}
         if active:
+            if await self.cog._run_due_mission_action(channel, self.user):
+                refreshed = await self.cog.config.user(self.user).all()
+                active = refreshed.get("active_mission", {}) or {}
+                if not active:
+                    embed = await self.cog._build_dashboard_embed(self.user)
+                    view = FscDashboardView(self.cog, self.user, channel, interaction.guild or self.guild)
+                    await interaction.response.edit_message(content=None, embed=embed, view=view)
+                    return
             embed = self.cog._build_mission_control_embed(active)
             view = await self.cog._build_mission_control_view(self.user, channel, self.guild, active)
             await interaction.response.edit_message(content=None, embed=embed, view=view)
@@ -3817,6 +3876,27 @@ class MissionControlView(discord.ui.View):
         self.stop()
 
     async def _refresh(self, interaction: discord.Interaction):
+        if await self.cog._run_due_mission_action(interaction.channel or self.channel, self.user):
+            refreshed = await self.cog.config.user(self.user).all()
+            mission = refreshed.get("active_mission", {}) or {}
+            if not mission:
+                embed = await self.cog._build_dashboard_embed(self.user)
+                view = FscDashboardView(
+                    self.cog,
+                    self.user,
+                    interaction.channel or self.channel,
+                    interaction.guild or self.guild,
+                )
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
+
+            channel = interaction.channel or self.channel
+            guild = interaction.guild or self.guild
+            embed = self.cog._build_mission_control_embed(mission)
+            view = await self.cog._build_mission_control_view(self.user, channel, guild, mission)
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+            return
+
         data = await self.cog.config.user(self.user).all()
         mission = data.get("active_mission", {}) or {}
         if not mission:
