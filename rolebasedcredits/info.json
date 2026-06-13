@@ -1,0 +1,15 @@
+{
+    "author": ["FireAndRescueAcademy"],
+    "min_bot_version": "3.5.0",
+    "description": "Assign Discord rank roles from MissionChief earned credits using MembersScraper and approved MemberSync links.",
+    "hidden": false,
+    "install_msg": "RoleBasedCredits loaded. Link Discord roles with `[p]creditrankset role \"Firefighter\" @role`, set a promotion channel, then run `[p]creditranks sync`.",
+    "required_cogs": {
+        "MembersScraper": "https://github.com/Brandjuh/FireAndRescueAcademyCogs",
+        "MemberSync": "https://github.com/Brandjuh/FireAndRescueAcademyCogs"
+    },
+    "requirements": [],
+    "short": "Automatically assign Discord roles based on ingame credits.",
+    "end_user_data_statement": "This cog reads approved MemberSync links and MissionChief earned credits from existing local cogs. It stores guild-level role mappings, promotion channel settings, and last assigned rank keys.",
+    "tags": ["roles", "credits", "missionchief", "membersync", "automation"]
+}

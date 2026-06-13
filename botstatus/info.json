@@ -1,0 +1,12 @@
+{
+    "author": ["FireAndRescueAcademy"],
+    "min_bot_version": "3.5.0",
+    "description": "Keeps the bot presence updated with manual status text and optional command activity tracking.",
+    "hidden": false,
+    "install_msg": "BotStatus loaded. Use `[p]botstatusset idle watching <text>` and `[p]botstatusset commandtracking true`.",
+    "required_cogs": {},
+    "requirements": [],
+    "short": "Show what the bot is currently doing in its Discord status.",
+    "end_user_data_statement": "This cog stores guild-level bot presence preferences only.",
+    "tags": ["status", "presence", "activity"]
+}
