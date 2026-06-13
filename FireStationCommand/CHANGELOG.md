@@ -47,6 +47,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - Prevented Red help from appearing after the `[p]fsc` dashboard.
 - Dashboard buttons now update the existing dashboard message instead of opening private responses.
 - Vehicle shop now has a back button to return to the station dashboard.
+- Vehicle purchase confirmation now edits the shop message instead of opening a private interaction flow.
 
 ### Planned
 
