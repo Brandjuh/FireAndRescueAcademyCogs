@@ -432,6 +432,38 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         self.assertIn("Repeated warning history", insights["signals"])
         self.assertIn("Repeated warning reason", insights["signals"])
 
+    def test_sanction_summary_warns_when_same_reason_reaches_third_warning(self):
+        module = load_sanction_manager_module()
+
+        class FakeCog:
+            def get_member_reason_warning_count(self, **kwargs):
+                self.call = kwargs
+                return 2
+
+        cog = FakeCog()
+        view = module.SummarySanctionView(
+            cog,
+            admin_user_id=999,
+            admin_username="Admin",
+            target_discord_id=None,
+            target_mc_id="456",
+            target_mc_username="CrashTestDummy",
+            target_discord_user=None,
+            sanction_type="Warning - Official 3rd and last warning",
+            reason_category="Contribution",
+            reason_detail="Low contribution",
+        )
+
+        embed = view._create_embed(guild_id=1)
+        fields = {field["name"]: field["value"] for field in embed.fields}
+
+        self.assertIn("Repeated Warning Alert", fields)
+        self.assertIn("warning #3", fields["Repeated Warning Alert"])
+        self.assertIn("Low contribution", fields["Repeated Warning Alert"])
+        self.assertEqual(cog.call["guild_id"], 1)
+        self.assertEqual(cog.call["mc_user_id"], "456")
+        self.assertEqual(cog.call["reason_detail"], "Low contribution")
+
     def test_sanction_stats_contract_defines_status_and_staff_activity_counts(self):
         SanctionsDatabase = load_sanctions_database_class()
         SanctionsManager = load_sanctions_manager_class()

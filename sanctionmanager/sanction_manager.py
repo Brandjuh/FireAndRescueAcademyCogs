@@ -1786,7 +1786,8 @@ class SummarySanctionView(discord.ui.View):
         self.additional_notes = additional_notes
 
     async def send_summary(self, interaction: discord.Interaction):
-        embed = self._create_embed()
+        guild_id = interaction.guild.id if interaction.guild else 0
+        embed = self._create_embed(guild_id=guild_id)
         await safe_update(
             interaction,
             content="⚠️ Review the sanction before submitting:",
@@ -1794,7 +1795,7 @@ class SummarySanctionView(discord.ui.View):
             view=self
         )
 
-    def _create_embed(self) -> discord.Embed:
+    def _create_embed(self, *, guild_id: Optional[int] = None) -> discord.Embed:
         embed = discord.Embed(
             title="🚨 Sanction Summary",
             color=discord.Color.red(),
@@ -1815,6 +1816,34 @@ class SummarySanctionView(discord.ui.View):
         embed.add_field(name="Sanction", value=self.sanction_type, inline=True)
         embed.add_field(name="Reason Category", value=self.reason_category, inline=False)
         embed.add_field(name="Reason", value=self.reason_detail[:1024], inline=False)
+
+        if guild_id and "Warning" in self.sanction_type:
+            existing_reason_count = self.cog.get_member_reason_warning_count(
+                guild_id=guild_id,
+                discord_user_id=self.target_discord_id,
+                mc_user_id=self.target_mc_id,
+                reason_detail=self.reason_detail,
+            )
+            next_reason_count = existing_reason_count + 1
+            if next_reason_count >= 3:
+                embed.add_field(
+                    name="Repeated Warning Alert",
+                    value=(
+                        f"This will be warning #{next_reason_count} for the same reason:\n"
+                        f"`{self.reason_detail[:900]}`\n\n"
+                        "Review the member history before submitting."
+                    ),
+                    inline=False,
+                )
+            elif existing_reason_count >= 1:
+                embed.add_field(
+                    name="Previous Same-Reason Warning",
+                    value=(
+                        f"This member already has {existing_reason_count} warning(s) "
+                        "for this same reason."
+                    ),
+                    inline=False,
+                )
         
         if self.additional_notes:
             embed.add_field(name="Additional Information", value=self.additional_notes[:1024], inline=False)
@@ -2339,6 +2368,34 @@ class SanctionsManager(commands.Cog):
             discord_user_id=discord_user_id,
             mc_user_id=mc_user_id,
         )["warning_insights"]
+
+    def get_member_reason_warning_count(
+        self,
+        *,
+        guild_id: int,
+        reason_detail: str,
+        discord_user_id: Optional[int] = None,
+        mc_user_id: Optional[str] = None,
+    ) -> int:
+        """Return non-removed warning count for one member and exact reason."""
+        reason = (reason_detail or "").strip()
+        if not reason:
+            return 0
+
+        sanctions = self.get_member_sanctions(
+            guild_id=guild_id,
+            discord_user_id=discord_user_id,
+            mc_user_id=mc_user_id,
+        )
+        return len(
+            [
+                sanction
+                for sanction in sanctions
+                if "Warning" in (sanction.get("sanction_type") or "")
+                and sanction.get("effective_status", sanction.get("status")) != "removed"
+                and (sanction.get("reason_detail") or "").strip() == reason
+            ]
+        )
 
     def get_sanction_stats(
         self,
