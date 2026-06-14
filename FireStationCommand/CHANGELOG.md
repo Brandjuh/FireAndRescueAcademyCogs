@@ -63,7 +63,7 @@ All notable changes to FireStationCommand will be documented in this file.
 
 ### Changed
 
-- Bumped the cog version to `1.3.2`.
+- Bumped the cog version to `1.3.3`.
 - Vehicle shop options now come from `data/config/vehicles.yaml` when available.
 - Mission definitions now come from `data/config/missions.yaml` when available.
 - Mission embeds now show configured mission images when available.
@@ -87,6 +87,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - Vehicle purchase confirmation now disables its controls immediately and returns with fresh shop data after purchase.
 - Maintenance bay now only shows repair/back controls and no longer inherits shop paging buttons.
 - Dashboard actions are now grouped by category and alphabetically sorted inside each category.
+- Dashboard category setup now removes old action buttons by label so only the category buttons remain on the main dashboard.
 - Short positive wait times now display as at least `in 1 minute` instead of `now`.
 - Station overview images now use the station level instead of vehicle capacity.
 - Default maximum station level is now 10.
