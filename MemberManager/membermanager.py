@@ -440,37 +440,24 @@ class MemberManager(ConfigCommands, commands.Cog):
                         "source": "discord",
                     })
 
-        if self.alliance_scraper:
-            try:
-                mc_members = await self.alliance_scraper.get_members()
-            except Exception as exc:
-                log.error("Error searching MC members: %s", exc)
-                mc_members = []
+        for mc_member in await self._get_missionchief_members_for_lookup():
+            mc_name, mc_id, score = self._score_missionchief_member(mc_member, query_clean)
+            if not mc_id or score < threshold:
+                continue
 
-            for mc_member in mc_members:
-                mc_name = mc_member.get("name", "")
-                mc_id = mc_member.get("user_id") or mc_member.get("mc_user_id")
-                if not mc_id:
-                    continue
+            discord_id = None
+            if self.membersync:
+                link = await self.membersync.get_link_for_mc(str(mc_id))
+                if link:
+                    discord_id = link.get("discord_id")
 
-                score = fuzzy_match_score(query_clean, mc_name)
-                if query_clean.isdigit() and query_clean in str(mc_id):
-                    score = max(score, 0.8)
-
-                if score >= threshold:
-                    discord_id = None
-                    if self.membersync:
-                        link = await self.membersync.get_link_for_mc(str(mc_id))
-                        if link:
-                            discord_id = link.get("discord_id")
-
-                    results.append({
-                        "score": score,
-                        "discord_id": discord_id,
-                        "mc_user_id": str(mc_id),
-                        "name": mc_name,
-                        "source": "missionchief",
-                    })
+            results.append({
+                "score": score,
+                "discord_id": discord_id,
+                "mc_user_id": str(mc_id),
+                "name": mc_name,
+                "source": "missionchief",
+            })
 
         seen = set()
         unique_results = []
@@ -525,6 +512,82 @@ class MemberManager(ConfigCommands, commands.Cog):
         best = results[0].get("score", 0)
         second = results[1].get("score", 0)
         return best < 1.0 and second >= best - 0.05
+
+    async def _get_missionchief_members_for_lookup(self) -> List[Dict[str, Any]]:
+        """Read current MissionChief members from the available public contracts."""
+        members_by_id: Dict[str, Dict[str, Any]] = {}
+
+        for source_name, cog in (
+            ("MembersScraper", getattr(self, "members_scraper", None)),
+            ("AllianceScraper", getattr(self, "alliance_scraper", None)),
+        ):
+            get_members = getattr(cog, "get_members", None) if cog else None
+            if not get_members:
+                continue
+
+            try:
+                members = await get_members()
+            except Exception as exc:
+                log.error("Error reading MissionChief members from %s: %s", source_name, exc)
+                continue
+
+            for member in members or []:
+                mc_id = self._extract_missionchief_member_id(member)
+                if not mc_id:
+                    continue
+                members_by_id.setdefault(str(mc_id), dict(member))
+
+        return list(members_by_id.values())
+
+    def _extract_missionchief_member_id(self, member: Dict[str, Any]) -> Optional[str]:
+        """Return the MissionChief user ID from known scraper contract fields."""
+        mc_id = (
+            member.get("user_id")
+            or member.get("mc_user_id")
+            or member.get("member_id")
+            or member.get("id")
+        )
+        return str(mc_id) if mc_id is not None and str(mc_id).strip() else None
+
+    def _missionchief_member_name_candidates(self, member: Dict[str, Any]) -> List[str]:
+        """Return known MissionChief username fields from scraper contracts."""
+        return [
+            str(name).strip()
+            for name in (
+                member.get("name"),
+                member.get("username"),
+                member.get("mc_username"),
+                member.get("user_name"),
+                member.get("member_name"),
+                member.get("display_name"),
+            )
+            if str(name or "").strip()
+        ]
+
+    def _score_missionchief_member(
+        self,
+        member: Dict[str, Any],
+        query: str,
+    ) -> tuple[str, Optional[str], float]:
+        """Return display name, MC ID, and fuzzy match score for one MC member."""
+        query_clean = query.strip()
+        query_lower = query_clean.lower()
+        mc_id = self._extract_missionchief_member_id(member)
+        names = self._missionchief_member_name_candidates(member)
+        mc_name = names[0] if names else f"MissionChief member {mc_id}"
+        score = max((fuzzy_match_score(query_lower, name) for name in names), default=0.0)
+
+        if mc_id and query_clean.isdigit():
+            if query_clean == mc_id:
+                score = 1.0
+            elif query_clean in mc_id:
+                score = max(score, 0.9)
+        elif any(name.lower() == query_lower for name in names):
+            score = 1.0
+        elif any(query_lower in name.lower() for name in names):
+            score = max(score, 0.9)
+
+        return mc_name, mc_id, score
 
     async def _open_member_profile_from_interaction(
         self,
@@ -1861,10 +1924,7 @@ class MemberManager(ConfigCommands, commands.Cog):
 
     async def _search_missionchief_members(self, query: str) -> List[Dict[str, Any]]:
         """Search MissionChief members by name or MC user ID."""
-        from .utils import fuzzy_match_score
-
         query_clean = query.strip()
-        query_lower = query_clean.lower()
         results: List[Dict[str, Any]] = []
 
         if query_clean.isdigit():
@@ -1876,24 +1936,10 @@ class MemberManager(ConfigCommands, commands.Cog):
                     "name": mc_data.get("name", "Unknown"),
                 }]
 
-        if not self.alliance_scraper:
-            return []
-
-        try:
-            mc_members = await self.alliance_scraper.get_members()
-        except Exception as exc:
-            log.error("Error searching MissionChief members: %s", exc)
-            return []
-
-        for mc_member in mc_members:
-            mc_name = mc_member.get("name", "")
-            mc_id = mc_member.get("user_id") or mc_member.get("mc_user_id")
+        for mc_member in await self._get_missionchief_members_for_lookup():
+            mc_name, mc_id, score = self._score_missionchief_member(mc_member, query_clean)
             if not mc_id:
                 continue
-
-            score = fuzzy_match_score(query_lower, mc_name)
-            if query_clean.isdigit() and query_clean in str(mc_id):
-                score = max(score, 0.9)
 
             if score >= 0.5:
                 results.append({
@@ -1953,6 +1999,10 @@ class MemberManager(ConfigCommands, commands.Cog):
             membersync=self.membersync,
             alliance_scraper=self.alliance_scraper
         )
+
+        if not result:
+            mc_results = await self._search_missionchief_members(target)
+            result = mc_results[0] if mc_results else None
         
         if result:
             return await self._build_member_data(
