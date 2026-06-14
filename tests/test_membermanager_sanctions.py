@@ -1309,7 +1309,7 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         self.assertEqual(stats["active_count"], 0)
         self.assertEqual(kick["sanction_type"], "Kick")
         self.assertEqual(kick["status"], "unverified")
-        self.assertEqual(ban["sanction_type"], "Chat Ban")
+        self.assertEqual(ban["sanction_type"], "Mute")
         self.assertEqual(ban["status"], "unverified")
         self.assertIsNotNone(kick_review)
         self.assertIsNotNone(ban_review)
@@ -1425,7 +1425,7 @@ class MemberManagerSanctionsTests(unittest.TestCase):
                 "description": "Chat ban set",
             },
             sanction_id=83,
-            sanction_type="Chat Ban",
+            sanction_type="Mute",
             discord_user_id=123,
         )
 
@@ -1550,6 +1550,22 @@ class MemberManagerSanctionsTests(unittest.TestCase):
             reason_detail="4.1. 5% donation to alliance",
         )
         interaction.response.send_message.assert_awaited_once()
+
+    def test_sanction_reason_search_uses_aliases(self):
+        SanctionsManager = load_sanctions_manager_class()
+        manager = SanctionsManager.__new__(SanctionsManager)
+        manager.db = types.SimpleNamespace(get_custom_rules=lambda guild_id: [])
+
+        results = manager.find_sanction_reason_matches(1, "tax", limit=3)
+
+        self.assertGreaterEqual(len(results), 1)
+        self.assertEqual(results[0]["detail"], "4.1. 5% donation to alliance - Minimum 5% donation required.")
+
+    def test_mute_is_available_as_manual_sanction_type(self):
+        module = load_sanction_manager_module()
+
+        self.assertIn("Mute", module.SANCTION_TYPES)
+        self.assertNotIn("Chat Ban", module.SANCTION_TYPES)
 
     def test_sanction_reason_search_results_view_uses_safe_view_reference(self):
         module = load_sanction_manager_module()

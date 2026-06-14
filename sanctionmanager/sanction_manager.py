@@ -28,7 +28,7 @@ GAME_LOG_SANCTION_ACTIONS = {
         "reason_detail": "Kicked from the alliance",
     },
     "chat_ban_set": {
-        "sanction_type": "Chat Ban",
+        "sanction_type": "Mute",
         "reason_detail": "Chat ban set",
     },
 }
@@ -866,6 +866,22 @@ DEFAULT_RULES = {
     }
 }
 
+DEFAULT_RULE_ALIASES = {
+    "1.3": ["respect", "disrespect", "behavior", "conduct", "attitude"],
+    "1.4": ["drama", "conflict", "arguing", "argument", "toxicity"],
+    "1.5": ["politics", "religion", "political", "religious"],
+    "1.6": ["racism", "bullying", "harassment", "abuse", "hate speech"],
+    "1.7": ["inactive", "inactivity", "absence", "not active", "idle"],
+    "1.8": ["nickname", "name", "username", "offensive name", "inappropriate name"],
+    "1.9": ["advertising", "advertisement", "poaching", "recruiting", "promotion"],
+    "2.1": ["language", "swearing", "profanity", "vulgar", "foul language"],
+    "2.2": ["privacy", "personal information", "financial information", "private info"],
+    "2.4": ["spam", "flood", "caps", "common sense", "yelling"],
+    "3.1": ["building placement", "placement", "location", "water", "realistic"],
+    "3.2": ["building name", "vehicle name", "naming", "inappropriate name"],
+    "4.1": ["donation", "donations", "tax", "taxes", "contribution", "contributions", "5 percent", "5%"],
+}
+
 SANCTION_TYPES = [
     "Warning - Verbal warning",
     "Warning - Official 1st warning",
@@ -873,6 +889,7 @@ SANCTION_TYPES = [
     "Warning - Official 3rd and last warning",
     "Kick",
     "Ban",
+    "Mute",
     "Mute 5m",
     "Mute 15m",
     "Mute 30m",
@@ -2628,7 +2645,8 @@ class SanctionsManager(commands.Cog):
         for category, rules in DEFAULT_RULES.items():
             for code, text in rules.items():
                 detail = f"{code}. {text}"
-                haystack = f"{category} {detail}"
+                aliases = DEFAULT_RULE_ALIASES.get(code, [])
+                haystack = " ".join([category, detail, *aliases])
                 score = _fuzzy_match_score(query_clean, haystack) if query_clean else 1.0
                 if not query_clean or score >= 0.25:
                     reasons.append(
@@ -2637,6 +2655,7 @@ class SanctionsManager(commands.Cog):
                             "category": category,
                             "detail": detail,
                             "label": detail,
+                            "aliases": aliases,
                         }
                     )
 
