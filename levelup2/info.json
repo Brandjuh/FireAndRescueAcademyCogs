@@ -26,7 +26,7 @@
     "orjson",
     "Pillow",
     "plotly",
-    "pydantic>=2.10,<2.11",
+    "pydantic>=1.10,<2",
     "python-multipart",
     "python-decouple",
     "python-dotenv",
