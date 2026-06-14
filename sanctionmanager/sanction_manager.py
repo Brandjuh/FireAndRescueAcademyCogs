@@ -1827,20 +1827,22 @@ class SummarySanctionView(discord.ui.View):
             next_reason_count = existing_reason_count + 1
             if next_reason_count >= 3:
                 embed.add_field(
-                    name="Repeated Warning Alert",
+                    name="⚠️⚠️ REPEATED WARNING ALERT ⚠️⚠️",
                     value=(
-                        f"This will be warning #{next_reason_count} for the same reason:\n"
-                        f"`{self.reason_detail[:900]}`\n\n"
-                        "Review the member history before submitting."
+                        f"**This will be warning #{next_reason_count} for the exact same reason.**\n\n"
+                        f"**Reason:** `{self.reason_detail[:850]}`\n\n"
+                        "⚠️ Check the member history before submitting.\n"
+                        "⚠️ Consider whether escalation is needed instead of another warning."
                     ),
                     inline=False,
                 )
             elif existing_reason_count >= 1:
                 embed.add_field(
-                    name="Previous Same-Reason Warning",
+                    name="⚠️ Previous Same-Reason Warning",
                     value=(
-                        f"This member already has {existing_reason_count} warning(s) "
-                        "for this same reason."
+                        f"**This member already has {existing_reason_count} warning(s) "
+                        "for this same reason.**\n"
+                        "Check the history before submitting."
                     ),
                     inline=False,
                 )

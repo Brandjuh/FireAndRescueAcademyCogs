@@ -457,9 +457,11 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         embed = view._create_embed(guild_id=1)
         fields = {field["name"]: field["value"] for field in embed.fields}
 
-        self.assertIn("Repeated Warning Alert", fields)
-        self.assertIn("warning #3", fields["Repeated Warning Alert"])
-        self.assertIn("Low contribution", fields["Repeated Warning Alert"])
+        alert = fields["⚠️⚠️ REPEATED WARNING ALERT ⚠️⚠️"]
+        self.assertIn("warning #3", alert)
+        self.assertIn("exact same reason", alert)
+        self.assertIn("Low contribution", alert)
+        self.assertIn("escalation", alert)
         self.assertEqual(cog.call["guild_id"], 1)
         self.assertEqual(cog.call["mc_user_id"], "456")
         self.assertEqual(cog.call["reason_detail"], "Low contribution")
