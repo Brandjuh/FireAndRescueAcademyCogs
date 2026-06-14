@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import types
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -1216,6 +1217,94 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         self.assertIsNotNone(ban_review)
         self.assertEqual(len(channel.messages), 2)
 
+    def test_game_log_review_scan_skips_existing_recent_manual_sanction(self):
+        module = load_sanction_manager_module()
+        SanctionsDatabase = module.SanctionsDatabase
+        SanctionsManager = module.SanctionsManager
+
+        row = {
+            "id": 21,
+            "action_key": "kicked_from_alliance",
+            "ts": "June 13, 2026 19:45",
+            "event_timestamp": datetime.now(timezone.utc).isoformat(),
+            "executed_name": "DutchFireFighter",
+            "executed_mc_id": "1",
+            "affected_name": "CrashTestDummy",
+            "affected_mc_id": "456",
+            "description": "Kicked from the alliance",
+        }
+
+        class FakeChannel:
+            def __init__(self):
+                self.messages = []
+
+            async def send(self, **kwargs):
+                message = types.SimpleNamespace(id=len(self.messages) + 100, **kwargs)
+                self.messages.append(message)
+                return message
+
+        class FakeValue:
+            def __init__(self, value):
+                self.value = value
+
+            async def __call__(self):
+                return self.value
+
+            async def set(self, value):
+                self.value = value
+
+        class FakeGuildConfig:
+            def __init__(self):
+                self.game_log_review_channel_id = FakeValue(1421625293130567690)
+                self.game_log_review_last_id = FakeValue(0)
+
+        class FakeConfig:
+            def __init__(self):
+                self.guild_config = FakeGuildConfig()
+
+            def guild(self, guild):
+                return self.guild_config
+
+        channel = FakeChannel()
+        guild = types.SimpleNamespace(
+            id=1,
+            get_channel=lambda channel_id: channel if channel_id == 1421625293130567690 else None,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = SanctionsDatabase(str(Path(temp_dir) / "sanctions.db"))
+            manual_id = database.add_sanction(
+                guild_id=1,
+                discord_user_id=None,
+                mc_user_id="456",
+                mc_username="CrashTestDummy",
+                admin_user_id=999,
+                admin_username="Admin",
+                sanction_type="Kick",
+                reason_category="Manual",
+                reason_detail="Kicked from the alliance",
+                additional_notes=None,
+            )
+            manager = SanctionsManager.__new__(SanctionsManager)
+            manager.db = database
+            manager.config = FakeConfig()
+            manager.bot = types.SimpleNamespace(
+                get_cog=lambda name: None,
+                get_channel=lambda channel_id: channel if channel_id == 1421625293130567690 else None,
+            )
+
+            result = asyncio.run(manager._process_game_log_review_rows(guild, [row]))
+            sanctions = database.get_user_sanctions(guild_id=1, mc_user_id="456")
+            review = database.get_game_log_review(21)
+
+        self.assertEqual(result["created"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(len(sanctions), 1)
+        self.assertEqual(sanctions[0]["sanction_id"], manual_id)
+        self.assertEqual(review["sanction_id"], manual_id)
+        self.assertEqual(review["review_status"], "already_recorded")
+        self.assertEqual(len(channel.messages), 0)
+
     def test_game_log_review_embed_is_compact_and_shows_discord_nickname(self):
         module = load_sanction_manager_module()
         SanctionsManager = module.SanctionsManager
@@ -1391,6 +1480,34 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         self.assertEqual(results[0]["mc_user_id"], "456")
         self.assertEqual(results[0]["mc_username"], "CrashTestDummy")
         self.assertIsNone(results[0]["discord_id"])
+
+    def test_sanction_target_search_merges_memberscraper_and_alliancescraper(self):
+        SanctionsManager = load_sanctions_manager_class()
+
+        class FakeMembersScraper:
+            async def get_members(self):
+                return [{"mc_user_id": "123", "name": "MembersOnly"}]
+
+        class FakeAllianceScraper:
+            async def get_members(self):
+                return [{"user_id": "456", "name": "AllianceOnly"}]
+
+        def get_cog(name):
+            if name == "MembersScraper":
+                return FakeMembersScraper()
+            if name == "AllianceScraper":
+                return FakeAllianceScraper()
+            return None
+
+        manager = SanctionsManager.__new__(SanctionsManager)
+        manager.bot = types.SimpleNamespace(get_cog=get_cog)
+        guild = types.SimpleNamespace(members=[], get_member=lambda member_id: None)
+
+        results = asyncio.run(manager.search_sanction_targets(guild, "AllianceOnly"))
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["mc_user_id"], "456")
+        self.assertEqual(results[0]["mc_username"], "AllianceOnly")
 
     def test_sanction_target_search_enriches_missionchief_member_with_discord_link(self):
         SanctionsManager = load_sanctions_manager_class()
