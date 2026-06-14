@@ -466,6 +466,32 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         self.assertEqual(cog.call["mc_user_id"], "456")
         self.assertEqual(cog.call["reason_detail"], "Low contribution")
 
+    def test_sanction_summary_prefers_admin_missionchief_name(self):
+        module = load_sanction_manager_module()
+
+        class FakeCog:
+            def get_member_reason_warning_count(self, **kwargs):
+                return 0
+
+        view = module.SummarySanctionView(
+            FakeCog(),
+            admin_user_id=999,
+            admin_username="brandjuh",
+            target_discord_id=None,
+            target_mc_id="456",
+            target_mc_username="CrashTestDummy",
+            target_discord_user=None,
+            sanction_type="Warning - Official 1st warning",
+            reason_category="Contribution",
+            reason_detail="Low contribution",
+        )
+        view.admin_display_name = "DutchFireFighter"
+
+        embed = view._create_embed(guild_id=1)
+        fields = {field["name"]: field["value"] for field in embed.fields}
+
+        self.assertEqual(fields["Admin"], "DutchFireFighter")
+
     def test_sanction_stats_contract_defines_status_and_staff_activity_counts(self):
         SanctionsDatabase = load_sanctions_database_class()
         SanctionsManager = load_sanctions_manager_class()
@@ -1542,6 +1568,33 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["mc_user_id"], "456")
         self.assertEqual(results[0]["mc_username"], "AllianceOnly")
+
+    def test_sanction_manager_resolves_discord_user_to_mc_display_name(self):
+        SanctionsManager = load_sanctions_manager_class()
+
+        class FakeMemberSync:
+            async def get_link_for_discord(self, discord_id):
+                return {"discord_id": discord_id, "mc_user_id": "88649"}
+
+        class FakeMembersScraper:
+            async def get_member_snapshot(self, mc_user_id):
+                return {"user_id": mc_user_id, "name": "DutchFireFighter"}
+
+        def get_cog(name):
+            if name == "MemberSync":
+                return FakeMemberSync()
+            if name == "MembersScraper":
+                return FakeMembersScraper()
+            return None
+
+        manager = SanctionsManager.__new__(SanctionsManager)
+        manager.bot = types.SimpleNamespace(get_cog=get_cog)
+
+        display = asyncio.run(
+            manager.get_mc_display_name_for_discord(999, fallback="brandjuh")
+        )
+
+        self.assertEqual(display, "DutchFireFighter")
 
     def test_sanction_target_search_enriches_missionchief_member_with_discord_link(self):
         SanctionsManager = load_sanctions_manager_class()
