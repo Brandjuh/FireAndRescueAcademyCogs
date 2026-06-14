@@ -1,8 +1,10 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from admintimednotifications.admintimednotifications import (
+    AdminTimedNotifications,
     LOCAL_TIMEZONE,
     MANAGEMENT_PANEL_TITLE,
     format_channel_reference,
@@ -212,6 +214,43 @@ def test_admin_timer_panel_message_detection_and_channel_display():
     assert not is_management_panel_message(OtherMessage(), bot_user_id=123)
     assert format_channel_reference(FakeChannel(), 1) == "#action-required (`1421625293130567690`)"
     assert format_channel_reference(None, 1421625293130567690) == "Missing channel `1421625293130567690`"
+
+
+def test_admin_timer_restore_creates_management_panel_when_missing():
+    guild = object()
+
+    class FakeBot:
+        guilds = [guild]
+
+        async def wait_until_red_ready(self):
+            return None
+
+        def add_view(self, view):
+            del view
+
+    class FakeGuildConfig:
+        async def reminders(self):
+            return []
+
+    class FakeConfig:
+        def guild(self, item):
+            assert item is guild
+            return FakeGuildConfig()
+
+    cog = object.__new__(AdminTimedNotifications)
+    cog.bot = FakeBot()
+    cog.config = FakeConfig()
+    create_flags = []
+
+    async def fake_ensure_management_panel(item, *, create=True):
+        assert item is guild
+        create_flags.append(create)
+
+    cog.ensure_management_panel = fake_ensure_management_panel
+
+    asyncio.run(cog.restore_views_and_panels())
+
+    assert create_flags == [True]
 
 
 def test_botstatus_accepts_only_supported_activity_types():

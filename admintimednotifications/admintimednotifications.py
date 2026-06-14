@@ -736,7 +736,7 @@ class AdminTimedNotifications(commands.Cog):
                 reminder_id = reminder.get("id")
                 if reminder_id:
                     self.bot.add_view(ReminderActionView(self, int(reminder_id)))
-            await self.ensure_management_panel(guild, create=False)
+            await self.ensure_management_panel(guild, create=True)
 
     async def reminder_loop(self):
         await self.bot.wait_until_red_ready()
