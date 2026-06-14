@@ -110,13 +110,13 @@ class MemberOverviewView(discord.ui.View):
 
         elif self.current_tab == "infractions":
             self.add_item(AddSanctionButton(self, row=2))
+            self.add_item(SearchSanctionButton(self, row=2))
 
             if self._has_sanctions():
                 self.add_item(EditSanctionButton(self, row=2))
                 self.add_item(RemoveSanctionButton(self, row=2))
 
             if self._has_multiple_sanctions():
-                self.add_item(SearchSanctionButton(self, row=3))
                 self.add_item(PreviousPageButton(self, "infraction", row=3))
                 self.add_item(NextPageButton(self, "infraction", row=3))
 
@@ -736,7 +736,7 @@ class MemberOverviewView(discord.ui.View):
                     ),
                     inline=False
                 )
-            
+            self._add_warning_insights_field(embed, all_sanctions, sanction_summary)
             return embed
     
     def _build_single_sanction_embed(
@@ -786,6 +786,8 @@ class MemberOverviewView(discord.ui.View):
         )
         embed.add_field(name="ℹ️ Details", value=metadata, inline=False)
         
+        self._add_warning_insights_field(embed, all_sanctions, sanction_summary)
+
         # Historical summary
         total = len(all_sanctions)
         active_count = (
@@ -869,6 +871,7 @@ class MemberOverviewView(discord.ui.View):
             )
         )
 
+        self._add_warning_insights_field(embed, all_sanctions, sanction_summary)
         return embed
 
     def _get_sanction_display_name(
@@ -904,6 +907,121 @@ class MemberOverviewView(discord.ui.View):
         if data.discord_id:
             return f"Discord User {data.discord_id}"
         return "Unknown User"
+
+    def _get_warning_insights(
+        self,
+        all_sanctions: List[Dict[str, Any]],
+        sanction_summary: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build warning counts and repeat patterns for this member."""
+        if sanction_summary and sanction_summary.get("warning_insights"):
+            return sanction_summary["warning_insights"]
+
+        warnings = [
+            sanction
+            for sanction in all_sanctions
+            if "Warning" in (sanction.get("sanction_type") or "")
+            and sanction.get("effective_status", sanction.get("status", "active")) != "removed"
+        ]
+        active_warnings = [
+            sanction for sanction in warnings if sanction.get("effective_status", sanction.get("status")) == "active"
+        ]
+        official_warnings = [
+            sanction for sanction in warnings if "Official" in (sanction.get("sanction_type") or "")
+        ]
+        verbal_warnings = [
+            sanction for sanction in warnings if "Verbal" in (sanction.get("sanction_type") or "")
+        ]
+
+        repeated_reasons = {}
+        for sanction in warnings:
+            reason = (sanction.get("reason_detail") or "").strip()
+            if reason:
+                repeated_reasons[reason] = repeated_reasons.get(reason, 0) + 1
+        repeated_reasons = {
+            reason: count
+            for reason, count in sorted(repeated_reasons.items(), key=lambda item: item[1], reverse=True)
+            if count > 1
+        }
+
+        signals = []
+        if len(active_warnings) >= 3:
+            signals.append("High active warning count")
+        elif len(active_warnings) >= 2:
+            signals.append("Multiple active warnings")
+        if len(warnings) >= 5:
+            signals.append("High historical warning count")
+        elif len(warnings) >= 3:
+            signals.append("Repeated warning history")
+        if repeated_reasons:
+            signals.append("Repeated warning reason")
+
+        return {
+            "total_warnings": len(warnings),
+            "active_warnings": len(active_warnings),
+            "official_warnings": len(official_warnings),
+            "verbal_warnings": len(verbal_warnings),
+            "repeated_reasons": repeated_reasons,
+            "signals": signals,
+        }
+
+    def _add_warning_insights_field(
+        self,
+        embed: discord.Embed,
+        all_sanctions: List[Dict[str, Any]],
+        sanction_summary: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Add warning pattern context to a sanctions embed."""
+        insights = self._get_warning_insights(all_sanctions, sanction_summary)
+        if not insights.get("total_warnings"):
+            return
+
+        lines = [
+            f"Active warnings: {insights.get('active_warnings', 0)}",
+            f"Historical warnings: {insights.get('total_warnings', 0)}",
+            f"Official: {insights.get('official_warnings', 0)} | Verbal: {insights.get('verbal_warnings', 0)}",
+        ]
+        repeated_reasons = insights.get("repeated_reasons") or {}
+        if repeated_reasons:
+            lines.append("Repeated reasons:")
+            for reason, count in list(repeated_reasons.items())[:3]:
+                lines.append(f"- {truncate_text(reason, 70)} ({count}x)")
+        signals = insights.get("signals") or []
+        if signals:
+            lines.append("Decision signals:")
+            lines.extend(f"- {signal}" for signal in signals[:3])
+
+        embed.add_field(
+            name="Warning Pattern",
+            value=truncate_text("\n".join(lines), 1024),
+            inline=False,
+        )
+
+    def _search_sanctions(
+        self,
+        all_sanctions: List[Dict[str, Any]],
+        query: str,
+    ) -> List[Dict[str, Any]]:
+        """Search sanctions by ID, status, type, reason, category, admin, or notes."""
+        query_clean = (query or "").strip().lower()
+        if not query_clean:
+            return []
+
+        matches = []
+        for sanction in all_sanctions:
+            searchable = [
+                str(sanction.get("sanction_id") or ""),
+                sanction.get("effective_status") or sanction.get("status") or "",
+                sanction.get("sanction_type") or "",
+                sanction.get("reason_category") or "",
+                sanction.get("reason_detail") or "",
+                sanction.get("additional_notes") or "",
+                sanction.get("admin_username") or "",
+                sanction.get("mc_username") or "",
+            ]
+            if any(query_clean in str(value).lower() for value in searchable):
+                matches.append(sanction)
+        return sorted(matches, key=lambda item: item.get("created_at", 0), reverse=True)
     
     async def get_events_embed(self) -> discord.Embed:
         """Build the operations embed for alliance storms and large alliance missions."""
@@ -1440,11 +1558,11 @@ class RemoveSanctionButton(discord.ui.Button):
 
 
 class SearchSanctionButton(discord.ui.Button):
-    """Search sanction by ID button."""
+    """Search member sanctions button."""
     
     def __init__(self, parent_view: MemberOverviewView, row: int):
         super().__init__(
-            label="Search ID",
+            label="Search Sanction",
             style=discord.ButtonStyle.primary,
             emoji="🔍",
             custom_id="mm:search_sanction",
@@ -1453,7 +1571,7 @@ class SearchSanctionButton(discord.ui.Button):
         self.parent_view = parent_view
     
     async def callback(self, interaction: discord.Interaction):
-        modal = SearchSanctionModal(self.parent_view)
+        modal = SearchSanctionQueryModal(self.parent_view)
         await interaction.response.send_modal(modal)
 
 
@@ -2441,6 +2559,139 @@ class SearchSanctionModal(discord.ui.Modal, title="Search Sanction by ID"):
                 f"❌ Error searching sanction: {str(e)}",
                 ephemeral=True
             )
+
+
+# Sanction search modal
+class SearchSanctionQueryModal(discord.ui.Modal, title="Search Sanctions"):
+    """Modal to search member sanctions by ID or text."""
+
+    sanction_query = discord.ui.TextInput(
+        label="Sanction ID or search text",
+        style=discord.TextStyle.short,
+        placeholder="123, warning, inactivity, removed, admin name...",
+        required=True,
+        max_length=100,
+    )
+
+    def __init__(self, parent_view: MemberOverviewView):
+        super().__init__()
+        self.parent_view = parent_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        """Search this member's sanctions."""
+        try:
+            query = str(self.sanction_query.value).strip()
+            sanction_manager = self.parent_view.integrations.get("sanction_manager")
+            data = self.parent_view.member_data
+            if not sanction_manager or not self.parent_view.guild:
+                await interaction.response.send_message(
+                    "SanctionManager not available",
+                    ephemeral=True,
+                )
+                return
+
+            sanction_summary = None
+            get_member_sanction_summary = getattr(sanction_manager, "get_member_sanction_summary", None)
+            get_member_sanctions = getattr(sanction_manager, "get_member_sanctions", None)
+            if get_member_sanction_summary:
+                sanction_summary = get_member_sanction_summary(
+                    guild_id=self.parent_view.guild.id,
+                    discord_user_id=data.discord_id,
+                    mc_user_id=data.mc_user_id,
+                )
+                all_sanctions = list(sanction_summary.get("sanctions", []))
+            elif get_member_sanctions:
+                all_sanctions = list(
+                    get_member_sanctions(
+                        guild_id=self.parent_view.guild.id,
+                        discord_user_id=data.discord_id,
+                        mc_user_id=data.mc_user_id,
+                    )
+                )
+            else:
+                all_sanctions = list(
+                    sanction_manager.db.get_user_sanctions(
+                        guild_id=self.parent_view.guild.id,
+                        discord_user_id=data.discord_id,
+                        mc_user_id=data.mc_user_id,
+                    )
+                )
+
+            matches = self.parent_view._search_sanctions(all_sanctions, query)
+            if not matches:
+                await interaction.response.send_message(
+                    f"No sanctions found for `{query}` on this member.",
+                    ephemeral=True,
+                )
+                return
+
+            if len(matches) == 1:
+                embed = self._build_detail_embed(matches[0])
+                self.parent_view._add_warning_insights_field(embed, all_sanctions, sanction_summary)
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+
+            embed = discord.Embed(
+                title=f"Sanction Search - {self.parent_view._get_member_display_name()}",
+                color=discord.Color.blue(),
+            )
+            embed.description = f"Found {len(matches)} sanctions for `{query}`."
+            lines = []
+            for sanction in matches[:10]:
+                status = sanction.get("effective_status", sanction.get("status", "active"))
+                created = format_timestamp(sanction.get("created_at", 0), "R")
+                lines.append(
+                    f"**#{sanction.get('sanction_id')}** | {sanction.get('sanction_type', 'Unknown')} | {status}"
+                )
+                lines.append(f"  {truncate_text(sanction.get('reason_detail', ''), 90)} - {created}")
+            embed.add_field(name="Matches", value=truncate_text("\n".join(lines), 1024), inline=False)
+            self.parent_view._add_warning_insights_field(embed, all_sanctions, sanction_summary)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        except Exception as e:
+            log.error(f"Error searching sanctions: {e}", exc_info=True)
+            await interaction.response.send_message(
+                f"Error searching sanctions: {str(e)}",
+                ephemeral=True,
+            )
+
+    def _build_detail_embed(self, sanction: Dict[str, Any]) -> discord.Embed:
+        """Build a detailed embed for one matching sanction."""
+        sid = sanction.get("sanction_id", "Unknown")
+        embed = discord.Embed(
+            title=f"Sanction Details - #{sid}",
+            color=discord.Color.blue(),
+        )
+        status = sanction.get("effective_status", sanction.get("status", "active"))
+        sanction_type = sanction.get("sanction_type", "Unknown")
+        reason_category = sanction.get("reason_category", "N/A")
+        reason_detail = sanction.get("reason_detail", "No details")
+        admin_name = sanction.get("admin_username", "Unknown")
+        created_at = sanction.get("created_at", 0)
+
+        embed.description = f"**Status:** {str(status).title()}\n**Type:** {sanction_type}"
+        member_info = f"**MC Name:** {sanction.get('mc_username', 'Unknown')}"
+        if sanction.get("discord_user_id"):
+            member_info += f"\n**Discord:** <@{sanction['discord_user_id']}>"
+        embed.add_field(name="Member", value=member_info, inline=False)
+        embed.add_field(
+            name="Reason",
+            value=f"**Category:** {reason_category}\n**Detail:** {reason_detail}",
+            inline=False,
+        )
+        if sanction.get("additional_notes"):
+            embed.add_field(
+                name="Admin Notes",
+                value=truncate_text(sanction["additional_notes"], 1024),
+                inline=False,
+            )
+        metadata = (
+            f"**Admin:** {admin_name}\n"
+            f"**Issued:** {format_timestamp(created_at, 'F')}"
+        )
+        if sanction.get("edited_at"):
+            metadata += f"\n**Last edited:** {format_timestamp(sanction['edited_at'], 'R')}"
+        embed.add_field(name="Details", value=metadata, inline=False)
+        return embed
 
 
 # 🔧 NEW: Audit search modal

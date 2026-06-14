@@ -369,6 +369,60 @@ class SanctionsDatabase:
             "expired_count": len([s for s in normalized if s.get("effective_status") == "expired"]),
             "removed_count": len([s for s in normalized if s.get("effective_status") == "removed"]),
             "historical_count": len(normalized),
+            "warning_insights": cls.summarize_warning_insights(normalized),
+        }
+
+    @classmethod
+    def summarize_warning_insights(cls, sanctions: List[dict]) -> dict:
+        """Return warning counts and repeat patterns for one member."""
+        warnings = [
+            sanction
+            for sanction in sanctions
+            if "Warning" in (sanction.get("sanction_type") or "")
+            and sanction.get("effective_status", sanction.get("status", "active")) != "removed"
+        ]
+        active_warnings = [
+            sanction for sanction in warnings if sanction.get("effective_status", sanction.get("status")) == "active"
+        ]
+        official_warnings = [
+            sanction for sanction in warnings if "Official" in (sanction.get("sanction_type") or "")
+        ]
+        verbal_warnings = [
+            sanction for sanction in warnings if "Verbal" in (sanction.get("sanction_type") or "")
+        ]
+
+        repeated_reasons: Dict[str, int] = {}
+        for sanction in warnings:
+            reason = (sanction.get("reason_detail") or "").strip()
+            if not reason:
+                continue
+            repeated_reasons[reason] = repeated_reasons.get(reason, 0) + 1
+
+        repeated_reasons = {
+            reason: count
+            for reason, count in sorted(repeated_reasons.items(), key=lambda item: item[1], reverse=True)
+            if count > 1
+        }
+
+        signals = []
+        if len(active_warnings) >= 3:
+            signals.append("High active warning count")
+        elif len(active_warnings) >= 2:
+            signals.append("Multiple active warnings")
+        if len(warnings) >= 5:
+            signals.append("High historical warning count")
+        elif len(warnings) >= 3:
+            signals.append("Repeated warning history")
+        if repeated_reasons:
+            signals.append("Repeated warning reason")
+
+        return {
+            "total_warnings": len(warnings),
+            "active_warnings": len(active_warnings),
+            "official_warnings": len(official_warnings),
+            "verbal_warnings": len(verbal_warnings),
+            "repeated_reasons": repeated_reasons,
+            "signals": signals,
         }
     
     def get_active_warnings(self, guild_id: int, discord_user_id: Optional[int] = None,
@@ -2215,6 +2269,20 @@ class SanctionsManager(commands.Cog):
             mc_user_id=mc_user_id,
         )
         return SanctionsDatabase.summarize_sanctions(sanctions)
+
+    def get_member_warning_insights(
+        self,
+        *,
+        guild_id: int,
+        discord_user_id: Optional[int] = None,
+        mc_user_id: Optional[str] = None,
+    ) -> dict:
+        """Public contract for warning counts and repeat patterns for one member."""
+        return self.get_member_sanction_summary(
+            guild_id=guild_id,
+            discord_user_id=discord_user_id,
+            mc_user_id=mc_user_id,
+        )["warning_insights"]
 
     def get_sanction_stats(
         self,

@@ -14,6 +14,7 @@ from MemberManager.views import (
     EditSanctionModal,
     MemberOverviewView,
     RemoveSanctionModal,
+    SearchSanctionQueryModal,
 )
 
 
@@ -377,6 +378,58 @@ class MemberManagerSanctionsTests(unittest.TestCase):
             {sanction["sanction_id"]: sanction["effective_status"] for sanction in summary["sanctions"]},
             {1: "expired", 2: "active", 3: "removed", 4: "unverified"},
         )
+
+    def test_sanction_summary_tracks_warning_patterns_for_member_decisions(self):
+        SanctionsDatabase = load_sanctions_database_class()
+        now = 1_800_000_000
+        sanctions = [
+            {
+                "sanction_id": 1,
+                "sanction_type": "Warning - Official 1st",
+                "reason_detail": "Low contribution",
+                "created_at": now - 100,
+                "status": "active",
+            },
+            {
+                "sanction_id": 2,
+                "sanction_type": "Warning - Official 2nd",
+                "reason_detail": "Low contribution",
+                "created_at": now - 200,
+                "status": "active",
+            },
+            {
+                "sanction_id": 3,
+                "sanction_type": "Warning - Official 1st",
+                "reason_detail": "Low contribution",
+                "created_at": now - (31 * 86400),
+                "status": "active",
+            },
+            {
+                "sanction_id": 4,
+                "sanction_type": "Warning - Verbal warning",
+                "reason_detail": "Discord conduct",
+                "created_at": now - 300,
+                "status": "active",
+            },
+            {
+                "sanction_id": 5,
+                "sanction_type": "Warning - Verbal warning",
+                "reason_detail": "Low contribution",
+                "created_at": now - 400,
+                "status": "removed",
+            },
+        ]
+
+        insights = SanctionsDatabase.summarize_sanctions(sanctions, now=now)["warning_insights"]
+
+        self.assertEqual(insights["total_warnings"], 4)
+        self.assertEqual(insights["active_warnings"], 3)
+        self.assertEqual(insights["official_warnings"], 3)
+        self.assertEqual(insights["verbal_warnings"], 1)
+        self.assertEqual(insights["repeated_reasons"], {"Low contribution": 3})
+        self.assertIn("High active warning count", insights["signals"])
+        self.assertIn("Repeated warning history", insights["signals"])
+        self.assertIn("Repeated warning reason", insights["signals"])
 
     def test_sanction_stats_contract_defines_status_and_staff_activity_counts(self):
         SanctionsDatabase = load_sanctions_database_class()
@@ -771,6 +824,116 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         self.assertIn("Expired: 1", embed.footer["text"])
         self.assertIn("Removed: 1", embed.footer["text"])
 
+    def test_sanctions_embed_shows_warning_pattern_context(self):
+        class FakeSanctionManager:
+            def get_member_sanction_summary(self, **kwargs):
+                del kwargs
+                sanctions = [
+                    {
+                        "sanction_id": 1,
+                        "sanction_type": "Warning - Official 1st",
+                        "reason_detail": "Low contribution",
+                        "created_at": 1_800_000_000,
+                        "effective_status": "active",
+                    },
+                    {
+                        "sanction_id": 2,
+                        "sanction_type": "Warning - Official 2nd",
+                        "reason_detail": "Low contribution",
+                        "created_at": 1_800_000_100,
+                        "effective_status": "active",
+                    },
+                    {
+                        "sanction_id": 3,
+                        "sanction_type": "Warning - Verbal warning",
+                        "reason_detail": "Discord conduct",
+                        "created_at": 1_800_000_200,
+                        "effective_status": "active",
+                    },
+                ]
+                return {
+                    "sanctions": sanctions,
+                    "active_count": 3,
+                    "unverified_count": 0,
+                    "expired_count": 0,
+                    "removed_count": 0,
+                    "historical_count": 3,
+                    "warning_insights": {
+                        "total_warnings": 3,
+                        "active_warnings": 3,
+                        "official_warnings": 2,
+                        "verbal_warnings": 1,
+                        "repeated_reasons": {"Low contribution": 2},
+                        "signals": ["High active warning count", "Repeated warning reason"],
+                    },
+                }
+
+        view = MemberOverviewView.__new__(MemberOverviewView)
+        view.member_data = MemberData(discord_id=123, mc_user_id="456", mc_username="MCUser")
+        view.integrations = {"sanction_manager": FakeSanctionManager()}
+        view.guild = types.SimpleNamespace(id=1)
+        view.infraction_page = 0
+        view.infractions_per_page = 10
+
+        embed = asyncio.run(view.get_infractions_embed())
+        warning_field = next(field for field in embed.fields if field["name"] == "Warning Pattern")
+
+        self.assertIn("Active warnings: 3", warning_field["value"])
+        self.assertIn("Historical warnings: 3", warning_field["value"])
+        self.assertIn("Low contribution (2x)", warning_field["value"])
+        self.assertIn("High active warning count", warning_field["value"])
+
+    def test_sanction_search_modal_finds_member_sanctions_by_reason_text(self):
+        class FakeSanctionManager:
+            def get_member_sanction_summary(self, **kwargs):
+                del kwargs
+                return {
+                    "sanctions": [
+                        {
+                            "sanction_id": 1,
+                            "sanction_type": "Kick",
+                            "reason_detail": "Other reason",
+                            "created_at": 1_800_000_000,
+                            "effective_status": "active",
+                        },
+                        {
+                            "sanction_id": 2,
+                            "sanction_type": "Warning - Official 1st",
+                            "reason_category": "Contribution",
+                            "reason_detail": "Low contribution",
+                            "admin_username": "Admin",
+                            "mc_username": "MCUser",
+                            "created_at": 1_800_000_100,
+                            "effective_status": "active",
+                        },
+                    ],
+                    "warning_insights": {
+                        "total_warnings": 1,
+                        "active_warnings": 1,
+                        "official_warnings": 1,
+                        "verbal_warnings": 0,
+                        "repeated_reasons": {},
+                        "signals": [],
+                    },
+                }
+
+        view = MemberOverviewView.__new__(MemberOverviewView)
+        view.member_data = MemberData(discord_id=123, mc_user_id="456", mc_username="MCUser")
+        view.integrations = {"sanction_manager": FakeSanctionManager()}
+        view.guild = types.SimpleNamespace(id=1)
+        modal = SearchSanctionQueryModal(view)
+        modal.sanction_query.value = "contribution"
+        interaction = types.SimpleNamespace(
+            response=types.SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        asyncio.run(modal.on_submit(interaction))
+
+        interaction.response.send_message.assert_awaited_once()
+        embed = interaction.response.send_message.await_args.kwargs["embed"]
+        self.assertEqual(embed.kwargs["title"], "Sanction Details - #2")
+        self.assertIn("Low contribution", embed.fields[1]["value"])
+
     def test_sanction_manager_public_contract_delegates_to_database(self):
         SanctionsManager = load_sanctions_manager_class()
         calls = {}
@@ -782,7 +945,14 @@ class MemberManagerSanctionsTests(unittest.TestCase):
 
             def get_user_sanctions(self, **kwargs):
                 calls["get"] = kwargs
-                return [{"sanction_id": 1}]
+                return [
+                    {
+                        "sanction_id": 1,
+                        "sanction_type": "Warning",
+                        "reason_detail": "Reason",
+                        "status": "active",
+                    }
+                ]
 
             def add_sanction(self, **kwargs):
                 calls["add"] = kwargs
@@ -799,6 +969,11 @@ class MemberManagerSanctionsTests(unittest.TestCase):
 
         sanction = manager.get_sanction_by_id(42)
         sanctions = manager.get_member_sanctions(
+            guild_id=1,
+            discord_user_id=123,
+            mc_user_id="456",
+        )
+        warning_insights = manager.get_member_warning_insights(
             guild_id=1,
             discord_user_id=123,
             mc_user_id="456",
@@ -823,6 +998,8 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         self.assertEqual(calls["get_one"], 42)
         self.assertEqual(sanctions[0]["sanction_id"], 1)
         self.assertEqual(sanctions[0]["effective_status"], "active")
+        self.assertEqual(warning_insights["total_warnings"], 1)
+        self.assertEqual(warning_insights["active_warnings"], 1)
         self.assertEqual(sanction_id, 42)
         self.assertEqual(calls["get"]["mc_user_id"], "456")
         self.assertEqual(calls["add"]["sanction_type"], "Warning")
