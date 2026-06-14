@@ -1444,7 +1444,7 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         self.assertTrue(hasattr(module.GameLogReviewActionView, "edit_notes"))
         self.assertTrue(hasattr(module.GameLogReviewActionView, "dismiss"))
 
-    def test_game_log_review_edit_type_opens_search_modal(self):
+    def test_game_log_review_edit_type_opens_fixed_select(self):
         module = load_sanction_manager_module()
         sanction = {
             "sanction_id": 88,
@@ -1468,27 +1468,54 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         interaction = types.SimpleNamespace(
             message=types.SimpleNamespace(embeds=[embed]),
             user=types.SimpleNamespace(id=999),
-            response=types.SimpleNamespace(send_modal=AsyncMock()),
+            response=types.SimpleNamespace(send_message=AsyncMock()),
         )
         view = module.GameLogReviewActionView(FakeCog())
 
         asyncio.run(view.edit_type(interaction, None))
 
+        interaction.response.send_message.assert_awaited_once()
+        kwargs = interaction.response.send_message.await_args.kwargs
+        self.assertIsInstance(kwargs["view"], module.EditSanctionTypeView)
+        self.assertTrue(kwargs["ephemeral"])
+
+    def test_game_log_review_edit_reason_opens_search_modal(self):
+        module = load_sanction_manager_module()
+        sanction = {
+            "sanction_id": 88,
+            "guild_id": 1,
+            "sanction_type": "Kick",
+            "reason_detail": "Kicked from the alliance",
+        }
+
+        class FakeDB:
+            def get_sanction(self, sanction_id):
+                return sanction if sanction_id == 88 else None
+
+        class FakeCog:
+            db = FakeDB()
+
+            async def _is_admin(self, interaction):
+                return True
+
+        embed = types.SimpleNamespace(
+            footer=types.SimpleNamespace(text="Log ID: 18554 | Sanction ID: 88")
+        )
+        interaction = types.SimpleNamespace(
+            message=types.SimpleNamespace(embeds=[embed]),
+            user=types.SimpleNamespace(id=999),
+            response=types.SimpleNamespace(send_modal=AsyncMock()),
+        )
+        view = module.GameLogReviewActionView(FakeCog())
+
+        asyncio.run(view.edit_reason(interaction, None))
+
         interaction.response.send_modal.assert_awaited_once()
         modal = interaction.response.send_modal.await_args.args[0]
-        self.assertIsInstance(modal, module.EditSanctionTypeSearchModal)
-        self.assertEqual(modal.query.default, "Kick")
+        self.assertIsInstance(modal, module.EditSanctionReasonSearchModal)
+        self.assertEqual(modal.query.default, "Kicked from the alliance")
 
-    def test_sanction_type_fuzzy_search_finds_known_types(self):
-        SanctionsManager = load_sanctions_manager_class()
-        manager = SanctionsManager.__new__(SanctionsManager)
-
-        results = manager.find_sanction_type_matches("verbal", limit=3)
-
-        self.assertGreaterEqual(len(results), 1)
-        self.assertEqual(results[0]["sanction_type"], "Warning - Verbal warning")
-
-    def test_sanction_type_search_modal_updates_exact_match(self):
+    def test_sanction_reason_search_modal_updates_exact_match(self):
         module = load_sanction_manager_module()
         apply_edit = AsyncMock()
         sanction = {
@@ -1498,13 +1525,18 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         }
         editor = types.SimpleNamespace(id=999)
         cog = types.SimpleNamespace(
-            find_sanction_type_matches=lambda query, limit=5: [
-                {"score": 1.0, "sanction_type": "Chat Ban", "label": "Chat Ban"}
+            find_sanction_reason_matches=lambda guild_id, query, limit=10: [
+                {
+                    "score": 1.0,
+                    "category": "Activity",
+                    "detail": "4.1. 5% donation to alliance",
+                    "label": "4.1. 5% donation to alliance",
+                }
             ],
-            apply_sanction_type_edit=apply_edit,
+            apply_sanction_reason_edit=apply_edit,
         )
-        modal = module.EditSanctionTypeSearchModal(cog, sanction, editor)
-        modal.query.value = "chat ban"
+        modal = module.EditSanctionReasonSearchModal(cog, sanction, editor)
+        modal.query.value = "donation"
         interaction = types.SimpleNamespace(
             response=types.SimpleNamespace(send_message=AsyncMock()),
         )
@@ -1514,11 +1546,12 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         apply_edit.assert_awaited_once_with(
             sanction=sanction,
             editor=editor,
-            new_type="Chat Ban",
+            reason_category="Activity",
+            reason_detail="4.1. 5% donation to alliance",
         )
         interaction.response.send_message.assert_awaited_once()
 
-    def test_sanction_type_search_results_view_uses_safe_view_reference(self):
+    def test_sanction_reason_search_results_view_uses_safe_view_reference(self):
         module = load_sanction_manager_module()
         sanction = {
             "sanction_id": 88,
@@ -1527,9 +1560,16 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         }
         cog = types.SimpleNamespace()
         editor = types.SimpleNamespace(id=999)
-        matches = [{"score": 0.9, "sanction_type": "Kick", "label": "Kick"}]
+        matches = [
+            {
+                "score": 0.9,
+                "category": "Activity",
+                "detail": "4.1. 5% donation to alliance",
+                "label": "4.1. 5% donation to alliance",
+            }
+        ]
 
-        view = module.EditSanctionTypeSearchResultsView(cog, sanction, editor, matches)
+        view = module.EditSanctionReasonSearchResultsView(cog, sanction, editor, matches)
 
         self.assertEqual(len(view.children), 1)
         self.assertIs(view.children[0].search_view, view)

@@ -2177,7 +2177,11 @@ class GameLogReviewActionView(discord.ui.View):
             await interaction.response.send_message("The linked sanction no longer exists.", ephemeral=True)
             return
 
-        await interaction.response.send_modal(EditSanctionTypeSearchModal(self.cog, sanction, interaction.user))
+        await interaction.response.send_message(
+            f"Select the correct sanction type for sanction #{sanction_id}:",
+            view=EditSanctionTypeView(self.cog, sanction, interaction.user),
+            ephemeral=True,
+        )
 
     @discord.ui.button(label="Edit Reason", style=discord.ButtonStyle.primary, custom_id="sm:logreview:edit_reason")
     async def edit_reason(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2192,7 +2196,7 @@ class GameLogReviewActionView(discord.ui.View):
             await interaction.response.send_message("The linked sanction no longer exists.", ephemeral=True)
             return
 
-        await interaction.response.send_modal(EditReasonModal(self.cog, sanction, interaction.user))
+        await interaction.response.send_modal(EditSanctionReasonSearchModal(self.cog, sanction, interaction.user))
 
     @discord.ui.button(label="Edit Notes", style=discord.ButtonStyle.secondary, custom_id="sm:logreview:edit_notes")
     async def edit_notes(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2659,28 +2663,6 @@ class SanctionsManager(commands.Cog):
 
         return sorted(reasons, key=lambda item: item["score"], reverse=True)[:limit]
 
-    def find_sanction_type_matches(
-        self,
-        query: str = "",
-        *,
-        limit: int = 10,
-    ) -> List[Dict[str, Any]]:
-        """Fuzzy-search known sanction types."""
-        query_clean = (query or "").strip().lower()
-        matches = []
-        for sanction_type in SANCTION_TYPES:
-            score = _fuzzy_match_score(query_clean, sanction_type) if query_clean else 1.0
-            if not query_clean or score >= 0.25:
-                matches.append(
-                    {
-                        "score": score,
-                        "sanction_type": sanction_type,
-                        "label": sanction_type,
-                    }
-                )
-
-        return sorted(matches, key=lambda item: item["score"], reverse=True)[:limit]
-
     async def apply_sanction_type_edit(
         self,
         *,
@@ -2702,6 +2684,32 @@ class SanctionsManager(commands.Cog):
             event_type="sanction_edited",
             actor_id=editor.id,
             event_data={"fields": ["sanction_type"], "source": "SanctionManager"},
+        )
+
+    async def apply_sanction_reason_edit(
+        self,
+        *,
+        sanction: dict,
+        editor: discord.Member,
+        reason_category: str,
+        reason_detail: str,
+    ) -> None:
+        """Update a sanction reason and record the MemberManager audit event."""
+        self.db.edit_sanction(
+            sanction["sanction_id"],
+            editor.id,
+            reason_category=reason_category,
+            reason_detail=reason_detail,
+        )
+        updated = dict(sanction)
+        updated["reason_category"] = reason_category
+        updated["reason_detail"] = reason_detail
+        await self._record_membermanager_sanction_event(
+            guild_id=sanction["guild_id"],
+            sanction=updated,
+            event_type="sanction_edited",
+            actor_id=editor.id,
+            event_data={"fields": ["reason_category", "reason_detail"], "source": "SanctionManager"},
         )
 
     async def send_sanction_reason_selection(
@@ -3983,7 +3991,7 @@ class EditSanctionView(discord.ui.View):
 
     @discord.ui.button(label="Edit Reason", style=discord.ButtonStyle.primary)
     async def edit_reason(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = EditReasonModal(self.cog, self.sanction, self.editor)
+        modal = EditSanctionReasonSearchModal(self.cog, self.sanction, self.editor)
         await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="Edit Admin Notes", style=discord.ButtonStyle.secondary)
@@ -4058,100 +4066,6 @@ class EditSanctionTypeView(discord.ui.View):
         self.editor = editor
         self.add_item(EditSanctionTypeSelect(self))
 
-class EditSanctionTypeSearchModal(discord.ui.Modal, title="Search Sanction Type"):
-    query = discord.ui.TextInput(
-        label="Sanction type search",
-        style=discord.TextStyle.short,
-        max_length=100,
-        required=True,
-        placeholder="Example: kick, verbal, 2nd, chat ban",
-    )
-
-    def __init__(self, cog: "SanctionsManager", sanction: dict, editor: discord.Member):
-        super().__init__()
-        self.cog = cog
-        self.sanction = sanction
-        self.editor = editor
-        self.query.default = str(sanction.get("sanction_type") or "")
-
-    async def on_submit(self, interaction: discord.Interaction):
-        query = str(self.query.value).strip()
-        matches = self.cog.find_sanction_type_matches(query, limit=5)
-        if not matches:
-            await interaction.response.send_message(
-                f"No sanction type found for `{query}`. Try `kick`, `ban`, `verbal`, `1st`, `2nd`, or `3rd`.",
-                ephemeral=True,
-            )
-            return
-
-        if len(matches) == 1 or matches[0]["score"] >= 1.0:
-            new_type = matches[0]["sanction_type"]
-            await self.cog.apply_sanction_type_edit(
-                sanction=self.sanction,
-                editor=self.editor,
-                new_type=new_type,
-            )
-            await interaction.response.send_message(
-                f"✅ Updated sanction type to: {new_type}",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.send_message(
-            f"Select the correct sanction type for `{query}`:",
-            view=EditSanctionTypeSearchResultsView(
-                self.cog,
-                self.sanction,
-                self.editor,
-                matches,
-            ),
-            ephemeral=True,
-        )
-
-class EditSanctionTypeSearchResultsView(discord.ui.View):
-    def __init__(
-        self,
-        cog: "SanctionsManager",
-        sanction: dict,
-        editor: discord.Member,
-        matches: List[Dict[str, Any]],
-    ):
-        super().__init__(timeout=600)
-        self.cog = cog
-        self.sanction = sanction
-        self.editor = editor
-        self.add_item(EditSanctionTypeSearchResultsSelect(self, matches))
-
-class EditSanctionTypeSearchResultsSelect(discord.ui.Select):
-    def __init__(self, parent: EditSanctionTypeSearchResultsView, matches: List[Dict[str, Any]]):
-        self.search_view = parent
-        options = [
-            discord.SelectOption(
-                label=match["sanction_type"],
-                value=match["sanction_type"],
-                description=f"Match: {match['score']:.0%}",
-            )
-            for match in matches[:25]
-        ]
-        super().__init__(
-            placeholder="Choose matching sanction type",
-            min_values=1,
-            max_values=1,
-            options=options,
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        new_type = self.values[0]
-        await self.search_view.cog.apply_sanction_type_edit(
-            sanction=self.search_view.sanction,
-            editor=self.search_view.editor,
-            new_type=new_type,
-        )
-        await interaction.response.send_message(
-            f"✅ Updated sanction type to: {new_type}",
-            ephemeral=True,
-        )
-
 class EditSanctionTypeSelect(discord.ui.Select):
     def __init__(self, parent: EditSanctionTypeView):
         self.edit_view = parent
@@ -4170,6 +4084,105 @@ class EditSanctionTypeSelect(discord.ui.Select):
         await interaction.response.send_message(
             f"✅ Updated sanction type to: {new_type}",
             ephemeral=True
+        )
+
+class EditSanctionReasonSearchModal(discord.ui.Modal, title="Search Sanction Reason"):
+    query = discord.ui.TextInput(
+        label="Reason search",
+        style=discord.TextStyle.short,
+        max_length=100,
+        required=True,
+        placeholder="Example: donation, inactivity, drama, nickname",
+    )
+
+    def __init__(self, cog: "SanctionsManager", sanction: dict, editor: discord.Member):
+        super().__init__()
+        self.cog = cog
+        self.sanction = sanction
+        self.editor = editor
+        self.query.default = str(sanction.get("reason_detail") or "")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        query = str(self.query.value).strip()
+        guild_id = int(self.sanction.get("guild_id") or 0)
+        matches = self.cog.find_sanction_reason_matches(guild_id, query, limit=10)
+        if not matches:
+            await interaction.response.send_message(
+                f"No sanction reason found for `{query}`. Try a shorter search term.",
+                ephemeral=True,
+            )
+            return
+
+        if len(matches) == 1 or matches[0]["score"] >= 1.0:
+            reason = matches[0]
+            await self.cog.apply_sanction_reason_edit(
+                sanction=self.sanction,
+                editor=self.editor,
+                reason_category=reason["category"],
+                reason_detail=reason["detail"],
+            )
+            await interaction.response.send_message(
+                f"Updated sanction reason to: {reason['detail']}",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            f"Select the correct reason for `{query}`:",
+            view=EditSanctionReasonSearchResultsView(
+                self.cog,
+                self.sanction,
+                self.editor,
+                matches,
+            ),
+            ephemeral=True,
+        )
+
+class EditSanctionReasonSearchResultsView(discord.ui.View):
+    def __init__(
+        self,
+        cog: "SanctionsManager",
+        sanction: dict,
+        editor: discord.Member,
+        matches: List[Dict[str, Any]],
+    ):
+        super().__init__(timeout=600)
+        self.cog = cog
+        self.sanction = sanction
+        self.editor = editor
+        self.reason_matches = matches
+        self.add_item(EditSanctionReasonSearchResultsSelect(self))
+
+class EditSanctionReasonSearchResultsSelect(discord.ui.Select):
+    def __init__(self, search_view: EditSanctionReasonSearchResultsView):
+        self.search_view = search_view
+        options = []
+        for index, reason in enumerate(search_view.reason_matches[:25]):
+            options.append(
+                discord.SelectOption(
+                    label=reason["label"][:100],
+                    value=str(index),
+                    description=reason["category"][:100],
+                )
+            )
+        super().__init__(
+            placeholder="Choose matching reason",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        reason = self.search_view.reason_matches[int(self.values[0])]
+        await self.search_view.cog.apply_sanction_reason_edit(
+            sanction=self.search_view.sanction,
+            editor=self.search_view.editor,
+            reason_category=reason["category"],
+            reason_detail=reason["detail"],
+        )
+        await interaction.response.send_message(
+            f"Updated sanction reason to: {reason['detail']}",
+            ephemeral=True,
         )
 
 class EditReasonModal(discord.ui.Modal, title="Edit Reason"):
