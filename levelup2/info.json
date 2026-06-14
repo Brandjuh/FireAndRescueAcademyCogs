@@ -34,6 +34,7 @@
     "rapidfuzz",
     "requests",
     "tenacity",
+    "typing-extensions>=4.15.0",
     "ujson",
     "uvicorn",
     "jinja2"
