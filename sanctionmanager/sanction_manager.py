@@ -1775,38 +1775,36 @@ class GameLogReviewActionView(discord.ui.View):
         )
         return False
 
-    async def _mark_review_message(
-        self,
-        interaction: discord.Interaction,
-        *,
-        title: str,
-        color: discord.Color,
-        status: str,
-    ) -> None:
+    def _get_review_sanction(self, interaction: discord.Interaction) -> tuple[Optional[int], Optional[int], Optional[dict]]:
+        """Resolve the log ID, sanction ID, and stored sanction for a review message."""
+        log_id, sanction_id = self._extract_review_ids(interaction)
+        if not log_id or not sanction_id:
+            return log_id, sanction_id, None
+        return log_id, sanction_id, self.cog.db.get_sanction(sanction_id)
+
+    async def _finish_review_message(self, interaction: discord.Interaction, content: str) -> None:
+        """Acknowledge the action privately and remove the action-required message."""
+        if not interaction.response.is_done():
+            await interaction.response.send_message(content, ephemeral=True)
+        else:
+            await interaction.followup.send(content, ephemeral=True)
+
         message = getattr(interaction, "message", None)
-        embeds = getattr(message, "embeds", None) or []
-        embed = embeds[0] if embeds else discord.Embed(title=title)
-        embed.title = title
-        embed.color = color
-        embed.add_field(name="Review Status", value=status, inline=False)
-
-        for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                child.disabled = True
-
-        await safe_update(interaction, embed=embed, view=self)
+        if message is not None:
+            try:
+                await message.delete()
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+                log.info("Could not delete game-log review message %s: %s", getattr(message, "id", None), exc)
 
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.success, custom_id="sm:logreview:approve")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._check_permissions(interaction):
             return
 
-        log_id, sanction_id = self._extract_review_ids(interaction)
+        log_id, sanction_id, sanction = self._get_review_sanction(interaction)
         if not log_id or not sanction_id:
             await interaction.response.send_message("Could not read the review IDs from this message.", ephemeral=True)
             return
-
-        sanction = self.cog.db.get_sanction(sanction_id)
         if not sanction:
             await interaction.response.send_message("The linked sanction no longer exists.", ephemeral=True)
             return
@@ -1826,24 +1824,66 @@ class GameLogReviewActionView(discord.ui.View):
             actor_id=interaction.user.id,
             event_data={"source": "MissionChief game-log review", "log_id": log_id},
         )
-        await self._mark_review_message(
-            interaction,
-            title="Game Log Sanction Approved",
-            color=discord.Color.green(),
-            status=f"Approved by {interaction.user.mention}",
+        await self._finish_review_message(interaction, f"Sanction #{sanction_id} approved.")
+
+    @discord.ui.button(label="Edit Type", style=discord.ButtonStyle.primary, custom_id="sm:logreview:edit_type")
+    async def edit_type(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_permissions(interaction):
+            return
+
+        _, sanction_id, sanction = self._get_review_sanction(interaction)
+        if not sanction_id:
+            await interaction.response.send_message("Could not read the sanction ID from this message.", ephemeral=True)
+            return
+        if not sanction:
+            await interaction.response.send_message("The linked sanction no longer exists.", ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            f"Select the correct sanction type for sanction #{sanction_id}:",
+            view=EditSanctionTypeView(self.cog, sanction, interaction.user),
+            ephemeral=True,
         )
+
+    @discord.ui.button(label="Edit Reason", style=discord.ButtonStyle.primary, custom_id="sm:logreview:edit_reason")
+    async def edit_reason(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_permissions(interaction):
+            return
+
+        _, sanction_id, sanction = self._get_review_sanction(interaction)
+        if not sanction_id:
+            await interaction.response.send_message("Could not read the sanction ID from this message.", ephemeral=True)
+            return
+        if not sanction:
+            await interaction.response.send_message("The linked sanction no longer exists.", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(EditReasonModal(self.cog, sanction, interaction.user))
+
+    @discord.ui.button(label="Edit Notes", style=discord.ButtonStyle.secondary, custom_id="sm:logreview:edit_notes")
+    async def edit_notes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_permissions(interaction):
+            return
+
+        _, sanction_id, sanction = self._get_review_sanction(interaction)
+        if not sanction_id:
+            await interaction.response.send_message("Could not read the sanction ID from this message.", ephemeral=True)
+            return
+        if not sanction:
+            await interaction.response.send_message("The linked sanction no longer exists.", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(EditNotesModal(self.cog, sanction, interaction.user))
 
     @discord.ui.button(label="Dismiss", style=discord.ButtonStyle.secondary, custom_id="sm:logreview:dismiss")
     async def dismiss(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._check_permissions(interaction):
             return
 
-        log_id, sanction_id = self._extract_review_ids(interaction)
+        log_id, sanction_id, sanction = self._get_review_sanction(interaction)
         if not log_id or not sanction_id:
             await interaction.response.send_message("Could not read the review IDs from this message.", ephemeral=True)
             return
-
-        sanction = self.cog.db.get_sanction(sanction_id)
         if not sanction:
             await interaction.response.send_message("The linked sanction no longer exists.", ephemeral=True)
             return
@@ -1863,12 +1903,7 @@ class GameLogReviewActionView(discord.ui.View):
             actor_id=interaction.user.id,
             event_data={"source": "MissionChief game-log review", "log_id": log_id},
         )
-        await self._mark_review_message(
-            interaction,
-            title="Game Log Sanction Dismissed",
-            color=discord.Color.dark_grey(),
-            status=f"Dismissed by {interaction.user.mention}",
-        )
+        await self._finish_review_message(interaction, f"Sanction #{sanction_id} dismissed.")
 
 class SanctionsManager(commands.Cog):
     """Manage sanctions for alliance members with full tracking and statistics."""
@@ -2375,7 +2410,15 @@ class SanctionsManager(commands.Cog):
         except (TypeError, ValueError):
             return None
 
-    def _build_game_log_review_embed(self, *, row: dict, sanction_id: int, sanction_type: str) -> discord.Embed:
+    def _build_game_log_review_embed(
+        self,
+        *,
+        guild: discord.Guild,
+        row: dict,
+        sanction_id: int,
+        sanction_type: str,
+        discord_user_id: Optional[int] = None,
+    ) -> discord.Embed:
         """Build the staff review embed for a MissionChief moderation log."""
         target_name = row.get("affected_name") or "Unknown"
         target_mc_id = row.get("affected_mc_id")
@@ -2383,11 +2426,7 @@ class SanctionsManager(commands.Cog):
         executor_mc_id = row.get("executed_mc_id")
 
         embed = discord.Embed(
-            title="Game Log Sanction Review",
-            description=(
-                "A MissionChief moderation log was imported as an unverified sanction. "
-                "Approve it to make it official, or dismiss it if it should not count."
-            ),
+            title="Sanction Review Required",
             color=discord.Color.orange(),
             timestamp=datetime.now(timezone.utc),
         )
@@ -2396,6 +2435,19 @@ class SanctionsManager(commands.Cog):
             value=f"{target_name} (`{target_mc_id or 'unknown MC ID'}`)",
             inline=False,
         )
+        discord_member = guild.get_member(int(discord_user_id)) if discord_user_id else None
+        if discord_member:
+            embed.add_field(
+                name="Discord Server Nickname",
+                value=f"{discord_member.display_name} ({discord_member.mention})",
+                inline=False,
+            )
+        elif discord_user_id:
+            embed.add_field(
+                name="Discord Server Nickname",
+                value=f"Linked Discord user: <@{discord_user_id}>",
+                inline=False,
+            )
         embed.add_field(name="Detected Action", value=sanction_type, inline=True)
         embed.add_field(
             name="Executed By",
@@ -2459,9 +2511,11 @@ class SanctionsManager(commands.Cog):
             row = item["row"]
             message = await channel.send(
                 embed=self._build_game_log_review_embed(
+                    guild=guild,
                     row=row,
                     sanction_id=item["sanction_id"],
                     sanction_type=item["sanction_type"],
+                    discord_user_id=item.get("discord_user_id"),
                 ),
                 view=GameLogReviewActionView(self),
             )
@@ -2533,6 +2587,7 @@ class SanctionsManager(commands.Cog):
                     "row": row,
                     "sanction_id": sanction_id,
                     "sanction_type": action["sanction_type"],
+                    "discord_user_id": discord_user_id,
                 }
             )
 
