@@ -238,7 +238,53 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         interaction.response.send_message.assert_awaited_once()
         kwargs = interaction.response.send_message.await_args.kwargs
         self.assertTrue(kwargs["ephemeral"])
-        self.assertEqual(kwargs["content"], "Select the type of sanction:")
+        self.assertEqual(kwargs["content"], "Sanction wizard: choose the matching reason first.")
+        self.assertEqual(kwargs["view"].target_discord_id, 123)
+        self.assertEqual(kwargs["view"].target_mc_id, "456")
+
+    def test_sanctionmanager_panel_start_opens_member_search_modal_directly(self):
+        module = load_sanction_manager_module()
+        cog = module.SanctionsManager.__new__(module.SanctionsManager)
+        cog._is_admin = AsyncMock(return_value=True)
+        view = module.StartView(cog)
+        interaction = types.SimpleNamespace(
+            response=types.SimpleNamespace(send_modal=AsyncMock(), send_message=AsyncMock()),
+        )
+
+        asyncio.run(view.start(interaction, types.SimpleNamespace()))
+
+        interaction.response.send_modal.assert_awaited_once()
+        self.assertIsInstance(interaction.response.send_modal.await_args.args[0], module.DiscordMemberModal)
+        interaction.response.send_message.assert_not_awaited()
+
+    def test_reason_first_wizard_finds_reason_matches_and_sends_selection(self):
+        module = load_sanction_manager_module()
+        manager = module.SanctionsManager.__new__(module.SanctionsManager)
+        manager.db = types.SimpleNamespace(get_custom_rules=lambda guild_id: [])
+        manager._is_admin = AsyncMock(return_value=True)
+        interaction = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=1),
+            user=types.SimpleNamespace(id=999, __str__=lambda self: "Admin"),
+            response=types.SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        asyncio.run(
+            manager.start_sanction_wizard_for_target(
+                interaction,
+                {
+                    "discord_id": 123,
+                    "mc_user_id": "456",
+                    "mc_username": "MCUser",
+                    "name": "MCUser",
+                },
+            )
+        )
+
+        interaction.response.send_message.assert_awaited_once()
+        kwargs = interaction.response.send_message.await_args.kwargs
+        self.assertEqual(kwargs["content"], "Sanction wizard: choose the matching reason first.")
+        self.assertTrue(kwargs["ephemeral"])
+        self.assertGreater(len(kwargs["view"].reason_matches), 0)
         self.assertEqual(kwargs["view"].target_discord_id, 123)
         self.assertEqual(kwargs["view"].target_mc_id, "456")
 
@@ -1149,6 +1195,18 @@ class MemberManagerSanctionsTests(unittest.TestCase):
                     }
                 ]
 
+            async def send_sanction_reason_selection(self, interaction, target, *, use_followup=False):
+                self.reason_call = (interaction, target, use_followup)
+                await interaction.followup.send(
+                    content="Sanction wizard: choose the matching reason first.",
+                    view=types.SimpleNamespace(
+                        target_mc_id=target.get("mc_user_id"),
+                        target_mc_username=target.get("mc_username"),
+                        target_discord_id=target.get("discord_id"),
+                    ),
+                    ephemeral=True,
+                )
+
         cog = FakeCog()
         modal = module.DiscordMemberModal(cog)
         modal.member_input.value = "MCOnlyUser"
@@ -1165,10 +1223,13 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         self.assertEqual(cog.call, (interaction.guild, "MCOnlyUser", 5))
         interaction.followup.send.assert_awaited_once()
         kwargs = interaction.followup.send.await_args.kwargs
-        self.assertEqual(kwargs["content"], "Select the type of sanction:")
+        self.assertEqual(kwargs["content"], "Sanction wizard: choose the matching reason first.")
         self.assertEqual(kwargs["view"].target_mc_id, "456")
         self.assertEqual(kwargs["view"].target_mc_username, "MCOnlyUser")
         self.assertIsNone(kwargs["view"].target_discord_id)
+        self.assertIs(cog.reason_call[0], interaction)
+        self.assertEqual(cog.reason_call[1]["mc_user_id"], "456")
+        self.assertTrue(cog.reason_call[2])
 
     def test_sanction_manager_audit_hook_is_noop_without_membermanager(self):
         SanctionsManager = load_sanctions_manager_class()

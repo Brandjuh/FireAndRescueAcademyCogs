@@ -55,7 +55,7 @@ class MemberOverviewView(discord.ui.View):
         invoker_id: int,
         guild: discord.Guild
     ):
-        super().__init__(timeout=300)
+        super().__init__(timeout=1800)
         
         self.bot = bot
         self.db = db
@@ -254,7 +254,19 @@ class MemberOverviewView(discord.ui.View):
             )
             return False
         return True
-    
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
+        """Return a useful private error instead of Discord's generic interaction failure."""
+        log.exception("MemberManager view action failed for %s: %s", getattr(item, "custom_id", item), error)
+        message = "MemberManager action failed. Refresh this profile and try again."
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(message, ephemeral=True)
+            else:
+                await interaction.followup.send(message, ephemeral=True)
+        except Exception:
+            log.exception("Failed to send MemberManager interaction error response")
+
     async def on_timeout(self):
         """Disable all buttons when view times out."""
         for item in self.children:
@@ -324,7 +336,7 @@ class MemberOverviewView(discord.ui.View):
         data = self.member_data
         
         embed = discord.Embed(
-            title=f"👤 Member Overview: {data.get_display_name()}",
+            title=f"👤 Member Overview: {self._get_member_display_name()}",
             color=discord.Color.blue() if data.is_verified else discord.Color.orange()
         )
         
@@ -478,7 +490,7 @@ class MemberOverviewView(discord.ui.View):
         triage_status, triage_lines, color = self._build_triage_summary()
 
         embed = discord.Embed(
-            title=f"👤 Member Overview: {data.get_display_name()}",
+            title=f"👤 Member Overview: {self._get_member_display_name()}",
             color=color if triage_status != "Normal" else discord.Color.blue()
         )
 
@@ -530,7 +542,7 @@ class MemberOverviewView(discord.ui.View):
         data = self.member_data
         
         embed = discord.Embed(
-            title=f"📝 Notes - {data.get_display_name()}",
+            title=f"📝 Notes - {self._get_member_display_name()}",
             color=discord.Color.gold()
         )
         
@@ -879,29 +891,44 @@ class MemberOverviewView(discord.ui.View):
         if member_data.discord_id:
             return f"Discord User {member_data.discord_id}"
         return "Unknown User"
+
+    def _get_member_display_name(self) -> str:
+        """Return the preferred staff-facing member identity."""
+        data = self.member_data
+        if data.mc_username:
+            return data.mc_username
+        if data.discord_username:
+            return data.discord_username
+        if data.mc_user_id:
+            return f"MC User {data.mc_user_id}"
+        if data.discord_id:
+            return f"Discord User {data.discord_id}"
+        return "Unknown User"
     
     async def get_events_embed(self) -> discord.Embed:
         """Build the operations embed for alliance storms and large alliance missions."""
         return await self._build_filtered_logs_embed(
-            title=f"Alliance Operations - {self.member_data.get_display_name()}",
+            title=f"Alliance Operations - {self._get_member_display_name()}",
             empty_text="No alliance storm or large alliance mission logs found for this member.",
             action_keys=OPERATIONS_ACTION_KEYS,
             page=self.events_page,
             per_page=self.events_per_page,
             footer_label="operations",
             color=discord.Color.purple(),
+            show_actor=True,
         )
 
     async def get_buildings_embed(self) -> discord.Embed:
         """Build the building and extension activity embed."""
         return await self._build_filtered_logs_embed(
-            title=f"Buildings & Extensions - {self.member_data.get_display_name()}",
+            title=f"Buildings & Extensions - {self._get_member_display_name()}",
             empty_text="No building or extension logs found for this member.",
             action_keys=BUILDING_ACTIVITY_ACTION_KEYS,
             page=self.buildings_page,
             per_page=self.buildings_per_page,
             footer_label="building logs",
             color=discord.Color.dark_gold(),
+            show_actor=False,
         )
 
     async def _build_filtered_logs_embed(
@@ -914,6 +941,7 @@ class MemberOverviewView(discord.ui.View):
         per_page: int,
         footer_label: str,
         color,
+        show_actor: bool = True,
     ) -> discord.Embed:
         """Build a filtered LogsScraper embed for a specific action category."""
         embed = discord.Embed(title=title, color=color)
@@ -952,16 +980,18 @@ class MemberOverviewView(discord.ui.View):
             except Exception:
                 timestamp_formatted = ts or "Unknown time"
 
-            actor_info = ""
-            if executed_name:
-                actor_info = f" by {executed_name}"
+            actor_parts = []
+            if description:
+                actor_parts.append(truncate_text(description, 100))
+            if show_actor and executed_name:
+                actor_parts.append(f"by {executed_name}")
             if affected_name and affected_name != executed_name:
-                actor_info += f" -> {affected_name}"
+                actor_parts.append(f"-> {affected_name}")
+
+            actor_info = f" - {' '.join(actor_parts)}" if actor_parts else ""
 
             emoji = self._get_action_emoji(log_entry.get("action_key"))
             lines.append(f"{emoji} **{action_text}**{actor_info} | {timestamp_formatted}")
-            if description:
-                lines.append(f"  *{truncate_text(description, 100)}*")
             lines.append("")
 
         embed.description = "\n".join(lines)
@@ -1066,7 +1096,7 @@ class MemberOverviewView(discord.ui.View):
         data = self.member_data
         
         embed = discord.Embed(
-            title=f"📋 Audit Log - {data.get_display_name()}",
+            title=f"📋 Audit Log - {self._get_member_display_name()}",
             color=discord.Color.dark_gray()
         )
         return await self._build_audit_timeline_embed(embed)
@@ -1145,7 +1175,11 @@ class MemberOverviewView(discord.ui.View):
             )
 
             lines.append(f"{action_emoji} **{entry.title}**")
-            lines.append(f"  *{entry.source} • {actor_display} • {timestamp}*")
+            context_parts = [entry.source, actor_display, timestamp]
+            target_display = self._get_member_display_name()
+            if target_display and target_display != actor_display:
+                context_parts.append(f"Target: {target_display}")
+            lines.append(f"  *{' • '.join(context_parts)}*")
 
             if entry.reference:
                 lines.append(f"  Ref: `{entry.reference}`")
@@ -1342,6 +1376,29 @@ class AddSanctionButton(discord.ui.Button):
         self.parent_view = parent_view
     
     async def callback(self, interaction: discord.Interaction):
+        sanction_manager = self.parent_view.integrations.get("sanction_manager")
+        start_wizard = getattr(sanction_manager, "start_sanction_wizard_for_target", None) if sanction_manager else None
+        if start_wizard:
+            member_data = self.parent_view.member_data
+            discord_member = (
+                self.parent_view.guild.get_member(member_data.discord_id)
+                if member_data.discord_id and self.parent_view.guild
+                else None
+            )
+            await start_wizard(
+                interaction,
+                {
+                    "discord_id": member_data.discord_id,
+                    "discord_member": discord_member,
+                    "discord_username": member_data.discord_username,
+                    "discord_display_name": getattr(member_data, "discord_display_name", None),
+                    "mc_user_id": member_data.mc_user_id,
+                    "mc_username": member_data.mc_username,
+                    "name": member_data.get_display_name(),
+                },
+            )
+            return
+
         modal = CreateSanctionModal(self.parent_view)
         await interaction.response.send_modal(modal)
 

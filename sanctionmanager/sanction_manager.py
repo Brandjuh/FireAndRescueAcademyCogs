@@ -817,12 +817,8 @@ class StartView(discord.ui.View):
         if not await self.cog._is_admin(interaction):
             await interaction.response.send_message("You don't have permission to create sanctions.", ephemeral=True)
             return
-        
-        await interaction.response.send_message(
-            "Let's create a sanction. First, provide the member's information.",
-            view=MemberInputView(self.cog),
-            ephemeral=True,
-        )
+
+        await interaction.response.send_modal(DiscordMemberModal(self.cog))
 
 class MemberInputView(discord.ui.View):
     def __init__(self, cog: "SanctionsManager"):
@@ -888,27 +884,10 @@ class DiscordMemberModal(discord.ui.Modal, title="Sanction Target Search"):
                 )
                 return
 
-            target = results[0]
-            view = SanctionTypeView(
-                self.cog,
-                admin_user_id=interaction.user.id,
-                admin_username=str(interaction.user),
-                target_discord_id=target.get("discord_id"),
-                target_mc_id=target.get("mc_user_id"),
-                target_mc_username=(
-                    target.get("mc_username")
-                    or target.get("name")
-                    or target.get("discord_display_name")
-                    or target.get("discord_username")
-                ),
-                target_discord_user=target.get("discord_member"),
-            )
-
-            await interaction.followup.send(
-                content="Select the type of sanction:",
-                embed=view._create_target_embed(),
-                view=view,
-                ephemeral=True,
+            await self.cog.send_sanction_reason_selection(
+                interaction,
+                results[0],
+                use_followup=True,
             )
             return
             
@@ -1170,28 +1149,18 @@ class MCOnlyModal(discord.ui.Modal, title="MC Member Info"):
                     log.warning("No guild context")
             
             log.info(f"Final data - MC ID: {final_mc_id}, Username: {display_name}, Discord: {discord_member}")
-            log.info(f"Creating SanctionTypeView for MC user: {display_name}")
-            
-            # Move to sanction type selection
-            view = SanctionTypeView(
-                self.cog,
-                admin_user_id=interaction.user.id,
-                admin_username=str(interaction.user),
-                target_discord_id=discord_id,
-                target_mc_id=final_mc_id,
-                target_mc_username=display_name,
-                target_discord_user=discord_member,
+            await self.cog.send_sanction_reason_selection(
+                interaction,
+                {
+                    "discord_id": discord_id,
+                    "discord_member": discord_member,
+                    "mc_user_id": final_mc_id,
+                    "mc_username": display_name,
+                    "name": display_name,
+                },
+                use_followup=True,
             )
-            
-            # Send new message instead of trying to update
-            embed = view._create_target_embed()
-            await interaction.followup.send(
-                content="Select the type of sanction:",
-                embed=embed,
-                view=view,
-                ephemeral=True
-            )
-            log.info("Successfully sent sanction type selection")
+            log.info("Successfully sent sanction reason selection")
             
         except Exception as e:
             log.exception(f"Error in MCOnlyModal.on_submit: {e}")
@@ -1202,6 +1171,213 @@ class MCOnlyModal(discord.ui.Modal, title="MC Member Info"):
                 )
             except:
                 pass
+
+class ReasonSelectionView(discord.ui.View):
+    """Wizard step for selecting or searching a sanction reason before the sanction type."""
+
+    def __init__(
+        self,
+        cog: "SanctionsManager",
+        *,
+        admin_user_id: int,
+        admin_username: str,
+        target_discord_id: Optional[int],
+        target_mc_id: Optional[str],
+        target_mc_username: Optional[str],
+        target_discord_user: Optional[discord.Member],
+        guild_id: int,
+        reason_query: str = "",
+    ):
+        super().__init__(timeout=600)
+        self.cog = cog
+        self.admin_user_id = admin_user_id
+        self.admin_username = admin_username
+        self.target_discord_id = target_discord_id
+        self.target_mc_id = target_mc_id
+        self.target_mc_username = target_mc_username
+        self.target_discord_user = target_discord_user
+        self.guild_id = guild_id
+        self.reason_query = reason_query
+        self.reason_matches = cog.find_sanction_reason_matches(guild_id, reason_query, limit=25)
+        if self.reason_matches:
+            self.add_item(ReasonSelectionSelect(self))
+        self.add_item(SearchReasonAgainButton(self))
+
+    def _create_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="Sanction Wizard: Select Reason",
+            color=discord.Color.orange(),
+        )
+        member_lines = [f"MC Username: {self.target_mc_username or 'Unknown'}"]
+        if self.target_mc_id:
+            member_lines.append(f"MC ID: {self.target_mc_id}")
+        if self.target_discord_user:
+            member_lines.append(f"Discord: {self.target_discord_user.mention}")
+        embed.add_field(name="Member", value="\n".join(member_lines), inline=False)
+        if self.reason_query:
+            embed.add_field(name="Reason Search", value=self.reason_query, inline=False)
+        if not self.reason_matches:
+            embed.add_field(
+                name="No Reason Matches",
+                value="Use Search Reason to try again without restarting the wizard.",
+                inline=False,
+            )
+        return embed
+
+
+class ReasonSelectionSelect(discord.ui.Select):
+    def __init__(self, wizard_view: ReasonSelectionView):
+        self.wizard_view = wizard_view
+        options = []
+        for index, reason in enumerate(wizard_view.reason_matches):
+            label = reason["label"][:100]
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    value=str(index),
+                    description=reason["category"][:100],
+                )
+            )
+        super().__init__(
+            placeholder="Choose the matching reason",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="sm:wizard_reason",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        reason = self.wizard_view.reason_matches[int(self.values[0])]
+        view = SanctionTypeAfterReasonView(
+            self.wizard_view.cog,
+            admin_user_id=self.wizard_view.admin_user_id,
+            admin_username=self.wizard_view.admin_username,
+            target_discord_id=self.wizard_view.target_discord_id,
+            target_mc_id=self.wizard_view.target_mc_id,
+            target_mc_username=self.wizard_view.target_mc_username,
+            target_discord_user=self.wizard_view.target_discord_user,
+            reason_category=reason["category"],
+            reason_detail=reason["detail"],
+        )
+        await safe_update(
+            interaction,
+            content="Reason selected. Now choose the sanction to apply:",
+            embed=view._create_embed(),
+            view=view,
+        )
+
+
+class SearchReasonAgainButton(discord.ui.Button):
+    def __init__(self, wizard_view: ReasonSelectionView):
+        super().__init__(
+            label="Search Reason",
+            style=discord.ButtonStyle.primary,
+            custom_id="sm:wizard_search_reason",
+        )
+        self.wizard_view = wizard_view
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(ReasonSearchModal(self.wizard_view))
+
+
+class ReasonSearchModal(discord.ui.Modal, title="Search Sanction Reason"):
+    query = discord.ui.TextInput(
+        label="Reason search",
+        style=discord.TextStyle.short,
+        max_length=100,
+        required=True,
+        placeholder="Example: inactivity, donation, drama, nickname",
+    )
+
+    def __init__(self, parent: ReasonSelectionView):
+        super().__init__()
+        self.parent = parent
+
+    async def on_submit(self, interaction: discord.Interaction):
+        view = ReasonSelectionView(
+            self.parent.cog,
+            admin_user_id=self.parent.admin_user_id,
+            admin_username=self.parent.admin_username,
+            target_discord_id=self.parent.target_discord_id,
+            target_mc_id=self.parent.target_mc_id,
+            target_mc_username=self.parent.target_mc_username,
+            target_discord_user=self.parent.target_discord_user,
+            guild_id=self.parent.guild_id,
+            reason_query=str(self.query.value),
+        )
+        await interaction.response.send_message(
+            content="Reason search updated. Choose the matching reason:",
+            embed=view._create_embed(),
+            view=view,
+            ephemeral=True,
+        )
+
+
+class SanctionTypeAfterReasonView(discord.ui.View):
+    """Wizard step for selecting the sanction after a reason is chosen."""
+
+    def __init__(
+        self,
+        cog: "SanctionsManager",
+        *,
+        admin_user_id: int,
+        admin_username: str,
+        target_discord_id: Optional[int],
+        target_mc_id: Optional[str],
+        target_mc_username: Optional[str],
+        target_discord_user: Optional[discord.Member],
+        reason_category: str,
+        reason_detail: str,
+    ):
+        super().__init__(timeout=600)
+        self.cog = cog
+        self.admin_user_id = admin_user_id
+        self.admin_username = admin_username
+        self.target_discord_id = target_discord_id
+        self.target_mc_id = target_mc_id
+        self.target_mc_username = target_mc_username
+        self.target_discord_user = target_discord_user
+        self.reason_category = reason_category
+        self.reason_detail = reason_detail
+        self.add_item(SanctionTypeAfterReasonSelect(self))
+
+    def _create_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="Sanction Wizard: Select Sanction",
+            color=discord.Color.red(),
+        )
+        embed.add_field(name="Reason Category", value=self.reason_category, inline=False)
+        embed.add_field(name="Reason", value=self.reason_detail[:1024], inline=False)
+        return embed
+
+
+class SanctionTypeAfterReasonSelect(discord.ui.Select):
+    def __init__(self, wizard_view: SanctionTypeAfterReasonView):
+        self.wizard_view = wizard_view
+        options = [discord.SelectOption(label=t) for t in SANCTION_TYPES]
+        super().__init__(
+            placeholder="Choose sanction",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="sm:wizard_sanction_type",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        sanction_type = self.values[0]
+        view = SummarySanctionView(
+            self.wizard_view.cog,
+            self.wizard_view.admin_user_id,
+            self.wizard_view.admin_username,
+            self.wizard_view.target_discord_id,
+            self.wizard_view.target_mc_id,
+            self.wizard_view.target_mc_username,
+            self.wizard_view.target_discord_user,
+            sanction_type,
+            self.wizard_view.reason_category,
+            self.wizard_view.reason_detail,
+        )
+        await view.send_summary(interaction)
 
 class SanctionTypeView(discord.ui.View):
     def __init__(self, cog: "SanctionsManager", admin_user_id: int, admin_username: str,
@@ -2073,6 +2249,107 @@ class SanctionsManager(commands.Cog):
                 return list(members)
         return []
 
+    def find_sanction_reason_matches(
+        self,
+        guild_id: int,
+        query: str = "",
+        *,
+        limit: int = 25,
+    ) -> List[Dict[str, Any]]:
+        """Fuzzy-search all configured sanction reasons."""
+        query_clean = (query or "").strip().lower()
+        reasons: List[Dict[str, Any]] = []
+
+        for category, rules in DEFAULT_RULES.items():
+            for code, text in rules.items():
+                detail = f"{code}. {text}"
+                haystack = f"{category} {detail}"
+                score = _fuzzy_match_score(query_clean, haystack) if query_clean else 1.0
+                if not query_clean or score >= 0.25:
+                    reasons.append(
+                        {
+                            "score": score,
+                            "category": category,
+                            "detail": detail,
+                            "label": detail,
+                        }
+                    )
+
+        try:
+            custom_rules = self.db.get_custom_rules(guild_id)
+        except Exception as exc:
+            log.error("Failed to read custom sanction rules: %s", exc, exc_info=True)
+            custom_rules = []
+
+        for rule in custom_rules:
+            category = rule.get("category") or "Custom"
+            detail = f"{rule.get('rule_code')}. {rule.get('rule_text')}"
+            haystack = f"{category} {detail}"
+            score = _fuzzy_match_score(query_clean, haystack) if query_clean else 1.0
+            if not query_clean or score >= 0.25:
+                reasons.append(
+                    {
+                        "score": score,
+                        "category": category,
+                        "detail": detail,
+                        "label": detail,
+                    }
+                )
+
+        return sorted(reasons, key=lambda item: item["score"], reverse=True)[:limit]
+
+    async def send_sanction_reason_selection(
+        self,
+        interaction: discord.Interaction,
+        target: Dict[str, Any],
+        *,
+        use_followup: bool = False,
+    ) -> None:
+        """Open the reason-first sanction wizard for a resolved target."""
+        guild = interaction.guild
+        target_guild = getattr(target.get("discord_member"), "guild", None)
+        guild_id = guild.id if guild else getattr(target_guild, "id", 0)
+        view = ReasonSelectionView(
+            self,
+            admin_user_id=interaction.user.id,
+            admin_username=str(interaction.user),
+            target_discord_id=target.get("discord_id"),
+            target_mc_id=target.get("mc_user_id"),
+            target_mc_username=(
+                target.get("mc_username")
+                or target.get("name")
+                or target.get("discord_display_name")
+                or target.get("discord_username")
+            ),
+            target_discord_user=target.get("discord_member"),
+            guild_id=guild_id or 0,
+        )
+        payload = {
+            "content": "Sanction wizard: choose the matching reason first.",
+            "embed": view._create_embed(),
+            "view": view,
+            "ephemeral": True,
+        }
+        if use_followup:
+            await interaction.followup.send(**payload)
+        else:
+            await interaction.response.send_message(**payload)
+
+    async def start_sanction_wizard_for_target(
+        self,
+        interaction: discord.Interaction,
+        target: Dict[str, Any],
+    ) -> None:
+        """Public UI contract for MemberManager to start the sanction wizard."""
+        if not await self._is_admin(interaction):
+            await interaction.response.send_message(
+                "You don't have permission to create sanctions.",
+                ephemeral=True,
+            )
+            return
+
+        await self.send_sanction_reason_selection(interaction, target)
+
     async def search_sanction_targets(
         self,
         guild: discord.Guild,
@@ -2200,27 +2477,8 @@ class SanctionsManager(commands.Cog):
         interaction: discord.Interaction,
         target: Dict[str, Any],
     ) -> None:
-        """Open the existing sanction type flow for a resolved target."""
-        view = SanctionTypeView(
-            self,
-            admin_user_id=interaction.user.id,
-            admin_username=str(interaction.user),
-            target_discord_id=target.get("discord_id"),
-            target_mc_id=target.get("mc_user_id"),
-            target_mc_username=(
-                target.get("mc_username")
-                or target.get("name")
-                or target.get("discord_display_name")
-                or target.get("discord_username")
-            ),
-            target_discord_user=target.get("discord_member"),
-        )
-        await interaction.response.send_message(
-            content="Select the type of sanction:",
-            embed=view._create_target_embed(),
-            view=view,
-            ephemeral=True,
-        )
+        """Open the reason-first sanction wizard for a resolved target."""
+        await self.send_sanction_reason_selection(interaction, target)
 
     async def _sanction_context_menu_callback(
         self,
