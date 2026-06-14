@@ -17,6 +17,18 @@ log = logging.getLogger("red.cog.sanctions_manager")
 
 WARNING_EXPIRY_SECONDS = 30 * 86400
 DEFAULT_PANEL_CHANNEL_ID = 1426226521231589507
+DEFAULT_REVIEW_CHANNEL_ID = 1421625293130567690
+
+GAME_LOG_SANCTION_ACTIONS = {
+    "kicked_from_alliance": {
+        "sanction_type": "Kick",
+        "reason_detail": "Kicked from the alliance",
+    },
+    "chat_ban_set": {
+        "sanction_type": "Chat Ban",
+        "reason_detail": "Chat ban set",
+    },
+}
 
 # ---------- Utilities ----------
 
@@ -142,6 +154,20 @@ class SanctionsDatabase:
                 enabled INTEGER DEFAULT 0
             )
         ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS game_log_reviews (
+                log_id INTEGER PRIMARY KEY,
+                guild_id INTEGER NOT NULL,
+                sanction_id INTEGER,
+                action_key TEXT NOT NULL,
+                review_status TEXT NOT NULL DEFAULT 'pending',
+                review_message_id INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER,
+                FOREIGN KEY (sanction_id) REFERENCES sanctions(sanction_id)
+            )
+        ''')
         
         conn.commit()
         conn.close()
@@ -194,6 +220,82 @@ class SanctionsDatabase:
         conn.close()
         
         return dict(result) if result else None
+
+    def get_game_log_review(self, log_id: int) -> Optional[dict]:
+        """Return the review record for a MissionChief log row."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM game_log_reviews WHERE log_id = ?", (log_id,))
+        result = cursor.fetchone()
+        conn.close()
+        return dict(result) if result else None
+
+    def add_game_log_review(
+        self,
+        *,
+        log_id: int,
+        guild_id: int,
+        sanction_id: Optional[int],
+        action_key: str,
+        review_status: str = "pending",
+        review_message_id: Optional[int] = None,
+    ) -> None:
+        """Store that a MissionChief moderation log row was processed."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        now = ts()
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO game_log_reviews
+            (log_id, guild_id, sanction_id, action_key, review_status, review_message_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                log_id,
+                guild_id,
+                sanction_id,
+                action_key,
+                review_status,
+                review_message_id,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+    def update_game_log_review(
+        self,
+        log_id: int,
+        *,
+        review_status: Optional[str] = None,
+        review_message_id: Optional[int] = None,
+    ) -> None:
+        """Update a MissionChief log review record."""
+        fields = []
+        values = []
+        if review_status is not None:
+            fields.append("review_status = ?")
+            values.append(review_status)
+        if review_message_id is not None:
+            fields.append("review_message_id = ?")
+            values.append(review_message_id)
+        if not fields:
+            return
+
+        fields.append("updated_at = ?")
+        values.append(ts())
+        values.append(log_id)
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            f"UPDATE game_log_reviews SET {', '.join(fields)} WHERE log_id = ?",
+            values,
+        )
+        conn.commit()
+        conn.close()
     
     def get_user_sanctions(self, guild_id: int, discord_user_id: Optional[int] = None, 
                           mc_user_id: Optional[str] = None) -> List[dict]:
@@ -1642,6 +1744,167 @@ class AdditionalNotesModal(discord.ui.Modal, title="Additional Admin Notes"):
 
 # ---------- Cog ----------
 
+class GameLogReviewActionView(discord.ui.View):
+    """Persistent actions for sanctions imported from MissionChief moderation logs."""
+
+    def __init__(self, cog: "SanctionsManager"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @staticmethod
+    def _extract_review_ids(interaction: discord.Interaction) -> tuple[Optional[int], Optional[int]]:
+        """Read log and sanction IDs from the review message footer."""
+        message = getattr(interaction, "message", None)
+        embeds = getattr(message, "embeds", None) or []
+        if not embeds:
+            return None, None
+
+        footer = getattr(getattr(embeds[0], "footer", None), "text", "") or ""
+        log_match = re.search(r"Log ID:\s*(\d+)", footer)
+        sanction_match = re.search(r"Sanction ID:\s*(\d+)", footer)
+        log_id = int(log_match.group(1)) if log_match else None
+        sanction_id = int(sanction_match.group(1)) if sanction_match else None
+        return log_id, sanction_id
+
+    async def _check_permissions(self, interaction: discord.Interaction) -> bool:
+        if await self.cog._is_admin(interaction):
+            return True
+        await interaction.response.send_message(
+            "You are not allowed to manage sanctions.",
+            ephemeral=True,
+        )
+        return False
+
+    def _get_review_sanction(self, interaction: discord.Interaction) -> tuple[Optional[int], Optional[int], Optional[dict]]:
+        """Resolve the log ID, sanction ID, and stored sanction for a review message."""
+        log_id, sanction_id = self._extract_review_ids(interaction)
+        if not log_id or not sanction_id:
+            return log_id, sanction_id, None
+        return log_id, sanction_id, self.cog.db.get_sanction(sanction_id)
+
+    async def _finish_review_message(self, interaction: discord.Interaction, content: str) -> None:
+        """Acknowledge the action privately and remove the action-required message."""
+        if not interaction.response.is_done():
+            await interaction.response.send_message(content, ephemeral=True)
+        else:
+            await interaction.followup.send(content, ephemeral=True)
+
+        message = getattr(interaction, "message", None)
+        if message is not None:
+            try:
+                await message.delete()
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+                log.info("Could not delete game-log review message %s: %s", getattr(message, "id", None), exc)
+
+    @discord.ui.button(label="Approve", style=discord.ButtonStyle.success, custom_id="sm:logreview:approve")
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_permissions(interaction):
+            return
+
+        log_id, sanction_id, sanction = self._get_review_sanction(interaction)
+        if not log_id or not sanction_id:
+            await interaction.response.send_message("Could not read the review IDs from this message.", ephemeral=True)
+            return
+        if not sanction:
+            await interaction.response.send_message("The linked sanction no longer exists.", ephemeral=True)
+            return
+
+        self.cog.db.update_sanction_status(
+            sanction_id,
+            "active",
+            interaction.user.id,
+            "Approved from MissionChief game-log review.",
+        )
+        self.cog.db.update_game_log_review(log_id, review_status="approved")
+        updated = self.cog.db.get_sanction(sanction_id) or sanction
+        await self.cog._record_membermanager_sanction_event(
+            guild_id=updated["guild_id"],
+            sanction=updated,
+            event_type="sanction_approved",
+            actor_id=interaction.user.id,
+            event_data={"source": "MissionChief game-log review", "log_id": log_id},
+        )
+        await self._finish_review_message(interaction, f"Sanction #{sanction_id} approved.")
+
+    @discord.ui.button(label="Edit Type", style=discord.ButtonStyle.primary, custom_id="sm:logreview:edit_type")
+    async def edit_type(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_permissions(interaction):
+            return
+
+        _, sanction_id, sanction = self._get_review_sanction(interaction)
+        if not sanction_id:
+            await interaction.response.send_message("Could not read the sanction ID from this message.", ephemeral=True)
+            return
+        if not sanction:
+            await interaction.response.send_message("The linked sanction no longer exists.", ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            f"Select the correct sanction type for sanction #{sanction_id}:",
+            view=EditSanctionTypeView(self.cog, sanction, interaction.user),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Edit Reason", style=discord.ButtonStyle.primary, custom_id="sm:logreview:edit_reason")
+    async def edit_reason(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_permissions(interaction):
+            return
+
+        _, sanction_id, sanction = self._get_review_sanction(interaction)
+        if not sanction_id:
+            await interaction.response.send_message("Could not read the sanction ID from this message.", ephemeral=True)
+            return
+        if not sanction:
+            await interaction.response.send_message("The linked sanction no longer exists.", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(EditReasonModal(self.cog, sanction, interaction.user))
+
+    @discord.ui.button(label="Edit Notes", style=discord.ButtonStyle.secondary, custom_id="sm:logreview:edit_notes")
+    async def edit_notes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_permissions(interaction):
+            return
+
+        _, sanction_id, sanction = self._get_review_sanction(interaction)
+        if not sanction_id:
+            await interaction.response.send_message("Could not read the sanction ID from this message.", ephemeral=True)
+            return
+        if not sanction:
+            await interaction.response.send_message("The linked sanction no longer exists.", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(EditNotesModal(self.cog, sanction, interaction.user))
+
+    @discord.ui.button(label="Dismiss", style=discord.ButtonStyle.secondary, custom_id="sm:logreview:dismiss")
+    async def dismiss(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_permissions(interaction):
+            return
+
+        log_id, sanction_id, sanction = self._get_review_sanction(interaction)
+        if not log_id or not sanction_id:
+            await interaction.response.send_message("Could not read the review IDs from this message.", ephemeral=True)
+            return
+        if not sanction:
+            await interaction.response.send_message("The linked sanction no longer exists.", ephemeral=True)
+            return
+
+        self.cog.db.update_sanction_status(
+            sanction_id,
+            "removed",
+            interaction.user.id,
+            "Dismissed from MissionChief game-log review.",
+        )
+        self.cog.db.update_game_log_review(log_id, review_status="dismissed")
+        updated = self.cog.db.get_sanction(sanction_id) or sanction
+        await self.cog._record_membermanager_sanction_event(
+            guild_id=updated["guild_id"],
+            sanction=updated,
+            event_type="sanction_dismissed",
+            actor_id=interaction.user.id,
+            event_data={"source": "MissionChief game-log review", "log_id": log_id},
+        )
+        await self._finish_review_message(interaction, f"Sanction #{sanction_id} dismissed.")
+
 class SanctionsManager(commands.Cog):
     """Manage sanctions for alliance members with full tracking and statistics."""
 
@@ -1659,6 +1922,9 @@ class SanctionsManager(commands.Cog):
             "auto_remove_roles_on_ban": [],
             "panel_channel_id": DEFAULT_PANEL_CHANNEL_ID,
             "panel_message_id": None,
+            "game_log_review_enabled": True,
+            "game_log_review_channel_id": DEFAULT_REVIEW_CHANNEL_ID,
+            "game_log_review_last_id": 0,
         }
         self.config.register_guild(**default_guild)
 
@@ -1667,6 +1933,7 @@ class SanctionsManager(commands.Cog):
         db_path = str(data_manager.cog_data_path(self) / "sanctions.db")
         self.db = SanctionsDatabase(db_path)
         self._panel_task: Optional[asyncio.Task] = None
+        self._game_log_review_task: Optional[asyncio.Task] = None
         self._sanction_context_menu = app_commands.ContextMenu(
             name="Sanction Member",
             callback=self._sanction_context_menu_callback,
@@ -1674,14 +1941,18 @@ class SanctionsManager(commands.Cog):
         self._context_menu_guild: Optional[discord.Object] = None
 
         self.bot.add_view(StartView(self))
+        self.bot.add_view(GameLogReviewActionView(self))
 
     async def cog_load(self):
         """Post persistent panel after the bot is ready."""
         self._panel_task = asyncio.create_task(self._delayed_panel_start())
+        self._game_log_review_task = asyncio.create_task(self._game_log_review_loop())
 
     def cog_unload(self):
         if self._panel_task:
             self._panel_task.cancel()
+        if self._game_log_review_task:
+            self._game_log_review_task.cancel()
         self._unregister_context_menu()
 
     async def _get_context_menu_guild(self) -> Optional[discord.Object]:
@@ -2102,6 +2373,280 @@ class SanctionsManager(commands.Cog):
         except Exception as exc:
             log.exception("Failed to post SanctionManager panel: %s", exc)
 
+    async def _game_log_review_loop(self) -> None:
+        """Periodically import MissionChief moderation logs as unverified sanctions."""
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(15)
+        while True:
+            try:
+                for guild in getattr(self.bot, "guilds", []):
+                    enabled = await self.config.guild(guild).game_log_review_enabled()
+                    if enabled:
+                        await self.scan_game_log_reviews(guild)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.exception("Game-log sanction review scan failed: %s", exc)
+
+            await asyncio.sleep(300)
+
+    async def _find_discord_id_for_mc(self, mc_user_id: Optional[str]) -> Optional[int]:
+        """Resolve a MissionChief user ID to Discord through MemberSync when available."""
+        if not mc_user_id:
+            return None
+        member_sync = self.bot.get_cog("MemberSync")
+        get_link = getattr(member_sync, "get_link_for_mc", None) if member_sync else None
+        if not get_link:
+            return None
+        try:
+            link = await get_link(str(mc_user_id))
+        except Exception as exc:
+            log.debug("MemberSync lookup failed for MC ID %s: %s", mc_user_id, exc)
+            return None
+        if not link or not link.get("discord_id"):
+            return None
+        try:
+            return int(link["discord_id"])
+        except (TypeError, ValueError):
+            return None
+
+    def _build_game_log_review_embed(
+        self,
+        *,
+        guild: discord.Guild,
+        row: dict,
+        sanction_id: int,
+        sanction_type: str,
+        discord_user_id: Optional[int] = None,
+    ) -> discord.Embed:
+        """Build the staff review embed for a MissionChief moderation log."""
+        target_name = row.get("affected_name") or "Unknown"
+        target_mc_id = row.get("affected_mc_id")
+        executor_name = row.get("executed_name") or "Unknown"
+        executor_mc_id = row.get("executed_mc_id")
+
+        embed = discord.Embed(
+            title="Sanction Review Required",
+            color=discord.Color.orange(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(
+            name="Member",
+            value=f"{target_name} (`{target_mc_id or 'unknown MC ID'}`)",
+            inline=False,
+        )
+        discord_member = guild.get_member(int(discord_user_id)) if discord_user_id else None
+        if discord_member:
+            embed.add_field(
+                name="Discord Server Nickname",
+                value=f"{discord_member.display_name} ({discord_member.mention})",
+                inline=False,
+            )
+        elif discord_user_id:
+            embed.add_field(
+                name="Discord Server Nickname",
+                value=f"Linked Discord user: <@{discord_user_id}>",
+                inline=False,
+            )
+        embed.add_field(name="Detected Action", value=sanction_type, inline=True)
+        embed.add_field(
+            name="Executed By",
+            value=f"{executor_name} (`{executor_mc_id or 'unknown MC ID'}`)",
+            inline=True,
+        )
+        if row.get("ts"):
+            embed.add_field(name="Game Log Time", value=str(row["ts"]), inline=False)
+        if row.get("description"):
+            embed.add_field(name="Description", value=str(row["description"])[:1024], inline=False)
+        embed.set_footer(text=f"Log ID: {row.get('id')} | Sanction ID: {sanction_id}")
+        return embed
+
+    def _build_game_log_bulk_embed(self, *, created: List[dict]) -> discord.Embed:
+        """Build a compact review embed for mass moderation actions."""
+        by_action: Dict[str, int] = {}
+        for item in created:
+            by_action[item["sanction_type"]] = by_action.get(item["sanction_type"], 0) + 1
+
+        lines = [f"- {action}: {count}" for action, count in sorted(by_action.items())]
+        sample_names = [item["row"].get("affected_name") or "Unknown" for item in created[:10]]
+        embed = discord.Embed(
+            title="Bulk Game Log Sanction Review",
+            description=(
+                f"{len(created)} MissionChief moderation logs were imported as unverified sanctions.\n\n"
+                + "\n".join(lines)
+            ),
+            color=discord.Color.orange(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="Sample Members", value="\n".join(sample_names) or "None", inline=False)
+        embed.set_footer(text="Bulk import. Review the pending sanctions in SanctionManager.")
+        return embed
+
+    async def _send_game_log_review_messages(
+        self,
+        guild: discord.Guild,
+        created: List[dict],
+        *,
+        bulk_threshold: int = 10,
+    ) -> None:
+        """Post action-required review messages for imported game-log sanctions."""
+        if not created:
+            return
+
+        channel_id = await self.config.guild(guild).game_log_review_channel_id()
+        channel = self.bot.get_channel(int(channel_id)) if channel_id else None
+        if channel is None:
+            channel = guild.get_channel(int(channel_id)) if channel_id else None
+        if channel is None:
+            log.warning("SanctionManager game-log review channel not found: %s", channel_id)
+            return
+
+        if len(created) >= bulk_threshold:
+            message = await channel.send(embed=self._build_game_log_bulk_embed(created=created))
+            for item in created:
+                self.db.update_game_log_review(item["row"]["id"], review_message_id=message.id)
+            return
+
+        for item in created:
+            row = item["row"]
+            message = await channel.send(
+                embed=self._build_game_log_review_embed(
+                    guild=guild,
+                    row=row,
+                    sanction_id=item["sanction_id"],
+                    sanction_type=item["sanction_type"],
+                    discord_user_id=item.get("discord_user_id"),
+                ),
+                view=GameLogReviewActionView(self),
+            )
+            self.db.update_game_log_review(row["id"], review_message_id=message.id)
+
+    async def _process_game_log_review_rows(self, guild: discord.Guild, rows: List[dict]) -> dict:
+        """Process already-fetched MissionChief log rows into review sanctions."""
+        if not rows:
+            return {"available": True, "scanned": 0, "created": 0, "skipped": 0}
+
+        max_id = max(int(row.get("id") or 0) for row in rows)
+        created = []
+        skipped = 0
+
+        for row in rows:
+            action = GAME_LOG_SANCTION_ACTIONS.get(row.get("action_key"))
+            if not action:
+                skipped += 1
+                continue
+
+            log_id = int(row.get("id") or 0)
+            if not log_id or self.db.get_game_log_review(log_id):
+                skipped += 1
+                continue
+
+            mc_user_id = str(row.get("affected_mc_id")) if row.get("affected_mc_id") else None
+            mc_username = row.get("affected_name")
+            discord_user_id = await self._find_discord_id_for_mc(mc_user_id)
+            executor = row.get("executed_name") or "MissionChief Log"
+            executor_mc_id = row.get("executed_mc_id") or "unknown"
+            notes = (
+                f"Imported from MissionChief alliance log #{log_id}.\n"
+                f"Executor: {executor} (MC ID: {executor_mc_id}).\n"
+                f"Source timestamp: {row.get('ts') or 'unknown'}."
+            )
+            if row.get("description"):
+                notes += f"\nDescription: {row['description']}"
+
+            sanction_id = self.create_sanction_for_member(
+                guild_id=guild.id,
+                discord_user_id=discord_user_id,
+                mc_user_id=mc_user_id,
+                mc_username=mc_username,
+                admin_user_id=0,
+                admin_username=f"MissionChief Log: {executor}",
+                sanction_type=action["sanction_type"],
+                reason_category="MissionChief Game Log",
+                reason_detail=action["reason_detail"],
+                additional_notes=notes,
+                status="unverified",
+            )
+            self.db.add_game_log_review(
+                log_id=log_id,
+                guild_id=guild.id,
+                sanction_id=sanction_id,
+                action_key=row.get("action_key") or "unknown",
+            )
+            sanction = self.db.get_sanction(sanction_id)
+            if sanction:
+                await self._record_membermanager_sanction_event(
+                    guild_id=guild.id,
+                    sanction=sanction,
+                    event_type="sanction_imported_unverified",
+                    actor_id=None,
+                    event_data={"source": "MissionChief game-log review", "log_id": log_id},
+                )
+            created.append(
+                {
+                    "row": row,
+                    "sanction_id": sanction_id,
+                    "sanction_type": action["sanction_type"],
+                    "discord_user_id": discord_user_id,
+                }
+            )
+
+        await self.config.guild(guild).game_log_review_last_id.set(max_id)
+        await self._send_game_log_review_messages(guild, created)
+        return {
+            "available": True,
+            "scanned": len(rows),
+            "created": len(created),
+            "skipped": skipped,
+            "last_id": max_id,
+        }
+
+    async def _bootstrap_game_log_review_checkpoint(self, guild: discord.Guild, logs_scraper: Any) -> Optional[int]:
+        """Move a new install to the current log tail without importing old history."""
+        get_recent_logs = getattr(logs_scraper, "get_recent_logs", None)
+        if not get_recent_logs:
+            return None
+
+        rows = await get_recent_logs(limit=1)
+        if not rows:
+            return 0
+
+        latest_id = int(rows[-1].get("id") or 0)
+        await self.config.guild(guild).game_log_review_last_id.set(latest_id)
+        return latest_id
+
+    async def scan_game_log_reviews(self, guild: discord.Guild, *, limit: int = 100) -> dict:
+        """Import new MissionChief moderation log rows as unverified sanctions."""
+        logs_scraper = self.bot.get_cog("LogsScraper")
+        get_logs_after = getattr(logs_scraper, "get_logs_after", None) if logs_scraper else None
+        if not get_logs_after:
+            return {"available": False, "scanned": 0, "created": 0, "skipped": 0}
+
+        last_id = int(await self.config.guild(guild).game_log_review_last_id() or 0)
+        if last_id <= 0:
+            latest_id = await self._bootstrap_game_log_review_checkpoint(guild, logs_scraper)
+            return {
+                "available": True,
+                "scanned": 0,
+                "created": 0,
+                "skipped": 0,
+                "last_id": latest_id or 0,
+                "bootstrapped": True,
+            }
+
+        rows = await get_logs_after(last_id, limit=limit)
+        return await self._process_game_log_review_rows(guild, rows)
+
+    async def scan_recent_game_log_reviews(self, guild: discord.Guild, *, limit: int = 100) -> dict:
+        """Import recent MissionChief moderation logs, independent of the current checkpoint."""
+        logs_scraper = self.bot.get_cog("LogsScraper")
+        get_recent_logs = getattr(logs_scraper, "get_recent_logs", None) if logs_scraper else None
+        if not get_recent_logs:
+            return {"available": False, "scanned": 0, "created": 0, "skipped": 0}
+
+        rows = await get_recent_logs(limit=limit)
+        return await self._process_game_log_review_rows(guild, rows)
+
     def create_sanction_for_member(
         self,
         *,
@@ -2457,6 +3002,76 @@ class SanctionsManager(commands.Cog):
 
         await self._send_panel_message(ctx.guild, channel)
         await ctx.send(f"SanctionManager panel reposted in {channel.mention}.")
+
+    @commands.group(name="sanctionreview")
+    @commands.admin()
+    @commands.guild_only()
+    async def sanctionreview(self, ctx: commands.Context):
+        """Manage MissionChief game-log sanction reviews."""
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+
+    @sanctionreview.command(name="scan")
+    async def sanctionreview_scan(self, ctx: commands.Context, limit: int = 100):
+        """Scan recent MissionChief moderation logs for unverified sanctions."""
+        limit = max(1, min(int(limit), 500))
+        result = await self.scan_game_log_reviews(ctx.guild, limit=limit)
+        if not result.get("available"):
+            await ctx.send("LogsScraper is not loaded or does not expose get_logs_after().")
+            return
+
+        bootstrap_note = "\n- Initial checkpoint was set to the current log tail." if result.get("bootstrapped") else ""
+        await ctx.send(
+            "Game-log sanction review scan complete:\n"
+            f"- Rows scanned: {result.get('scanned', 0)}\n"
+            f"- Unverified sanctions created: {result.get('created', 0)}\n"
+            f"- Rows skipped: {result.get('skipped', 0)}\n"
+            f"- Last reviewed log ID: {result.get('last_id', 'unchanged')}"
+            f"{bootstrap_note}"
+        )
+
+    @sanctionreview.command(name="scanrecent")
+    async def sanctionreview_scan_recent(self, ctx: commands.Context, limit: int = 100):
+        """Scan the most recent stored MissionChief logs for unverified sanctions."""
+        limit = max(1, min(int(limit), 500))
+        result = await self.scan_recent_game_log_reviews(ctx.guild, limit=limit)
+        if not result.get("available"):
+            await ctx.send("LogsScraper is not loaded or does not expose get_recent_logs().")
+            return
+
+        await ctx.send(
+            "Recent game-log sanction review scan complete:\n"
+            f"- Recent rows scanned: {result.get('scanned', 0)}\n"
+            f"- Unverified sanctions created: {result.get('created', 0)}\n"
+            f"- Rows skipped: {result.get('skipped', 0)}\n"
+            f"- Last reviewed log ID: {result.get('last_id', 'unchanged')}"
+        )
+
+    @sanctionreview.command(name="channel")
+    async def sanctionreview_channel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Set the channel for MissionChief game-log sanction reviews."""
+        await self.config.guild(ctx.guild).game_log_review_channel_id.set(channel.id)
+        await ctx.send(f"Game-log sanction reviews will be posted in {channel.mention}.")
+
+    @sanctionreview.command(name="enabled")
+    async def sanctionreview_enabled(self, ctx: commands.Context, enabled: bool):
+        """Enable or disable automatic MissionChief game-log sanction reviews."""
+        await self.config.guild(ctx.guild).game_log_review_enabled.set(enabled)
+        await ctx.send(f"Automatic game-log sanction reviews: {'enabled' if enabled else 'disabled'}.")
+
+    @sanctionreview.command(name="status")
+    async def sanctionreview_status(self, ctx: commands.Context):
+        """Show MissionChief game-log sanction review status."""
+        channel_id = await self.config.guild(ctx.guild).game_log_review_channel_id()
+        enabled = await self.config.guild(ctx.guild).game_log_review_enabled()
+        last_id = await self.config.guild(ctx.guild).game_log_review_last_id()
+        channel = ctx.guild.get_channel(int(channel_id)) if channel_id else None
+        await ctx.send(
+            "Game-log sanction review status:\n"
+            f"- Automatic scan: {'enabled' if enabled else 'disabled'}\n"
+            f"- Review channel: {channel.mention if channel else f'`{channel_id}`'}\n"
+            f"- Last reviewed log ID: {last_id or 0}"
+        )
 
     @commands.hybrid_group(name="sanction", invoke_without_command=True)
     @commands.guild_only()

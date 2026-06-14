@@ -659,6 +659,38 @@ class LogsScraper(commands.Cog):
         conn.close()
         
         return rows
+
+    async def get_recent_logs(self, limit: int = 100):
+        """Get the most recent stored logs in ascending ID order."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT
+                id,
+                hash,
+                ts,
+                action_key,
+                action_text,
+                executed_name,
+                executed_mc_id,
+                executed_url,
+                affected_name,
+                affected_type,
+                affected_mc_id,
+                affected_url,
+                description,
+                contribution_amount
+            FROM logs
+            ORDER BY id DESC
+            LIMIT ?
+        ''', (limit,))
+
+        rows = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+
+        return list(reversed(rows))
     
     # ==================== COMMANDS ====================
     
