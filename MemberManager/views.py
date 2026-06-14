@@ -55,7 +55,7 @@ class MemberOverviewView(discord.ui.View):
         invoker_id: int,
         guild: discord.Guild
     ):
-        super().__init__(timeout=300)
+        super().__init__(timeout=1800)
         
         self.bot = bot
         self.db = db
@@ -254,7 +254,19 @@ class MemberOverviewView(discord.ui.View):
             )
             return False
         return True
-    
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
+        """Return a useful private error instead of Discord's generic interaction failure."""
+        log.exception("MemberManager view action failed for %s: %s", getattr(item, "custom_id", item), error)
+        message = "MemberManager action failed. Refresh this profile and try again."
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(message, ephemeral=True)
+            else:
+                await interaction.followup.send(message, ephemeral=True)
+        except Exception:
+            log.exception("Failed to send MemberManager interaction error response")
+
     async def on_timeout(self):
         """Disable all buttons when view times out."""
         for item in self.children:
@@ -1342,6 +1354,29 @@ class AddSanctionButton(discord.ui.Button):
         self.parent_view = parent_view
     
     async def callback(self, interaction: discord.Interaction):
+        sanction_manager = self.parent_view.integrations.get("sanction_manager")
+        start_wizard = getattr(sanction_manager, "start_sanction_wizard_for_target", None) if sanction_manager else None
+        if start_wizard:
+            member_data = self.parent_view.member_data
+            discord_member = (
+                self.parent_view.guild.get_member(member_data.discord_id)
+                if member_data.discord_id and self.parent_view.guild
+                else None
+            )
+            await start_wizard(
+                interaction,
+                {
+                    "discord_id": member_data.discord_id,
+                    "discord_member": discord_member,
+                    "discord_username": member_data.discord_username,
+                    "discord_display_name": getattr(member_data, "discord_display_name", None),
+                    "mc_user_id": member_data.mc_user_id,
+                    "mc_username": member_data.mc_username,
+                    "name": member_data.get_display_name(),
+                },
+            )
+            return
+
         modal = CreateSanctionModal(self.parent_view)
         await interaction.response.send_modal(modal)
 

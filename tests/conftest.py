@@ -41,8 +41,9 @@ class _Cog:
 
 class _View:
     def __init__(self, *args, **kwargs):
-        del args, kwargs
+        del args
         self.children = []
+        self.timeout = kwargs.get("timeout")
 
     def add_item(self, item):
         self.children.append(item)
