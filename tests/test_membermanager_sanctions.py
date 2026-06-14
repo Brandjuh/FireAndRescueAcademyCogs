@@ -1538,18 +1538,46 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         modal = module.EditSanctionReasonSearchModal(cog, sanction, editor)
         modal.query.value = "donation"
         interaction = types.SimpleNamespace(
-            response=types.SimpleNamespace(send_message=AsyncMock()),
+            response=types.SimpleNamespace(defer=AsyncMock()),
+            followup=types.SimpleNamespace(send=AsyncMock()),
         )
 
         asyncio.run(modal.on_submit(interaction))
 
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
         apply_edit.assert_awaited_once_with(
             sanction=sanction,
             editor=editor,
             reason_category="Activity",
             reason_detail="4.1. 5% donation to alliance",
         )
-        interaction.response.send_message.assert_awaited_once()
+        interaction.followup.send.assert_awaited_once()
+
+    def test_sanction_reason_search_modal_reports_search_errors(self):
+        module = load_sanction_manager_module()
+        sanction = {
+            "sanction_id": 88,
+            "guild_id": 1,
+            "sanction_type": "Kick",
+        }
+        editor = types.SimpleNamespace(id=999)
+
+        class FakeCog:
+            def find_sanction_reason_matches(self, guild_id, query, limit=10):
+                raise RuntimeError("database unavailable")
+
+        modal = module.EditSanctionReasonSearchModal(FakeCog(), sanction, editor)
+        modal.query.value = "inactive"
+        interaction = types.SimpleNamespace(
+            response=types.SimpleNamespace(defer=AsyncMock()),
+            followup=types.SimpleNamespace(send=AsyncMock()),
+        )
+
+        asyncio.run(modal.on_submit(interaction))
+
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        interaction.followup.send.assert_awaited_once()
+        self.assertIn("Could not search sanction reasons", interaction.followup.send.await_args.args[0])
 
     def test_sanction_reason_search_uses_aliases(self):
         SanctionsManager = load_sanctions_manager_class()
