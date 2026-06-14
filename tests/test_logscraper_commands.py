@@ -1,6 +1,9 @@
 import asyncio
+import sqlite3
+import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 from logscraper.logs_scraper import LogsScraper
@@ -37,6 +40,39 @@ class LogsScraperCommandTests(unittest.TestCase):
         asyncio.run(self.scraper.event_timezone(self.ctx, "America/New_York"))
 
         self.scraper.config.event_timezone.set.assert_awaited_once_with("America/New_York")
+
+    def test_get_recent_logs_returns_latest_rows_in_ascending_order(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scraper = LogsScraper.__new__(LogsScraper)
+            scraper.db_path = Path(temp_dir) / "logs.db"
+            LogsScraper._init_database(scraper)
+
+            conn = sqlite3.connect(scraper.db_path)
+            cursor = conn.cursor()
+            for index, action_key in enumerate(["created_course", "kicked_from_alliance", "chat_ban_set"], start=1):
+                cursor.execute(
+                    """
+                    INSERT INTO logs
+                    (hash, ts, action_key, action_text, executed_name, affected_name, affected_mc_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"hash-{index}",
+                        f"June 13, 2026 19:4{index}",
+                        action_key,
+                        action_key.replace("_", " "),
+                        "Admin",
+                        f"Member{index}",
+                        str(index),
+                    ),
+                )
+            conn.commit()
+            conn.close()
+
+            rows = asyncio.run(scraper.get_recent_logs(limit=2))
+
+        self.assertEqual([row["id"] for row in rows], [2, 3])
+        self.assertEqual([row["action_key"] for row in rows], ["kicked_from_alliance", "chat_ban_set"])
 
 
 if __name__ == "__main__":

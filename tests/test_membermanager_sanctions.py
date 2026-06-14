@@ -52,6 +52,11 @@ class MemberManagerSanctionsTests(unittest.TestCase):
 
         self.assertEqual(module.DEFAULT_PANEL_CHANNEL_ID, 1426226521231589507)
 
+    def test_sanctionmanager_default_review_channel_is_configured(self):
+        module = load_sanction_manager_module()
+
+        self.assertEqual(module.DEFAULT_REVIEW_CHANNEL_ID, 1421625293130567690)
+
     def test_sanction_manager_permission_helper_accepts_administrator(self):
         SanctionsManager = load_sanctions_manager_class()
         manager = SanctionsManager.__new__(SanctionsManager)
@@ -817,6 +822,186 @@ class MemberManagerSanctionsTests(unittest.TestCase):
             triggered_by="sanctionmanager",
             actor_id=999,
         )
+
+    def test_game_log_review_scan_creates_unverified_sanctions_once(self):
+        module = load_sanction_manager_module()
+        SanctionsDatabase = module.SanctionsDatabase
+        SanctionsManager = module.SanctionsManager
+
+        rows = [
+            {
+                "id": 10,
+                "action_key": "expansion_finished",
+                "ts": "June 13, 2026 17:35",
+                "affected_name": "Hospital",
+            },
+            {
+                "id": 11,
+                "action_key": "kicked_from_alliance",
+                "ts": "June 13, 2026 19:45",
+                "executed_name": "DutchFireFighter",
+                "executed_mc_id": "1",
+                "affected_name": "Ezekiel27366",
+                "affected_mc_id": "1251176",
+                "description": "Kicked from the alliance",
+            },
+            {
+                "id": 12,
+                "action_key": "chat_ban_set",
+                "ts": "June 13, 2026 19:41",
+                "executed_name": "DutchFireFighter",
+                "executed_mc_id": "1",
+                "affected_name": "velvethunder",
+                "affected_mc_id": "555",
+                "description": "Chat ban set (13 Jun 19:46)",
+            },
+        ]
+
+        class FakeLogsScraper:
+            async def get_logs_after(self, last_id, limit=100):
+                return [row for row in rows if row["id"] > last_id][:limit]
+
+            async def get_recent_logs(self, limit=100):
+                return rows[-limit:]
+
+        class FakeValue:
+            def __init__(self, value):
+                self.value = value
+
+            async def __call__(self):
+                return self.value
+
+            async def set(self, value):
+                self.value = value
+
+        class FakeGuildConfig:
+            def __init__(self):
+                self.game_log_review_last_id = FakeValue(0)
+                self.game_log_review_channel_id = FakeValue(1421625293130567690)
+                self.game_log_review_enabled = FakeValue(True)
+
+        class FakeConfig:
+            def __init__(self):
+                self.guild_config = FakeGuildConfig()
+
+            def guild(self, guild):
+                return self.guild_config
+
+        class FakeChannel:
+            def __init__(self):
+                self.messages = []
+
+            async def send(self, **kwargs):
+                message = types.SimpleNamespace(id=len(self.messages) + 100, **kwargs)
+                self.messages.append(message)
+                return message
+
+        channel = FakeChannel()
+        guild = types.SimpleNamespace(
+            id=1,
+            get_channel=lambda channel_id: channel if channel_id == 1421625293130567690 else None,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = SanctionsDatabase(str(Path(temp_dir) / "sanctions.db"))
+            manager = SanctionsManager.__new__(SanctionsManager)
+            manager.db = database
+            manager.config = FakeConfig()
+            manager.bot = types.SimpleNamespace(
+                get_cog=lambda name: FakeLogsScraper() if name == "LogsScraper" else None,
+                get_channel=lambda channel_id: channel if channel_id == 1421625293130567690 else None,
+            )
+
+            first = asyncio.run(manager.scan_recent_game_log_reviews(guild))
+            second = asyncio.run(manager.scan_recent_game_log_reviews(guild))
+            stats = manager.get_sanction_stats(1)
+            kick = database.get_user_sanctions(guild_id=1, mc_user_id="1251176")[0]
+            ban = database.get_user_sanctions(guild_id=1, mc_user_id="555")[0]
+            kick_review = database.get_game_log_review(11)
+            ban_review = database.get_game_log_review(12)
+
+        self.assertEqual(first["scanned"], 3)
+        self.assertEqual(first["created"], 2)
+        self.assertEqual(first["skipped"], 1)
+        self.assertEqual(first["last_id"], 12)
+        self.assertEqual(second["scanned"], 3)
+        self.assertEqual(second["created"], 0)
+        self.assertEqual(second["skipped"], 3)
+        self.assertEqual(stats["unverified_count"], 2)
+        self.assertEqual(stats["active_count"], 0)
+        self.assertEqual(kick["sanction_type"], "Kick")
+        self.assertEqual(kick["status"], "unverified")
+        self.assertEqual(ban["sanction_type"], "Chat Ban")
+        self.assertEqual(ban["status"], "unverified")
+        self.assertIsNotNone(kick_review)
+        self.assertIsNotNone(ban_review)
+        self.assertEqual(len(channel.messages), 2)
+
+    def test_game_log_review_scan_bootstraps_without_historical_import(self):
+        module = load_sanction_manager_module()
+        SanctionsDatabase = module.SanctionsDatabase
+        SanctionsManager = module.SanctionsManager
+        rows = [
+            {
+                "id": 42,
+                "action_key": "kicked_from_alliance",
+                "ts": "June 13, 2026 19:45",
+                "executed_name": "DutchFireFighter",
+                "affected_name": "OldMember",
+                "affected_mc_id": "1251176",
+            }
+        ]
+
+        class FakeLogsScraper:
+            async def get_logs_after(self, last_id, limit=100):
+                return [row for row in rows if row["id"] > last_id][:limit]
+
+            async def get_recent_logs(self, limit=100):
+                return rows[-limit:]
+
+        class FakeValue:
+            def __init__(self, value):
+                self.value = value
+
+            async def __call__(self):
+                return self.value
+
+            async def set(self, value):
+                self.value = value
+
+        class FakeGuildConfig:
+            def __init__(self):
+                self.game_log_review_last_id = FakeValue(0)
+                self.game_log_review_channel_id = FakeValue(1421625293130567690)
+
+        class FakeConfig:
+            def __init__(self):
+                self.guild_config = FakeGuildConfig()
+
+            def guild(self, guild):
+                return self.guild_config
+
+        guild = types.SimpleNamespace(id=1, get_channel=lambda channel_id: None)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = SanctionsDatabase(str(Path(temp_dir) / "sanctions.db"))
+            manager = SanctionsManager.__new__(SanctionsManager)
+            manager.db = database
+            manager.config = FakeConfig()
+            manager.bot = types.SimpleNamespace(
+                get_cog=lambda name: FakeLogsScraper() if name == "LogsScraper" else None,
+                get_channel=lambda channel_id: None,
+            )
+
+            result = asyncio.run(manager.scan_game_log_reviews(guild))
+            stats = manager.get_sanction_stats(1)
+            last_id = asyncio.run(manager.config.guild_config.game_log_review_last_id())
+
+        self.assertTrue(result["bootstrapped"])
+        self.assertEqual(result["created"], 0)
+        self.assertEqual(result["last_id"], 42)
+        self.assertEqual(last_id, 42)
+        self.assertEqual(stats["historical_count"], 0)
 
     def test_sanction_target_search_finds_missionchief_member_by_exact_id(self):
         SanctionsManager = load_sanctions_manager_class()
