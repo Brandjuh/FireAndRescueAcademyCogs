@@ -1838,7 +1838,10 @@ class SummarySanctionView(discord.ui.View):
                 "sanction_id": sanction_id,
                 "discord_user_id": self.target_discord_id,
                 "mc_user_id": self.target_mc_id,
+                "mc_username": self.target_mc_username,
                 "sanction_type": self.sanction_type,
+                "reason_category": self.reason_category,
+                "reason_detail": self.reason_detail,
             },
             event_type="sanction_added",
             actor_id=self.admin_user_id,
@@ -2485,17 +2488,34 @@ class SanctionsManager(commands.Cog):
 
         alliance_members = await self._get_alliance_members_for_lookup()
         for mc_member in alliance_members:
-            mc_name = mc_member.get("name") or mc_member.get("username") or ""
-            mc_id = mc_member.get("user_id") or mc_member.get("mc_user_id") or mc_member.get("member_id")
+            name_candidates = [
+                mc_member.get("name"),
+                mc_member.get("username"),
+                mc_member.get("mc_username"),
+                mc_member.get("user_name"),
+                mc_member.get("member_name"),
+                mc_member.get("display_name"),
+            ]
+            mc_name = next((str(name).strip() for name in name_candidates if str(name or "").strip()), "")
+            mc_id = (
+                mc_member.get("user_id")
+                or mc_member.get("mc_user_id")
+                or mc_member.get("member_id")
+                or mc_member.get("id")
+            )
             if not mc_id:
                 continue
 
             mc_id = str(mc_id)
-            score = _fuzzy_match_score(query_lower, mc_name)
+            score = max(_fuzzy_match_score(query_lower, str(name or "")) for name in name_candidates)
             if query_clean.isdigit() and query_clean == mc_id:
                 score = 1.0
             elif query_clean.isdigit() and query_clean in mc_id:
                 score = max(score, 0.9)
+            elif mc_name.lower() == query_lower:
+                score = 1.0
+            elif query_lower in mc_name.lower():
+                score = max(score, 0.85)
 
             if score < threshold:
                 continue
@@ -2990,7 +3010,7 @@ class SanctionsManager(commands.Cog):
         status: str = "active",
     ) -> int:
         """Public contract for other cogs to create a sanction."""
-        return self.db.add_sanction(
+        sanction_id = self.db.add_sanction(
             guild_id=guild_id,
             discord_user_id=discord_user_id,
             mc_user_id=mc_user_id,
@@ -3004,6 +3024,30 @@ class SanctionsManager(commands.Cog):
             expires_at=expires_at,
             status=status,
         )
+        if hasattr(self, "bot"):
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop:
+                loop.create_task(
+                    self._record_membermanager_sanction_event(
+                        guild_id=guild_id,
+                        sanction={
+                            "sanction_id": sanction_id,
+                            "discord_user_id": discord_user_id,
+                            "mc_user_id": mc_user_id,
+                            "mc_username": mc_username,
+                            "sanction_type": sanction_type,
+                            "reason_category": reason_category,
+                            "reason_detail": reason_detail,
+                        },
+                        event_type="sanction_added",
+                        actor_id=admin_user_id,
+                        event_data={"source": "SanctionManager"},
+                    )
+                )
+        return sanction_id
 
     def edit_member_sanction(
         self,
@@ -3048,6 +3092,10 @@ class SanctionsManager(commands.Cog):
         payload = {
             "sanction_id": sanction.get("sanction_id"),
             "sanction_type": sanction.get("sanction_type"),
+            "reason_category": sanction.get("reason_category"),
+            "reason_detail": sanction.get("reason_detail"),
+            "target_name": sanction.get("mc_username"),
+            "mc_username": sanction.get("mc_username"),
             **(event_data or {}),
         }
         try:

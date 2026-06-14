@@ -1007,6 +1007,55 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         self.assertEqual(calls["edit"], (42, 999, {"reason_detail": "Updated"}))
         self.assertEqual(calls["remove"], (42, "removed", 999, "Resolved"))
 
+    def test_sanction_manager_create_contract_records_membermanager_audit(self):
+        SanctionsManager = load_sanctions_manager_class()
+        add_event = AsyncMock()
+        created_tasks = []
+
+        class FakeDB:
+            def add_sanction(self, **kwargs):
+                self.add = kwargs
+                return 84
+
+        class FakeLoop:
+            def create_task(self, coro):
+                created_tasks.append(coro)
+
+        manager = SanctionsManager.__new__(SanctionsManager)
+        manager.db = FakeDB()
+        manager.bot = types.SimpleNamespace(
+            get_cog=lambda name: types.SimpleNamespace(db=types.SimpleNamespace(add_event=add_event))
+            if name == "MemberManager"
+            else None
+        )
+
+        original_get_running_loop = asyncio.get_running_loop
+        asyncio.get_running_loop = lambda: FakeLoop()
+        try:
+            sanction_id = manager.create_sanction_for_member(
+                guild_id=1,
+                discord_user_id=None,
+                mc_user_id="456",
+                mc_username="CrashTestDummy",
+                admin_user_id=999,
+                admin_username="Admin",
+                sanction_type="Warning - Official 1st",
+                reason_category="Contribution",
+                reason_detail="Low contribution",
+            )
+        finally:
+            asyncio.get_running_loop = original_get_running_loop
+
+        self.assertEqual(sanction_id, 84)
+        self.assertEqual(len(created_tasks), 1)
+        asyncio.run(created_tasks[0])
+        add_event.assert_awaited_once()
+        kwargs = add_event.await_args.kwargs
+        self.assertEqual(kwargs["mc_user_id"], "456")
+        self.assertEqual(kwargs["event_type"], "sanction_added")
+        self.assertEqual(kwargs["event_data"]["target_name"], "CrashTestDummy")
+        self.assertEqual(kwargs["event_data"]["reason_detail"], "Low contribution")
+
     def test_sanction_manager_records_membermanager_audit_when_available(self):
         SanctionsManager = load_sanctions_manager_class()
         add_event = AsyncMock()
@@ -1024,7 +1073,10 @@ class MemberManagerSanctionsTests(unittest.TestCase):
                     "sanction_id": 42,
                     "discord_user_id": 123,
                     "mc_user_id": "456",
+                    "mc_username": "CrashTestDummy",
                     "sanction_type": "Warning",
+                    "reason_category": "Contribution",
+                    "reason_detail": "Low contribution",
                 },
                 event_type="sanction_added",
                 actor_id=999,
@@ -1040,6 +1092,10 @@ class MemberManagerSanctionsTests(unittest.TestCase):
             event_data={
                 "sanction_id": 42,
                 "sanction_type": "Warning",
+                "reason_category": "Contribution",
+                "reason_detail": "Low contribution",
+                "target_name": "CrashTestDummy",
+                "mc_username": "CrashTestDummy",
                 "source": "SanctionManager",
             },
             triggered_by="sanctionmanager",
@@ -1311,6 +1367,30 @@ class MemberManagerSanctionsTests(unittest.TestCase):
 
         self.assertEqual(results[0]["mc_user_id"], "456")
         self.assertEqual(results[0]["mc_username"], "DutchFireFighter")
+
+    def test_sanction_target_search_finds_alliance_only_member_by_name(self):
+        SanctionsManager = load_sanctions_manager_class()
+
+        class FakeMembersScraper:
+            async def get_members(self):
+                return [
+                    {"id": "456", "mc_username": "CrashTestDummy"},
+                    {"id": "789", "mc_username": "Other Member"},
+                ]
+
+        manager = SanctionsManager.__new__(SanctionsManager)
+        manager.bot = types.SimpleNamespace(
+            get_cog=lambda name: FakeMembersScraper() if name == "MembersScraper" else None
+        )
+        guild = types.SimpleNamespace(members=[], get_member=lambda member_id: None)
+
+        results = asyncio.run(manager.search_sanction_targets(guild, "CrashTestDummy"))
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["score"], 1.0)
+        self.assertEqual(results[0]["mc_user_id"], "456")
+        self.assertEqual(results[0]["mc_username"], "CrashTestDummy")
+        self.assertIsNone(results[0]["discord_id"])
 
     def test_sanction_target_search_enriches_missionchief_member_with_discord_link(self):
         SanctionsManager = load_sanctions_manager_class()

@@ -174,6 +174,12 @@ def normalize_member_event(event: dict[str, Any]) -> Optional[AuditTimelineEvent
         if value:
             details.append(str(value))
 
+    sanction_type = event_data.get("sanction_type")
+    target_name = event_data.get("target_name") or event_data.get("mc_username")
+    reason_detail = event_data.get("reason_detail")
+    if reason_detail and str(reason_detail) not in details:
+        details.append(str(reason_detail))
+
     reference = None
     if event_data.get("ref_code"):
         reference = str(event_data["ref_code"])
@@ -182,11 +188,25 @@ def normalize_member_event(event: dict[str, Any]) -> Optional[AuditTimelineEvent
     elif event_data.get("reminder_id"):
         reference = f"Timer #{event_data['reminder_id']}"
 
+    title = event_type.replace("_", " ").title()
+    if event_type == "sanction_added":
+        title = f"{sanction_type or 'Sanction'} added"
+        if target_name:
+            title += f" for {target_name}"
+    elif event_type == "sanction_edited":
+        title = f"{sanction_type or 'Sanction'} edited"
+        if target_name:
+            title += f" for {target_name}"
+    elif event_type == "sanction_removed":
+        title = f"{sanction_type or 'Sanction'} removed"
+        if target_name:
+            title += f" for {target_name}"
+
     return AuditTimelineEvent(
         source="MemberManager",
         event_type=event_type,
         timestamp=parse_timestamp(event.get("timestamp")),
-        title=event_type.replace("_", " ").title(),
+        title=title,
         actor_name=event.get("triggered_by") or "system",
         actor_id=event.get("actor_id"),
         details=" | ".join(details),
