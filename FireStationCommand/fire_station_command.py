@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - dependency is declared in info.json
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.3.1"
+    __version__ = "1.3.2"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
@@ -4034,6 +4034,32 @@ class FscDashboardView(FscTimedView):
         "maintenance": {"maintenance"},
         "training": {"training"},
     }
+    ACTION_FEATURES = {
+        "career": "career_conversion",
+        "expansions": "expansions",
+        "maintenance": "maintenance",
+        "training": "training",
+    }
+    ACTION_LABELS = {
+        "equipment": "Buy equipment",
+        "shop": "Buy vehicle",
+        "expansions": "Build expansions",
+        "career": "Career station",
+        "commands": "Command help",
+        "recruit": "Hire staff",
+        "maintenance": "Maintenance bay",
+        "mission": "Start mission",
+        "station": "Overview",
+        "training": "Train staff",
+        "upgrade": "Upgrade station",
+    }
+    DASHBOARD_CATEGORIES = {
+        "Incidents": ("commands", "mission"),
+        "Staff": ("recruit", "training"),
+        "Station": ("expansions", "career", "station", "upgrade"),
+        "Vehicle": ("equipment", "maintenance", "shop"),
+    }
+    DASHBOARD_ACTION_CALLBACKS = set(ACTION_LABELS)
 
     def __init__(
         self,
@@ -4051,6 +4077,7 @@ class FscDashboardView(FscTimedView):
         self.data = data or {}
         if data:
             self._remove_unavailable_buttons(data)
+        self._configure_category_buttons(data or {})
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user.id
@@ -4069,8 +4096,52 @@ class FscDashboardView(FscTimedView):
             if not self.cog._feature_available(data, feature):
                 self._remove_buttons_by_callback(callbacks)
 
+    def _action_available(self, action: str, data: Dict[str, Any]) -> bool:
+        feature = self.ACTION_FEATURES.get(action)
+        return feature is None or self.cog._feature_available(data, feature)
+
+    def _category_actions(self, category: str, data: Dict[str, Any]) -> List[str]:
+        actions = [
+            action
+            for action in self.DASHBOARD_CATEGORIES.get(category, ())
+            if self._action_available(action, data)
+        ]
+        return sorted(actions, key=lambda action: self.ACTION_LABELS[action].lower())
+
+    def _available_categories(self, data: Dict[str, Any]) -> List[str]:
+        return [
+            category
+            for category in sorted(self.DASHBOARD_CATEGORIES)
+            if self._category_actions(category, data)
+        ]
+
+    def _configure_category_buttons(self, data: Dict[str, Any]) -> None:
+        self._remove_buttons_by_callback(self.DASHBOARD_ACTION_CALLBACKS)
+        for category in self._available_categories(data):
+            self.add_item(DashboardCategoryButton(category))
+
     def _dashboard_view(self, data: Dict[str, Any] | None = None) -> "FscDashboardView":
         return FscDashboardView(self.cog, self.user, self.channel, self.guild, data=data or self.data)
+
+    async def open_category(self, interaction: discord.Interaction, category: str) -> None:
+        data = await self.cog.config.user(self.user).all()
+        embed = await self.cog._build_dashboard_embed(self.user)
+        actions = self._category_actions(category, data)
+        labels = [self.ACTION_LABELS[action] for action in actions]
+        embed.add_field(
+            name=f"{category} menu",
+            value=", ".join(labels) if labels else "No available actions in this category yet.",
+            inline=False,
+        )
+        view = FscDashboardCategoryView(
+            self.cog,
+            self.user,
+            interaction.channel or self.channel,
+            interaction.guild or self.guild,
+            category,
+            data=data,
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
 
     @discord.ui.button(label="Refresh", style=discord.ButtonStyle.primary)
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -4437,6 +4508,91 @@ class FscDashboardView(FscTimedView):
         embed.add_field(name="Training", value="`[p]fsc training`", inline=False)
         embed.add_field(name="Expansions", value="`[p]fsc expansions`", inline=False)
         await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
+
+
+class DashboardCategoryButton(discord.ui.Button):
+    def __init__(self, category: str):
+        super().__init__(label=category, style=discord.ButtonStyle.primary)
+        self.category = category
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, FscDashboardView):
+            await interaction.response.send_message("This dashboard is no longer available.", ephemeral=True)
+            return
+        await view.open_category(interaction, self.category)
+
+
+class DashboardActionButton(discord.ui.Button):
+    def __init__(self, action: str, label: str):
+        super().__init__(label=label, style=discord.ButtonStyle.secondary)
+        self.action = action
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, FscDashboardCategoryView):
+            await interaction.response.send_message("This menu is no longer available.", ephemeral=True)
+            return
+        await view.run_action(interaction, self.action)
+
+
+class FscDashboardCategoryView(FscTimedView):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        user: discord.abc.User,
+        channel: discord.abc.Messageable,
+        guild: discord.Guild | None,
+        category: str,
+        data: Dict[str, Any] | None = None,
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.user = user
+        self.channel = channel
+        self.guild = guild
+        self.category = category
+        self.data = data or {}
+        dashboard = FscDashboardView(cog, user, channel, guild, data=self.data)
+        for action in dashboard._category_actions(category, self.data):
+            self.add_item(DashboardActionButton(action, dashboard.ACTION_LABELS[action]))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    async def run_action(self, interaction: discord.Interaction, action: str) -> None:
+        data = await self.cog.config.user(self.user).all()
+        dashboard = FscDashboardView(
+            self.cog,
+            self.user,
+            interaction.channel or self.channel,
+            interaction.guild or self.guild,
+            data=data,
+        )
+        if not dashboard._action_available(action, data):
+            feature = dashboard.ACTION_FEATURES.get(action, action)
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Action locked", value=self.cog._feature_locked_text(feature), inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=dashboard)
+            return
+        handler = getattr(dashboard, action, None)
+        if handler is None:
+            await interaction.response.send_message("Unknown dashboard action.", ephemeral=True)
+            return
+        await handler(interaction, None)
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, row=4)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.config.user(self.user).all()
+        embed = await self.cog._build_dashboard_embed(self.user)
+        view = FscDashboardView(
+            self.cog,
+            self.user,
+            interaction.channel or self.channel,
+            interaction.guild or self.guild,
+            data=data,
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
 
 
 class RecruitmentView(FscTimedView):

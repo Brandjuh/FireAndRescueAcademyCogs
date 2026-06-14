@@ -59,10 +59,11 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added a turnout takeover dispatch flow where another server member can take over an unanswered incident.
 - Added feature-gated dashboard buttons so training, maintenance, expansions, and career conversion only appear when available.
 - Added temporary out-of-service vehicle handling for heavily damaged units once the maintenance bay is unlocked.
+- Added categorized dashboard menus for Incidents, Staff, Station, and Vehicle actions.
 
 ### Changed
 
-- Bumped the cog version to `1.3.1`.
+- Bumped the cog version to `1.3.2`.
 - Vehicle shop options now come from `data/config/vehicles.yaml` when available.
 - Mission definitions now come from `data/config/missions.yaml` when available.
 - Mission embeds now show configured mission images when available.
@@ -85,6 +86,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - Turnout decisions now expire into a dispatch narrative, open a short takeover window, and abandon the incident if nobody responds.
 - Vehicle purchase confirmation now disables its controls immediately and returns with fresh shop data after purchase.
 - Maintenance bay now only shows repair/back controls and no longer inherits shop paging buttons.
+- Dashboard actions are now grouped by category and alphabetically sorted inside each category.
 - Short positive wait times now display as at least `in 1 minute` instead of `now`.
 - Station overview images now use the station level instead of vehicle capacity.
 - Default maximum station level is now 10.
