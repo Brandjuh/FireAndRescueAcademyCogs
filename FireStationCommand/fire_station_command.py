@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover - dependency is declared in info.json
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.3.2"
+    __version__ = "1.3.3"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
@@ -4049,6 +4049,7 @@ class FscDashboardView(FscTimedView):
         "recruit": "Hire staff",
         "maintenance": "Maintenance bay",
         "mission": "Start mission",
+        "refresh": "Refresh dashboard",
         "station": "Overview",
         "training": "Train staff",
         "upgrade": "Upgrade station",
@@ -4056,10 +4057,25 @@ class FscDashboardView(FscTimedView):
     DASHBOARD_CATEGORIES = {
         "Incidents": ("commands", "mission"),
         "Staff": ("recruit", "training"),
-        "Station": ("expansions", "career", "station", "upgrade"),
+        "Station": ("expansions", "career", "station", "refresh", "upgrade"),
         "Vehicle": ("equipment", "maintenance", "shop"),
     }
+    DASHBOARD_CATEGORY_LABELS = set(DASHBOARD_CATEGORIES)
     DASHBOARD_ACTION_CALLBACKS = set(ACTION_LABELS)
+    DASHBOARD_ACTION_LABELS = set(ACTION_LABELS.values()) | {
+        "Build expansions",
+        "Career station",
+        "Command help",
+        "Equipment shop",
+        "Hire staff",
+        "Maintenance bay",
+        "Refresh",
+        "Start mission",
+        "Station overview",
+        "Training desk",
+        "Upgrade station",
+        "Vehicle shop",
+    }
 
     def __init__(
         self,
@@ -4086,10 +4102,23 @@ class FscDashboardView(FscTimedView):
         callback = getattr(child, "callback", None)
         return getattr(callback, "__name__", "")
 
+    def _remove_child_item(self, child: discord.ui.Item) -> None:
+        try:
+            self.remove_item(child)
+        except AttributeError:
+            if child in self.children:
+                self.children.remove(child)
+
     def _remove_buttons_by_callback(self, callback_names: set[str]) -> None:
         for child in list(self.children):
             if self._button_callback_name(child) in callback_names:
-                self.remove_item(child)
+                self._remove_child_item(child)
+
+    def _remove_buttons_by_label(self, labels: set[str]) -> None:
+        for child in list(self.children):
+            label = getattr(child, "label", None)
+            if isinstance(label, str) and label in labels:
+                self._remove_child_item(child)
 
     def _remove_unavailable_buttons(self, data: Dict[str, Any]) -> None:
         for feature, callbacks in self.FEATURE_BUTTONS.items():
@@ -4117,6 +4146,7 @@ class FscDashboardView(FscTimedView):
 
     def _configure_category_buttons(self, data: Dict[str, Any]) -> None:
         self._remove_buttons_by_callback(self.DASHBOARD_ACTION_CALLBACKS)
+        self._remove_buttons_by_label(self.DASHBOARD_ACTION_LABELS | self.DASHBOARD_CATEGORY_LABELS)
         for category in self._available_categories(data):
             self.add_item(DashboardCategoryButton(category))
 

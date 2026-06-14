@@ -1091,8 +1091,37 @@ def test_dashboard_categories_and_actions_are_alphabetized():
         "Build expansions",
         "Career station",
         "Overview",
+        "Refresh dashboard",
         "Upgrade station",
     ]
+
+
+def test_dashboard_category_configuration_removes_old_action_labels():
+    user = type("User", (), {"id": 123})()
+    cog = _cog_with_game_data({})
+    data = {
+        "started": True,
+        "station_level": 5,
+        "command_level": 5,
+        "xp": 975,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "vehicles": [],
+        "expansions": [],
+        "active_mission": {},
+    }
+    view = FscDashboardView(cog, user, object(), object())
+    stale_labels = ["Refresh", "Station overview", "Hire staff", "Vehicle shop", "Equipment shop"]
+    for label in stale_labels:
+        view.add_item(discord.ui.Button(label=label))
+
+    view._configure_category_buttons(data)
+    labels = [getattr(child, "label", None) for child in view.children]
+
+    for label in stale_labels:
+        assert label not in labels
+    assert labels == ["Incidents", "Staff", "Station", "Vehicle"]
 
 
 def test_dashboard_upgrade_button_explains_locked_level():
