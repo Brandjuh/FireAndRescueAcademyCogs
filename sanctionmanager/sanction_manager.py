@@ -28,7 +28,7 @@ GAME_LOG_SANCTION_ACTIONS = {
         "reason_detail": "Kicked from the alliance",
     },
     "chat_ban_set": {
-        "sanction_type": "Chat Ban",
+        "sanction_type": "Mute",
         "reason_detail": "Chat ban set",
     },
 }
@@ -889,7 +889,7 @@ SANCTION_TYPES = [
     "Warning - Official 3rd and last warning",
     "Kick",
     "Ban",
-    "Chat Ban",
+    "Mute",
     "Mute 5m",
     "Mute 15m",
     "Mute 30m",
