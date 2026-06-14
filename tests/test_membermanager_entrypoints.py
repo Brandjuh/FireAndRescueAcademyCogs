@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 from MemberManager.membermanager import DEFAULTS, MemberManager
 from MemberManager.models import MemberData
-from MemberManager.views import MemberOverviewView, RefreshButton
+from MemberManager.views import AddSanctionButton, MemberOverviewView, RefreshButton
 
 
 class MemberManagerEntrypointTests(unittest.TestCase):
@@ -215,6 +215,44 @@ class MemberManagerEntrypointTests(unittest.TestCase):
         self.assertIs(view.db, cog.db)
         self.assertIs(view.member_data, updated_data)
         view._update_view.assert_awaited_once_with(interaction)
+
+    def test_member_overview_view_uses_longer_timeout_for_staff_work(self):
+        view = MemberOverviewView(
+            bot=types.SimpleNamespace(),
+            db=object(),
+            config=object(),
+            member_data=MemberData(discord_id=123),
+            integrations={},
+            invoker_id=999,
+            guild=types.SimpleNamespace(),
+        )
+
+        self.assertEqual(view.timeout, 1800)
+
+    def test_add_sanction_button_starts_sanctionmanager_wizard_when_available(self):
+        start_wizard = AsyncMock()
+        sanction_manager = types.SimpleNamespace(start_sanction_wizard_for_target=start_wizard)
+        guild_member = types.SimpleNamespace(id=123)
+        view = MemberOverviewView.__new__(MemberOverviewView)
+        view.integrations = {"sanction_manager": sanction_manager}
+        view.member_data = MemberData(
+            discord_id=123,
+            discord_username="DiscordUser",
+            mc_user_id="456",
+            mc_username="MCUser",
+        )
+        view.guild = types.SimpleNamespace(get_member=lambda user_id: guild_member if user_id == 123 else None)
+        button = AddSanctionButton(view, row=2)
+        interaction = types.SimpleNamespace()
+
+        asyncio.run(button.callback(interaction))
+
+        start_wizard.assert_awaited_once()
+        target = start_wizard.await_args.args[1]
+        self.assertEqual(target["discord_id"], 123)
+        self.assertEqual(target["discord_member"], guild_member)
+        self.assertEqual(target["mc_user_id"], "456")
+        self.assertEqual(target["mc_username"], "MCUser")
 
     def test_connect_integrations_accepts_sanctionsmanager_cog_name(self):
         sanction_manager = object()
