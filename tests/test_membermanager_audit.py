@@ -61,6 +61,70 @@ class MemberManagerAuditTests(unittest.TestCase):
         self.assertIn("Weekly report", event.details)
         self.assertIn("snoozed", event.details)
 
+    def test_sanction_events_show_action_and_target_in_audit_title(self):
+        event = normalize_member_event(
+            {
+                "event_type": "sanction_added",
+                "timestamp": 1_765_000_000,
+                "triggered_by": "sanctionmanager",
+                "actor_id": 999,
+                "event_data": {
+                    "sanction_id": 84,
+                    "sanction_type": "Warning - Official 1st",
+                    "target_name": "CrashTestDummy",
+                    "reason_detail": "Low contribution",
+                },
+            }
+        )
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event.title, "Warning - Official 1st added for CrashTestDummy")
+        self.assertEqual(event.reference, "Sanction #84")
+        self.assertIn("Low contribution", event.details)
+
+    def test_sanction_audit_lines_focus_on_action_target_and_reason(self):
+        class FakeDB:
+            async def get_events(self, **kwargs):
+                del kwargs
+                return [
+                    {
+                        "event_type": "sanction_added",
+                        "timestamp": 1_765_000_000,
+                        "triggered_by": "sanctionmanager",
+                        "actor_id": 123,
+                        "event_data": {
+                            "sanction_id": 84,
+                            "sanction_type": "Warning - Official 1st",
+                            "target_name": "CrashTestDummy",
+                            "reason_detail": "Low contribution",
+                        },
+                    }
+                ]
+
+        view = MemberOverviewView.__new__(MemberOverviewView)
+        view.member_data = MemberData(
+            discord_id=None,
+            mc_user_id="456",
+            mc_username="CrashTestDummy",
+        )
+        view.db = FakeDB()
+        view.integrations = {}
+        view.audit_search_query = None
+        view.audit_page = 0
+        view.audit_per_page = 10
+        view.guild = types.SimpleNamespace(
+            get_member=lambda actor_id: types.SimpleNamespace(display_name="Admin Nick")
+            if actor_id == 123
+            else None
+        )
+
+        embed = discord.Embed(title="Audit", color=discord.Color.dark_gray())
+        result = asyncio.run(view._build_audit_timeline_embed(embed))
+
+        self.assertIn("Warning - Official 1st added for CrashTestDummy", result.description)
+        self.assertIn("Low contribution", result.description)
+        self.assertNotIn("Admin Nick", result.description)
+
     def test_course_completed_logs_are_not_member_audit_entries(self):
         self.assertFalse(should_include_log_row({"action_key": "course_completed"}))
         self.assertFalse(should_include_log_row({"action_key": "course_created"}))

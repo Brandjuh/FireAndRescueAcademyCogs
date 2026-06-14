@@ -1293,7 +1293,7 @@ class MemberOverviewView(discord.ui.View):
             )
 
             lines.append(f"{action_emoji} **{entry.title}**")
-            context_parts = [entry.source, actor_display, timestamp]
+            context_parts = [entry.source, timestamp] if entry.event_type.startswith("sanction_") else [entry.source, actor_display, timestamp]
             target_display = self._get_member_display_name()
             if target_display and target_display != actor_display:
                 context_parts.append(f"Target: {target_display}")
