@@ -492,6 +492,44 @@ class MemberManagerSanctionsTests(unittest.TestCase):
 
         self.assertEqual(fields["Admin"], "DutchFireFighter")
 
+    def test_sanction_summary_history_button_sends_private_history(self):
+        module = load_sanction_manager_module()
+        history_embed = module.discord.Embed(title="Sanction History - CrashTestDummy")
+
+        class FakeCog:
+            def build_member_sanction_history_embed(self, **kwargs):
+                self.call = kwargs
+                return history_embed
+
+        cog = FakeCog()
+        view = module.SummarySanctionView(
+            cog,
+            admin_user_id=999,
+            admin_username="Admin",
+            target_discord_id=None,
+            target_mc_id="456",
+            target_mc_username="CrashTestDummy",
+            target_discord_user=None,
+            sanction_type="Warning - Verbal warning",
+            reason_category="Contribution",
+            reason_detail="Low contribution",
+        )
+        guild = types.SimpleNamespace(id=1)
+        interaction = types.SimpleNamespace(
+            guild=guild,
+            response=types.SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        asyncio.run(view.view_history(interaction, None))
+
+        interaction.response.send_message.assert_awaited_once_with(
+            embed=history_embed,
+            ephemeral=True,
+        )
+        self.assertEqual(cog.call["guild"], guild)
+        self.assertEqual(cog.call["mc_user_id"], "456")
+        self.assertEqual(cog.call["mc_username"], "CrashTestDummy")
+
     def test_sanction_stats_contract_defines_status_and_staff_activity_counts(self):
         SanctionsDatabase = load_sanctions_database_class()
         SanctionsManager = load_sanctions_manager_class()
@@ -1406,6 +1444,151 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         self.assertTrue(hasattr(module.GameLogReviewActionView, "edit_notes"))
         self.assertTrue(hasattr(module.GameLogReviewActionView, "dismiss"))
 
+    def test_game_log_review_edit_type_opens_fixed_select(self):
+        module = load_sanction_manager_module()
+        sanction = {
+            "sanction_id": 88,
+            "guild_id": 1,
+            "sanction_type": "Kick",
+        }
+
+        class FakeDB:
+            def get_sanction(self, sanction_id):
+                return sanction if sanction_id == 88 else None
+
+        class FakeCog:
+            db = FakeDB()
+
+            async def _is_admin(self, interaction):
+                return True
+
+        embed = types.SimpleNamespace(
+            footer=types.SimpleNamespace(text="Log ID: 18554 | Sanction ID: 88")
+        )
+        interaction = types.SimpleNamespace(
+            message=types.SimpleNamespace(embeds=[embed]),
+            user=types.SimpleNamespace(id=999),
+            response=types.SimpleNamespace(send_message=AsyncMock()),
+        )
+        view = module.GameLogReviewActionView(FakeCog())
+
+        asyncio.run(view.edit_type(interaction, None))
+
+        interaction.response.send_message.assert_awaited_once()
+        kwargs = interaction.response.send_message.await_args.kwargs
+        self.assertIsInstance(kwargs["view"], module.EditSanctionTypeView)
+        self.assertTrue(kwargs["ephemeral"])
+
+    def test_game_log_review_edit_reason_opens_search_modal(self):
+        module = load_sanction_manager_module()
+        sanction = {
+            "sanction_id": 88,
+            "guild_id": 1,
+            "sanction_type": "Kick",
+            "reason_detail": "Kicked from the alliance",
+        }
+
+        class FakeDB:
+            def get_sanction(self, sanction_id):
+                return sanction if sanction_id == 88 else None
+
+        class FakeCog:
+            db = FakeDB()
+
+            async def _is_admin(self, interaction):
+                return True
+
+        embed = types.SimpleNamespace(
+            footer=types.SimpleNamespace(text="Log ID: 18554 | Sanction ID: 88")
+        )
+        interaction = types.SimpleNamespace(
+            message=types.SimpleNamespace(embeds=[embed]),
+            user=types.SimpleNamespace(id=999),
+            response=types.SimpleNamespace(send_modal=AsyncMock()),
+        )
+        view = module.GameLogReviewActionView(FakeCog())
+
+        asyncio.run(view.edit_reason(interaction, None))
+
+        interaction.response.send_modal.assert_awaited_once()
+        modal = interaction.response.send_modal.await_args.args[0]
+        self.assertIsInstance(modal, module.EditSanctionReasonSearchModal)
+        self.assertEqual(modal.query.default, "Kicked from the alliance")
+
+    def test_sanction_reason_search_modal_updates_exact_match(self):
+        module = load_sanction_manager_module()
+        apply_edit = AsyncMock()
+        sanction = {
+            "sanction_id": 88,
+            "guild_id": 1,
+            "sanction_type": "Kick",
+        }
+        editor = types.SimpleNamespace(id=999)
+        cog = types.SimpleNamespace(
+            find_sanction_reason_matches=lambda guild_id, query, limit=10: [
+                {
+                    "score": 1.0,
+                    "category": "Activity",
+                    "detail": "4.1. 5% donation to alliance",
+                    "label": "4.1. 5% donation to alliance",
+                }
+            ],
+            apply_sanction_reason_edit=apply_edit,
+        )
+        modal = module.EditSanctionReasonSearchModal(cog, sanction, editor)
+        modal.query.value = "donation"
+        interaction = types.SimpleNamespace(
+            response=types.SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        asyncio.run(modal.on_submit(interaction))
+
+        apply_edit.assert_awaited_once_with(
+            sanction=sanction,
+            editor=editor,
+            reason_category="Activity",
+            reason_detail="4.1. 5% donation to alliance",
+        )
+        interaction.response.send_message.assert_awaited_once()
+
+    def test_sanction_reason_search_results_view_uses_safe_view_reference(self):
+        module = load_sanction_manager_module()
+        sanction = {
+            "sanction_id": 88,
+            "guild_id": 1,
+            "sanction_type": "Kick",
+        }
+        cog = types.SimpleNamespace()
+        editor = types.SimpleNamespace(id=999)
+        matches = [
+            {
+                "score": 0.9,
+                "category": "Activity",
+                "detail": "4.1. 5% donation to alliance",
+                "label": "4.1. 5% donation to alliance",
+            }
+        ]
+
+        view = module.EditSanctionReasonSearchResultsView(cog, sanction, editor, matches)
+
+        self.assertEqual(len(view.children), 1)
+        self.assertIs(view.children[0].search_view, view)
+
+    def test_legacy_sanction_type_select_uses_safe_view_reference(self):
+        module = load_sanction_manager_module()
+        sanction = {
+            "sanction_id": 88,
+            "guild_id": 1,
+            "sanction_type": "Kick",
+        }
+        cog = types.SimpleNamespace()
+        editor = types.SimpleNamespace(id=999)
+
+        view = module.EditSanctionTypeView(cog, sanction, editor)
+
+        self.assertEqual(len(view.children), 1)
+        self.assertIs(view.children[0].edit_view, view)
+
     def test_game_log_review_scan_bootstraps_without_historical_import(self):
         module = load_sanction_manager_module()
         SanctionsDatabase = module.SanctionsDatabase
@@ -1595,6 +1778,39 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         )
 
         self.assertEqual(display, "DutchFireFighter")
+
+    def test_sanction_manager_builds_member_history_embed(self):
+        SanctionsManager = load_sanctions_manager_class()
+
+        class FakeDB:
+            def get_user_sanctions(self, guild_id, discord_user_id=None, mc_user_id=None):
+                self.call = (guild_id, discord_user_id, mc_user_id)
+                return [
+                    {
+                        "sanction_id": 12,
+                        "status": "active",
+                        "sanction_type": "Warning - Verbal warning",
+                        "reason_detail": "Low contribution",
+                        "admin_username": "DutchFireFighter",
+                        "created_at": 1_800_000_000,
+                    }
+                ]
+
+        manager = SanctionsManager.__new__(SanctionsManager)
+        manager.db = FakeDB()
+        guild = types.SimpleNamespace(id=1)
+
+        embed = manager.build_member_sanction_history_embed(
+            guild=guild,
+            mc_user_id="456",
+            mc_username="CrashTestDummy",
+        )
+
+        self.assertEqual(embed.kwargs["title"], "Sanction History - CrashTestDummy")
+        self.assertEqual(manager.db.call, (1, None, "456"))
+        self.assertEqual(len(embed.fields), 1)
+        self.assertIn("Warning - Verbal warning", embed.fields[0]["value"])
+        self.assertIn("DutchFireFighter", embed.fields[0]["value"])
 
     def test_sanction_target_search_enriches_missionchief_member_with_discord_link(self):
         SanctionsManager = load_sanctions_manager_class()

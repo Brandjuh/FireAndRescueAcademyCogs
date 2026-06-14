@@ -1862,6 +1862,21 @@ class SummarySanctionView(discord.ui.View):
         modal = AdditionalNotesModal(self)
         await interaction.response.send_modal(modal)
 
+    @discord.ui.button(label="View History", style=discord.ButtonStyle.primary, custom_id="sm:view_history")
+    async def view_history(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.guild:
+            await interaction.response.send_message("This must be used in a server.", ephemeral=True)
+            return
+
+        embed = self.cog.build_member_sanction_history_embed(
+            guild=interaction.guild,
+            discord_user_id=self.target_discord_id,
+            mc_user_id=self.target_mc_id,
+            mc_username=self.target_mc_username,
+            target_discord_user=self.target_discord_user,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     @discord.ui.button(label="Submit Sanction", style=discord.ButtonStyle.danger, custom_id="sm:submit")
     async def submit(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
@@ -2056,7 +2071,8 @@ class AdditionalNotesModal(discord.ui.Modal, title="Additional Admin Notes"):
 
     async def on_submit(self, interaction: discord.Interaction):
         self.parent.additional_notes = str(self.notes)
-        embed = self.parent._create_embed()
+        guild_id = interaction.guild.id if interaction.guild else 0
+        embed = self.parent._create_embed(guild_id=guild_id)
         await safe_update(
             interaction,
             content="⚠️ Review the sanction before submitting:",
@@ -2180,7 +2196,7 @@ class GameLogReviewActionView(discord.ui.View):
             await interaction.response.send_message("The linked sanction no longer exists.", ephemeral=True)
             return
 
-        await interaction.response.send_modal(EditReasonModal(self.cog, sanction, interaction.user))
+        await interaction.response.send_modal(EditSanctionReasonSearchModal(self.cog, sanction, interaction.user))
 
     @discord.ui.button(label="Edit Notes", style=discord.ButtonStyle.secondary, custom_id="sm:logreview:edit_notes")
     async def edit_notes(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2421,6 +2437,68 @@ class SanctionsManager(commands.Cog):
         """Public contract for other cogs to read one sanction by ID."""
         return self.db.get_sanction(sanction_id)
 
+    def build_member_sanction_history_embed(
+        self,
+        *,
+        guild: discord.Guild,
+        discord_user_id: Optional[int] = None,
+        mc_user_id: Optional[str] = None,
+        mc_username: Optional[str] = None,
+        target_discord_user: Optional[discord.Member] = None,
+        limit: int = 10,
+    ) -> discord.Embed:
+        """Build a compact sanction history embed for a member."""
+        sanctions = self.db.get_user_sanctions(
+            guild.id,
+            discord_user_id,
+            mc_user_id,
+        )
+        display_name = mc_username or (
+            target_discord_user.display_name if target_discord_user else None
+        )
+        if not display_name and mc_user_id:
+            display_name = f"MC ID {mc_user_id}"
+        if not display_name:
+            display_name = "Unknown member"
+
+        embed = discord.Embed(
+            title=f"Sanction History - {display_name}",
+            color=discord.Color.blue(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        if target_discord_user:
+            embed.set_author(
+                name=target_discord_user.display_name,
+                icon_url=target_discord_user.display_avatar.url,
+            )
+
+        if not sanctions:
+            embed.description = "No sanctions found for this member."
+            return embed
+
+        for sanction in sanctions[:limit]:
+            status = sanction.get("status") or "unknown"
+            status_emoji = "🔴" if status == "active" else "⚫"
+            reason = sanction.get("reason_detail") or "No reason stored"
+            created_at = sanction.get("created_at")
+            date_text = fmt_dt(int(created_at)) if created_at else "Unknown"
+            value = (
+                f"**Type**: {sanction.get('sanction_type')}\n"
+                f"**Reason**: {reason[:160]}\n"
+                f"**Admin**: {sanction.get('admin_username') or 'Unknown'}\n"
+                f"**Date**: {date_text}"
+            )
+            embed.add_field(
+                name=f"{status_emoji} ID: {sanction.get('sanction_id')} ({status})",
+                value=value,
+                inline=False,
+            )
+
+        if len(sanctions) > limit:
+            embed.set_footer(text=f"Showing {limit} of {len(sanctions)} sanctions")
+
+        return embed
+
     async def _get_alliance_members_for_lookup(self) -> List[Dict[str, Any]]:
         """Read alliance members through public cog contracts."""
         members_by_id: Dict[str, Dict[str, Any]] = {}
@@ -2584,6 +2662,55 @@ class SanctionsManager(commands.Cog):
                 )
 
         return sorted(reasons, key=lambda item: item["score"], reverse=True)[:limit]
+
+    async def apply_sanction_type_edit(
+        self,
+        *,
+        sanction: dict,
+        editor: discord.Member,
+        new_type: str,
+    ) -> None:
+        """Update a sanction type and record the MemberManager audit event."""
+        self.db.edit_sanction(
+            sanction["sanction_id"],
+            editor.id,
+            sanction_type=new_type,
+        )
+        updated = dict(sanction)
+        updated["sanction_type"] = new_type
+        await self._record_membermanager_sanction_event(
+            guild_id=sanction["guild_id"],
+            sanction=updated,
+            event_type="sanction_edited",
+            actor_id=editor.id,
+            event_data={"fields": ["sanction_type"], "source": "SanctionManager"},
+        )
+
+    async def apply_sanction_reason_edit(
+        self,
+        *,
+        sanction: dict,
+        editor: discord.Member,
+        reason_category: str,
+        reason_detail: str,
+    ) -> None:
+        """Update a sanction reason and record the MemberManager audit event."""
+        self.db.edit_sanction(
+            sanction["sanction_id"],
+            editor.id,
+            reason_category=reason_category,
+            reason_detail=reason_detail,
+        )
+        updated = dict(sanction)
+        updated["reason_category"] = reason_category
+        updated["reason_detail"] = reason_detail
+        await self._record_membermanager_sanction_event(
+            guild_id=sanction["guild_id"],
+            sanction=updated,
+            event_type="sanction_edited",
+            actor_id=editor.id,
+            event_data={"fields": ["reason_category", "reason_detail"], "source": "SanctionManager"},
+        )
 
     async def send_sanction_reason_selection(
         self,
@@ -3858,15 +3985,13 @@ class EditSanctionView(discord.ui.View):
 
     @discord.ui.button(label="Edit Sanction Type", style=discord.ButtonStyle.primary)
     async def edit_type(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "Select new sanction type:",
-            view=EditSanctionTypeView(self.cog, self.sanction, self.editor),
-            ephemeral=True
+        await interaction.response.send_modal(
+            EditSanctionTypeSearchModal(self.cog, self.sanction, self.editor)
         )
 
     @discord.ui.button(label="Edit Reason", style=discord.ButtonStyle.primary)
     async def edit_reason(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = EditReasonModal(self.cog, self.sanction, self.editor)
+        modal = EditSanctionReasonSearchModal(self.cog, self.sanction, self.editor)
         await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="Edit Admin Notes", style=discord.ButtonStyle.secondary)
@@ -3943,29 +4068,121 @@ class EditSanctionTypeView(discord.ui.View):
 
 class EditSanctionTypeSelect(discord.ui.Select):
     def __init__(self, parent: EditSanctionTypeView):
-        self.parent = parent
+        self.edit_view = parent
         options = [discord.SelectOption(label=t) for t in SANCTION_TYPES]
         super().__init__(placeholder="Choose new sanction type", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         new_type = self.values[0]
-        
-        self.parent.cog.db.edit_sanction(
-            self.parent.sanction['sanction_id'],
-            self.parent.editor.id,
-            sanction_type=new_type
+
+        await self.edit_view.cog.apply_sanction_type_edit(
+            sanction=self.edit_view.sanction,
+            editor=self.edit_view.editor,
+            new_type=new_type,
         )
-        await self.parent.cog._record_membermanager_sanction_event(
-            guild_id=self.parent.sanction["guild_id"],
-            sanction=self.parent.sanction,
-            event_type="sanction_edited",
-            actor_id=self.parent.editor.id,
-            event_data={"fields": ["sanction_type"], "source": "SanctionManager"},
-        )
-        
+
         await interaction.response.send_message(
             f"✅ Updated sanction type to: {new_type}",
             ephemeral=True
+        )
+
+class EditSanctionReasonSearchModal(discord.ui.Modal, title="Search Sanction Reason"):
+    query = discord.ui.TextInput(
+        label="Reason search",
+        style=discord.TextStyle.short,
+        max_length=100,
+        required=True,
+        placeholder="Example: donation, inactivity, drama, nickname",
+    )
+
+    def __init__(self, cog: "SanctionsManager", sanction: dict, editor: discord.Member):
+        super().__init__()
+        self.cog = cog
+        self.sanction = sanction
+        self.editor = editor
+        self.query.default = str(sanction.get("reason_detail") or "")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        query = str(self.query.value).strip()
+        guild_id = int(self.sanction.get("guild_id") or 0)
+        matches = self.cog.find_sanction_reason_matches(guild_id, query, limit=10)
+        if not matches:
+            await interaction.response.send_message(
+                f"No sanction reason found for `{query}`. Try a shorter search term.",
+                ephemeral=True,
+            )
+            return
+
+        if len(matches) == 1 or matches[0]["score"] >= 1.0:
+            reason = matches[0]
+            await self.cog.apply_sanction_reason_edit(
+                sanction=self.sanction,
+                editor=self.editor,
+                reason_category=reason["category"],
+                reason_detail=reason["detail"],
+            )
+            await interaction.response.send_message(
+                f"Updated sanction reason to: {reason['detail']}",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            f"Select the correct reason for `{query}`:",
+            view=EditSanctionReasonSearchResultsView(
+                self.cog,
+                self.sanction,
+                self.editor,
+                matches,
+            ),
+            ephemeral=True,
+        )
+
+class EditSanctionReasonSearchResultsView(discord.ui.View):
+    def __init__(
+        self,
+        cog: "SanctionsManager",
+        sanction: dict,
+        editor: discord.Member,
+        matches: List[Dict[str, Any]],
+    ):
+        super().__init__(timeout=600)
+        self.cog = cog
+        self.sanction = sanction
+        self.editor = editor
+        self.reason_matches = matches
+        self.add_item(EditSanctionReasonSearchResultsSelect(self))
+
+class EditSanctionReasonSearchResultsSelect(discord.ui.Select):
+    def __init__(self, search_view: EditSanctionReasonSearchResultsView):
+        self.search_view = search_view
+        options = []
+        for index, reason in enumerate(search_view.reason_matches[:25]):
+            options.append(
+                discord.SelectOption(
+                    label=reason["label"][:100],
+                    value=str(index),
+                    description=reason["category"][:100],
+                )
+            )
+        super().__init__(
+            placeholder="Choose matching reason",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        reason = self.search_view.reason_matches[int(self.values[0])]
+        await self.search_view.cog.apply_sanction_reason_edit(
+            sanction=self.search_view.sanction,
+            editor=self.search_view.editor,
+            reason_category=reason["category"],
+            reason_detail=reason["detail"],
+        )
+        await interaction.response.send_message(
+            f"Updated sanction reason to: {reason['detail']}",
+            ephemeral=True,
         )
 
 class EditReasonModal(discord.ui.Modal, title="Edit Reason"):
