@@ -5,10 +5,10 @@ This module provides a FastAPI server for offloading image generation to a dedic
 It can be run standalone as an external service for large bot deployments.
 
 Usage (as external service):
-    uvicorn levelup.generator.api:app --host 0.0.0.0 --port 8888 --workers 4
+    uvicorn levelup2.generator.api:app --host 0.0.0.0 --port 8888 --workers 4
 
     Or directly:
-    python -m levelup.generator.api --port 8888 --host 0.0.0.0
+    python -m levelup2.generator.api --port 8888 --host 0.0.0.0
 
 Environment variables (.env file supported):
     LEVELUP_PORT=8888

@@ -32,7 +32,7 @@ source apienv/bin/activate
 
 ```bash
 git clone https://github.com/vertyco/vrt-cogs.git
-cd vrt-cogs/levelup/generator
+cd vrt-cogs/levelup2/generator
 ```
 
 ### 4. Install Dependencies
@@ -48,11 +48,11 @@ pip install -r requirements.txt
 Before setting up the service, you can test the API to ensure it's working:
 
 ```bash
-cd /home/ubuntu/vrt-cogs/levelup/generator
+cd /home/ubuntu/vrt-cogs/levelup2/generator
 ```
 
 ```bash
-uvicorn api:app --host 0.0.0.0 --port 8888 --app-dir /home/ubuntu/vrt-cogs/levelup/generator
+uvicorn api:app --host 0.0.0.0 --port 8888 --app-dir /home/ubuntu/vrt-cogs/levelup2/generator
 ```
 
 ### 6. Set Up the systemd Service
@@ -72,7 +72,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/home/ubuntu/redenv/bin/uvicorn api:app --host 0.0.0.0 --port 8888 --workers 4 --app-dir /home/ubuntu/vrt-cogs/levelup/generator
+ExecStart=/home/ubuntu/redenv/bin/uvicorn api:app --host 0.0.0.0 --port 8888 --workers 4 --app-dir /home/ubuntu/vrt-cogs/levelup2/generator
 User=ubuntu
 Group=ubuntu
 Restart=always
