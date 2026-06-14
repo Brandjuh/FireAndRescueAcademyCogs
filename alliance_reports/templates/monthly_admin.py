@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import discord
 
 from ..data_aggregator import DataAggregator
+from ..report_formatting import add_section, count_line, report_title, text_line
 
 log = logging.getLogger("red.FARA.AllianceReports.MonthlyAdmin")
 
@@ -54,85 +55,79 @@ class MonthlyAdminReport:
         admin = data.get("admin_activity", {})
 
         embed = discord.Embed(
-            title="🛡️ ADMIN MONTHLY REPORT",
-            description=f"Reporting month: **{month_name}**",
+            title=report_title("ADMIN", month_name),
             color=discord.Color.dark_gold(),
             timestamp=now,
         )
         if "error" not in membership:
             membership_lines = [
-                f"• Starting members: {membership.get('starting_members', 0)}",
-                f"• Ending members: {membership.get('ending_members', 0)}",
+                count_line("Starting members", membership.get("starting_members", 0)),
+                count_line("Ending members", membership.get("ending_members", 0)),
             ]
             if membership.get("log_activity_available", True):
                 membership_lines.extend(
                     [
-                        f"• Join logs recorded: {membership.get('new_joins_period', 0)}",
-                        f"• Leave logs recorded: {membership.get('left_period', 0)}",
+                        count_line("Join logs recorded", membership.get("new_joins_period", 0)),
+                        count_line("Leave logs recorded", membership.get("left_period", 0)),
                     ]
                 )
             membership_lines.extend(
                 [
-                    f"• Kicked: {membership.get('kicked_period', 0)}",
-                    f"• Net growth: {membership.get('net_growth', 0):+d}",
+                    count_line("Kicked", membership.get("kicked_period", 0)),
+                    count_line("Net growth", membership.get("net_growth", 0), signed=True),
                 ]
             )
-            embed.add_field(
-                name="👥 Membership",
-                value="\n".join(membership_lines),
-                inline=False,
-            )
+            add_section(embed, "👥 Membership", membership_lines)
         if "error" not in training:
-            embed.add_field(
-                name="🎓 Training",
-                value=(
-                f"• Courses started: {training.get('started_period', 0)}\n"
-                f"• Courses completed: {training.get('completed_period', 0)}"
+            add_section(
+                embed,
+                "🎓 Training",
+                (
+                    count_line("Courses started", training.get("started_period", 0)),
+                    count_line("Courses completed", training.get("completed_period", 0)),
                 ),
-                inline=False,
             )
         if "error" not in buildings:
             building_lines = [
-                f"• Requests approved: {buildings.get('approved_period', 0)}",
-                f"• Requests denied: {buildings.get('denied_period', 0)}",
+                count_line("Requests approved", buildings.get("approved_period", 0)),
+                count_line("Requests denied", buildings.get("denied_period", 0)),
             ]
             if buildings.get("extension_activity_available", True):
                 building_lines.extend(
                     [
-                        f"• Extensions started: {buildings.get('extensions_started_period', 0)}",
-                        f"• Extensions completed: {buildings.get('extensions_completed_period', 0)}",
+                        count_line("Extensions started", buildings.get("extensions_started_period", 0)),
+                        count_line("Extensions completed", buildings.get("extensions_completed_period", 0)),
                     ]
                 )
-            embed.add_field(
-                name="🏗️ Buildings",
-                value="\n".join(building_lines),
-                inline=False,
-            )
+            add_section(embed, "🏗️ Buildings", building_lines)
         if "error" not in operations:
-            embed.add_field(
-                name="🎯 Operations",
-                value=(
-                f"• Large missions started: {operations.get('large_missions_period', 0)}\n"
-                f"• Alliance events started: {operations.get('alliance_events_period', 0)}"
+            add_section(
+                embed,
+                "🎯 Operations",
+                (
+                    count_line("Large missions started", operations.get("large_missions_period", 0)),
+                    count_line("Alliance events started", operations.get("alliance_events_period", 0)),
                 ),
-                inline=False,
             )
         if "error" not in sanctions:
-            embed.add_field(
-                name="⚖️ Sanctions",
-                value=f"• Issued: {sanctions.get('issued_period', 0)}",
-                inline=False,
+            add_section(
+                embed,
+                "⚖️ Sanctions",
+                (count_line("Issued", sanctions.get("issued_period", 0)),),
             )
         if "error" not in admin:
-            embed.add_field(
-                name="📋 Recorded Admin Activity",
-                value=(
-                f"• Recorded actions: {admin.get('total_actions_period', 0)}\n"
-                f"• Most active building reviewer: "
-                f"{admin.get('most_active_admin_name', 'N/A')} "
-                f"({admin.get('most_active_admin_count', 0)} reviews)"
+            reviewer_count = admin.get("most_active_admin_count", 0)
+            add_section(
+                embed,
+                "📋 Recorded Admin Activity",
+                (
+                    count_line("Recorded actions", admin.get("total_actions_period", 0)),
+                    text_line(
+                        "Most active building reviewer",
+                        f"{admin.get('most_active_admin_name', 'N/A')} ({reviewer_count} reviews)",
+                        show=bool(reviewer_count),
+                    ),
                 ),
-                inline=False,
             )
         embed.set_footer(text=f"Report generated: {now.strftime('%B %d, %Y %H:%M')} {tz_str}")
         return embed

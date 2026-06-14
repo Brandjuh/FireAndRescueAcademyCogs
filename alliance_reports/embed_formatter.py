@@ -5,6 +5,8 @@ from typing import Any, Dict, Optional
 
 import discord
 
+from .report_formatting import add_section, count_line, report_title
+
 
 class EmbedFormatter:
     """Format recorded daily alliance metrics."""
@@ -19,15 +21,9 @@ class EmbedFormatter:
         period_label = now.strftime("%A, %B %d, %Y")
         timezone_suffix = f" ({timezone_label})" if timezone_label else ""
         embed = discord.Embed(
-            title="🔥 FIRE & RESCUE ACADEMY - Daily Dispatch",
-            description=f"Reporting date: **{period_label}**{timezone_suffix}",
+            title=report_title("PUBLIC", f"{period_label}{timezone_suffix}"),
             color=discord.Color.blue(),
             timestamp=now,
-        )
-        embed.add_field(
-            name="═" * 40,
-            value="📊 ALLIANCE ACTIVITY - Current Reporting Window",
-            inline=False,
         )
 
         sections = (
@@ -39,43 +35,47 @@ class EmbedFormatter:
         for key, title, formatter in sections:
             section = data.get(key, {})
             if "error" not in section:
-                embed.add_field(name=title, value=formatter(section), inline=False)
+                add_section(embed, title, formatter(section))
 
         embed.set_footer(text="Generated at")
         return embed
 
     @staticmethod
-    def _format_membership(data: Dict[str, Any]) -> str:
-        joined = data.get("new_joins_24h", 0)
-        left = data.get("left_24h", 0)
-        kicked = data.get("kicked_24h", 0)
+    def _format_membership(data: Dict[str, Any]) -> list:
+        left = int(data.get("left_24h", 0) or 0)
+        kicked = int(data.get("kicked_24h", 0) or 0)
         lines = [
-            f"• **Join logs recorded:** {joined}",
-            f"• **Verifications approved:** {data.get('verifications_approved_24h', 0)}",
-            f"• **Total current members:** {data.get('total_members', 0)}",
+            count_line("Join logs recorded", data.get("new_joins_24h", 0)),
+            count_line("Verifications approved", data.get("verifications_approved_24h", 0)),
+            count_line("Total current members", data.get("total_members", 0)),
         ]
         if left or kicked:
-            lines.append(f"• **Recorded departures:** {left} leave logs, {kicked} kicks")
-        return "\n".join(lines)
+            departure_parts = []
+            if left:
+                departure_parts.append(f"{left} leave logs")
+            if kicked:
+                departure_parts.append(f"{kicked} kicks")
+            lines.append(f"• Recorded departures: {', '.join(departure_parts)}")
+        return lines
 
     @staticmethod
-    def _format_training(data: Dict[str, Any]) -> str:
+    def _format_training(data: Dict[str, Any]) -> tuple:
         return (
-            f"• **Courses started:** {data.get('started_24h', 0)}\n"
-            f"• **Courses completed:** {data.get('completed_24h', 0)}"
+            count_line("Courses started", data.get("started_24h", 0)),
+            count_line("Courses completed", data.get("completed_24h", 0)),
         )
 
     @staticmethod
-    def _format_buildings(data: Dict[str, Any]) -> str:
+    def _format_buildings(data: Dict[str, Any]) -> tuple:
         return (
-            f"• **Requests approved:** {data.get('approved_24h', 0)}\n"
-            f"• **Extensions started:** {data.get('extensions_started_24h', 0)}\n"
-            f"• **Extensions completed:** {data.get('extensions_completed_24h', 0)}"
+            count_line("Requests approved", data.get("approved_24h", 0)),
+            count_line("Extensions started", data.get("extensions_started_24h", 0)),
+            count_line("Extensions completed", data.get("extensions_completed_24h", 0)),
         )
 
     @staticmethod
-    def _format_operations(data: Dict[str, Any]) -> str:
+    def _format_operations(data: Dict[str, Any]) -> tuple:
         return (
-            f"• **Large missions started:** {data.get('large_missions_started_24h', 0)}\n"
-            f"• **Alliance events started:** {data.get('alliance_events_started_24h', 0)}"
+            count_line("Large missions started", data.get("large_missions_started_24h", 0)),
+            count_line("Alliance events started", data.get("alliance_events_started_24h", 0)),
         )
