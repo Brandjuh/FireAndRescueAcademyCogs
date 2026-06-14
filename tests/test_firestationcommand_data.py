@@ -1060,6 +1060,41 @@ def test_feature_availability_shows_unlocked_facilities():
     assert FireStationCommand._feature_available(cog, data, "career_conversion") is True
 
 
+def test_dashboard_categories_and_actions_are_alphabetized():
+    user = type("User", (), {"id": 123})()
+    cog = _cog_with_game_data({})
+    data = {
+        "started": True,
+        "station_level": 5,
+        "command_level": 5,
+        "xp": 975,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "vehicles": [],
+        "expansions": [],
+        "active_mission": {},
+    }
+    view = FscDashboardView(cog, user, object(), object(), data=data)
+
+    assert view._available_categories(data) == ["Incidents", "Staff", "Station", "Vehicle"]
+    assert [view.ACTION_LABELS[action] for action in view._category_actions("Vehicle", data)] == [
+        "Buy equipment",
+        "Buy vehicle",
+        "Maintenance bay",
+    ]
+    assert [view.ACTION_LABELS[action] for action in view._category_actions("Staff", data)] == [
+        "Hire staff",
+        "Train staff",
+    ]
+    assert [view.ACTION_LABELS[action] for action in view._category_actions("Station", data)] == [
+        "Build expansions",
+        "Career station",
+        "Overview",
+        "Upgrade station",
+    ]
+
+
 def test_dashboard_upgrade_button_explains_locked_level():
     user = type("User", (), {"id": 123})()
     cog = _cog_with_game_data({})
