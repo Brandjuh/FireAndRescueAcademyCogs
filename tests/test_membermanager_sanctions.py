@@ -937,6 +937,47 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         self.assertIsNotNone(ban_review)
         self.assertEqual(len(channel.messages), 2)
 
+    def test_game_log_review_embed_is_compact_and_shows_discord_nickname(self):
+        module = load_sanction_manager_module()
+        SanctionsManager = module.SanctionsManager
+        manager = SanctionsManager.__new__(SanctionsManager)
+        discord_member = types.SimpleNamespace(
+            display_name="ServerNick",
+            mention="<@123>",
+        )
+        guild = types.SimpleNamespace(get_member=lambda user_id: discord_member if user_id == 123 else None)
+
+        embed = manager._build_game_log_review_embed(
+            guild=guild,
+            row={
+                "id": 18514,
+                "ts": "June 13, 2026 19:41",
+                "executed_name": "DutchFireFighter",
+                "executed_mc_id": "88649",
+                "affected_name": "velvethunder",
+                "affected_mc_id": "375558",
+                "description": "Chat ban set",
+            },
+            sanction_id=83,
+            sanction_type="Chat Ban",
+            discord_user_id=123,
+        )
+
+        field_values = {field["name"]: field["value"] for field in embed.fields}
+        self.assertEqual(embed.kwargs["title"], "Sanction Review Required")
+        self.assertNotIn("description", embed.kwargs)
+        self.assertEqual(field_values["Member"], "velvethunder (`375558`)")
+        self.assertEqual(field_values["Discord Server Nickname"], "ServerNick (<@123>)")
+
+    def test_game_log_review_view_defines_edit_actions(self):
+        module = load_sanction_manager_module()
+
+        self.assertTrue(hasattr(module.GameLogReviewActionView, "approve"))
+        self.assertTrue(hasattr(module.GameLogReviewActionView, "edit_type"))
+        self.assertTrue(hasattr(module.GameLogReviewActionView, "edit_reason"))
+        self.assertTrue(hasattr(module.GameLogReviewActionView, "edit_notes"))
+        self.assertTrue(hasattr(module.GameLogReviewActionView, "dismiss"))
+
     def test_game_log_review_scan_bootstraps_without_historical_import(self):
         module = load_sanction_manager_module()
         SanctionsDatabase = module.SanctionsDatabase
