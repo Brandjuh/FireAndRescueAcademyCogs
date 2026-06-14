@@ -293,7 +293,7 @@ class LevelUp(
         env = os.environ.copy()
         env["LEVELUP_CUSTOM_FONTS_DIR"] = str(self.custom_fonts)
 
-        # Add the cog's parent directory to PYTHONPATH so uvicorn can import levelup
+        # Add the cog's parent directory to PYTHONPATH so uvicorn can import levelup2
         cog_parent = str(Path(__file__).parent.parent)
         existing_pythonpath = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = f"{cog_parent}{os.pathsep}{existing_pythonpath}" if existing_pythonpath else cog_parent
@@ -324,7 +324,7 @@ class LevelUp(
                 sys.executable,
                 "-m",
                 "uvicorn",
-                "levelup.generator.api:app",
+                "levelup2.generator.api:app",
                 "--host",
                 "127.0.0.1",
                 "--port",
