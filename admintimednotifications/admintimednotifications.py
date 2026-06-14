@@ -4,6 +4,7 @@ import asyncio
 import calendar
 import logging
 import re
+import unicodedata
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -64,6 +65,66 @@ WEEKDAY_ALIASES = {
     "sun": 6,
     "zondag": 6,
     "zo": 6,
+}
+
+MONTH_ALIASES = {
+    "january": 1,
+    "jan": 1,
+    "januari": 1,
+    "february": 2,
+    "feb": 2,
+    "februari": 2,
+    "march": 3,
+    "mar": 3,
+    "maart": 3,
+    "mrt": 3,
+    "april": 4,
+    "apr": 4,
+    "may": 5,
+    "mei": 5,
+    "june": 6,
+    "jun": 6,
+    "juni": 6,
+    "july": 7,
+    "jul": 7,
+    "juli": 7,
+    "august": 8,
+    "aug": 8,
+    "augustus": 8,
+    "september": 9,
+    "sep": 9,
+    "sept": 9,
+    "oktober": 10,
+    "october": 10,
+    "okt": 10,
+    "oct": 10,
+    "november": 11,
+    "nov": 11,
+    "december": 12,
+    "dec": 12,
+}
+
+TODAY_ALIASES = {"today", "vandaag", "nu", "now"}
+TOMORROW_ALIASES = {"tomorrow", "morgen"}
+DAY_FILLER_WORDS = {
+    "de",
+    "den",
+    "het",
+    "op",
+    "om",
+    "elke",
+    "iedere",
+    "ieder",
+    "dag",
+    "datum",
+    "van",
+    "aankomende",
+    "komende",
+    "volgende",
+    "next",
+    "on",
+    "the",
+    "every",
 }
 
 DEFAULT_GUILD = {
@@ -181,28 +242,138 @@ def _timestamp_from_local(value: datetime) -> int:
     return int(value.astimezone(timezone.utc).timestamp())
 
 
-def _date_from_text(value: str) -> Optional[date]:
-    text = (value or "").strip()
+def _normalize_day_text(value: str) -> str:
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = text.casefold()
+    text = text.replace(",", " ")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" .")
+
+
+def _tokens(value: str) -> list[str]:
+    return re.findall(r"[a-z]+|\d{1,4}", _normalize_day_text(value))
+
+
+def _without_fillers(value: str) -> str:
+    return " ".join(token for token in _tokens(value) if token not in DAY_FILLER_WORDS)
+
+
+def _parse_day_number(value: str) -> Optional[int]:
+    text = _normalize_day_text(value)
+    match = re.search(r"\b(\d{1,2})(?:e|de|ste|st|nd|rd|th)?\b", text)
+    if not match:
+        return None
+    day = int(match.group(1))
+    if not 1 <= day <= 31:
+        return None
+    return day
+
+
+def _weekday_from_text(value: str) -> Optional[int]:
+    text = _without_fillers(value)
     if not text:
         return None
-    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
-        with suppress(ValueError):
-            return datetime.strptime(text, fmt).date()
+    if text in WEEKDAY_ALIASES:
+        return WEEKDAY_ALIASES[text]
+    for token in _tokens(text):
+        if token in WEEKDAY_ALIASES:
+            return WEEKDAY_ALIASES[token]
+        if token.isdigit():
+            value_int = int(token)
+            if 1 <= value_int <= 7:
+                return value_int - 1
+            if value_int == 0:
+                return 6
+    return None
+
+
+def _relative_date_from_text(value: str, *, now: Optional[datetime] = None) -> Optional[date]:
+    text = _without_fillers(value)
+    if not text:
+        return None
+    current = _local_now(now)
+    if text in TODAY_ALIASES:
+        return current.date()
+    if text in TOMORROW_ALIASES:
+        return current.date() + timedelta(days=1)
     return None
 
 
 def _day_month_from_text(value: str) -> Optional[tuple[int, int]]:
-    text = (value or "").strip()
-    match = re.fullmatch(r"(\d{1,2})[-/](\d{1,2})", text)
-    if not match:
+    text = _without_fillers(value)
+    if not text:
         return None
-    day = int(match.group(1))
-    month = int(match.group(2))
-    if not 1 <= month <= 12:
+
+    numeric = re.fullmatch(r"(\d{1,2})[-/. ](\d{1,2})(?:[-/. ]\d{2,4})?", text)
+    if numeric:
+        day = int(numeric.group(1))
+        month = int(numeric.group(2))
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            return day, month
         return None
-    if not 1 <= day <= 31:
+
+    day_month = re.fullmatch(
+        r"(\d{1,2})(?:e|de|ste|st|nd|rd|th)?\s+([a-z]+)(?:\s+\d{2,4})?",
+        text,
+    )
+    if day_month:
+        day = int(day_month.group(1))
+        month = MONTH_ALIASES.get(day_month.group(2))
+        if month and 1 <= day <= 31:
+            return day, month
         return None
-    return day, month
+
+    month_day = re.fullmatch(
+        r"([a-z]+)\s+(\d{1,2})(?:e|de|ste|st|nd|rd|th)?(?:\s+\d{2,4})?",
+        text,
+    )
+    if month_day:
+        month = MONTH_ALIASES.get(month_day.group(1))
+        day = int(month_day.group(2))
+        if month and 1 <= day <= 31:
+            return day, month
+    return None
+
+
+def _date_from_text(value: str, *, now: Optional[datetime] = None) -> Optional[date]:
+    text = _without_fillers(value)
+    if not text:
+        return None
+    relative = _relative_date_from_text(text, now=now)
+    if relative:
+        return relative
+
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y", "%d %m %Y"):
+        with suppress(ValueError):
+            return datetime.strptime(text, fmt).date()
+
+    day_month = _day_month_from_text(text)
+    if not day_month:
+        return None
+    day, month = day_month
+    current = _local_now(now)
+    candidate = _safe_date(current.year, month, day)
+    if candidate < current.date():
+        candidate = _safe_date(current.year + 1, month, day)
+    return candidate
+
+
+def _safe_date(year: int, month: int, day: int) -> date:
+    max_day = calendar.monthrange(year, month)[1]
+    return date(year, month, min(day, max_day))
+
+
+def _date_from_weekday(value: str, *, now: datetime, hour: int, minute: int) -> Optional[datetime]:
+    weekday = _weekday_from_text(value)
+    if weekday is None:
+        return None
+    days_ahead = (weekday - now.weekday()) % 7
+    candidate_date = now.date() + timedelta(days=days_ahead)
+    candidate = datetime.combine(candidate_date, time(hour, minute), tzinfo=LOCAL_TIMEZONE)
+    if candidate <= now:
+        candidate += timedelta(days=7)
+    return candidate
 
 
 def _month_day_from_reminder(reminder: dict[str, Any], fallback: int) -> int:
@@ -210,8 +381,12 @@ def _month_day_from_reminder(reminder: dict[str, Any], fallback: int) -> int:
     full_date = _date_from_text(day_text)
     if full_date:
         return full_date.day
-    if day_text.isdigit():
-        return min(max(int(day_text), 1), 31)
+    day_month = _day_month_from_text(day_text)
+    if day_month:
+        return day_month[0]
+    day_number = _parse_day_number(day_text)
+    if day_number is not None:
+        return day_number
     return fallback
 
 
@@ -251,53 +426,60 @@ def first_scheduled_run(
     day_text = (day_text or "").strip()
 
     if recurrence == "daily":
-        explicit_date = _date_from_text(day_text)
-        target_date = explicit_date or current.date()
-        candidate = datetime.combine(target_date, time(hour, minute), tzinfo=LOCAL_TIMEZONE)
+        explicit_date = _date_from_text(day_text, now=current)
+        weekday_candidate = _date_from_weekday(day_text, now=current, hour=hour, minute=minute)
+        if weekday_candidate:
+            candidate = weekday_candidate
+        else:
+            target_date = explicit_date or current.date()
+            candidate = datetime.combine(target_date, time(hour, minute), tzinfo=LOCAL_TIMEZONE)
         if candidate <= current:
             candidate += timedelta(days=1)
         return _timestamp_from_local(candidate)
 
     if recurrence == "weekly":
-        explicit_date = _date_from_text(day_text)
+        explicit_date = _date_from_text(day_text, now=current)
         if explicit_date:
             candidate = datetime.combine(explicit_date, time(hour, minute), tzinfo=LOCAL_TIMEZONE)
             if candidate <= current:
                 candidate += timedelta(days=7)
             return _timestamp_from_local(candidate)
 
-        weekday = WEEKDAY_ALIASES.get(day_text.lower())
-        if weekday is None:
-            raise ValueError("weekly reminders need a weekday, for example Monday or maandag")
-        days_ahead = (weekday - current.weekday()) % 7
-        candidate_date = current.date() + timedelta(days=days_ahead)
-        candidate = datetime.combine(candidate_date, time(hour, minute), tzinfo=LOCAL_TIMEZONE)
-        if candidate <= current:
-            candidate += timedelta(days=7)
+        candidate = _date_from_weekday(day_text, now=current, hour=hour, minute=minute)
+        if not candidate:
+            raise ValueError(
+                "I do not recognize that weekday. Use for example `maandag`, `ma`, `Monday`, or `1`."
+            )
         return _timestamp_from_local(candidate)
 
     if recurrence == "monthly":
-        explicit_date = _date_from_text(day_text)
+        explicit_date = _date_from_text(day_text, now=current)
+        day_month = _day_month_from_text(day_text)
+        day_number = day_month[0] if day_month else _parse_day_number(day_text)
         if explicit_date:
             candidate = datetime.combine(explicit_date, time(hour, minute), tzinfo=LOCAL_TIMEZONE)
-        elif day_text.isdigit():
-            day = min(max(int(day_text), 1), 31)
-            candidate = _safe_local_datetime(current.year, current.month, day, hour, minute)
+            day_number = explicit_date.day
+        elif day_number:
+            candidate = _safe_local_datetime(current.year, current.month, day_number, hour, minute)
         else:
-            raise ValueError("monthly reminders need a day number, for example 1 or 28")
+            raise ValueError(
+                "I do not recognize that monthly day. Use for example `15`, `15e`, or `15 juni`."
+            )
         while candidate <= current:
-            candidate = _advance_monthly(candidate, int(day_text) if day_text.isdigit() else candidate.day)
+            candidate = _advance_monthly(candidate, day_number or candidate.day)
         return _timestamp_from_local(candidate)
 
     day_month = _day_month_from_text(day_text)
-    explicit_date = _date_from_text(day_text)
+    explicit_date = _date_from_text(day_text, now=current)
     if explicit_date:
         day = explicit_date.day
         month = explicit_date.month
     elif day_month:
         day, month = day_month
     else:
-        raise ValueError("yearly reminders need a date, for example 25-12")
+        raise ValueError(
+            "I do not recognize that yearly date. Use for example `25-12`, `25 december`, or `december 25`."
+        )
 
     candidate = _safe_local_datetime(current.year, month, day, hour, minute)
     while candidate <= current:
@@ -509,7 +691,7 @@ class TimerDetailsModal(discord.ui.Modal, title="Admin timer"):
         label="Day or date",
         max_length=30,
         required=False,
-        placeholder="Daily: empty. Weekly: Monday. Monthly: 15. Yearly: 25-12.",
+        placeholder="Examples: maandag, ma, 15e, 15 juni, 25-12, morgen.",
     )
     time_input = discord.ui.TextInput(
         label="Time",
@@ -530,16 +712,16 @@ class TimerDetailsModal(discord.ui.Modal, title="Admin timer"):
         self.cog = cog
         self.state = state
         if state.recurrence == "daily":
-            self.day_input.placeholder = "Optional start date, for example 2026-06-15."
+            self.day_input.placeholder = "Optional: vandaag, morgen, maandag, or 2026-06-15."
         elif state.recurrence == "weekly":
             self.day_input.required = True
-            self.day_input.placeholder = "Weekday, for example Monday or maandag."
+            self.day_input.placeholder = "Weekday: maandag, ma, Monday, mon, or 1-7."
         elif state.recurrence == "monthly":
             self.day_input.required = True
-            self.day_input.placeholder = "Day of month, for example 1, 15, or 31."
+            self.day_input.placeholder = "Day: 1, 15, 15e, de 15e, or 15 juni."
         elif state.recurrence == "yearly":
             self.day_input.required = True
-            self.day_input.placeholder = "Date, for example 25-12 or 2026-12-25."
+            self.day_input.placeholder = "Date: 25-12, 25 december, december 25, or 2026-12-25."
 
     async def on_submit(self, interaction: discord.Interaction):
         if not interaction.guild:
