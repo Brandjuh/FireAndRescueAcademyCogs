@@ -8,7 +8,30 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
-from logscraper.logs_scraper import LogsScraper
+from logscraper.logs_scraper import LogsScrapePageError, LogsScraper
+
+
+class _FakeResponse:
+    def __init__(self, html):
+        self.html = html
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        del exc_type, exc, traceback
+
+    async def text(self):
+        return self.html
+
+
+class _FakeSession:
+    def __init__(self, html):
+        self.html = html
+
+    def get(self, url):
+        del url
+        return _FakeResponse(self.html)
 
 
 class LogsScraperEventTimestampTests(unittest.TestCase):
@@ -81,6 +104,34 @@ class LogsScraperEventTimestampTests(unittest.TestCase):
         result = LogsScraper._normalize_event_timestamp("12 Jun 09:30", scraped_at, None)
 
         self.assertIsNone(result)
+
+    def test_page_one_without_log_table_is_a_scrape_failure(self):
+        scraper = LogsScraper.__new__(LogsScraper)
+        scraper.logs_url = "https://www.missionchief.com/alliance_logfiles"
+        scraper._debug_log = AsyncMock()
+        scraper._report_bot_status = AsyncMock()
+
+        with self.assertRaises(LogsScrapePageError):
+            asyncio.run(
+                scraper._scrape_logs_page(
+                    _FakeSession("<html><body>Please log in</body></html>"),
+                    1,
+                )
+            )
+
+    def test_all_logs_scrape_returns_false_when_first_page_is_not_parseable(self):
+        scraper = LogsScraper.__new__(LogsScraper)
+        scraper._get_session = AsyncMock(return_value=object())
+        scraper._scrape_logs_page = AsyncMock(
+            side_effect=LogsScrapePageError("No alliance log table found on page 1")
+        )
+        scraper._debug_log = AsyncMock()
+        ctx = types.SimpleNamespace(send=AsyncMock())
+
+        result = asyncio.run(scraper._scrape_all_logs_impl(ctx, max_pages=1))
+
+        self.assertFalse(result)
+        ctx.send.assert_awaited_once()
 
     def test_database_migration_adds_event_timestamp_column_and_index(self):
         with tempfile.TemporaryDirectory() as temp_dir:

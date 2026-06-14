@@ -420,9 +420,6 @@ class AllianceLogsPub(commands.Cog):
                 log.warning("Main channel not found or not a text channel")
                 return 0
             
-            # Use the guild from the channel
-            guild = main_ch.guild
-            
             mirrors = await self.config.mirrors()
             style = (await self.config.style()).lower()
             emoji_titles = bool(await self.config.emoji_titles())
@@ -506,6 +503,7 @@ class AllianceLogsPub(commands.Cog):
         
         total_logs = "N/A"
         pending = 0
+        pending_breakdown = []
         if scraper_available:
             try:
                 import sqlite3
@@ -516,6 +514,18 @@ class AllianceLogsPub(commands.Cog):
                 if row:
                     total_logs = f"{row[0]} (max ID: {row[1]})"
                     pending = row[1] - last_id if row[1] else 0
+                cursor.execute(
+                    """
+                    SELECT action_key, COUNT(*) AS count
+                    FROM logs
+                    WHERE id > ?
+                    GROUP BY action_key
+                    ORDER BY count DESC, action_key ASC
+                    LIMIT 8
+                    """,
+                    (last_id,),
+                )
+                pending_breakdown = cursor.fetchall()
                 conn.close()
             except Exception as e:
                 total_logs = f"Error: {e}"
@@ -532,10 +542,19 @@ class AllianceLogsPub(commands.Cog):
             f"Max posts per run: {cfg['max_posts_per_run']}",
             f"Interval: {cfg['interval_minutes']} minutes",
             f"Main channel: {cfg.get('main_channel_id')}",
-            "",
-            "Note: No posted_logs table - sequential only",
-            "```",
         ]
+        if pending_breakdown:
+            lines.extend(
+                [
+                    "",
+                    "Pending by action:",
+                    *[
+                        f"- {action_key or 'unknown'}: {count}"
+                        for action_key, count in pending_breakdown
+                    ],
+                ]
+            )
+        lines.extend(["", "Note: No posted_logs table - sequential only", "```"])
         await ctx.send("\n".join(lines))
 
     @alog_group.command(name="testfetch")

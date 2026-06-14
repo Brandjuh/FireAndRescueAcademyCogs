@@ -25,14 +25,15 @@ class ScraperStorageStatsTests(unittest.TestCase):
             connection.executemany(
                 """
                 INSERT INTO logs (
-                    hash, ts, event_timestamp, signature, occurrence_index, action_key
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    hash, ts, event_timestamp, scraped_at, signature, occurrence_index, action_key
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
                         "one",
                         "June 12, 2026 06:52",
                         "2026-06-12T10:52:00+00:00",
+                        "2026-06-12T11:00:00+00:00",
                         "same",
                         1,
                         "created_course",
@@ -41,11 +42,12 @@ class ScraperStorageStatsTests(unittest.TestCase):
                         "two",
                         "June 12, 2026 06:52",
                         "2026-06-12T10:52:00+00:00",
+                        "2026-06-12T11:05:00+00:00",
                         "same",
                         2,
                         "created_course",
                     ),
-                    ("legacy", "old value", None, None, 1, "other"),
+                    ("legacy", "old value", None, None, None, 1, "other"),
                 ],
             )
             connection.commit()
@@ -59,6 +61,7 @@ class ScraperStorageStatsTests(unittest.TestCase):
         self.assertEqual(values["Event Timestamps"], "2 / 3")
         self.assertEqual(values["Repeated Actions Preserved"], "1")
         self.assertEqual(values["Latest Event (UTC)"], "2026-06-12T10:52:00+00:00")
+        self.assertEqual(values["Latest Stored Scrape (UTC)"], "2026-06-12T11:05:00+00:00")
 
     def test_income_stats_reports_new_expense_storage_and_snapshots(self):
         with tempfile.TemporaryDirectory() as temp_dir:

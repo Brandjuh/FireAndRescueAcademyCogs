@@ -10,6 +10,11 @@ import hashlib
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, Iterable, Optional
 
+
+class LogsScrapePageError(RuntimeError):
+    """Raised when a required MissionChief logs page cannot be parsed."""
+
+
 class LogsScraper(commands.Cog):
     """Scrapes alliance logs from MissionChief with complete data extraction"""
     
@@ -314,7 +319,7 @@ class LogsScraper(commands.Cog):
                 await self._debug_log("❌ Background scrape task cancelled")
                 break
             except Exception as e:
-                await self._debug_log(f"❌ Background scrape error: {e}")
+                await self._debug_log(f"Background scrape error: {e}")
                 await asyncio.sleep(300)  # Wait 5 min on error
     
     async def _debug_log(self, message, ctx=None):
@@ -356,11 +361,21 @@ class LogsScraper(commands.Cog):
                 table = soup.find('table', class_='table')
                 if not table:
                     await self._debug_log(f"⚠️ No table found on page {page_num}", ctx)
+                    if page_num == 1:
+                        raise LogsScrapePageError(
+                            "No alliance log table found on page 1; "
+                            "the MissionChief session may be logged out or the page layout changed"
+                        )
                     return []
                 
                 tbody = table.find('tbody')
                 if not tbody:
                     await self._debug_log(f"⚠️ No tbody found on page {page_num}", ctx)
+                    if page_num == 1:
+                        raise LogsScrapePageError(
+                            "No alliance log rows found on page 1; "
+                            "the MissionChief session may be logged out or the page layout changed"
+                        )
                     return []
                 
                 rows = tbody.find_all('tr')
@@ -537,6 +552,8 @@ class LogsScraper(commands.Cog):
                 return logs
                 
         except Exception as e:
+            if isinstance(e, LogsScrapePageError):
+                raise
             await self._debug_log(f"❌ Page {page_num} error: {e}", ctx)
             return []
     
@@ -554,15 +571,21 @@ class LogsScraper(commands.Cog):
         await self._debug_log(f"🔄 Starting logs scrape (max {max_pages} pages)", ctx)
         
         all_logs = []
-        for page in range(1, max_pages + 1):
-            logs = await self._scrape_logs_page(session, page, ctx)
-            all_logs.extend(logs)
-            
-            # Progress update every 10 pages
-            if page % 10 == 0:
-                await self._debug_log(f"📊 Progress: {page}/{max_pages} pages, {len(all_logs)} logs collected", ctx)
-            
-            await asyncio.sleep(1.5)  # Rate limiting
+        try:
+            for page in range(1, max_pages + 1):
+                logs = await self._scrape_logs_page(session, page, ctx)
+                all_logs.extend(logs)
+
+                # Progress update every 10 pages
+                if page % 10 == 0:
+                    await self._debug_log(f"Progress: {page}/{max_pages} pages, {len(all_logs)} logs collected", ctx)
+
+                await asyncio.sleep(1.5)  # Rate limiting
+        except LogsScrapePageError as exc:
+            await self._debug_log(f"Logs scrape failed: {exc}", ctx)
+            if ctx:
+                await ctx.send(f"Logs scrape failed: {exc}")
+            return False
 
         self._assign_occurrence_hashes(all_logs)
         
@@ -725,6 +748,9 @@ class LogsScraper(commands.Cog):
 
         cursor.execute("SELECT MAX(event_timestamp) FROM logs")
         latest_event_timestamp = cursor.fetchone()[0]
+
+        cursor.execute("SELECT MAX(scraped_at) FROM logs")
+        latest_scraped_at = cursor.fetchone()[0]
         
         conn.close()
         
@@ -745,6 +771,11 @@ class LogsScraper(commands.Cog):
         embed.add_field(
             name="Latest Event (UTC)",
             value=latest_event_timestamp or "None",
+            inline=False,
+        )
+        embed.add_field(
+            name="Latest Stored Scrape (UTC)",
+            value=latest_scraped_at or "None",
             inline=False,
         )
         embed.add_field(
