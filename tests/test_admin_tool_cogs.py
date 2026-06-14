@@ -142,7 +142,7 @@ def test_admin_timer_due_split_and_next_run():
 def test_admin_timer_recurring_schedule_helpers():
     now = datetime(2026, 6, 13, 10, 0, tzinfo=LOCAL_TIMEZONE)
 
-    weekly_ts = first_scheduled_run("weekly", "maandag", "09:30", now=now)
+    weekly_ts = first_scheduled_run("weekly", "Elke MA.", "09:30", now=now)
     weekly_dt = datetime.fromtimestamp(weekly_ts, tz=LOCAL_TIMEZONE)
     assert (weekly_dt.year, weekly_dt.month, weekly_dt.day, weekly_dt.hour, weekly_dt.minute) == (
         2026,
@@ -151,15 +151,50 @@ def test_admin_timer_recurring_schedule_helpers():
         9,
         30,
     )
+    numeric_weekday_ts = first_scheduled_run("weekly", "2", "09:30", now=now)
+    numeric_weekday_dt = datetime.fromtimestamp(numeric_weekday_ts, tz=LOCAL_TIMEZONE)
+    assert (
+        numeric_weekday_dt.year,
+        numeric_weekday_dt.month,
+        numeric_weekday_dt.day,
+        numeric_weekday_dt.hour,
+    ) == (2026, 6, 16, 9)
+
+    tomorrow_ts = first_scheduled_run("daily", "morgen", "08:00", now=now)
+    tomorrow_dt = datetime.fromtimestamp(tomorrow_ts, tz=LOCAL_TIMEZONE)
+    assert (tomorrow_dt.year, tomorrow_dt.month, tomorrow_dt.day, tomorrow_dt.hour) == (
+        2026,
+        6,
+        14,
+        8,
+    )
 
     monthly_now = datetime(2026, 2, 1, 10, 0, tzinfo=LOCAL_TIMEZONE)
     monthly_ts = first_scheduled_run("monthly", "31", "08:00", now=monthly_now)
     monthly_dt = datetime.fromtimestamp(monthly_ts, tz=LOCAL_TIMEZONE)
     assert (monthly_dt.year, monthly_dt.month, monthly_dt.day, monthly_dt.hour) == (2026, 2, 28, 8)
 
+    monthly_ordinal_ts = first_scheduled_run("monthly", "de 15e", "08:00", now=monthly_now)
+    monthly_ordinal_dt = datetime.fromtimestamp(monthly_ordinal_ts, tz=LOCAL_TIMEZONE)
+    assert (monthly_ordinal_dt.year, monthly_ordinal_dt.month, monthly_ordinal_dt.day) == (
+        2026,
+        2,
+        15,
+    )
+
+    monthly_name_now = datetime(2026, 6, 14, 10, 0, tzinfo=LOCAL_TIMEZONE)
+    monthly_name_ts = first_scheduled_run("monthly", "15 juni", "08:00", now=monthly_name_now)
+    monthly_name_dt = datetime.fromtimestamp(monthly_name_ts, tz=LOCAL_TIMEZONE)
+    assert (monthly_name_dt.year, monthly_name_dt.month, monthly_name_dt.day, monthly_name_dt.hour) == (
+        2026,
+        6,
+        15,
+        8,
+    )
+
     reminder = {
         "recurrence": "monthly",
-        "day": "31",
+        "day": "31e",
         "time": "08:00",
         "next_run": monthly_ts,
     }
@@ -171,6 +206,15 @@ def test_admin_timer_recurring_schedule_helpers():
         31,
         8,
     )
+
+    yearly_ts = first_scheduled_run("yearly", "25 december", "12:00", now=now)
+    yearly_dt = datetime.fromtimestamp(yearly_ts, tz=LOCAL_TIMEZONE)
+    assert (yearly_dt.year, yearly_dt.month, yearly_dt.day, yearly_dt.hour) == (2026, 12, 25, 12)
+    yearly_reversed_ts = first_scheduled_run("yearly", "december 25", "12:00", now=now)
+    assert yearly_reversed_ts == yearly_ts
+
+    with pytest.raises(ValueError):
+        first_scheduled_run("monthly", "feestdag", "08:00", now=monthly_now)
 
 
 def test_admin_timer_due_split_includes_snoozed_reminders():
