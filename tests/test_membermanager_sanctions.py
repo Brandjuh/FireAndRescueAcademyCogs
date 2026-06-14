@@ -492,6 +492,44 @@ class MemberManagerSanctionsTests(unittest.TestCase):
 
         self.assertEqual(fields["Admin"], "DutchFireFighter")
 
+    def test_sanction_summary_history_button_sends_private_history(self):
+        module = load_sanction_manager_module()
+        history_embed = module.discord.Embed(title="Sanction History - CrashTestDummy")
+
+        class FakeCog:
+            def build_member_sanction_history_embed(self, **kwargs):
+                self.call = kwargs
+                return history_embed
+
+        cog = FakeCog()
+        view = module.SummarySanctionView(
+            cog,
+            admin_user_id=999,
+            admin_username="Admin",
+            target_discord_id=None,
+            target_mc_id="456",
+            target_mc_username="CrashTestDummy",
+            target_discord_user=None,
+            sanction_type="Warning - Verbal warning",
+            reason_category="Contribution",
+            reason_detail="Low contribution",
+        )
+        guild = types.SimpleNamespace(id=1)
+        interaction = types.SimpleNamespace(
+            guild=guild,
+            response=types.SimpleNamespace(send_message=AsyncMock()),
+        )
+
+        asyncio.run(view.view_history(interaction, None))
+
+        interaction.response.send_message.assert_awaited_once_with(
+            embed=history_embed,
+            ephemeral=True,
+        )
+        self.assertEqual(cog.call["guild"], guild)
+        self.assertEqual(cog.call["mc_user_id"], "456")
+        self.assertEqual(cog.call["mc_username"], "CrashTestDummy")
+
     def test_sanction_stats_contract_defines_status_and_staff_activity_counts(self):
         SanctionsDatabase = load_sanctions_database_class()
         SanctionsManager = load_sanctions_manager_class()
@@ -1595,6 +1633,39 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         )
 
         self.assertEqual(display, "DutchFireFighter")
+
+    def test_sanction_manager_builds_member_history_embed(self):
+        SanctionsManager = load_sanctions_manager_class()
+
+        class FakeDB:
+            def get_user_sanctions(self, guild_id, discord_user_id=None, mc_user_id=None):
+                self.call = (guild_id, discord_user_id, mc_user_id)
+                return [
+                    {
+                        "sanction_id": 12,
+                        "status": "active",
+                        "sanction_type": "Warning - Verbal warning",
+                        "reason_detail": "Low contribution",
+                        "admin_username": "DutchFireFighter",
+                        "created_at": 1_800_000_000,
+                    }
+                ]
+
+        manager = SanctionsManager.__new__(SanctionsManager)
+        manager.db = FakeDB()
+        guild = types.SimpleNamespace(id=1)
+
+        embed = manager.build_member_sanction_history_embed(
+            guild=guild,
+            mc_user_id="456",
+            mc_username="CrashTestDummy",
+        )
+
+        self.assertEqual(embed.kwargs["title"], "Sanction History - CrashTestDummy")
+        self.assertEqual(manager.db.call, (1, None, "456"))
+        self.assertEqual(len(embed.fields), 1)
+        self.assertIn("Warning - Verbal warning", embed.fields[0]["value"])
+        self.assertIn("DutchFireFighter", embed.fields[0]["value"])
 
     def test_sanction_target_search_enriches_missionchief_member_with_discord_link(self):
         SanctionsManager = load_sanctions_manager_class()

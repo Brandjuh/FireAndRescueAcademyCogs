@@ -1862,6 +1862,21 @@ class SummarySanctionView(discord.ui.View):
         modal = AdditionalNotesModal(self)
         await interaction.response.send_modal(modal)
 
+    @discord.ui.button(label="View History", style=discord.ButtonStyle.primary, custom_id="sm:view_history")
+    async def view_history(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.guild:
+            await interaction.response.send_message("This must be used in a server.", ephemeral=True)
+            return
+
+        embed = self.cog.build_member_sanction_history_embed(
+            guild=interaction.guild,
+            discord_user_id=self.target_discord_id,
+            mc_user_id=self.target_mc_id,
+            mc_username=self.target_mc_username,
+            target_discord_user=self.target_discord_user,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     @discord.ui.button(label="Submit Sanction", style=discord.ButtonStyle.danger, custom_id="sm:submit")
     async def submit(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
@@ -2056,7 +2071,8 @@ class AdditionalNotesModal(discord.ui.Modal, title="Additional Admin Notes"):
 
     async def on_submit(self, interaction: discord.Interaction):
         self.parent.additional_notes = str(self.notes)
-        embed = self.parent._create_embed()
+        guild_id = interaction.guild.id if interaction.guild else 0
+        embed = self.parent._create_embed(guild_id=guild_id)
         await safe_update(
             interaction,
             content="⚠️ Review the sanction before submitting:",
@@ -2420,6 +2436,68 @@ class SanctionsManager(commands.Cog):
     def get_sanction_by_id(self, sanction_id: int) -> Optional[dict]:
         """Public contract for other cogs to read one sanction by ID."""
         return self.db.get_sanction(sanction_id)
+
+    def build_member_sanction_history_embed(
+        self,
+        *,
+        guild: discord.Guild,
+        discord_user_id: Optional[int] = None,
+        mc_user_id: Optional[str] = None,
+        mc_username: Optional[str] = None,
+        target_discord_user: Optional[discord.Member] = None,
+        limit: int = 10,
+    ) -> discord.Embed:
+        """Build a compact sanction history embed for a member."""
+        sanctions = self.db.get_user_sanctions(
+            guild.id,
+            discord_user_id,
+            mc_user_id,
+        )
+        display_name = mc_username or (
+            target_discord_user.display_name if target_discord_user else None
+        )
+        if not display_name and mc_user_id:
+            display_name = f"MC ID {mc_user_id}"
+        if not display_name:
+            display_name = "Unknown member"
+
+        embed = discord.Embed(
+            title=f"Sanction History - {display_name}",
+            color=discord.Color.blue(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        if target_discord_user:
+            embed.set_author(
+                name=target_discord_user.display_name,
+                icon_url=target_discord_user.display_avatar.url,
+            )
+
+        if not sanctions:
+            embed.description = "No sanctions found for this member."
+            return embed
+
+        for sanction in sanctions[:limit]:
+            status = sanction.get("status") or "unknown"
+            status_emoji = "🔴" if status == "active" else "⚫"
+            reason = sanction.get("reason_detail") or "No reason stored"
+            created_at = sanction.get("created_at")
+            date_text = fmt_dt(int(created_at)) if created_at else "Unknown"
+            value = (
+                f"**Type**: {sanction.get('sanction_type')}\n"
+                f"**Reason**: {reason[:160]}\n"
+                f"**Admin**: {sanction.get('admin_username') or 'Unknown'}\n"
+                f"**Date**: {date_text}"
+            )
+            embed.add_field(
+                name=f"{status_emoji} ID: {sanction.get('sanction_id')} ({status})",
+                value=value,
+                inline=False,
+            )
+
+        if len(sanctions) > limit:
+            embed.set_footer(text=f"Showing {limit} of {len(sanctions)} sanctions")
+
+        return embed
 
     async def _get_alliance_members_for_lookup(self) -> List[Dict[str, Any]]:
         """Read alliance members through public cog contracts."""
