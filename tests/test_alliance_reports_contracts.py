@@ -496,9 +496,9 @@ class AllianceReportContractTests(unittest.TestCase):
         embed = EmbedFormatter.create_daily_member_embed(data)
         output = "\n".join(field["value"] for field in embed.fields)
 
-        self.assertIn("Join logs recorded:** 2", output)
+        self.assertIn("Join logs recorded: 2", output)
         self.assertNotIn("(+1)", output)
-        self.assertIn("Courses started:** 3", output)
+        self.assertIn("Courses started: 3", output)
         self.assertNotIn("ACTIVITY SCORE", output.upper())
         self.assertNotIn("vs yesterday", output)
 
@@ -512,9 +512,10 @@ class AllianceReportContractTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            embed.kwargs["description"],
-            "Reporting date: **Saturday, June 13, 2026** (America/New_York)",
+            embed.kwargs["title"],
+            "PUBLIC REPORT: Saturday, June 13, 2026 (America/New_York)",
         )
+        self.assertNotIn("description", embed.kwargs)
 
     def test_daily_member_generate_uses_configured_timezone_for_header(self):
         import asyncio
@@ -527,8 +528,9 @@ class AllianceReportContractTests(unittest.TestCase):
 
         embed = asyncio.run(report.generate())
 
-        self.assertIn("Reporting date: **", embed.kwargs["description"])
-        self.assertIn("(America/New_York)", embed.kwargs["description"])
+        self.assertIn("PUBLIC REPORT:", embed.kwargs["title"])
+        self.assertIn("(America/New_York)", embed.kwargs["title"])
+        self.assertNotIn("description", embed.kwargs)
 
     def test_daily_admin_report_header_shows_explicit_reporting_date(self):
         import asyncio
@@ -549,8 +551,9 @@ class AllianceReportContractTests(unittest.TestCase):
 
         embed = asyncio.run(report.generate())
 
-        self.assertIn("Reporting date: **", embed.kwargs["description"])
-        self.assertIn("(America/New_York)", embed.kwargs["description"])
+        self.assertIn("ADMIN REPORT:", embed.kwargs["title"])
+        self.assertIn("(America/New_York)", embed.kwargs["title"])
+        self.assertNotIn("description", embed.kwargs)
 
     def test_daily_admin_output_omits_unmeasured_claims(self):
         report = DailyAdminReport.__new__(DailyAdminReport)
@@ -612,6 +615,62 @@ class AllianceReportContractTests(unittest.TestCase):
         ):
             self.assertNotIn(unsupported, output)
 
+    def test_daily_admin_output_hides_zero_lines_and_empty_sections(self):
+        report = DailyAdminReport.__new__(DailyAdminReport)
+        data = {
+            "membership": {
+                "total_members": 988,
+                "new_joins_24h": 0,
+                "left_24h": 0,
+                "kicked_24h": 1,
+                "verifications_approved_24h": 0,
+                "verifications_pending": 0,
+            },
+            "training": {"started_24h": 0, "completed_24h": 6},
+            "buildings": {
+                "processed_24h": 0,
+                "approved_24h": 0,
+                "denied_24h": 0,
+                "pending": 0,
+                "extensions_started_24h": 0,
+                "extensions_completed_24h": 50,
+            },
+            "operations": {
+                "large_missions_started_24h": 0,
+                "alliance_events_started_24h": 0,
+            },
+            "sanctions": {"issued_24h": 0, "active_warnings": 0},
+            "admin_activity": {
+                "building_reviews_24h": 0,
+                "sanctions_24h": 0,
+                "most_active_admin": "N/A",
+                "most_active_admin_count": 0,
+            },
+        }
+
+        import discord
+
+        embed = discord.Embed()
+        report._add_membership(embed, data["membership"])
+        report._add_training(embed, data["training"])
+        report._add_buildings(embed, data["buildings"])
+        report._add_operations(embed, data["operations"])
+        report._add_sanctions(embed, data["sanctions"])
+        report._add_admin_activity(embed, data["admin_activity"])
+        output = "\n".join(field["name"] + "\n" + field["value"] for field in embed.fields)
+
+        self.assertIn("Current members: 988", output)
+        self.assertIn("Kicked: 1", output)
+        self.assertIn("Courses completed: 6", output)
+        self.assertIn("Extensions completed: 50", output)
+        self.assertNotIn("Join logs recorded", output)
+        self.assertNotIn("Courses started", output)
+        self.assertNotIn("Requests processed", output)
+        self.assertNotIn("Operations", output)
+        self.assertNotIn("Sanctions", output)
+        self.assertNotIn("Recorded Admin Activity", output)
+        self.assertNotIn(": 0", output)
+
     def test_monthly_outputs_skip_failed_sources_and_fabricated_sections(self):
         from datetime import datetime
 
@@ -627,11 +686,10 @@ class AllianceReportContractTests(unittest.TestCase):
 
         admin_embed = MonthlyAdminReport._create_overview(data, "May 2026", now, "Europe/Amsterdam")
         member_embed = MonthlyMemberReport._create_overview(data, "May 2026", now, "Europe/Amsterdam")
-        self.assertEqual(admin_embed.kwargs["description"], "Reporting month: **May 2026**")
-        self.assertEqual(
-            member_embed.kwargs["description"],
-            "Monthly briefing\nReporting month: **May 2026**",
-        )
+        self.assertEqual(admin_embed.kwargs["title"], "ADMIN REPORT: May 2026")
+        self.assertEqual(member_embed.kwargs["title"], "PUBLIC REPORT: May 2026")
+        self.assertNotIn("description", admin_embed.kwargs)
+        self.assertNotIn("description", member_embed.kwargs)
         admin_output = "\n".join(
             [field["name"] + "\n" + field["value"] for field in admin_embed.fields]
         )

@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import discord
 
 from ..data_aggregator import DataAggregator
+from ..report_formatting import add_section, count_line, report_title, text_line
 
 log = logging.getLogger("red.FARA.AllianceReports.DailyAdmin")
 
@@ -29,8 +30,7 @@ class DailyAdminReport:
                 return None
 
             embed = discord.Embed(
-                title="🛡️ ADMIN DAILY REPORT",
-                description=f"Reporting date: **{now.strftime('%A, %B %d, %Y')}** ({tz_str})",
+                title=report_title("ADMIN", f"{now.strftime('%A, %B %d, %Y')} ({tz_str})"),
                 color=discord.Color.dark_blue(),
                 timestamp=now,
             )
@@ -42,9 +42,9 @@ class DailyAdminReport:
                 ("sanctions", self._add_sanctions),
                 ("admin_activity", self._add_admin_activity),
             )
-            for section_name, add_section in sections:
+            for section_name, add_report_section in sections:
                 if "error" not in data.get(section_name, {}):
-                    add_section(embed, data[section_name])
+                    add_report_section(embed, data[section_name])
 
             embed.set_footer(text=f"Report generated: {now.strftime('%H:%M')} {tz_str}")
             return embed
@@ -54,81 +54,82 @@ class DailyAdminReport:
 
     @staticmethod
     def _add_membership(embed: discord.Embed, data: Dict) -> None:
-        joined = data.get("new_joins_24h", 0)
-        left = data.get("left_24h", 0)
-        kicked = data.get("kicked_24h", 0)
-        embed.add_field(
+        add_section(
+            embed,
             name="👥 Membership - Current Reporting Window",
-            value=(
-                f"• Current members: {data.get('total_members', 0)}\n"
-                f"• Join logs recorded: {joined}\n"
-                f"• Leave logs recorded: {left}\n"
-                f"• Kicked: {kicked}\n"
-                f"• Verifications approved: {data.get('verifications_approved_24h', 0)}\n"
-                f"• Verifications pending: {data.get('verifications_pending', 0)}"
+            lines=(
+                count_line("Current members", data.get("total_members", 0)),
+                count_line("Join logs recorded", data.get("new_joins_24h", 0)),
+                count_line("Leave logs recorded", data.get("left_24h", 0)),
+                count_line("Kicked", data.get("kicked_24h", 0)),
+                count_line("Verifications approved", data.get("verifications_approved_24h", 0)),
+                count_line("Verifications pending", data.get("verifications_pending", 0)),
             ),
-            inline=False,
         )
 
     @staticmethod
     def _add_training(embed: discord.Embed, data: Dict) -> None:
-        embed.add_field(
+        add_section(
+            embed,
             name="🎓 Training - Current Reporting Window",
-            value=(
-                f"• Courses started: {data.get('started_24h', 0)}\n"
-                f"• Courses completed: {data.get('completed_24h', 0)}"
+            lines=(
+                count_line("Courses started", data.get("started_24h", 0)),
+                count_line("Courses completed", data.get("completed_24h", 0)),
             ),
-            inline=False,
         )
 
     @staticmethod
     def _add_buildings(embed: discord.Embed, data: Dict) -> None:
-        embed.add_field(
+        add_section(
+            embed,
             name="🏗️ Buildings - Current Reporting Window",
-            value=(
-                f"• Requests processed: {data.get('processed_24h', 0)}\n"
-                f"• Requests approved: {data.get('approved_24h', 0)}\n"
-                f"• Requests denied: {data.get('denied_24h', 0)}\n"
-                f"• Requests pending: {data.get('pending', 0)}\n"
-                f"• Extensions started: {data.get('extensions_started_24h', 0)}\n"
-                f"• Extensions completed: {data.get('extensions_completed_24h', 0)}"
+            lines=(
+                count_line("Requests processed", data.get("processed_24h", 0)),
+                count_line("Requests approved", data.get("approved_24h", 0)),
+                count_line("Requests denied", data.get("denied_24h", 0)),
+                count_line("Requests pending", data.get("pending", 0)),
+                count_line("Extensions started", data.get("extensions_started_24h", 0)),
+                count_line("Extensions completed", data.get("extensions_completed_24h", 0)),
             ),
-            inline=False,
         )
 
     @staticmethod
     def _add_operations(embed: discord.Embed, data: Dict) -> None:
-        embed.add_field(
+        add_section(
+            embed,
             name="🎯 Operations - Current Reporting Window",
-            value=(
-                f"• Large missions started: {data.get('large_missions_started_24h', 0)}\n"
-                f"• Alliance events started: {data.get('alliance_events_started_24h', 0)}"
+            lines=(
+                count_line("Large missions started", data.get("large_missions_started_24h", 0)),
+                count_line("Alliance events started", data.get("alliance_events_started_24h", 0)),
             ),
-            inline=False,
         )
 
     @staticmethod
     def _add_sanctions(embed: discord.Embed, data: Dict) -> None:
-        embed.add_field(
+        add_section(
+            embed,
             name="⚖️ Sanctions - Current Reporting Window",
-            value=(
-                f"• Sanctions issued: {data.get('issued_24h', 0)}\n"
-                f"• Active warnings: {data.get('active_warnings', 0)}"
+            lines=(
+                count_line("Sanctions issued", data.get("issued_24h", 0)),
+                count_line("Active warnings", data.get("active_warnings", 0)),
             ),
-            inline=False,
         )
 
     @staticmethod
     def _add_admin_activity(embed: discord.Embed, data: Dict) -> None:
-        embed.add_field(
+        reviewer_count = data.get("most_active_admin_count", 0)
+        add_section(
+            embed,
             name="📋 Recorded Admin Activity - Current Reporting Window",
-            value=(
-                f"• Building reviews: {data.get('building_reviews_24h', 0)}\n"
-                f"• Sanctions issued: {data.get('sanctions_24h', 0)}\n"
-                f"• Most active building reviewer: {data.get('most_active_admin', 'N/A')} "
-                f"({data.get('most_active_admin_count', 0)} reviews)"
+            lines=(
+                count_line("Building reviews", data.get("building_reviews_24h", 0)),
+                count_line("Sanctions issued", data.get("sanctions_24h", 0)),
+                text_line(
+                    "Most active building reviewer",
+                    f"{data.get('most_active_admin', 'N/A')} ({reviewer_count} reviews)",
+                    show=bool(reviewer_count),
+                ),
             ),
-            inline=False,
         )
 
     async def post(self, channel: discord.TextChannel) -> bool:
