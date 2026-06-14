@@ -18,6 +18,9 @@ log = logging.getLogger("red.cog.sanctions_manager")
 WARNING_EXPIRY_SECONDS = 30 * 86400
 DEFAULT_PANEL_CHANNEL_ID = 1426226521231589507
 DEFAULT_REVIEW_CHANNEL_ID = 1421625293130567690
+GAME_LOG_DUPLICATE_LOOKBACK_SECONDS = 6 * 3600
+GAME_LOG_DUPLICATE_EVENT_GRACE_SECONDS = 30 * 60
+GAME_LOG_DUPLICATE_FUTURE_GRACE_SECONDS = 5 * 60
 
 GAME_LOG_SANCTION_ACTIONS = {
     "kicked_from_alliance": {
@@ -329,6 +332,56 @@ class SanctionsDatabase:
         conn.close()
         
         return results
+
+    def find_matching_sanction(
+        self,
+        *,
+        guild_id: int,
+        sanction_type: str,
+        discord_user_id: Optional[int] = None,
+        mc_user_id: Optional[str] = None,
+        created_after: Optional[int] = None,
+        created_before: Optional[int] = None,
+    ) -> Optional[dict]:
+        """Return a matching non-removed sanction for duplicate prevention."""
+        if not discord_user_id and not mc_user_id:
+            return None
+
+        where_parts = ["guild_id = ?", "sanction_type = ?", "status != 'removed'"]
+        params: List[Any] = [guild_id, sanction_type]
+
+        identity_parts = []
+        if discord_user_id:
+            identity_parts.append("discord_user_id = ?")
+            params.append(discord_user_id)
+        if mc_user_id:
+            identity_parts.append("mc_user_id = ?")
+            params.append(str(mc_user_id))
+        where_parts.append("(" + " OR ".join(identity_parts) + ")")
+
+        if created_after is not None:
+            where_parts.append("created_at >= ?")
+            params.append(int(created_after))
+        if created_before is not None:
+            where_parts.append("created_at <= ?")
+            params.append(int(created_before))
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT *
+            FROM sanctions
+            WHERE {" AND ".join(where_parts)}
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            params,
+        )
+        result = cursor.fetchone()
+        conn.close()
+        return dict(result) if result else None
 
     @staticmethod
     def effective_status(sanction: dict, now: Optional[int] = None) -> str:
@@ -2306,6 +2359,7 @@ class SanctionsManager(commands.Cog):
 
     async def _get_alliance_members_for_lookup(self) -> List[Dict[str, Any]]:
         """Read alliance members through public cog contracts."""
+        members_by_id: Dict[str, Dict[str, Any]] = {}
         for cog_name in ("MembersScraper", "AllianceScraper"):
             cog = self.bot.get_cog(cog_name)
             get_members = getattr(cog, "get_members", None) if cog else None
@@ -2316,9 +2370,62 @@ class SanctionsManager(commands.Cog):
             except Exception as exc:
                 log.error("Failed to read members from %s: %s", cog_name, exc, exc_info=True)
                 continue
-            if members:
-                return list(members)
-        return []
+            for member in members or []:
+                mc_id = self._extract_missionchief_member_id(member)
+                if not mc_id:
+                    continue
+                members_by_id.setdefault(str(mc_id), dict(member))
+        return list(members_by_id.values())
+
+    def _extract_missionchief_member_id(self, member: Dict[str, Any]) -> Optional[str]:
+        """Return the MissionChief user ID from known scraper contract fields."""
+        mc_id = (
+            member.get("user_id")
+            or member.get("mc_user_id")
+            or member.get("member_id")
+            or member.get("id")
+        )
+        return str(mc_id) if mc_id is not None and str(mc_id).strip() else None
+
+    def _missionchief_member_name_candidates(self, member: Dict[str, Any]) -> List[str]:
+        """Return known MissionChief username fields from scraper contracts."""
+        return [
+            str(name).strip()
+            for name in (
+                member.get("name"),
+                member.get("username"),
+                member.get("mc_username"),
+                member.get("user_name"),
+                member.get("member_name"),
+                member.get("display_name"),
+            )
+            if str(name or "").strip()
+        ]
+
+    def _score_missionchief_member(
+        self,
+        member: Dict[str, Any],
+        query: str,
+    ) -> tuple[str, Optional[str], float]:
+        """Return display name, MC ID, and fuzzy match score for one MC member."""
+        query_clean = query.strip()
+        query_lower = query_clean.lower()
+        mc_id = self._extract_missionchief_member_id(member)
+        names = self._missionchief_member_name_candidates(member)
+        mc_name = names[0] if names else f"MissionChief member {mc_id}"
+        score = max((_fuzzy_match_score(query_lower, name) for name in names), default=0.0)
+
+        if mc_id and query_clean.isdigit():
+            if query_clean == mc_id:
+                score = 1.0
+            elif query_clean in mc_id:
+                score = max(score, 0.9)
+        elif any(name.lower() == query_lower for name in names):
+            score = 1.0
+        elif any(query_lower in name.lower() for name in names):
+            score = max(score, 0.9)
+
+        return mc_name, mc_id, score
 
     def find_sanction_reason_matches(
         self,
@@ -2488,36 +2595,8 @@ class SanctionsManager(commands.Cog):
 
         alliance_members = await self._get_alliance_members_for_lookup()
         for mc_member in alliance_members:
-            name_candidates = [
-                mc_member.get("name"),
-                mc_member.get("username"),
-                mc_member.get("mc_username"),
-                mc_member.get("user_name"),
-                mc_member.get("member_name"),
-                mc_member.get("display_name"),
-            ]
-            mc_name = next((str(name).strip() for name in name_candidates if str(name or "").strip()), "")
-            mc_id = (
-                mc_member.get("user_id")
-                or mc_member.get("mc_user_id")
-                or mc_member.get("member_id")
-                or mc_member.get("id")
-            )
-            if not mc_id:
-                continue
-
-            mc_id = str(mc_id)
-            score = max(_fuzzy_match_score(query_lower, str(name or "")) for name in name_candidates)
-            if query_clean.isdigit() and query_clean == mc_id:
-                score = 1.0
-            elif query_clean.isdigit() and query_clean in mc_id:
-                score = max(score, 0.9)
-            elif mc_name.lower() == query_lower:
-                score = 1.0
-            elif query_lower in mc_name.lower():
-                score = max(score, 0.85)
-
-            if score < threshold:
+            mc_name, mc_id, score = self._score_missionchief_member(mc_member, query_clean)
+            if not mc_id or score < threshold:
                 continue
 
             discord_id = None
@@ -2867,6 +2946,56 @@ class SanctionsManager(commands.Cog):
             )
             self.db.update_game_log_review(row["id"], review_message_id=message.id)
 
+    def _parse_game_log_event_timestamp(self, row: dict) -> Optional[int]:
+        """Return a Unix timestamp from a LogsScraper event timestamp when available."""
+        event_timestamp = row.get("event_timestamp")
+        if not event_timestamp:
+            return None
+
+        try:
+            parsed = datetime.fromisoformat(str(event_timestamp).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return int(parsed.timestamp())
+
+    def _game_log_duplicate_window(self, row: dict) -> tuple[int, int]:
+        """Return the created_at range used to detect manual sanctions for a log row."""
+        now_ts = ts()
+        event_ts = self._parse_game_log_event_timestamp(row)
+        if event_ts:
+            return (
+                event_ts - GAME_LOG_DUPLICATE_EVENT_GRACE_SECONDS,
+                now_ts + GAME_LOG_DUPLICATE_FUTURE_GRACE_SECONDS,
+            )
+
+        return (
+            now_ts - GAME_LOG_DUPLICATE_LOOKBACK_SECONDS,
+            now_ts + GAME_LOG_DUPLICATE_FUTURE_GRACE_SECONDS,
+        )
+
+    def _find_existing_game_log_sanction(
+        self,
+        *,
+        guild_id: int,
+        row: dict,
+        action: dict,
+        discord_user_id: Optional[int],
+    ) -> Optional[dict]:
+        """Find a manually recorded sanction that already covers a game-log action."""
+        mc_user_id = str(row.get("affected_mc_id")) if row.get("affected_mc_id") else None
+        created_after, created_before = self._game_log_duplicate_window(row)
+        return self.db.find_matching_sanction(
+            guild_id=guild_id,
+            discord_user_id=discord_user_id,
+            mc_user_id=mc_user_id,
+            sanction_type=action["sanction_type"],
+            created_after=created_after,
+            created_before=created_before,
+        )
+
     async def _process_game_log_review_rows(self, guild: discord.Guild, rows: List[dict]) -> dict:
         """Process already-fetched MissionChief log rows into review sanctions."""
         if not rows:
@@ -2890,6 +3019,23 @@ class SanctionsManager(commands.Cog):
             mc_user_id = str(row.get("affected_mc_id")) if row.get("affected_mc_id") else None
             mc_username = row.get("affected_name")
             discord_user_id = await self._find_discord_id_for_mc(mc_user_id)
+            existing_sanction = self._find_existing_game_log_sanction(
+                guild_id=guild.id,
+                row=row,
+                action=action,
+                discord_user_id=discord_user_id,
+            )
+            if existing_sanction:
+                self.db.add_game_log_review(
+                    log_id=log_id,
+                    guild_id=guild.id,
+                    sanction_id=existing_sanction.get("sanction_id"),
+                    action_key=row.get("action_key") or "unknown",
+                    review_status="already_recorded",
+                )
+                skipped += 1
+                continue
+
             executor = row.get("executed_name") or "MissionChief Log"
             executor_mc_id = row.get("executed_mc_id") or "unknown"
             notes = (
