@@ -1784,9 +1784,14 @@ class SummarySanctionView(discord.ui.View):
         self.reason_category = reason_category
         self.reason_detail = reason_detail
         self.additional_notes = additional_notes
+        self.admin_display_name = admin_username
 
     async def send_summary(self, interaction: discord.Interaction):
         guild_id = interaction.guild.id if interaction.guild else 0
+        self.admin_display_name = await self.cog.get_mc_display_name_for_discord(
+            self.admin_user_id,
+            fallback=self.admin_username,
+        )
         embed = self._create_embed(guild_id=guild_id)
         await safe_update(
             interaction,
@@ -1812,7 +1817,7 @@ class SummarySanctionView(discord.ui.View):
             member_info += f"**Discord**: No Discord found\n"
         
         embed.add_field(name="Member", value=member_info, inline=False)
-        embed.add_field(name="Admin", value=self.admin_username, inline=True)
+        embed.add_field(name="Admin", value=self.admin_display_name, inline=True)
         embed.add_field(name="Sanction", value=self.sanction_type, inline=True)
         embed.add_field(name="Reason Category", value=self.reason_category, inline=False)
         embed.add_field(name="Reason", value=self.reason_detail[:1024], inline=False)
@@ -1910,7 +1915,7 @@ class SummarySanctionView(discord.ui.View):
             mc_user_id=self.target_mc_id,
             mc_username=self.target_mc_username,
             admin_user_id=self.admin_user_id,
-            admin_username=self.admin_username,
+            admin_username=self.admin_display_name,
             sanction_type=self.sanction_type,
             reason_category=self.reason_category,
             reason_detail=self.reason_detail,
@@ -1971,7 +1976,7 @@ class SummarySanctionView(discord.ui.View):
             member_info += f"**Discord**: No Discord found\n"
         
         public_embed.add_field(name="Member", value=member_info, inline=False)
-        public_embed.add_field(name="Admin", value=self.admin_username, inline=True)
+        public_embed.add_field(name="Admin", value=self.admin_display_name, inline=True)
         public_embed.add_field(name="Sanction", value=self.sanction_type, inline=True)
         public_embed.add_field(name="Reason", value=self.reason_detail[:1024], inline=False)
         public_embed.set_footer(text=f"Sanction ID: {sanction_id}")
@@ -1986,7 +1991,7 @@ class SummarySanctionView(discord.ui.View):
         )
         
         log_embed.add_field(name="Member", value=member_info, inline=False)
-        log_embed.add_field(name="Admin", value=f"{self.admin_username} ({self.admin_user_id})", inline=True)
+        log_embed.add_field(name="Admin", value=f"{self.admin_display_name} ({self.admin_user_id})", inline=True)
         log_embed.add_field(name="Sanction", value=self.sanction_type, inline=True)
         log_embed.add_field(name="Reason Category", value=self.reason_category, inline=False)
         log_embed.add_field(name="Reason", value=self.reason_detail[:1024], inline=False)
@@ -2485,6 +2490,51 @@ class SanctionsManager(commands.Cog):
             score = max(score, 0.9)
 
         return mc_name, mc_id, score
+
+    async def get_mc_display_name_for_discord(
+        self,
+        discord_user_id: Optional[int],
+        *,
+        fallback: Optional[str] = None,
+    ) -> str:
+        """Return the linked MissionChief username for a Discord user when available."""
+        if not discord_user_id:
+            return fallback or "Unknown"
+
+        membersync = self.bot.get_cog("MemberSync")
+        get_link = getattr(membersync, "get_link_for_discord", None) if membersync else None
+        if not get_link:
+            return fallback or str(discord_user_id)
+
+        try:
+            link = await get_link(int(discord_user_id))
+        except Exception as exc:
+            log.debug("MemberSync Discord lookup failed for %s: %s", discord_user_id, exc)
+            return fallback or str(discord_user_id)
+
+        if not link:
+            return fallback or str(discord_user_id)
+
+        for name_key in ("mc_username", "username", "name"):
+            if link.get(name_key):
+                return str(link[name_key])
+
+        mc_user_id = link.get("mc_user_id")
+        if mc_user_id:
+            members_scraper = self.bot.get_cog("MembersScraper")
+            get_snapshot = getattr(members_scraper, "get_member_snapshot", None) if members_scraper else None
+            if get_snapshot:
+                try:
+                    snapshot = await get_snapshot(str(mc_user_id))
+                except Exception as exc:
+                    log.debug("MembersScraper snapshot lookup failed for %s: %s", mc_user_id, exc)
+                    snapshot = None
+                if snapshot:
+                    for name_key in ("name", "username", "mc_username"):
+                        if snapshot.get(name_key):
+                            return str(snapshot[name_key])
+
+        return fallback or str(discord_user_id)
 
     def find_sanction_reason_matches(
         self,
