@@ -1226,10 +1226,10 @@ class ReasonSelectionView(discord.ui.View):
 
 
 class ReasonSelectionSelect(discord.ui.Select):
-    def __init__(self, parent: ReasonSelectionView):
-        self.parent = parent
+    def __init__(self, wizard_view: ReasonSelectionView):
+        self.wizard_view = wizard_view
         options = []
-        for index, reason in enumerate(parent.reason_matches):
+        for index, reason in enumerate(wizard_view.reason_matches):
             label = reason["label"][:100]
             options.append(
                 discord.SelectOption(
@@ -1247,15 +1247,15 @@ class ReasonSelectionSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        reason = self.parent.reason_matches[int(self.values[0])]
+        reason = self.wizard_view.reason_matches[int(self.values[0])]
         view = SanctionTypeAfterReasonView(
-            self.parent.cog,
-            admin_user_id=self.parent.admin_user_id,
-            admin_username=self.parent.admin_username,
-            target_discord_id=self.parent.target_discord_id,
-            target_mc_id=self.parent.target_mc_id,
-            target_mc_username=self.parent.target_mc_username,
-            target_discord_user=self.parent.target_discord_user,
+            self.wizard_view.cog,
+            admin_user_id=self.wizard_view.admin_user_id,
+            admin_username=self.wizard_view.admin_username,
+            target_discord_id=self.wizard_view.target_discord_id,
+            target_mc_id=self.wizard_view.target_mc_id,
+            target_mc_username=self.wizard_view.target_mc_username,
+            target_discord_user=self.wizard_view.target_discord_user,
             reason_category=reason["category"],
             reason_detail=reason["detail"],
         )
@@ -1268,16 +1268,16 @@ class ReasonSelectionSelect(discord.ui.Select):
 
 
 class SearchReasonAgainButton(discord.ui.Button):
-    def __init__(self, parent: ReasonSelectionView):
+    def __init__(self, wizard_view: ReasonSelectionView):
         super().__init__(
             label="Search Reason",
             style=discord.ButtonStyle.primary,
             custom_id="sm:wizard_search_reason",
         )
-        self.parent = parent
+        self.wizard_view = wizard_view
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(ReasonSearchModal(self.parent))
+        await interaction.response.send_modal(ReasonSearchModal(self.wizard_view))
 
 
 class ReasonSearchModal(discord.ui.Modal, title="Search Sanction Reason"):
@@ -1352,8 +1352,8 @@ class SanctionTypeAfterReasonView(discord.ui.View):
 
 
 class SanctionTypeAfterReasonSelect(discord.ui.Select):
-    def __init__(self, parent: SanctionTypeAfterReasonView):
-        self.parent = parent
+    def __init__(self, wizard_view: SanctionTypeAfterReasonView):
+        self.wizard_view = wizard_view
         options = [discord.SelectOption(label=t) for t in SANCTION_TYPES]
         super().__init__(
             placeholder="Choose sanction",
@@ -1366,16 +1366,16 @@ class SanctionTypeAfterReasonSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         sanction_type = self.values[0]
         view = SummarySanctionView(
-            self.parent.cog,
-            self.parent.admin_user_id,
-            self.parent.admin_username,
-            self.parent.target_discord_id,
-            self.parent.target_mc_id,
-            self.parent.target_mc_username,
-            self.parent.target_discord_user,
+            self.wizard_view.cog,
+            self.wizard_view.admin_user_id,
+            self.wizard_view.admin_username,
+            self.wizard_view.target_discord_id,
+            self.wizard_view.target_mc_id,
+            self.wizard_view.target_mc_username,
+            self.wizard_view.target_discord_user,
             sanction_type,
-            self.parent.reason_category,
-            self.parent.reason_detail,
+            self.wizard_view.reason_category,
+            self.wizard_view.reason_detail,
         )
         await view.send_summary(interaction)
 

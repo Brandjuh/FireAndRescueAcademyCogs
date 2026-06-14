@@ -330,6 +330,7 @@ class MemberManagerAuditTests(unittest.TestCase):
         self.assertIn("Chat ban set", result.description)
         self.assertIn("Note Created", result.description)
         self.assertIn("Admin Nick", result.description)
+        self.assertIn("Target: MCUser", result.description)
         self.assertNotIn("Building constructed", result.description)
 
     def test_audit_embed_uses_logscraper_public_contract_when_available(self):
