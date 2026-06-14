@@ -104,6 +104,53 @@ class MemberManagerContributionTests(unittest.TestCase):
         members_scraper.get_member_contribution_history.assert_awaited_once_with("456", limit=12)
         members_scraper.get_member_first_seen.assert_awaited_once_with("456")
 
+    def test_membermanager_searches_membersscraper_members_by_name(self):
+        members_scraper = types.SimpleNamespace(
+            get_members=AsyncMock(
+                return_value=[
+                    {"mc_user_id": "456", "name": "CrashTestDummy"},
+                    {"mc_user_id": "789", "name": "Other Member"},
+                ]
+            )
+        )
+        cog = MemberManager.__new__(MemberManager)
+        cog.members_scraper = members_scraper
+        cog.alliance_scraper = None
+        cog.membersync = None
+        guild = types.SimpleNamespace(members=[])
+
+        results = asyncio.run(cog._search_member_candidates(guild, "CrashTestDummy"))
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["mc_user_id"], "456")
+        self.assertEqual(results[0]["name"], "CrashTestDummy")
+        self.assertEqual(results[0]["source"], "missionchief")
+
+    def test_membermanager_resolves_membersscraper_member_by_name(self):
+        members_scraper = types.SimpleNamespace(
+            get_members=AsyncMock(
+                return_value=[
+                    {"id": "456", "mc_username": "CrashTestDummy"},
+                ]
+            )
+        )
+        expected_data = MemberData(mc_user_id="456", mc_username="CrashTestDummy")
+        cog = MemberManager.__new__(MemberManager)
+        cog.members_scraper = members_scraper
+        cog.alliance_scraper = None
+        cog.membersync = None
+        cog._build_member_data = AsyncMock(return_value=expected_data)
+        guild = types.SimpleNamespace(members=[], get_member=lambda member_id: None)
+
+        result = asyncio.run(cog._resolve_target(guild, "CrashTestDummy"))
+
+        self.assertIs(result, expected_data)
+        cog._build_member_data.assert_awaited_once_with(
+            guild=guild,
+            discord_id=None,
+            mc_user_id="456",
+        )
+
     def test_overview_embed_includes_contribution_field(self):
         data = MemberData(
             discord_id=123,
