@@ -1415,26 +1415,34 @@ class ReasonSearchModal(discord.ui.Modal, title="Search Sanction Reason"):
 
     def __init__(self, parent: ReasonSelectionView):
         super().__init__()
-        self.parent = parent
+        self.reason_view = parent
 
     async def on_submit(self, interaction: discord.Interaction):
-        view = ReasonSelectionView(
-            self.parent.cog,
-            admin_user_id=self.parent.admin_user_id,
-            admin_username=self.parent.admin_username,
-            target_discord_id=self.parent.target_discord_id,
-            target_mc_id=self.parent.target_mc_id,
-            target_mc_username=self.parent.target_mc_username,
-            target_discord_user=self.parent.target_discord_user,
-            guild_id=self.parent.guild_id,
-            reason_query=str(self.query.value),
-        )
-        await interaction.response.send_message(
-            content="Reason search updated. Choose the matching reason:",
-            embed=view._create_embed(),
-            view=view,
-            ephemeral=True,
-        )
+        await interaction.response.defer(ephemeral=True)
+        try:
+            view = ReasonSelectionView(
+                self.reason_view.cog,
+                admin_user_id=self.reason_view.admin_user_id,
+                admin_username=self.reason_view.admin_username,
+                target_discord_id=self.reason_view.target_discord_id,
+                target_mc_id=self.reason_view.target_mc_id,
+                target_mc_username=self.reason_view.target_mc_username,
+                target_discord_user=self.reason_view.target_discord_user,
+                guild_id=self.reason_view.guild_id,
+                reason_query=str(self.query.value),
+            )
+            await interaction.followup.send(
+                content="Reason search updated. Choose the matching reason:",
+                embed=view._create_embed(),
+                view=view,
+                ephemeral=True,
+            )
+        except Exception as exc:
+            log.exception("Sanction reason wizard search failed: %s", exc)
+            await interaction.followup.send(
+                "Could not search sanction reasons. Check the logs and try again.",
+                ephemeral=True,
+            )
 
 
 class SanctionTypeAfterReasonView(discord.ui.View):
@@ -4122,40 +4130,48 @@ class EditSanctionReasonSearchModal(discord.ui.Modal, title="Search Sanction Rea
         self.query.default = str(sanction.get("reason_detail") or "")
 
     async def on_submit(self, interaction: discord.Interaction):
-        query = str(self.query.value).strip()
-        guild_id = int(self.sanction.get("guild_id") or 0)
-        matches = self.cog.find_sanction_reason_matches(guild_id, query, limit=10)
-        if not matches:
-            await interaction.response.send_message(
-                f"No sanction reason found for `{query}`. Try a shorter search term.",
+        await interaction.response.defer(ephemeral=True)
+        try:
+            query = str(self.query.value).strip()
+            guild_id = int(self.sanction.get("guild_id") or 0)
+            matches = self.cog.find_sanction_reason_matches(guild_id, query, limit=10)
+            if not matches:
+                await interaction.followup.send(
+                    f"No sanction reason found for `{query}`. Try a shorter search term.",
+                    ephemeral=True,
+                )
+                return
+
+            if len(matches) == 1 or matches[0]["score"] >= 1.0:
+                reason = matches[0]
+                await self.cog.apply_sanction_reason_edit(
+                    sanction=self.sanction,
+                    editor=self.editor,
+                    reason_category=reason["category"],
+                    reason_detail=reason["detail"],
+                )
+                await interaction.followup.send(
+                    f"Updated sanction reason to: {reason['detail']}",
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.followup.send(
+                f"Select the correct reason for `{query}`:",
+                view=EditSanctionReasonSearchResultsView(
+                    self.cog,
+                    self.sanction,
+                    self.editor,
+                    matches,
+                ),
                 ephemeral=True,
             )
-            return
-
-        if len(matches) == 1 or matches[0]["score"] >= 1.0:
-            reason = matches[0]
-            await self.cog.apply_sanction_reason_edit(
-                sanction=self.sanction,
-                editor=self.editor,
-                reason_category=reason["category"],
-                reason_detail=reason["detail"],
-            )
-            await interaction.response.send_message(
-                f"Updated sanction reason to: {reason['detail']}",
+        except Exception as exc:
+            log.exception("Sanction reason edit search failed: %s", exc)
+            await interaction.followup.send(
+                "Could not search sanction reasons. Check the logs and try again.",
                 ephemeral=True,
             )
-            return
-
-        await interaction.response.send_message(
-            f"Select the correct reason for `{query}`:",
-            view=EditSanctionReasonSearchResultsView(
-                self.cog,
-                self.sanction,
-                self.editor,
-                matches,
-            ),
-            ephemeral=True,
-        )
 
 class EditSanctionReasonSearchResultsView(discord.ui.View):
     def __init__(
