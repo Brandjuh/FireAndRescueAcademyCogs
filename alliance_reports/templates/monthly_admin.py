@@ -55,7 +55,7 @@ class MonthlyAdminReport:
 
         embed = discord.Embed(
             title="🛡️ ADMIN MONTHLY REPORT",
-            description=f"📊 **{month_name}**",
+            description=f"Reporting month: **{month_name}**",
             color=discord.Color.dark_gold(),
             timestamp=now,
         )

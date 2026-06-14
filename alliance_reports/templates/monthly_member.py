@@ -53,7 +53,7 @@ class MonthlyMemberReport:
 
         embed = discord.Embed(
             title="🔥 FIRE & RESCUE ACADEMY",
-            description=f"📊 **Monthly Briefing - {month_name}**",
+            description=f"Monthly briefing\nReporting month: **{month_name}**",
             color=discord.Color.blue(),
             timestamp=now,
         )

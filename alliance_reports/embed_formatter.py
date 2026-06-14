@@ -1,7 +1,7 @@
 """Formatting for database-backed AllianceReports member output."""
 
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import discord
 
@@ -10,12 +10,19 @@ class EmbedFormatter:
     """Format recorded daily alliance metrics."""
 
     @staticmethod
-    def create_daily_member_embed(data: Dict[str, Any]) -> discord.Embed:
+    def create_daily_member_embed(
+        data: Dict[str, Any],
+        now: Optional[datetime] = None,
+        timezone_label: Optional[str] = None,
+    ) -> discord.Embed:
+        now = now or datetime.now()
+        period_label = now.strftime("%A, %B %d, %Y")
+        timezone_suffix = f" ({timezone_label})" if timezone_label else ""
         embed = discord.Embed(
             title="🔥 FIRE & RESCUE ACADEMY - Daily Dispatch",
-            description=f"📅 {datetime.now().strftime('%A, %B %d, %Y')}",
+            description=f"Reporting date: **{period_label}**{timezone_suffix}",
             color=discord.Color.blue(),
-            timestamp=datetime.now(),
+            timestamp=now,
         )
         embed.add_field(
             name="═" * 40,

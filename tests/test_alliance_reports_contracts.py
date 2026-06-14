@@ -12,6 +12,7 @@ from alliance_reports.alliance_reports import AllianceReports
 from alliance_reports.data_aggregator import DataAggregator
 from alliance_reports.embed_formatter import EmbedFormatter
 from alliance_reports.templates.daily_admin import DailyAdminReport
+from alliance_reports.templates.daily_member import DailyMemberReport
 from alliance_reports.templates.monthly_admin import MonthlyAdminReport
 from alliance_reports.templates.monthly_member import MonthlyMemberReport
 
@@ -501,6 +502,56 @@ class AllianceReportContractTests(unittest.TestCase):
         self.assertNotIn("ACTIVITY SCORE", output.upper())
         self.assertNotIn("vs yesterday", output)
 
+    def test_daily_member_report_header_shows_explicit_reporting_date(self):
+        report_date = datetime(2026, 6, 13, 8, 0, tzinfo=ZoneInfo("America/New_York"))
+
+        embed = EmbedFormatter.create_daily_member_embed(
+            {},
+            now=report_date,
+            timezone_label="America/New_York",
+        )
+
+        self.assertEqual(
+            embed.kwargs["description"],
+            "Reporting date: **Saturday, June 13, 2026** (America/New_York)",
+        )
+
+    def test_daily_member_generate_uses_configured_timezone_for_header(self):
+        import asyncio
+
+        report = DailyMemberReport.__new__(DailyMemberReport)
+        report.config_manager = types.SimpleNamespace(
+            config=types.SimpleNamespace(timezone=AsyncMock(return_value="America/New_York"))
+        )
+        report.aggregator = types.SimpleNamespace(get_daily_data=AsyncMock(return_value={}))
+
+        embed = asyncio.run(report.generate())
+
+        self.assertIn("Reporting date: **", embed.kwargs["description"])
+        self.assertIn("(America/New_York)", embed.kwargs["description"])
+
+    def test_daily_admin_report_header_shows_explicit_reporting_date(self):
+        import asyncio
+
+        data = {
+            "membership": {},
+            "training": {},
+            "buildings": {},
+            "operations": {},
+            "sanctions": {},
+            "admin_activity": {},
+        }
+        report = DailyAdminReport.__new__(DailyAdminReport)
+        report.config_manager = types.SimpleNamespace(
+            config=types.SimpleNamespace(timezone=AsyncMock(return_value="America/New_York"))
+        )
+        report.aggregator = types.SimpleNamespace(get_daily_data=AsyncMock(return_value=data))
+
+        embed = asyncio.run(report.generate())
+
+        self.assertIn("Reporting date: **", embed.kwargs["description"])
+        self.assertIn("(America/New_York)", embed.kwargs["description"])
+
     def test_daily_admin_output_omits_unmeasured_claims(self):
         report = DailyAdminReport.__new__(DailyAdminReport)
         data = {
@@ -576,6 +627,11 @@ class AllianceReportContractTests(unittest.TestCase):
 
         admin_embed = MonthlyAdminReport._create_overview(data, "May 2026", now, "Europe/Amsterdam")
         member_embed = MonthlyMemberReport._create_overview(data, "May 2026", now, "Europe/Amsterdam")
+        self.assertEqual(admin_embed.kwargs["description"], "Reporting month: **May 2026**")
+        self.assertEqual(
+            member_embed.kwargs["description"],
+            "Monthly briefing\nReporting month: **May 2026**",
+        )
         admin_output = "\n".join(
             [field["name"] + "\n" + field["value"] for field in admin_embed.fields]
         )
