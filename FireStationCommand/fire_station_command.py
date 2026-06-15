@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import random
 from datetime import datetime, timedelta, timezone
@@ -17,10 +18,13 @@ except ImportError:  # pragma: no cover - dependency is declared in info.json
     yaml = None
 
 
+log = logging.getLogger(__name__)
+
+
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.3.3"
+    __version__ = "1.3.4"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
@@ -3997,6 +4001,29 @@ class FscTimedView(discord.ui.View):
 
     async def on_timeout(self) -> None:
         await self._edit_timeout_message()
+
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        item: discord.ui.Item,
+    ) -> None:
+        log.exception("FireStationCommand view error on %r", item, exc_info=(type(error), error, error.__traceback__))
+        message = (
+            "This Fire Station Command menu hit an error while handling the button. "
+            "Open a fresh dashboard with `[p]fsc` and try again."
+        )
+        response = getattr(interaction, "response", None)
+        try:
+            is_done = response.is_done() if response and hasattr(response, "is_done") else False
+            if response and not is_done:
+                await response.send_message(message, ephemeral=True)
+                return
+            followup = getattr(interaction, "followup", None)
+            if followup is not None:
+                await followup.send(message, ephemeral=True)
+        except Exception:
+            log.exception("Failed to send FireStationCommand view error feedback")
 
     def stop(self) -> None:
         try:
