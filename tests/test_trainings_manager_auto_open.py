@@ -3,6 +3,7 @@ import types
 from unittest.mock import AsyncMock
 
 from trainings_manager.trainings_manager import (
+    AUTO_BUILDING_LIST_PATH,
     DEVELOPER_PANEL_CHANNEL_ID,
     DeveloperTrainingPanelView,
     SubmitButton,
@@ -11,6 +12,7 @@ from trainings_manager.trainings_manager import (
     TrainingManager,
     TrainingRequest,
     parse_academy_page,
+    parse_available_academies,
 )
 
 
@@ -47,6 +49,37 @@ ACADEMY_HTML = """
 """
 
 
+BUILDING_LIST_HTML = """
+<table>
+<tr search_attribute="[AA] Fire Academy #0001">
+  <td><img src="/images/building_fireschool.png" /></td>
+  <td><a href="/buildings/100">[AA] Fire Academy #0001</a></td>
+  <td><a class="btn btn-success" href="/buildings/100">Start a new training course</a></td>
+</tr>
+<tr search_attribute="[AA] Fire Academy #0002">
+  <td><img src="/images/building_fireschool.png" /></td>
+  <td><a href="/buildings/200">[AA] Fire Academy #0002</a></td>
+  <td><a class="btn btn-success" href="/buildings/200">Start a new training course</a></td>
+</tr>
+<tr search_attribute="[AA] Police Academy #0001">
+  <td><img src="/images/policechief_building_polizeischule.png" /></td>
+  <td><a href="/buildings/300">[AA] Police Academy #0001</a></td>
+  <td><a class="btn btn-success" href="/buildings/300">Start a new training course</a></td>
+</tr>
+</table>
+"""
+
+
+NO_ROOM_ACADEMY_HTML = ACADEMY_HTML.replace(
+    """
+  <option value="2">2</option>
+  <option value="3">3</option>
+  <option value="4">4</option>
+""",
+    "",
+)
+
+
 class _Response:
     def __init__(self, html="", status=200):
         self.html = html
@@ -66,11 +99,14 @@ class _Session:
     def __init__(self, html):
         self.html = html
         self.posts = []
+        self.get_urls = []
 
     def get(self, url, **kwargs):
+        self.get_urls.append(url)
         self.get_url = url
         self.get_kwargs = kwargs
-        return _Response(self.html)
+        html = self.html.get(url, "") if isinstance(self.html, dict) else self.html
+        return _Response(html)
 
     def post(self, url, **kwargs):
         self.posts.append((url, kwargs))
@@ -139,6 +175,16 @@ def test_parse_academy_page_extracts_form_rooms_costs_and_courses():
     ]
 
 
+def test_parse_available_academies_extracts_open_training_links():
+    academies = parse_available_academies(BUILDING_LIST_HTML)
+
+    assert [(academy.building_id, academy.discipline) for academy in academies] == [
+        (100, "Fire"),
+        (200, "Fire"),
+        (300, "Police"),
+    ]
+
+
 def test_auto_open_training_posts_missionchief_education_form():
     session = _Session(ACADEMY_HTML)
     manager, guild, user, _ = _manager(session=session, contribution_rate=None)
@@ -156,6 +202,28 @@ def test_auto_open_training_posts_missionchief_education_form():
     assert kwargs["data"]["education_select"] == "hotshot:17"
     assert kwargs["data"]["alliance[duration]"] == str(AUTO_ALLIANCE_DURATION_SECONDS)
     assert kwargs["data"]["alliance[cost]"] == "100"
+
+
+def test_auto_open_training_finds_dynamic_academy_with_available_rooms():
+    session = _Session(
+        {
+            f"https://www.missionchief.com{AUTO_BUILDING_LIST_PATH}": BUILDING_LIST_HTML,
+            "https://www.missionchief.com/buildings/100": NO_ROOM_ACADEMY_HTML,
+            "https://www.missionchief.com/buildings/200": ACADEMY_HTML.replace("4951748", "200"),
+        }
+    )
+    manager, guild, user, _ = _manager(session=session, contribution_rate=None)
+    req = _training_request()
+
+    result = asyncio.run(manager._try_auto_open_training(guild, user, req))
+
+    assert result.success is True
+    assert result.academy_id == 200
+    assert "https://www.missionchief.com/buildings/100" in session.get_urls
+    assert "https://www.missionchief.com/buildings/200" in session.get_urls
+    post_url, kwargs = session.posts[0]
+    assert post_url == "https://www.missionchief.com/buildings/200/education"
+    assert kwargs["data"]["building_rooms_use"] == "2"
 
 
 def test_auto_open_training_falls_back_when_known_tax_is_below_threshold():

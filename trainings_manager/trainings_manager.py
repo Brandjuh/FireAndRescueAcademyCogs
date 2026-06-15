@@ -125,6 +125,7 @@ DISCIPLINES: Dict[str, List[Tuple[str, int]]] = {
 
 FEE_CHOICES = [0, 100, 200, 300, 400, 500]
 DEVELOPER_PANEL_CHANNEL_ID = 1421242306136113254
+AUTO_BUILDING_LIST_PATH = "/verband/gebauede"
 AUTO_ACADEMY_BUILDINGS = {
     "Fire": 4951748,
     "Police": 4951746,
@@ -148,6 +149,13 @@ class AcademyPage:
     available_rooms: int
     costs: List[int]
     courses: List[AcademyCourse]
+
+
+@dataclass
+class AvailableAcademy:
+    building_id: int
+    name: str
+    discipline: str
 
 
 @dataclass
@@ -241,6 +249,71 @@ def parse_academy_page(html: str) -> AcademyPage:
     parser.feed(html)
     return parser.page()
 
+
+class AllianceAcademyListParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.academies: List[AvailableAcademy] = []
+        self._in_row = False
+        self._row_name = ""
+        self._row_discipline: Optional[str] = None
+        self._row_start_building_id: Optional[int] = None
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]):
+        attr = {key: value for key, value in attrs}
+        if tag == "tr":
+            self._in_row = True
+            self._row_name = attr.get("search_attribute") or ""
+            self._row_discipline = None
+            self._row_start_building_id = None
+            return
+
+        if not self._in_row:
+            return
+
+        if tag == "img":
+            src = (attr.get("src") or "").casefold()
+            if "polizeischule" in src:
+                self._row_discipline = "Police"
+            elif "fireschool" in src:
+                self._row_discipline = "Fire"
+            elif "water_rescue_school" in src:
+                self._row_discipline = "Coastal"
+            elif "rettungsschule" in src:
+                self._row_discipline = "EMS"
+        elif tag == "a":
+            href = re.sub(r"\s+", "", attr.get("href") or "")
+            classes = attr.get("class") or ""
+            class_text = " ".join(classes) if isinstance(classes, list) else str(classes)
+            if "btn-success" in class_text:
+                match = re.search(r"/buildings/(\d+)", href)
+                if match:
+                    self._row_start_building_id = int(match.group(1))
+
+    def handle_endtag(self, tag: str):
+        if tag != "tr" or not self._in_row:
+            return
+
+        if self._row_start_building_id and self._row_discipline:
+            self.academies.append(
+                AvailableAcademy(
+                    building_id=self._row_start_building_id,
+                    name=self._row_name.strip() or f"Building {self._row_start_building_id}",
+                    discipline=self._row_discipline,
+                )
+            )
+
+        self._in_row = False
+        self._row_name = ""
+        self._row_discipline = None
+        self._row_start_building_id = None
+
+
+def parse_available_academies(html: str) -> List[AvailableAcademy]:
+    parser = AllianceAcademyListParser()
+    parser.feed(html)
+    return parser.academies
+
 # ---------- Model ----------
 
 class TrainingRequest:
@@ -325,16 +398,18 @@ class StartView(discord.ui.View):
         )
 
 class DisciplineView(discord.ui.View):
-    def __init__(self, cog: "TrainingManager", reminder_only: bool = False):
+    def __init__(self, cog: "TrainingManager", reminder_only: bool = False, auto_open: bool = False):
         super().__init__(timeout=600)
         self.cog = cog
         self.reminder_only = reminder_only
-        self.add_item(DisciplineSelect(self.cog, reminder_only))
+        self.auto_open = auto_open
+        self.add_item(DisciplineSelect(self.cog, reminder_only, auto_open))
 
 class DisciplineSelect(discord.ui.Select):
-    def __init__(self, cog: "TrainingManager", reminder_only: bool = False):
+    def __init__(self, cog: "TrainingManager", reminder_only: bool = False, auto_open: bool = False):
         self.cog = cog
         self.reminder_only = reminder_only
+        self.auto_open = auto_open
         options = [discord.SelectOption(label=k, description=f"{len(v)} trainings") for k, v in DISCIPLINES.items()]
         super().__init__(placeholder="Choose a discipline", min_values=1, max_values=1, options=options, custom_id="tm:discipline")
 
@@ -343,22 +418,24 @@ class DisciplineSelect(discord.ui.Select):
         await safe_update(
             interaction,
             content=f"Discipline selected: **{discipline}**. Now choose a training.",
-            view=TrainingView(self.cog, discipline, self.reminder_only),
+            view=TrainingView(self.cog, discipline, self.reminder_only, self.auto_open),
         )
 
 class TrainingView(discord.ui.View):
-    def __init__(self, cog: "TrainingManager", discipline: str, reminder_only: bool = False):
+    def __init__(self, cog: "TrainingManager", discipline: str, reminder_only: bool = False, auto_open: bool = False):
         super().__init__(timeout=600)
         self.cog = cog
         self.discipline = discipline
         self.reminder_only = reminder_only
-        self.add_item(TrainingSelect(self.cog, discipline, reminder_only))
+        self.auto_open = auto_open
+        self.add_item(TrainingSelect(self.cog, discipline, reminder_only, auto_open))
 
 class TrainingSelect(discord.ui.Select):
-    def __init__(self, cog: "TrainingManager", discipline: str, reminder_only: bool = False):
+    def __init__(self, cog: "TrainingManager", discipline: str, reminder_only: bool = False, auto_open: bool = False):
         self.cog = cog
         self.discipline = discipline
         self.reminder_only = reminder_only
+        self.auto_open = auto_open
         options = []
         for name, days in DISCIPLINES[discipline]:
             label = name
@@ -375,22 +452,23 @@ class TrainingSelect(discord.ui.Select):
             await safe_update(
                 interaction,
                 content=f"Selected: **{self.discipline} → {training}** ({days} days). Do you want to add a reference?",
-                view=ReferenceAskView(self.cog, self.discipline, training, days, 0, 1, reminder_only=True),
+                view=ReferenceAskView(self.cog, self.discipline, training, days, 0, 1, reminder_only=True, auto_open=self.auto_open),
             )
         else:
             await safe_update(
                 interaction,
                 content=f"Selected: **{self.discipline} → {training}**. Now pick the fee per day, per trainee.",
-                view=FeeView(self.cog, self.discipline, training, days),
+                view=FeeView(self.cog, self.discipline, training, days, self.auto_open),
             )
 
 class FeeView(discord.ui.View):
-    def __init__(self, cog: "TrainingManager", discipline: str, training: str, days: int):
+    def __init__(self, cog: "TrainingManager", discipline: str, training: str, days: int, auto_open: bool = False):
         super().__init__(timeout=600)
         self.cog = cog
         self.discipline = discipline
         self.training = training
         self.days = days
+        self.auto_open = auto_open
         for fee in FEE_CHOICES:
             label = "Free" if fee == 0 else f"{fee} credits/day"
             self.add_item(FeeButton(label, fee))
@@ -409,14 +487,15 @@ class FeeButton(discord.ui.Button):
                 f"**{'Free' if self.fee == 0 else str(self.fee) + ' credits/day'}**.\n"
                 "How many classes do you want to request?"
             ),
-            view=ClassCountView(view.cog, view.discipline, view.training, view.days, self.fee),
+            view=ClassCountView(view.cog, view.discipline, view.training, view.days, self.fee, view.auto_open),
         )
 
 class ClassCountView(discord.ui.View):
-    def __init__(self, cog: "TrainingManager", discipline: str, training: str, days: int, fee: int):
+    def __init__(self, cog: "TrainingManager", discipline: str, training: str, days: int, fee: int, auto_open: bool = False):
         super().__init__(timeout=600)
         self.cog = cog
         self.state = (discipline, training, days, fee)
+        self.auto_open = auto_open
 
     @discord.ui.button(label="No, just one", style=discord.ButtonStyle.primary, custom_id="tm:class_1")
     async def one_class(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -424,7 +503,7 @@ class ClassCountView(discord.ui.View):
         await safe_update(
             interaction,
             content="1 class selected. Do you want to add a reference?",
-            view=ReferenceAskView(self.cog, discipline, training, days, fee, 1, reminder_only=False),
+            view=ReferenceAskView(self.cog, discipline, training, days, fee, 1, reminder_only=False, auto_open=self.auto_open),
         )
 
     @discord.ui.button(label="2", style=discord.ButtonStyle.secondary, custom_id="tm:class_2")
@@ -433,7 +512,7 @@ class ClassCountView(discord.ui.View):
         await safe_update(
             interaction,
             content="2 classes selected. Do you want to add references?",
-            view=ReferenceAskView(self.cog, discipline, training, days, fee, 2, reminder_only=False),
+            view=ReferenceAskView(self.cog, discipline, training, days, fee, 2, reminder_only=False, auto_open=self.auto_open),
         )
 
     @discord.ui.button(label="3", style=discord.ButtonStyle.secondary, custom_id="tm:class_3")
@@ -442,7 +521,7 @@ class ClassCountView(discord.ui.View):
         await safe_update(
             interaction,
             content="3 classes selected. Do you want to add references?",
-            view=ReferenceAskView(self.cog, discipline, training, days, fee, 3, reminder_only=False),
+            view=ReferenceAskView(self.cog, discipline, training, days, fee, 3, reminder_only=False, auto_open=self.auto_open),
         )
 
     @discord.ui.button(label="4", style=discord.ButtonStyle.secondary, custom_id="tm:class_4")
@@ -451,14 +530,15 @@ class ClassCountView(discord.ui.View):
         await safe_update(
             interaction,
             content="4 classes selected. Do you want to add references?",
-            view=ReferenceAskView(self.cog, discipline, training, days, fee, 4, reminder_only=False),
+            view=ReferenceAskView(self.cog, discipline, training, days, fee, 4, reminder_only=False, auto_open=self.auto_open),
         )
 
 class ReferenceAskView(discord.ui.View):
-    def __init__(self, cog: "TrainingManager", discipline: str, training: str, days: int, fee: int, num_classes: int, reminder_only: bool = False):
+    def __init__(self, cog: "TrainingManager", discipline: str, training: str, days: int, fee: int, num_classes: int, reminder_only: bool = False, auto_open: bool = False):
         super().__init__(timeout=600)
         self.cog = cog
         self.state = (discipline, training, days, fee, num_classes, reminder_only)
+        self.auto_open = auto_open
 
     @discord.ui.button(label="Yes, add references", style=discord.ButtonStyle.primary, custom_id="tm:ref_yes")
     async def yes(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -469,11 +549,11 @@ class ReferenceAskView(discord.ui.View):
             await safe_update(
                 interaction,
                 content="Do you want the same reference for all classes, or individual references?",
-                view=ReferenceModeView(self.cog, discipline, training, days, fee, num_classes, reminder_only),
+                view=ReferenceModeView(self.cog, discipline, training, days, fee, num_classes, reminder_only, self.auto_open),
             )
         else:
             # Single reference
-            await interaction.response.send_modal(ReferenceModal(self.cog, discipline, training, days, fee, num_classes, reminder_only, mode="single"))
+            await interaction.response.send_modal(ReferenceModal(self.cog, discipline, training, days, fee, num_classes, reminder_only, mode="single", auto_open=self.auto_open))
 
     @discord.ui.button(label="No, continue", style=discord.ButtonStyle.secondary, custom_id="tm:ref_no")
     async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -482,33 +562,36 @@ class ReferenceAskView(discord.ui.View):
             view = ReminderOnlySummaryView(self.cog, interaction.user.id, discipline, training, days, [])
             await view.send_summary(interaction)
         else:
+            summary_cls = DeveloperAutoOpenSummaryView if self.auto_open else SummaryView
             await safe_update(
                 interaction,
                 content="References skipped.",
-                view=SummaryView(self.cog, interaction.user.id, discipline, training, days, fee, num_classes, []),
+                view=summary_cls(self.cog, interaction.user.id, discipline, training, days, fee, num_classes, []),
             )
 
 class ReferenceModeView(discord.ui.View):
-    def __init__(self, cog: "TrainingManager", discipline: str, training: str, days: int, fee: int, num_classes: int, reminder_only: bool):
+    def __init__(self, cog: "TrainingManager", discipline: str, training: str, days: int, fee: int, num_classes: int, reminder_only: bool, auto_open: bool = False):
         super().__init__(timeout=600)
         self.cog = cog
         self.state = (discipline, training, days, fee, num_classes, reminder_only)
+        self.auto_open = auto_open
 
     @discord.ui.button(label="Same for all", style=discord.ButtonStyle.primary, custom_id="tm:ref_same")
     async def same_ref(self, interaction: discord.Interaction, button: discord.ui.Button):
         discipline, training, days, fee, num_classes, reminder_only = self.state
-        await interaction.response.send_modal(ReferenceModal(self.cog, discipline, training, days, fee, num_classes, reminder_only, mode="same"))
+        await interaction.response.send_modal(ReferenceModal(self.cog, discipline, training, days, fee, num_classes, reminder_only, mode="same", auto_open=self.auto_open))
 
     @discord.ui.button(label="Individual", style=discord.ButtonStyle.secondary, custom_id="tm:ref_individual")
     async def individual_ref(self, interaction: discord.Interaction, button: discord.ui.Button):
         discipline, training, days, fee, num_classes, reminder_only = self.state
-        await interaction.response.send_modal(ReferenceModal(self.cog, discipline, training, days, fee, num_classes, reminder_only, mode="individual"))
+        await interaction.response.send_modal(ReferenceModal(self.cog, discipline, training, days, fee, num_classes, reminder_only, mode="individual", auto_open=self.auto_open))
 
 class ReferenceModal(discord.ui.Modal):
-    def __init__(self, cog: "TrainingManager", discipline: str, training: str, days: int, fee: int, num_classes: int, reminder_only: bool, mode: str = "single"):
+    def __init__(self, cog: "TrainingManager", discipline: str, training: str, days: int, fee: int, num_classes: int, reminder_only: bool, mode: str = "single", auto_open: bool = False):
         self.cog = cog
         self.state = (discipline, training, days, fee, num_classes, reminder_only)
         self.mode = mode
+        self.auto_open = auto_open
         
         if mode == "individual":
             super().__init__(title="Add references for each class")
@@ -553,10 +636,11 @@ class ReferenceModal(discord.ui.Modal):
             view = ReminderOnlySummaryView(self.cog, interaction.user.id, discipline, training, days, references)
             await view.send_summary(interaction)
         else:
+            summary_cls = DeveloperAutoOpenSummaryView if self.auto_open else SummaryView
             await safe_update(
                 interaction,
                 content="References added.",
-                view=SummaryView(self.cog, interaction.user.id, discipline, training, days, fee, num_classes, references),
+                view=summary_cls(self.cog, interaction.user.id, discipline, training, days, fee, num_classes, references),
             )
 
 # ---------- Reminder Only Summary View ----------
@@ -875,99 +959,45 @@ class SummaryView(discord.ui.View):
 
         await safe_update(interaction, content="Review and submit to Admin.", embed=embed, view=self)
 
-# ---------- Admin decision ----------
 
-class DeveloperAutoTrainingModal(discord.ui.Modal, title="Developer Training Auto-Open"):
-    discipline = discord.ui.TextInput(
-        label="Discipline",
-        style=discord.TextStyle.short,
-        max_length=20,
-        required=True,
-        placeholder="Fire or Police",
-    )
-    training = discord.ui.TextInput(
-        label="Training name",
-        style=discord.TextStyle.short,
-        max_length=100,
-        required=True,
-        placeholder="Exact MissionChief training name",
-    )
-    fee = discord.ui.TextInput(
-        label="Alliance cost",
-        style=discord.TextStyle.short,
-        max_length=10,
-        required=True,
-        placeholder="0, 100, 200, 300, 400 or 500",
-    )
-    classes = discord.ui.TextInput(
-        label="Classes",
-        style=discord.TextStyle.short,
-        max_length=1,
-        required=True,
-        placeholder="1-4",
-    )
+class DeveloperAutoOpenSubmitButton(discord.ui.Button):
+    def __init__(self, parent_view: "DeveloperAutoOpenSummaryView"):
+        super().__init__(
+            label="Open Automatically",
+            style=discord.ButtonStyle.danger,
+            custom_id="tmdev:auto_open_submit",
+        )
+        self.parent_view = parent_view
 
-    def __init__(self, cog: "TrainingManager"):
-        super().__init__()
-        self.cog = cog
-
-    async def on_submit(self, interaction: discord.Interaction):
+    async def callback(self, interaction: discord.Interaction):
+        cog: TrainingManager = self.parent_view.cog  # type: ignore
         guild = interaction.guild
         if guild is None:
             await interaction.response.send_message("This only works inside a server.", ephemeral=True)
             return
 
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
-        except Exception as exc:
-            log.debug("Could not defer developer training auto-open interaction: %s", exc)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
 
-        discipline = str(self.discipline.value).strip()
-        training = str(self.training.value).strip()
-        try:
-            fee = int(str(self.fee.value).strip())
-            num_classes = int(str(self.classes.value).strip())
-        except ValueError:
-            await interaction.followup.send("Fee and classes must be numbers.", ephemeral=True)
-            return
-
-        days = next(
-            (
-                duration
-                for name, duration in DISCIPLINES.get(discipline, [])
-                if _normalize_training_name(name) == _normalize_training_name(training)
-            ),
-            0,
-        )
-        req = TrainingRequest(
-            user_id=interaction.user.id,
-            discipline=discipline,
-            training=training,
-            days=days,
-            fee_per_day=fee,
-            num_classes=num_classes,
-            references=["Developer auto-open test"],
-            want_reminder=False,
-            request_channel_id=interaction.channel.id if interaction.channel else 0,
-        )
-        result = await self.cog._try_auto_open_training(guild, interaction.user, req)
-        conf = await self.cog.config.guild(guild).all()
-        admin_channel = guild.get_channel(conf.get("admin_channel_id")) if conf.get("admin_channel_id") else None
+        req = self.parent_view.req
+        req.request_channel_id = interaction.channel.id if interaction.channel else 0
+        result = await cog._try_auto_open_training(guild, interaction.user, req)
+        conf = await cog.config.guild(guild).all()
         log_channel = guild.get_channel(conf.get("log_channel_id")) if conf.get("log_channel_id") else None
+        request_channel = guild.get_channel(req.request_channel_id) if req.request_channel_id else None
 
         if result.success:
-            if admin_channel and log_channel:
-                await self.cog._send_auto_open_success(
+            if log_channel:
+                await cog._send_auto_open_success(
                     guild=guild,
                     user=interaction.user,
                     req=req,
                     result=result,
-                    admin_channel=admin_channel,
                     log_channel=log_channel,
                 )
+            await cog._notify_auto_open_requester(interaction.user, req, result, request_channel)
             await interaction.followup.send(
-                f"Developer test succeeded: opened **{training}** in academy `{result.academy_id}`.",
+                f"Developer test succeeded: opened **{req.training}** in academy `{result.academy_id}`.",
                 ephemeral=True,
             )
             return
@@ -976,6 +1006,70 @@ class DeveloperAutoTrainingModal(discord.ui.Modal, title="Developer Training Aut
             f"Developer test did not open a class: {result.reason}",
             ephemeral=True,
         )
+
+
+class DeveloperAutoOpenSummaryView(discord.ui.View):
+    def __init__(
+        self,
+        cog: "TrainingManager",
+        user_id: int,
+        discipline: str,
+        training: str,
+        days: int,
+        fee: int,
+        num_classes: int,
+        references: List[str],
+    ):
+        super().__init__(timeout=600)
+        self.cog = cog
+        self.req = TrainingRequest(
+            user_id=user_id,
+            discipline=discipline,
+            training=training,
+            days=days,
+            fee_per_day=fee,
+            num_classes=num_classes,
+            references=references,
+            want_reminder=False,
+            request_channel_id=0,
+        )
+        self.add_item(ReminderOff())
+        self.add_item(ReminderOn())
+        self.add_item(DeveloperAutoOpenSubmitButton(self))
+
+    async def send_or_update(self, interaction: discord.Interaction):
+        user = interaction.user
+        end_at = datetime.now(AMS) + timedelta(days=self.req.days)
+        embed = discord.Embed(
+            title="Developer training auto-open - Summary",
+            color=discord.Color.orange(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="Requester", value=f"{user.mention} ({user.id})", inline=False)
+        embed.add_field(name="Discipline", value=self.req.discipline, inline=True)
+        embed.add_field(name="Training", value=self.req.training, inline=True)
+        embed.add_field(name="Duration", value=f"{self.req.days} days", inline=True)
+        fee_txt = "Free" if self.req.fee_per_day == 0 else f"{self.req.fee_per_day} credits/day/trainee"
+        embed.add_field(name="Fee", value=fee_txt, inline=True)
+        embed.add_field(name="Classes", value=str(self.req.num_classes), inline=True)
+        embed.add_field(name="Expected end time", value=fmt_dt(end_at), inline=False)
+        if self.req.references and any(self.req.references):
+            embed.add_field(name="Reference(s)", value="\n".join(ref or "-" for ref in self.req.references), inline=False)
+        else:
+            embed.add_field(name="Reference", value="-", inline=False)
+        embed.add_field(name="Notify when class finishes", value="Yes" if self.req.want_reminder else "No", inline=True)
+        embed.set_footer(text="Developer test only. Normal member requests still use admin approval.")
+
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                if child.custom_id == "tm:rem_on":
+                    child.style = discord.ButtonStyle.success if self.req.want_reminder else discord.ButtonStyle.secondary
+                if child.custom_id == "tm:rem_off":
+                    child.style = discord.ButtonStyle.success if not self.req.want_reminder else discord.ButtonStyle.secondary
+
+        await safe_update(interaction, content="Review and open automatically.", embed=embed, view=self)
+
+# ---------- Admin decision ----------
 
 
 class DeveloperTrainingPanelView(discord.ui.View):
@@ -989,7 +1083,11 @@ class DeveloperTrainingPanelView(discord.ui.View):
         custom_id="tmdev:auto_open_training",
     )
     async def open_test_training(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(DeveloperAutoTrainingModal(self.cog))
+        await interaction.response.send_message(
+            "Developer auto-open test. First, pick a discipline.",
+            view=DisciplineView(self.cog, reminder_only=False, auto_open=True),
+            ephemeral=True,
+        )
 
 
 class AdminDecisionView(discord.ui.View):
@@ -1372,29 +1470,46 @@ class TrainingManager(commands.Cog):
                 return course
         return None
 
+    async def _fetch_available_academies(self, session, discipline: str) -> Tuple[List[AvailableAcademy], Optional[int]]:
+        url = f"https://www.missionchief.com{AUTO_BUILDING_LIST_PATH}"
+        async with session.get(url, allow_redirects=True) as response:
+            status = getattr(response, "status", None)
+            html = await response.text()
+
+        if status is not None and int(status) >= 400:
+            return [], status
+
+        academies = [
+            academy
+            for academy in parse_available_academies(html)
+            if academy.discipline == discipline
+        ]
+        preferred_id = AUTO_ACADEMY_BUILDINGS.get(discipline)
+        if preferred_id:
+            academies.sort(key=lambda academy: academy.building_id != preferred_id)
+        return academies, status
+
     async def _try_auto_open_training(
         self,
         guild: discord.Guild,
         user: discord.abc.User,
         req: TrainingRequest,
     ) -> AutoTrainingResult:
-        academy_id = AUTO_ACADEMY_BUILDINGS.get(req.discipline)
-        if not academy_id:
-            return AutoTrainingResult(False, f"Auto-open is not configured for {req.discipline}")
+        fallback_academy_id = AUTO_ACADEMY_BUILDINGS.get(req.discipline)
 
         if req.num_classes < 1 or req.num_classes > AUTO_MAX_CLASSES:
             return AutoTrainingResult(False, f"Requested class count must be between 1 and {AUTO_MAX_CLASSES}")
 
         verified, mc_user_id, mc_username, verified_source = await self._resolve_verified_requester(guild, user)
         if not verified:
-            return AutoTrainingResult(False, verified_source, academy_id=academy_id)
+            return AutoTrainingResult(False, verified_source, academy_id=fallback_academy_id)
 
         contribution_rate = await self._get_latest_contribution_rate(mc_user_id)
         if contribution_rate is not None and contribution_rate < AUTO_MIN_CONTRIBUTION_RATE:
             return AutoTrainingResult(
                 False,
                 f"Latest contribution rate is {contribution_rate:.1f}%, below {AUTO_MIN_CONTRIBUTION_RATE:.1f}%",
-                academy_id=academy_id,
+                academy_id=fallback_academy_id,
                 mc_user_id=mc_user_id,
                 mc_username=mc_username,
                 contribution_rate=contribution_rate,
@@ -1405,60 +1520,75 @@ class TrainingManager(commands.Cog):
             return AutoTrainingResult(
                 False,
                 "CookieManager is not loaded",
-                academy_id=academy_id,
+                academy_id=fallback_academy_id,
                 mc_user_id=mc_user_id,
                 mc_username=mc_username,
                 contribution_rate=contribution_rate,
             )
 
         session = await cookie_manager.get_session()
-        building_url = f"https://www.missionchief.com/buildings/{academy_id}"
-        async with session.get(building_url, allow_redirects=True) as response:
-            status = getattr(response, "status", None)
-            html = await response.text()
-        if status is not None and int(status) >= 400:
-            return AutoTrainingResult(False, f"Academy page returned HTTP {status}", academy_id=academy_id, status=status)
-
-        page = parse_academy_page(html)
-        if not page.action or not page.authenticity_token:
+        academies, list_status = await self._fetch_available_academies(session, req.discipline)
+        if not academies and fallback_academy_id:
+            academies = [
+                AvailableAcademy(
+                    building_id=fallback_academy_id,
+                    name=f"Configured {req.discipline} academy",
+                    discipline=req.discipline,
+                )
+            ]
+        if not academies:
             return AutoTrainingResult(
                 False,
-                "Academy education form was not found; MissionChief session may not be logged in",
-                academy_id=academy_id,
+                f"No available {req.discipline} academies found on the alliance building list",
+                academy_id=fallback_academy_id,
                 mc_user_id=mc_user_id,
                 mc_username=mc_username,
                 contribution_rate=contribution_rate,
-                status=status,
+                status=list_status,
             )
 
-        if page.available_rooms < req.num_classes:
-            return AutoTrainingResult(
-                False,
-                f"Only {page.available_rooms} classroom(s) available, request needs {req.num_classes}",
-                academy_id=academy_id,
-                mc_user_id=mc_user_id,
-                mc_username=mc_username,
-                contribution_rate=contribution_rate,
-                status=status,
-            )
+        last_reason = "No suitable academy found"
+        page = None
+        course = None
+        academy_id = None
+        status = None
+        for academy in academies:
+            academy_id = academy.building_id
+            building_url = f"https://www.missionchief.com/buildings/{academy_id}"
+            async with session.get(building_url, allow_redirects=True) as response:
+                status = getattr(response, "status", None)
+                html = await response.text()
+            if status is not None and int(status) >= 400:
+                last_reason = f"Academy {academy_id} returned HTTP {status}"
+                continue
 
-        if req.fee_per_day not in page.costs:
-            return AutoTrainingResult(
-                False,
-                f"Fee {req.fee_per_day} is not available on the academy page",
-                academy_id=academy_id,
-                mc_user_id=mc_user_id,
-                mc_username=mc_username,
-                contribution_rate=contribution_rate,
-                status=status,
-            )
+            candidate_page = parse_academy_page(html)
+            if not candidate_page.action or not candidate_page.authenticity_token:
+                last_reason = f"Academy {academy_id} has no education form"
+                continue
+            if candidate_page.available_rooms < req.num_classes:
+                last_reason = (
+                    f"Academy {academy_id} has only {candidate_page.available_rooms} classroom(s), "
+                    f"request needs {req.num_classes}"
+                )
+                continue
+            if req.fee_per_day not in candidate_page.costs:
+                last_reason = f"Fee {req.fee_per_day} is not available in academy {academy_id}"
+                continue
+            candidate_course = self._find_academy_course(candidate_page, req.training)
+            if not candidate_course:
+                last_reason = f"Training `{req.training}` was not found in academy {academy_id}"
+                continue
 
-        course = self._find_academy_course(page, req.training)
-        if not course:
+            page = candidate_page
+            course = candidate_course
+            break
+
+        if not page or not course or not academy_id:
             return AutoTrainingResult(
                 False,
-                f"Training `{req.training}` was not found in academy {academy_id}",
-                academy_id=academy_id,
+                last_reason,
+                academy_id=academy_id or fallback_academy_id,
                 mc_user_id=mc_user_id,
                 mc_username=mc_username,
                 contribution_rate=contribution_rate,
@@ -1509,7 +1639,6 @@ class TrainingManager(commands.Cog):
         user: discord.abc.User,
         req: TrainingRequest,
         result: AutoTrainingResult,
-        admin_channel: discord.abc.Messageable,
         log_channel: discord.abc.Messageable,
     ) -> None:
         end_at = datetime.now(AMS) + timedelta(days=req.days)
@@ -1539,7 +1668,6 @@ class TrainingManager(commands.Cog):
         embed.add_field(name="Expected end time", value=fmt_dt(end_at), inline=False)
         embed.set_footer(text=f"Course value: {result.course_value} • HTTP {result.status}")
 
-        await admin_channel.send(embed=embed)
         await log_channel.send(embed=embed)
 
         if req.want_reminder:
@@ -1553,6 +1681,44 @@ class TrainingManager(commands.Cog):
                 when=end_at.astimezone(timezone.utc),
                 fallback_channel_id=req.request_channel_id,
             )
+
+    async def _notify_auto_open_requester(
+        self,
+        user: discord.abc.User,
+        req: TrainingRequest,
+        result: AutoTrainingResult,
+        request_channel: Optional[discord.abc.Messageable],
+    ) -> None:
+        fee_txt = "free" if req.fee_per_day == 0 else f"{req.fee_per_day} credits/day"
+        class_txt = "class" if req.num_classes == 1 else "classes"
+        message = (
+            f"Your training has been started automatically: **{req.training}** "
+            f"({req.num_classes} {class_txt}, {fee_txt})."
+        )
+        if result.academy_id:
+            message += f"\nAcademy: https://www.missionchief.com/buildings/{result.academy_id}"
+
+        try:
+            await user.send(message)
+            return
+        except Exception as exc:
+            log.info("Could not DM automatic training success to %s: %s", getattr(user, "id", "unknown"), exc)
+
+        if request_channel is None:
+            return
+
+        try:
+            fallback_message = await request_channel.send(f"{getattr(user, 'mention', '')} {message}")
+            asyncio.create_task(self._delete_later(fallback_message, 15 * 60))
+        except Exception as exc:
+            log.info("Could not send/delete automatic training fallback notification: %s", exc)
+
+    async def _delete_later(self, message: discord.Message, delay_seconds: int) -> None:
+        await asyncio.sleep(delay_seconds)
+        try:
+            await message.delete()
+        except Exception as exc:
+            log.info("Could not delete temporary automatic training notification: %s", exc)
 
     async def _send_developer_panel(self, guild: discord.Guild, channel: discord.TextChannel) -> discord.Message:
         embed = discord.Embed(
