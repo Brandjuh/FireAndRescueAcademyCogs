@@ -3,6 +3,10 @@ import types
 from unittest.mock import AsyncMock
 
 from trainings_manager.trainings_manager import (
+    DEVELOPER_PANEL_CHANNEL_ID,
+    DeveloperTrainingPanelView,
+    SubmitButton,
+    SummaryView,
     AUTO_ALLIANCE_DURATION_SECONDS,
     TrainingManager,
     TrainingRequest,
@@ -164,3 +168,56 @@ def test_auto_open_training_falls_back_when_known_tax_is_below_threshold():
     assert result.success is False
     assert "below 5.0%" in result.reason
     assert session.posts == []
+
+
+def test_normal_submit_button_uses_admin_flow_without_auto_open():
+    user = types.SimpleNamespace(id=123, mention="<@123>")
+    request_channel = types.SimpleNamespace(id=10, mention="#requests")
+    admin_channel = types.SimpleNamespace(id=11, send=AsyncMock())
+    log_channel = types.SimpleNamespace(id=12, send=AsyncMock())
+    guild = types.SimpleNamespace(
+        get_channel=lambda channel_id: {
+            10: request_channel,
+            11: admin_channel,
+            12: log_channel,
+        }.get(channel_id),
+    )
+    cog = TrainingManager.__new__(TrainingManager)
+    cog.config = types.SimpleNamespace(
+        guild=lambda guild: types.SimpleNamespace(
+            all=AsyncMock(
+                return_value={
+                    "request_channel_id": 10,
+                    "admin_channel_id": 11,
+                    "log_channel_id": 12,
+                }
+            )
+        )
+    )
+    cog._try_auto_open_training = AsyncMock()
+    parent = SummaryView(cog, user.id, "Fire", "Hotshot Crew Training", 3, 100, 2, [])
+    button = SubmitButton(parent)
+    interaction = types.SimpleNamespace(
+        guild=guild,
+        user=user,
+        response=types.SimpleNamespace(
+            send_message=AsyncMock(),
+            is_done=lambda: False,
+            edit_message=AsyncMock(),
+        ),
+        followup=types.SimpleNamespace(send=AsyncMock()),
+        message=types.SimpleNamespace(edit=AsyncMock()),
+    )
+
+    asyncio.run(button.callback(interaction))
+
+    cog._try_auto_open_training.assert_not_awaited()
+    admin_channel.send.assert_awaited_once()
+    log_channel.send.assert_awaited_once()
+
+
+def test_developer_panel_uses_configured_test_channel():
+    view = DeveloperTrainingPanelView(TrainingManager.__new__(TrainingManager))
+
+    assert DEVELOPER_PANEL_CHANNEL_ID == 1421242306136113254
+    assert hasattr(view, "open_test_training")
