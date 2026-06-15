@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.3.5"
+    __version__ = "1.3.6"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
@@ -4175,9 +4175,9 @@ class FscDashboardView(FscTimedView):
 
     def _configure_category_buttons(self, data: Dict[str, Any]) -> None:
         self._remove_buttons_by_callback(self.DASHBOARD_ACTION_CALLBACKS)
-        self._remove_buttons_by_label(self.DASHBOARD_ACTION_LABELS | self.DASHBOARD_CATEGORY_LABELS)
-        for category in self._available_categories(data):
-            self.add_item(DashboardCategoryButton(category))
+        self._remove_buttons_by_label(self.DASHBOARD_ACTION_LABELS)
+        unavailable_categories = self.DASHBOARD_CATEGORY_LABELS - set(self._available_categories(data))
+        self._remove_buttons_by_label(unavailable_categories)
 
     def _dashboard_view(self, data: Dict[str, Any] | None = None) -> "FscDashboardView":
         return FscDashboardView(self.cog, self.user, self.channel, self.guild, data=data or self.data)
@@ -4201,6 +4201,22 @@ class FscDashboardView(FscTimedView):
             data=data,
         )
         await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+    @discord.ui.button(label="Incidents", style=discord.ButtonStyle.primary, custom_id="fsc:dashboard:category:incidents")
+    async def category_incidents(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.open_category(interaction, "Incidents")
+
+    @discord.ui.button(label="Staff", style=discord.ButtonStyle.primary, custom_id="fsc:dashboard:category:staff")
+    async def category_staff(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.open_category(interaction, "Staff")
+
+    @discord.ui.button(label="Station", style=discord.ButtonStyle.primary, custom_id="fsc:dashboard:category:station")
+    async def category_station(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.open_category(interaction, "Station")
+
+    @discord.ui.button(label="Vehicle", style=discord.ButtonStyle.primary, custom_id="fsc:dashboard:category:vehicle")
+    async def category_vehicle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.open_category(interaction, "Vehicle")
 
     @discord.ui.button(label="Refresh", style=discord.ButtonStyle.primary)
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -4487,6 +4503,7 @@ class FscDashboardView(FscTimedView):
     @discord.ui.button(label="Start mission", style=discord.ButtonStyle.danger)
     async def mission(self, interaction: discord.Interaction, button: discord.ui.Button):
         channel = interaction.channel or self.channel
+        guild = interaction.guild or self.guild
         data = await self.cog.config.user(self.user).all()
         if not data["started"]:
             embed = await self.cog._build_dashboard_embed(self.user)
@@ -4523,8 +4540,8 @@ class FscDashboardView(FscTimedView):
         incident = self.cog._pick_random_incident(data)
         mission = self.cog._new_mission_state(
             incident,
-            channel_id=channel.id,
-            guild_id=self.guild.id if self.guild else None,
+            channel_id=getattr(channel, "id", 0),
+            guild_id=getattr(guild, "id", None),
         )
         mission["missing_required_vehicles"] = self.cog._missing_required_vehicle_ids(
             incident,
@@ -4569,33 +4586,6 @@ class FscDashboardView(FscTimedView):
         await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
 
 
-class DashboardCategoryButton(discord.ui.Button):
-    def __init__(self, category: str):
-        custom_id = f"fsc:dashboard:category:{category.lower()}"
-        super().__init__(label=category, style=discord.ButtonStyle.primary, custom_id=custom_id)
-        self.category = category
-
-    async def callback(self, interaction: discord.Interaction):
-        view = self.view
-        if not isinstance(view, FscDashboardView):
-            await interaction.response.send_message("This dashboard is no longer available.", ephemeral=True)
-            return
-        await view.open_category(interaction, self.category)
-
-
-class DashboardActionButton(discord.ui.Button):
-    def __init__(self, action: str, label: str):
-        super().__init__(label=label, style=discord.ButtonStyle.secondary, custom_id=f"fsc:dashboard:action:{action}")
-        self.action = action
-
-    async def callback(self, interaction: discord.Interaction):
-        view = self.view
-        if not isinstance(view, FscDashboardCategoryView):
-            await interaction.response.send_message("This menu is no longer available.", ephemeral=True)
-            return
-        await view.run_action(interaction, self.action)
-
-
 class FscDashboardCategoryView(FscTimedView):
     def __init__(
         self,
@@ -4614,8 +4604,14 @@ class FscDashboardCategoryView(FscTimedView):
         self.category = category
         self.data = data or {}
         dashboard = FscDashboardView(cog, user, channel, guild, data=self.data)
-        for action in dashboard._category_actions(category, self.data):
-            self.add_item(DashboardActionButton(action, dashboard.ACTION_LABELS[action]))
+        allowed_labels = {
+            dashboard.ACTION_LABELS[action]
+            for action in dashboard._category_actions(category, self.data)
+        }
+        for child in list(self.children):
+            label = getattr(child, "label", None)
+            if isinstance(label, str) and label in dashboard.ACTION_LABELS.values() and label not in allowed_labels:
+                self._remove_child_item(child)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user.id
@@ -4640,6 +4636,54 @@ class FscDashboardCategoryView(FscTimedView):
             await interaction.response.send_message("Unknown dashboard action.", ephemeral=True)
             return
         await handler(interaction, None)
+
+    @discord.ui.button(label="Build expansions", style=discord.ButtonStyle.secondary, custom_id="fsc:dashboard:action:expansions")
+    async def action_expansions(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.run_action(interaction, "expansions")
+
+    @discord.ui.button(label="Buy equipment", style=discord.ButtonStyle.secondary, custom_id="fsc:dashboard:action:equipment")
+    async def action_equipment(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.run_action(interaction, "equipment")
+
+    @discord.ui.button(label="Buy vehicle", style=discord.ButtonStyle.secondary, custom_id="fsc:dashboard:action:shop")
+    async def action_shop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.run_action(interaction, "shop")
+
+    @discord.ui.button(label="Career station", style=discord.ButtonStyle.secondary, custom_id="fsc:dashboard:action:career")
+    async def action_career(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.run_action(interaction, "career")
+
+    @discord.ui.button(label="Command help", style=discord.ButtonStyle.secondary, custom_id="fsc:dashboard:action:commands")
+    async def action_commands(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.run_action(interaction, "commands")
+
+    @discord.ui.button(label="Hire staff", style=discord.ButtonStyle.secondary, custom_id="fsc:dashboard:action:recruit")
+    async def action_recruit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.run_action(interaction, "recruit")
+
+    @discord.ui.button(label="Maintenance bay", style=discord.ButtonStyle.secondary, custom_id="fsc:dashboard:action:maintenance")
+    async def action_maintenance(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.run_action(interaction, "maintenance")
+
+    @discord.ui.button(label="Overview", style=discord.ButtonStyle.secondary, custom_id="fsc:dashboard:action:station")
+    async def action_station(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.run_action(interaction, "station")
+
+    @discord.ui.button(label="Refresh dashboard", style=discord.ButtonStyle.secondary, custom_id="fsc:dashboard:action:refresh")
+    async def action_refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.run_action(interaction, "refresh")
+
+    @discord.ui.button(label="Start mission", style=discord.ButtonStyle.danger, custom_id="fsc:dashboard:action:mission")
+    async def action_mission(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.run_action(interaction, "mission")
+
+    @discord.ui.button(label="Train staff", style=discord.ButtonStyle.secondary, custom_id="fsc:dashboard:action:training")
+    async def action_training(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.run_action(interaction, "training")
+
+    @discord.ui.button(label="Upgrade station", style=discord.ButtonStyle.primary, custom_id="fsc:dashboard:action:upgrade")
+    async def action_upgrade(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.run_action(interaction, "upgrade")
 
     @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, row=4)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
