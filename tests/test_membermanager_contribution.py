@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
+from MemberManager.automation import ContributionMonitor
 from MemberManager.membermanager import MemberManager
 from MemberManager.models import MemberData
 from MemberManager.views import MemberOverviewView
@@ -125,6 +126,42 @@ class MemberManagerContributionTests(unittest.TestCase):
         self.assertEqual(results[0]["mc_user_id"], "456")
         self.assertEqual(results[0]["name"], "CrashTestDummy")
         self.assertEqual(results[0]["source"], "missionchief")
+
+    def test_membermanager_prefers_membersscraper_for_member_source(self):
+        members_scraper = object()
+        alliance_scraper = object()
+        cog = MemberManager.__new__(MemberManager)
+        cog.members_scraper = members_scraper
+        cog.alliance_scraper = alliance_scraper
+
+        self.assertIs(cog._get_member_source(), members_scraper)
+
+    def test_contribution_monitor_uses_membersscraper_contract(self):
+        members_scraper = types.SimpleNamespace(
+            get_members=AsyncMock(
+                return_value=[
+                    {
+                        "mc_user_id": "456",
+                        "name": "LowTaxMember",
+                        "contribution_rate": 1.5,
+                    }
+                ]
+            ),
+            get_member_contribution_history=AsyncMock(return_value=[1.5, 2.0, 1.0, 0.5]),
+        )
+        monitor = ContributionMonitor(
+            bot=types.SimpleNamespace(get_cog=lambda name: None),
+            db=types.SimpleNamespace(),
+            config=types.SimpleNamespace(contribution_threshold=AsyncMock(return_value=5.0)),
+            member_source=members_scraper,
+        )
+        monitor._send_contribution_alert = AsyncMock(return_value=True)
+
+        asyncio.run(monitor._check_all_contributions())
+
+        members_scraper.get_members.assert_awaited_once()
+        members_scraper.get_member_contribution_history.assert_awaited_once_with("456", limit=8)
+        monitor._send_contribution_alert.assert_awaited_once()
 
     def test_membermanager_resolves_membersscraper_member_by_name(self):
         members_scraper = types.SimpleNamespace(

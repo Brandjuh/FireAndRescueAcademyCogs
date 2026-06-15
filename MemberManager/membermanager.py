@@ -260,7 +260,7 @@ class MemberManager(ConfigCommands, commands.Cog):
                 self.bot,
                 self.db,
                 self.config,
-                self.alliance_scraper
+                self._get_member_source()
             )
             self._automation_task = asyncio.create_task(
                 self.contribution_monitor.run()
@@ -296,6 +296,10 @@ class MemberManager(ConfigCommands, commands.Cog):
             log.info(f"Connected to: {', '.join(integrations)}")
         else:
             log.warning("No integrations found - some features may not work")
+
+    def _get_member_source(self) -> Optional[commands.Cog]:
+        """Return the preferred MissionChief member data provider."""
+        return self.members_scraper or self.alliance_scraper
 
     def _get_integrations_payload(self) -> Dict[str, Any]:
         """Return the current integration objects passed into MemberManager views."""
@@ -1303,8 +1307,16 @@ class MemberManager(ConfigCommands, commands.Cog):
         force_alert: bool
     ):
         """Check contribution status for all members."""
+        member_source = self._get_member_source()
+        if not member_source:
+            await ctx.send(
+                "❌ **MembersScraper not available**\n"
+                "Make sure MembersScraper is loaded: `[p]load membersscraper`"
+            )
+            return
+
         try:
-            mc_members = await self.alliance_scraper.get_members()
+            mc_members = await member_source.get_members()
         except Exception as e:
             await ctx.send(f"❌ Failed to get alliance members: {str(e)}")
             return
