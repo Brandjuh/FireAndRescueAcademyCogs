@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
+from MemberManager import automation as automation_module
 from MemberManager.automation import ContributionMonitor
 from MemberManager.membermanager import MemberManager
 from MemberManager.models import MemberData
@@ -162,6 +163,41 @@ class MemberManagerContributionTests(unittest.TestCase):
         members_scraper.get_members.assert_awaited_once()
         members_scraper.get_member_contribution_history.assert_awaited_once_with("456", limit=8)
         monitor._send_contribution_alert.assert_awaited_once()
+
+    def test_contribution_monitor_limits_alerts_per_run(self):
+        members_scraper = types.SimpleNamespace(
+            get_members=AsyncMock(
+                return_value=[
+                    {
+                        "mc_user_id": str(index),
+                        "name": f"LowTaxMember{index}",
+                        "contribution_rate": 1.0,
+                    }
+                    for index in range(5)
+                ]
+            ),
+            get_member_contribution_history=AsyncMock(return_value=[1.0, 1.0, 1.0, 1.0]),
+        )
+        monitor = ContributionMonitor(
+            bot=types.SimpleNamespace(get_cog=lambda name: None),
+            db=types.SimpleNamespace(),
+            config=types.SimpleNamespace(contribution_threshold=AsyncMock(return_value=5.0)),
+            member_source=members_scraper,
+        )
+        monitor._send_contribution_alert = AsyncMock(return_value=True)
+
+        original_max = automation_module.CONTRIBUTION_ALERT_MAX_PER_RUN
+        original_delay = automation_module.CONTRIBUTION_ALERT_SEND_DELAY_SECONDS
+        automation_module.CONTRIBUTION_ALERT_MAX_PER_RUN = 2
+        automation_module.CONTRIBUTION_ALERT_SEND_DELAY_SECONDS = 0
+        try:
+            asyncio.run(monitor._check_all_contributions())
+        finally:
+            automation_module.CONTRIBUTION_ALERT_MAX_PER_RUN = original_max
+            automation_module.CONTRIBUTION_ALERT_SEND_DELAY_SECONDS = original_delay
+
+        self.assertEqual(monitor._send_contribution_alert.await_count, 2)
+        self.assertEqual(len(monitor._last_alerts), 2)
 
     def test_membermanager_resolves_membersscraper_member_by_name(self):
         members_scraper = types.SimpleNamespace(

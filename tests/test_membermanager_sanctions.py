@@ -7,7 +7,7 @@ import types
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from MemberManager.models import MemberData
 from MemberManager.views import (
@@ -126,6 +126,71 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         self.assertEqual(message.id, 98765)
         self.assertEqual(stored["id"], 98765)
         channel.send.assert_awaited_once()
+
+    def test_sanctionmanager_throttles_game_log_review_messages(self):
+        module = load_sanction_manager_module()
+
+        class GuildConfig:
+            game_log_review_channel_id = AsyncMock(return_value=123)
+
+        channel = types.SimpleNamespace(
+            send=AsyncMock(
+                side_effect=[
+                    types.SimpleNamespace(id=1001),
+                    types.SimpleNamespace(id=1002),
+                    types.SimpleNamespace(id=1003),
+                ]
+            )
+        )
+        cog = module.SanctionsManager.__new__(module.SanctionsManager)
+        cog.bot = types.SimpleNamespace(get_channel=lambda channel_id: channel if channel_id == 123 else None)
+        cog.config = types.SimpleNamespace(guild=lambda guild: GuildConfig())
+        cog.db = types.SimpleNamespace(update_game_log_review=Mock())
+        cog._build_game_log_review_embed = Mock(return_value=types.SimpleNamespace())
+        guild = types.SimpleNamespace(id=1, get_channel=lambda channel_id: None)
+        created = [
+            {
+                "row": {"id": 1},
+                "sanction_id": 11,
+                "sanction_type": "Kick",
+                "discord_user_id": None,
+            },
+            {
+                "row": {"id": 2},
+                "sanction_id": 12,
+                "sanction_type": "Mute",
+                "discord_user_id": None,
+            },
+            {
+                "row": {"id": 3},
+                "sanction_id": 13,
+                "sanction_type": "Kick",
+                "discord_user_id": None,
+            },
+        ]
+
+        original_view = module.GameLogReviewActionView
+        original_sleep = module.asyncio.sleep
+        sleep_mock = AsyncMock()
+        module.GameLogReviewActionView = lambda manager: "review-view"
+        module.asyncio.sleep = sleep_mock
+        try:
+            asyncio.run(
+                cog._send_game_log_review_messages(
+                    guild,
+                    created,
+                    bulk_threshold=10,
+                    send_delay_seconds=0.25,
+                )
+            )
+        finally:
+            module.GameLogReviewActionView = original_view
+            module.asyncio.sleep = original_sleep
+
+        self.assertEqual(channel.send.await_count, 3)
+        self.assertEqual(sleep_mock.await_count, 2)
+        sleep_mock.assert_any_await(0.25)
+        self.assertEqual(cog.db.update_game_log_review.call_count, 3)
 
     def test_sanctionmanager_deduplicates_existing_panel_messages(self):
         module = load_sanction_manager_module()
