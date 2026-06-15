@@ -159,6 +159,23 @@ def test_timed_view_on_error_sends_clear_feedback():
     assert "Open a fresh dashboard" in message
 
 
+def test_timed_view_on_error_names_select_menus():
+    user = type("User", (), {"id": 123})()
+    view = FscTimedView()
+    interaction = _Interaction(user)
+    item = discord.ui.Select(
+        placeholder="Select vehicle action",
+        options=[discord.SelectOption(label="Buy vehicle", value="shop")],
+    )
+
+    asyncio.run(view.on_error(interaction, RuntimeError("boom"), item))
+
+    assert interaction.response.sent["ephemeral"] is True
+    message = interaction.response.sent["args"][0]
+    assert "`Select vehicle action` menu" in message
+    assert "button" not in message
+
+
 def test_build_vehicle_catalog_uses_yaml_vehicle_data():
     cog = _cog_with_game_data(
         {
@@ -1141,6 +1158,34 @@ def test_dashboard_category_configuration_removes_old_action_labels():
     for label in stale_labels:
         assert label not in labels
     assert labels == ["Incidents", "Staff", "Station", "Vehicle"]
+
+
+def test_dashboard_action_dropdown_routes_to_handler():
+    user = type("User", (), {"id": 123})()
+    cog = _cog_with_game_data({})
+    data = {
+        "started": True,
+        "station_level": 5,
+        "command_level": 5,
+        "xp": 975,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "vehicles": [],
+        "expansions": [],
+        "active_mission": {},
+    }
+    cog.config = _Config(data, {})
+    view = FscDashboardCategoryView(cog, user, object(), object(), "Vehicle", data=data)
+    select = next(child for child in view.children if isinstance(child, FscDashboardActionSelect))
+    select.view = view
+    select.values = ["equipment"]
+    interaction = _Interaction(user)
+
+    asyncio.run(select.callback(interaction))
+
+    assert interaction.response.edited["embed"].kwargs["title"] == "Equipment shop"
+    assert isinstance(interaction.response.edited["view"], EquipmentShopView)
 
 
 def test_dashboard_category_view_uses_action_dropdown():
