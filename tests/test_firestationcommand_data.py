@@ -13,6 +13,7 @@ from FireStationCommand.fire_station_command import (
     EquipmentShopSelect,
     EquipmentShopView,
     FireStationCommand,
+    FscDashboardActionSelect,
     FscDashboardCategoryView,
     FscDashboardView,
     FscTimedView,
@@ -1142,7 +1143,7 @@ def test_dashboard_category_configuration_removes_old_action_labels():
     assert labels == ["Incidents", "Staff", "Station", "Vehicle"]
 
 
-def test_dashboard_category_view_uses_static_action_callbacks():
+def test_dashboard_category_view_uses_action_dropdown():
     user = type("User", (), {"id": 123})()
     cog = _cog_with_game_data({})
     data = {
@@ -1158,10 +1159,16 @@ def test_dashboard_category_view_uses_static_action_callbacks():
         "active_mission": {},
     }
     view = FscDashboardCategoryView(cog, user, object(), object(), "Vehicle", data=data)
+    selects = [child for child in view.children if isinstance(child, FscDashboardActionSelect)]
 
-    assert hasattr(view, "action_equipment")
-    assert hasattr(view, "action_shop")
-    assert hasattr(view, "action_maintenance")
+    assert len(selects) == 1
+    assert selects[0].placeholder == "Select vehicle action"
+    assert [option.label for option in selects[0].options] == [
+        "Buy equipment",
+        "Buy vehicle",
+        "Maintenance bay",
+    ]
+    assert [option.value for option in selects[0].options] == ["equipment", "shop", "maintenance"]
 
 
 def test_dashboard_start_mission_handles_missing_channel_id():
