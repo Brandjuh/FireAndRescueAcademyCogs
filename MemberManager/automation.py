@@ -25,6 +25,9 @@ from .utils import format_historical_trend  # 🔧 FIXED IMPORT
 
 log = logging.getLogger("red.FARA.MemberManager.automation")
 
+CONTRIBUTION_ALERT_MAX_PER_RUN = 5
+CONTRIBUTION_ALERT_SEND_DELAY_SECONDS = 2.0
+
 
 class ContributionMonitor:
     """
@@ -96,6 +99,9 @@ class ContributionMonitor:
         
         threshold = await self.config.contribution_threshold()
         alerts_sent = 0
+        alerts_deferred = 0
+        max_alerts = max(1, int(CONTRIBUTION_ALERT_MAX_PER_RUN))
+        send_delay = max(0.0, float(CONTRIBUTION_ALERT_SEND_DELAY_SECONDS))
         
         for mc_member in mc_members:
             mc_id = mc_member.get("user_id") or mc_member.get("mc_user_id")
@@ -143,6 +149,16 @@ class ContributionMonitor:
                 continue
             
             # 🚨 ALL CHECKS PASSED - SEND ALERT
+            if alerts_sent >= max_alerts:
+                alerts_deferred += 1
+                log.info(
+                    "Deferring low contribution alert for %s (%s): per-run alert cap reached (%s)",
+                    mc_name,
+                    mc_id,
+                    max_alerts,
+                )
+                continue
+
             log.info(f"Sending low contribution alert for {mc_name} ({mc_id}): {current_rate:.1f}%")
             
             success = await self._send_contribution_alert(
@@ -155,8 +171,14 @@ class ContributionMonitor:
             if success:
                 self._last_alerts[mc_id] = now
                 alerts_sent += 1
+                if send_delay and alerts_sent < max_alerts:
+                    await asyncio.sleep(send_delay)
         
-        log.info(f"Contribution check complete. Sent {alerts_sent} alerts.")
+        log.info(
+            "Contribution check complete. Sent %s alerts. Deferred %s alerts due to per-run cap.",
+            alerts_sent,
+            alerts_deferred,
+        )
     
     async def _get_join_date(
         self,

@@ -21,6 +21,8 @@ DEFAULT_REVIEW_CHANNEL_ID = 1421625293130567690
 GAME_LOG_DUPLICATE_LOOKBACK_SECONDS = 6 * 3600
 GAME_LOG_DUPLICATE_EVENT_GRACE_SECONDS = 30 * 60
 GAME_LOG_DUPLICATE_FUTURE_GRACE_SECONDS = 5 * 60
+GAME_LOG_REVIEW_BULK_THRESHOLD = 10
+GAME_LOG_REVIEW_SEND_DELAY_SECONDS = 1.0
 
 GAME_LOG_SANCTION_ACTIONS = {
     "kicked_from_alliance": {
@@ -1161,7 +1163,7 @@ class DiscordMemberModal(discord.ui.Modal, title="Sanction Target Search"):
                     f"❌ An error occurred: {str(e)}\nPlease check the logs.",
                     ephemeral=True
                 )
-            except:
+            except Exception:
                 pass
 
 class MCOnlyModal(discord.ui.Modal, title="MC Member Info"):
@@ -1226,7 +1228,7 @@ class MCOnlyModal(discord.ui.Modal, title="MC Member Info"):
                             if not discord_member:
                                 try:
                                     discord_member = await guild.fetch_member(discord_id)
-                                except:
+                                except Exception:
                                     pass
                             
                             if discord_member:
@@ -1256,7 +1258,7 @@ class MCOnlyModal(discord.ui.Modal, title="MC Member Info"):
                                         if not discord_member:
                                             try:
                                                 discord_member = await guild.fetch_member(discord_id)
-                                            except:
+                                            except Exception:
                                                 pass
                                         
                                         if discord_member:
@@ -1293,7 +1295,7 @@ class MCOnlyModal(discord.ui.Modal, title="MC Member Info"):
                     f"❌ An error occurred: {str(e)}\nPlease check the logs.",
                     ephemeral=True
                 )
-            except:
+            except Exception:
                 pass
 
 class ReasonSelectionView(discord.ui.View):
@@ -1539,7 +1541,7 @@ class SanctionTypeView(discord.ui.View):
         if self.target_discord_user:
             member_info += f"**Discord**: {self.target_discord_user.mention}\n"
         else:
-            member_info += f"**Discord**: No Discord found\n"
+            member_info += "**Discord**: No Discord found\n"
         
         embed.description = member_info
         return embed
@@ -1588,7 +1590,7 @@ class SanctionTypeSelect(discord.ui.Select):
             log.exception(f"Error in SanctionTypeSelect callback: {e}")
             try:
                 await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
-            except:
+            except Exception:
                 pass
 
 class ReasonCategoryView(discord.ui.View):
@@ -1665,7 +1667,7 @@ class ReasonCategorySelect(discord.ui.Select):
             log.exception(f"Error in ReasonCategorySelect callback: {e}")
             try:
                 await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
-            except:
+            except Exception:
                 pass
 
 class ReasonDetailView(discord.ui.View):
@@ -1750,7 +1752,7 @@ class ReasonDetailSelect(discord.ui.Select):
             log.exception(f"Error in ReasonDetailSelect callback: {e}")
             try:
                 await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
-            except:
+            except Exception:
                 pass
 
 class CustomReasonModal(discord.ui.Modal, title="Custom Reason"):
@@ -1839,7 +1841,7 @@ class SummarySanctionView(discord.ui.View):
         if self.target_discord_user:
             member_info += f"**Discord**: {self.target_discord_user.mention}\n"
         else:
-            member_info += f"**Discord**: No Discord found\n"
+            member_info += "**Discord**: No Discord found\n"
         
         embed.add_field(name="Member", value=member_info, inline=False)
         embed.add_field(name="Admin", value=self.admin_display_name, inline=True)
@@ -2013,7 +2015,7 @@ class SummarySanctionView(discord.ui.View):
         if self.target_discord_user:
             member_info += f"**Discord**: {self.target_discord_user.mention}\n"
         else:
-            member_info += f"**Discord**: No Discord found\n"
+            member_info += "**Discord**: No Discord found\n"
         
         public_embed.add_field(name="Member", value=member_info, inline=False)
         public_embed.add_field(name="Admin", value=self.admin_display_name, inline=True)
@@ -3175,7 +3177,8 @@ class SanctionsManager(commands.Cog):
         guild: discord.Guild,
         created: List[dict],
         *,
-        bulk_threshold: int = 10,
+        bulk_threshold: int = GAME_LOG_REVIEW_BULK_THRESHOLD,
+        send_delay_seconds: float = GAME_LOG_REVIEW_SEND_DELAY_SECONDS,
     ) -> None:
         """Post action-required review messages for imported game-log sanctions."""
         if not created:
@@ -3195,7 +3198,8 @@ class SanctionsManager(commands.Cog):
                 self.db.update_game_log_review(item["row"]["id"], review_message_id=message.id)
             return
 
-        for item in created:
+        send_delay = max(0.0, float(send_delay_seconds))
+        for index, item in enumerate(created):
             row = item["row"]
             message = await channel.send(
                 embed=self._build_game_log_review_embed(
@@ -3208,6 +3212,8 @@ class SanctionsManager(commands.Cog):
                 view=GameLogReviewActionView(self),
             )
             self.db.update_game_log_review(row["id"], review_message_id=message.id)
+            if send_delay and index < len(created) - 1:
+                await asyncio.sleep(send_delay)
 
     def _parse_game_log_event_timestamp(self, row: dict) -> Optional[int]:
         """Return a Unix timestamp from a LogsScraper event timestamp when available."""
@@ -3881,7 +3887,7 @@ class SanctionsManager(commands.Cog):
             return
         
         embed = discord.Embed(
-            title=f"📋 Sanction History",
+            title="📋 Sanction History",
             color=discord.Color.blue(),
             timestamp=datetime.now(timezone.utc)
         )
@@ -4012,8 +4018,10 @@ class EditSanctionView(discord.ui.View):
 
     @discord.ui.button(label="Edit Sanction Type", style=discord.ButtonStyle.primary)
     async def edit_type(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(
-            EditSanctionTypeSearchModal(self.cog, self.sanction, self.editor)
+        await interaction.response.send_message(
+            f"Choose a new sanction type for sanction #{self.sanction['sanction_id']}:",
+            view=EditSanctionTypeView(self.cog, self.sanction, self.editor),
+            ephemeral=True,
         )
 
     @discord.ui.button(label="Edit Reason", style=discord.ButtonStyle.primary)
@@ -4444,7 +4452,7 @@ class EditNotesModal(discord.ui.Modal, title="Edit Admin Notes"):
             return
         
         embed = discord.Embed(
-            title=f"📜 Custom Rules" + (f" - {category}" if category else ""),
+            title="📜 Custom Rules" + (f" - {category}" if category else ""),
             color=discord.Color.green(),
             timestamp=datetime.now(timezone.utc)
         )
