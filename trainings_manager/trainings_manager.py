@@ -1,6 +1,11 @@
+from __future__ import annotations
+
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from html.parser import HTMLParser
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional, Tuple
@@ -119,6 +124,121 @@ DISCIPLINES: Dict[str, List[Tuple[str, int]]] = {
 }
 
 FEE_CHOICES = [0, 100, 200, 300, 400, 500]
+AUTO_ACADEMY_BUILDINGS = {
+    "Fire": 4951748,
+    "Police": 4951746,
+}
+AUTO_ALLIANCE_DURATION_SECONDS = 3600
+AUTO_MIN_CONTRIBUTION_RATE = 5.0
+AUTO_MAX_CLASSES = 4
+
+
+@dataclass
+class AcademyCourse:
+    label: str
+    normalized_label: str
+    value: str
+
+
+@dataclass
+class AcademyPage:
+    action: Optional[str]
+    authenticity_token: Optional[str]
+    available_rooms: int
+    costs: List[int]
+    courses: List[AcademyCourse]
+
+
+@dataclass
+class AutoTrainingResult:
+    success: bool
+    reason: str
+    academy_id: Optional[int] = None
+    mc_user_id: Optional[str] = None
+    mc_username: Optional[str] = None
+    contribution_rate: Optional[float] = None
+    course_value: Optional[str] = None
+    classes_opened: int = 0
+    status: Optional[int] = None
+
+
+def _normalize_training_name(name: str) -> str:
+    cleaned = re.sub(r"\(\s*\d+\s+days?\s*\)", "", str(name), flags=re.IGNORECASE)
+    cleaned = cleaned.replace("’", "'")
+    return re.sub(r"\s+", " ", cleaned).strip().casefold()
+
+
+class AcademyPageParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.action: Optional[str] = None
+        self.authenticity_token: Optional[str] = None
+        self.room_options: List[int] = []
+        self.cost_options: List[int] = []
+        self.courses: List[AcademyCourse] = []
+        self._select_name: Optional[str] = None
+        self._current_option_value: Optional[str] = None
+        self._current_option_text: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]):
+        attr = {key: value for key, value in attrs}
+        if tag == "form":
+            action = attr.get("action")
+            if action and "/education" in action:
+                self.action = action
+        elif tag == "input" and attr.get("name") == "authenticity_token":
+            self.authenticity_token = attr.get("value")
+        elif tag == "select":
+            self._select_name = attr.get("name")
+        elif tag == "option" and self._select_name:
+            self._current_option_value = attr.get("value") or ""
+            self._current_option_text = []
+
+    def handle_data(self, data: str):
+        if self._current_option_value is not None:
+            self._current_option_text.append(data)
+
+    def handle_endtag(self, tag: str):
+        if tag == "option" and self._select_name and self._current_option_value is not None:
+            text = re.sub(r"\s+", " ", "".join(self._current_option_text)).strip()
+            value = self._current_option_value
+            if self._select_name == "building_rooms_use":
+                try:
+                    self.room_options.append(int(value))
+                except ValueError:
+                    pass
+            elif self._select_name == "alliance[cost]":
+                try:
+                    self.cost_options.append(int(value))
+                except ValueError:
+                    pass
+            elif self._select_name == "education_select" and value and text:
+                self.courses.append(
+                    AcademyCourse(
+                        label=text,
+                        normalized_label=_normalize_training_name(text),
+                        value=value,
+                    )
+                )
+            self._current_option_value = None
+            self._current_option_text = []
+        elif tag == "select":
+            self._select_name = None
+
+    def page(self) -> AcademyPage:
+        return AcademyPage(
+            action=self.action,
+            authenticity_token=self.authenticity_token,
+            available_rooms=max(self.room_options) if self.room_options else 0,
+            costs=sorted(set(self.cost_options)),
+            courses=self.courses,
+        )
+
+
+def parse_academy_page(html: str) -> AcademyPage:
+    parser = AcademyPageParser()
+    parser.feed(html)
+    return parser.page()
 
 # ---------- Model ----------
 
@@ -302,7 +422,7 @@ class ClassCountView(discord.ui.View):
         discipline, training, days, fee = self.state
         await safe_update(
             interaction,
-            content=f"1 class selected. Do you want to add a reference?",
+            content="1 class selected. Do you want to add a reference?",
             view=ReferenceAskView(self.cog, discipline, training, days, fee, 1, reminder_only=False),
         )
 
@@ -311,7 +431,7 @@ class ClassCountView(discord.ui.View):
         discipline, training, days, fee = self.state
         await safe_update(
             interaction,
-            content=f"2 classes selected. Do you want to add references?",
+            content="2 classes selected. Do you want to add references?",
             view=ReferenceAskView(self.cog, discipline, training, days, fee, 2, reminder_only=False),
         )
 
@@ -320,7 +440,7 @@ class ClassCountView(discord.ui.View):
         discipline, training, days, fee = self.state
         await safe_update(
             interaction,
-            content=f"3 classes selected. Do you want to add references?",
+            content="3 classes selected. Do you want to add references?",
             view=ReferenceAskView(self.cog, discipline, training, days, fee, 3, reminder_only=False),
         )
 
@@ -329,7 +449,7 @@ class ClassCountView(discord.ui.View):
         discipline, training, days, fee = self.state
         await safe_update(
             interaction,
-            content=f"4 classes selected. Do you want to add references?",
+            content="4 classes selected. Do you want to add references?",
             view=ReferenceAskView(self.cog, discipline, training, days, fee, 4, reminder_only=False),
         )
 
@@ -531,7 +651,7 @@ class ReminderOnlySummaryView(discord.ui.View):
         )
         if ref_text:
             dm_text += f"\nReference: {ref_text}"
-        dm_text += f"\n\nYou will be notified when the training finishes."
+        dm_text += "\n\nYou will be notified when the training finishes."
         
         dm_sent = False
         try:
@@ -619,6 +739,30 @@ class SubmitButton(discord.ui.Button):
 
         req = self.parent_view.req
         req.request_channel_id = request_channel.id
+        user = interaction.user
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+        except Exception as exc:
+            log.debug("Could not defer training request submit interaction: %s", exc)
+
+        auto_result = await cog._try_auto_open_training(guild, user, req)
+        if auto_result.success:
+            await cog._send_auto_open_success(
+                guild=guild,
+                user=user,
+                req=req,
+                result=auto_result,
+                admin_channel=admin_channel,
+                log_channel=log_channel,
+            )
+            await safe_update(
+                interaction,
+                content="Training opened automatically in MissionChief. Admins have been notified.",
+                embed=None,
+                view=None,
+            )
+            return
 
         end_at = datetime.now(AMS) + timedelta(days=req.days)
         emb = discord.Embed(
@@ -626,7 +770,6 @@ class SubmitButton(discord.ui.Button):
             color=discord.Color.orange() if req.num_classes > 1 else discord.Color.yellow(),
             timestamp=datetime.now(timezone.utc),
         )
-        user = interaction.user
         emb.add_field(name="Requester", value=f"{user.mention} ({user.id})", inline=False)
         emb.add_field(name="Discipline", value=req.discipline, inline=True)
         emb.add_field(name="Training", value=req.training, inline=True)
@@ -637,6 +780,7 @@ class SubmitButton(discord.ui.Button):
         # Classes field with emphasis if multiple
         class_txt = f"**{req.num_classes}**" if req.num_classes > 1 else "1"
         emb.add_field(name="Classes", value=class_txt, inline=True)
+        emb.add_field(name="Automatic opening", value=f"Fallback to admin flow: {auto_result.reason}", inline=False)
         
         # References handling
         if req.references and any(req.references):
@@ -680,6 +824,7 @@ class SubmitButton(discord.ui.Button):
                 for i, ref in enumerate(req.references, 1):
                     ref_lines.append(f"Class {i}: {ref if ref else '—'}")
                 queue_emb.add_field(name="References", value="\n".join(ref_lines), inline=False)
+        queue_emb.add_field(name="Automatic opening", value=f"Fallback to admin flow: {auto_result.reason}", inline=False)
         
         await log_channel.send(embed=queue_emb)
 
@@ -1065,6 +1210,253 @@ class TrainingManager(commands.Cog):
                     await ch.send(f"<@{user.id}> {text}" if user else text)
                 except Exception:
                     pass
+
+    # --------------- Automatic MissionChief opening ---------------
+
+    async def _resolve_verified_requester(
+        self,
+        guild: discord.Guild,
+        user: discord.abc.User,
+    ) -> Tuple[bool, Optional[str], Optional[str], str]:
+        membersync = self.bot.get_cog("MemberSync")
+        if not membersync:
+            return False, None, None, "MemberSync is not loaded"
+
+        link = None
+        get_link = getattr(membersync, "get_link_for_discord", None)
+        if get_link:
+            link = await get_link(user.id)
+        if link:
+            mc_user_id = link.get("mc_user_id")
+            mc_username = link.get("mc_username") or link.get("mc_name") or link.get("name")
+            return True, str(mc_user_id) if mc_user_id else None, mc_username, "approved MemberSync link"
+
+        role_id = None
+        try:
+            role_id = await membersync.config.verified_role_id()
+        except Exception as exc:
+            log.debug("Could not read MemberSync verified role: %s", exc)
+
+        member = guild.get_member(user.id)
+        if role_id and member:
+            role = guild.get_role(int(role_id))
+            if role and role in getattr(member, "roles", []):
+                return True, None, None, "verified Discord role"
+
+        return False, None, None, "requester is not verified"
+
+    async def _get_latest_contribution_rate(self, mc_user_id: Optional[str]) -> Optional[float]:
+        if not mc_user_id:
+            return None
+        members_scraper = self.bot.get_cog("MembersScraper")
+        if not members_scraper:
+            return None
+        get_snapshot = getattr(members_scraper, "get_member_snapshot", None)
+        if not get_snapshot:
+            return None
+        try:
+            snapshot = await get_snapshot(str(mc_user_id))
+        except Exception as exc:
+            log.warning("Could not fetch latest contribution snapshot for %s: %s", mc_user_id, exc)
+            return None
+        if not snapshot:
+            return None
+        value = snapshot.get("contribution_rate")
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _find_academy_course(self, page: AcademyPage, training_name: str) -> Optional[AcademyCourse]:
+        wanted = _normalize_training_name(training_name)
+        for course in page.courses:
+            if course.normalized_label == wanted:
+                return course
+        return None
+
+    async def _try_auto_open_training(
+        self,
+        guild: discord.Guild,
+        user: discord.abc.User,
+        req: TrainingRequest,
+    ) -> AutoTrainingResult:
+        academy_id = AUTO_ACADEMY_BUILDINGS.get(req.discipline)
+        if not academy_id:
+            return AutoTrainingResult(False, f"Auto-open is not configured for {req.discipline}")
+
+        if req.num_classes < 1 or req.num_classes > AUTO_MAX_CLASSES:
+            return AutoTrainingResult(False, f"Requested class count must be between 1 and {AUTO_MAX_CLASSES}")
+
+        verified, mc_user_id, mc_username, verified_source = await self._resolve_verified_requester(guild, user)
+        if not verified:
+            return AutoTrainingResult(False, verified_source, academy_id=academy_id)
+
+        contribution_rate = await self._get_latest_contribution_rate(mc_user_id)
+        if contribution_rate is not None and contribution_rate < AUTO_MIN_CONTRIBUTION_RATE:
+            return AutoTrainingResult(
+                False,
+                f"Latest contribution rate is {contribution_rate:.1f}%, below {AUTO_MIN_CONTRIBUTION_RATE:.1f}%",
+                academy_id=academy_id,
+                mc_user_id=mc_user_id,
+                mc_username=mc_username,
+                contribution_rate=contribution_rate,
+            )
+
+        cookie_manager = self.bot.get_cog("CookieManager")
+        if not cookie_manager or not hasattr(cookie_manager, "get_session"):
+            return AutoTrainingResult(
+                False,
+                "CookieManager is not loaded",
+                academy_id=academy_id,
+                mc_user_id=mc_user_id,
+                mc_username=mc_username,
+                contribution_rate=contribution_rate,
+            )
+
+        session = await cookie_manager.get_session()
+        building_url = f"https://www.missionchief.com/buildings/{academy_id}"
+        async with session.get(building_url, allow_redirects=True) as response:
+            status = getattr(response, "status", None)
+            html = await response.text()
+        if status is not None and int(status) >= 400:
+            return AutoTrainingResult(False, f"Academy page returned HTTP {status}", academy_id=academy_id, status=status)
+
+        page = parse_academy_page(html)
+        if not page.action or not page.authenticity_token:
+            return AutoTrainingResult(
+                False,
+                "Academy education form was not found; MissionChief session may not be logged in",
+                academy_id=academy_id,
+                mc_user_id=mc_user_id,
+                mc_username=mc_username,
+                contribution_rate=contribution_rate,
+                status=status,
+            )
+
+        if page.available_rooms < req.num_classes:
+            return AutoTrainingResult(
+                False,
+                f"Only {page.available_rooms} classroom(s) available, request needs {req.num_classes}",
+                academy_id=academy_id,
+                mc_user_id=mc_user_id,
+                mc_username=mc_username,
+                contribution_rate=contribution_rate,
+                status=status,
+            )
+
+        if req.fee_per_day not in page.costs:
+            return AutoTrainingResult(
+                False,
+                f"Fee {req.fee_per_day} is not available on the academy page",
+                academy_id=academy_id,
+                mc_user_id=mc_user_id,
+                mc_username=mc_username,
+                contribution_rate=contribution_rate,
+                status=status,
+            )
+
+        course = self._find_academy_course(page, req.training)
+        if not course:
+            return AutoTrainingResult(
+                False,
+                f"Training `{req.training}` was not found in academy {academy_id}",
+                academy_id=academy_id,
+                mc_user_id=mc_user_id,
+                mc_username=mc_username,
+                contribution_rate=contribution_rate,
+                status=status,
+            )
+
+        post_url = f"https://www.missionchief.com{page.action}" if page.action.startswith("/") else page.action
+        payload = {
+            "utf8": "✓",
+            "authenticity_token": page.authenticity_token,
+            "building_rooms_use": str(req.num_classes),
+            "education_select": course.value,
+            "alliance[duration]": str(AUTO_ALLIANCE_DURATION_SECONDS),
+            "alliance[cost]": str(req.fee_per_day),
+            "commit": "Educate",
+        }
+        async with session.post(post_url, data=payload, allow_redirects=True) as response:
+            post_status = getattr(response, "status", None)
+            await response.text()
+
+        if post_status is None or int(post_status) >= 400:
+            return AutoTrainingResult(
+                False,
+                f"MissionChief education POST failed with HTTP {post_status}",
+                academy_id=academy_id,
+                mc_user_id=mc_user_id,
+                mc_username=mc_username,
+                contribution_rate=contribution_rate,
+                course_value=course.value,
+                status=post_status,
+            )
+
+        return AutoTrainingResult(
+            True,
+            "Training opened automatically",
+            academy_id=academy_id,
+            mc_user_id=mc_user_id,
+            mc_username=mc_username,
+            contribution_rate=contribution_rate,
+            course_value=course.value,
+            classes_opened=req.num_classes,
+            status=post_status,
+        )
+
+    async def _send_auto_open_success(
+        self,
+        guild: discord.Guild,
+        user: discord.abc.User,
+        req: TrainingRequest,
+        result: AutoTrainingResult,
+        admin_channel: discord.abc.Messageable,
+        log_channel: discord.abc.Messageable,
+    ) -> None:
+        end_at = datetime.now(AMS) + timedelta(days=req.days)
+        fee_txt = "Free" if req.fee_per_day == 0 else f"{req.fee_per_day} credits/day/trainee"
+        training_text = f"{req.discipline} → {req.training} ({req.days}d)"
+        if req.num_classes > 1:
+            training_text += f" × **{req.num_classes} classes**"
+
+        embed = discord.Embed(
+            title="Training automatically opened",
+            color=discord.Color.green(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="Requester", value=f"{user.mention} ({user.id})", inline=False)
+        embed.add_field(name="Training", value=training_text, inline=False)
+        embed.add_field(name="Academy", value=f"[Building {result.academy_id}](https://www.missionchief.com/buildings/{result.academy_id})", inline=True)
+        embed.add_field(name="Fee", value=fee_txt, inline=True)
+        embed.add_field(name="Alliance share", value="1 hour", inline=True)
+        if result.mc_user_id or result.mc_username:
+            embed.add_field(
+                name="MissionChief member",
+                value=f"{result.mc_username or 'Unknown'} ({result.mc_user_id or 'unknown ID'})",
+                inline=False,
+            )
+        if result.contribution_rate is not None:
+            embed.add_field(name="Contribution", value=f"{result.contribution_rate:.1f}%", inline=True)
+        embed.add_field(name="Expected end time", value=fmt_dt(end_at), inline=False)
+        embed.set_footer(text=f"Course value: {result.course_value} • HTTP {result.status}")
+
+        await admin_channel.send(embed=embed)
+        await log_channel.send(embed=embed)
+
+        if req.want_reminder:
+            ref_text = ""
+            if req.references and any(req.references):
+                ref_text = " (Multiple references)" if len(set(req.references)) > 1 else f" Reference: {req.references[0]}"
+            await self._add_reminder(
+                guild_id=guild.id,
+                user_id=user.id,
+                text=f"Your **{req.training}** class has finished.{ref_text}",
+                when=end_at.astimezone(timezone.utc),
+                fallback_channel_id=req.request_channel_id,
+            )
 
     # --------------- Commands ---------------
 
