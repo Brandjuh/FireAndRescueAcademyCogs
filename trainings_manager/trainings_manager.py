@@ -124,6 +124,7 @@ DISCIPLINES: Dict[str, List[Tuple[str, int]]] = {
 }
 
 FEE_CHOICES = [0, 100, 200, 300, 400, 500]
+DEVELOPER_PANEL_CHANNEL_ID = 1421242306136113254
 AUTO_ACADEMY_BUILDINGS = {
     "Fire": 4951748,
     "Police": 4951746,
@@ -740,29 +741,6 @@ class SubmitButton(discord.ui.Button):
         req = self.parent_view.req
         req.request_channel_id = request_channel.id
         user = interaction.user
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
-        except Exception as exc:
-            log.debug("Could not defer training request submit interaction: %s", exc)
-
-        auto_result = await cog._try_auto_open_training(guild, user, req)
-        if auto_result.success:
-            await cog._send_auto_open_success(
-                guild=guild,
-                user=user,
-                req=req,
-                result=auto_result,
-                admin_channel=admin_channel,
-                log_channel=log_channel,
-            )
-            await safe_update(
-                interaction,
-                content="Training opened automatically in MissionChief. Admins have been notified.",
-                embed=None,
-                view=None,
-            )
-            return
 
         end_at = datetime.now(AMS) + timedelta(days=req.days)
         emb = discord.Embed(
@@ -780,7 +758,6 @@ class SubmitButton(discord.ui.Button):
         # Classes field with emphasis if multiple
         class_txt = f"**{req.num_classes}**" if req.num_classes > 1 else "1"
         emb.add_field(name="Classes", value=class_txt, inline=True)
-        emb.add_field(name="Automatic opening", value=f"Fallback to admin flow: {auto_result.reason}", inline=False)
         
         # References handling
         if req.references and any(req.references):
@@ -824,8 +801,6 @@ class SubmitButton(discord.ui.Button):
                 for i, ref in enumerate(req.references, 1):
                     ref_lines.append(f"Class {i}: {ref if ref else '—'}")
                 queue_emb.add_field(name="References", value="\n".join(ref_lines), inline=False)
-        queue_emb.add_field(name="Automatic opening", value=f"Fallback to admin flow: {auto_result.reason}", inline=False)
-        
         await log_channel.send(embed=queue_emb)
 
         await safe_update(interaction, content="Sent to Admin. You'll be notified on any change.", embed=None, view=None)
@@ -901,6 +876,121 @@ class SummaryView(discord.ui.View):
         await safe_update(interaction, content="Review and submit to Admin.", embed=embed, view=self)
 
 # ---------- Admin decision ----------
+
+class DeveloperAutoTrainingModal(discord.ui.Modal, title="Developer Training Auto-Open"):
+    discipline = discord.ui.TextInput(
+        label="Discipline",
+        style=discord.TextStyle.short,
+        max_length=20,
+        required=True,
+        placeholder="Fire or Police",
+    )
+    training = discord.ui.TextInput(
+        label="Training name",
+        style=discord.TextStyle.short,
+        max_length=100,
+        required=True,
+        placeholder="Exact MissionChief training name",
+    )
+    fee = discord.ui.TextInput(
+        label="Alliance cost",
+        style=discord.TextStyle.short,
+        max_length=10,
+        required=True,
+        placeholder="0, 100, 200, 300, 400 or 500",
+    )
+    classes = discord.ui.TextInput(
+        label="Classes",
+        style=discord.TextStyle.short,
+        max_length=1,
+        required=True,
+        placeholder="1-4",
+    )
+
+    def __init__(self, cog: "TrainingManager"):
+        super().__init__()
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("This only works inside a server.", ephemeral=True)
+            return
+
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+        except Exception as exc:
+            log.debug("Could not defer developer training auto-open interaction: %s", exc)
+
+        discipline = str(self.discipline.value).strip()
+        training = str(self.training.value).strip()
+        try:
+            fee = int(str(self.fee.value).strip())
+            num_classes = int(str(self.classes.value).strip())
+        except ValueError:
+            await interaction.followup.send("Fee and classes must be numbers.", ephemeral=True)
+            return
+
+        days = next(
+            (
+                duration
+                for name, duration in DISCIPLINES.get(discipline, [])
+                if _normalize_training_name(name) == _normalize_training_name(training)
+            ),
+            0,
+        )
+        req = TrainingRequest(
+            user_id=interaction.user.id,
+            discipline=discipline,
+            training=training,
+            days=days,
+            fee_per_day=fee,
+            num_classes=num_classes,
+            references=["Developer auto-open test"],
+            want_reminder=False,
+            request_channel_id=interaction.channel.id if interaction.channel else 0,
+        )
+        result = await self.cog._try_auto_open_training(guild, interaction.user, req)
+        conf = await self.cog.config.guild(guild).all()
+        admin_channel = guild.get_channel(conf.get("admin_channel_id")) if conf.get("admin_channel_id") else None
+        log_channel = guild.get_channel(conf.get("log_channel_id")) if conf.get("log_channel_id") else None
+
+        if result.success:
+            if admin_channel and log_channel:
+                await self.cog._send_auto_open_success(
+                    guild=guild,
+                    user=interaction.user,
+                    req=req,
+                    result=result,
+                    admin_channel=admin_channel,
+                    log_channel=log_channel,
+                )
+            await interaction.followup.send(
+                f"Developer test succeeded: opened **{training}** in academy `{result.academy_id}`.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            f"Developer test did not open a class: {result.reason}",
+            ephemeral=True,
+        )
+
+
+class DeveloperTrainingPanelView(discord.ui.View):
+    def __init__(self, cog: "TrainingManager"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(
+        label="Open Test Training",
+        style=discord.ButtonStyle.danger,
+        custom_id="tmdev:auto_open_training",
+    )
+    async def open_test_training(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(DeveloperAutoTrainingModal(self.cog))
+
 
 class AdminDecisionView(discord.ui.View):
     def __init__(self, cog: "TrainingManager", requester_id: int, req: TrainingRequest):
@@ -1129,16 +1219,22 @@ class TrainingManager(commands.Cog):
             "admin_role_id": None,
             "reminders": [],
             "button_message": None,
+            "developer_panel_channel_id": DEVELOPER_PANEL_CHANNEL_ID,
+            "developer_panel_message_id": None,
         }
         self.config.register_guild(**default_guild)
 
         self.bot.add_view(StartView(self))
+        self.bot.add_view(DeveloperTrainingPanelView(self))
 
         self._reminder_task = self.bot.loop.create_task(self._reminder_loop())
+        self._developer_panel_task = self.bot.loop.create_task(self._ensure_developer_panels())
 
     def cog_unload(self):
         if self._reminder_task:
             self._reminder_task.cancel()
+        if self._developer_panel_task:
+            self._developer_panel_task.cancel()
 
     @asynccontextmanager
     async def _bot_status(self, detail: str, *, priority: int = 70):
@@ -1458,6 +1554,46 @@ class TrainingManager(commands.Cog):
                 fallback_channel_id=req.request_channel_id,
             )
 
+    async def _send_developer_panel(self, guild: discord.Guild, channel: discord.TextChannel) -> discord.Message:
+        embed = discord.Embed(
+            title="Developer Training Auto-Open",
+            description=(
+                "Use this private test panel to open MissionChief training classes automatically "
+                "without changing the normal member request flow.\n\n"
+                "This is for controlled testing only."
+            ),
+            color=discord.Color.orange(),
+        )
+        message = await channel.send(embed=embed, view=DeveloperTrainingPanelView(self))
+        await self.config.guild(guild).developer_panel_message_id.set(message.id)
+        return message
+
+    async def _ensure_developer_panel_for_guild(self, guild: discord.Guild) -> None:
+        conf = await self.config.guild(guild).all()
+        channel_id = int(conf.get("developer_panel_channel_id") or DEVELOPER_PANEL_CHANNEL_ID)
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            log.warning("TrainingManager developer panel channel not found: %s", channel_id)
+            return
+
+        message_id = conf.get("developer_panel_message_id")
+        if message_id:
+            try:
+                await channel.fetch_message(int(message_id))
+                return
+            except Exception as exc:
+                log.info("TrainingManager developer panel message missing; reposting: %s", exc)
+
+        await self._send_developer_panel(guild, channel)
+
+    async def _ensure_developer_panels(self) -> None:
+        await self.bot.wait_until_red_ready()
+        for guild in self.bot.guilds:
+            try:
+                await self._ensure_developer_panel_for_guild(guild)
+            except Exception as exc:
+                log.exception("Could not ensure TrainingManager developer panel in %s: %s", guild, exc)
+
     # --------------- Commands ---------------
 
     @commands.group(name="tmset", invoke_without_command=True)
@@ -1549,3 +1685,15 @@ class TrainingManager(commands.Cog):
         )
         await ch.send(embed=emb, view=StartView(self))
         await ctx.tick()
+
+    @tmset.command(name="devpost")
+    @commands.admin()
+    async def developer_post(self, ctx: commands.Context):
+        """Repost the developer-only TrainingManager auto-open test panel."""
+        channel_id = await self.config.guild(ctx.guild).developer_panel_channel_id()
+        channel = ctx.guild.get_channel(int(channel_id or DEVELOPER_PANEL_CHANNEL_ID))
+        if not channel:
+            await ctx.send("The configured developer panel channel was not found.")
+            return
+        await self._send_developer_panel(ctx.guild, channel)
+        await ctx.send(f"Developer TrainingManager panel posted in {channel.mention}.")
