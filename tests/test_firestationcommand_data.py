@@ -147,11 +147,14 @@ def test_timed_view_on_error_sends_clear_feedback():
     user = type("User", (), {"id": 123})()
     view = FscTimedView()
     interaction = _Interaction(user)
+    item = discord.ui.Button(label="Vehicle")
 
-    asyncio.run(view.on_error(interaction, RuntimeError("boom"), object()))
+    asyncio.run(view.on_error(interaction, RuntimeError("boom"), item))
 
     assert interaction.response.sent["ephemeral"] is True
-    assert "Open a fresh dashboard" in interaction.response.sent["args"][0]
+    message = interaction.response.sent["args"][0]
+    assert "`Vehicle` button" in message
+    assert "Open a fresh dashboard" in message
 
 
 def test_build_vehicle_catalog_uses_yaml_vehicle_data():
@@ -1134,6 +1137,13 @@ def test_dashboard_category_configuration_removes_old_action_labels():
     for label in stale_labels:
         assert label not in labels
     assert labels == ["Incidents", "Staff", "Station", "Vehicle"]
+    custom_ids = [getattr(child, "custom_id", None) for child in view.children]
+    assert custom_ids == [
+        "fsc:dashboard:category:incidents",
+        "fsc:dashboard:category:staff",
+        "fsc:dashboard:category:station",
+        "fsc:dashboard:category:vehicle",
+    ]
 
 
 def test_dashboard_upgrade_button_explains_locked_level():
