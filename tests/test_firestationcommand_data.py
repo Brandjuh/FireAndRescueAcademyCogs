@@ -901,8 +901,9 @@ def test_handle_takeover_incident_transfers_turnout_to_new_user():
     cog.config = _MultiUserConfig(users, {"xp_per_mission_base": 50})
     interaction = _Interaction(new_user, channel=channel, guild=guild)
 
-    asyncio.run(cog.handle_takeover_incident(interaction, channel, guild, original_user, new_user))
+    transferred = asyncio.run(cog.handle_takeover_incident(interaction, channel, guild, original_user, new_user))
 
+    assert transferred is True
     assert users[original_user.id]["active_mission"] == {}
     new_mission = users[new_user.id]["active_mission"]
     assert new_mission["stage"] == FireStationCommand.STAGE_ALERT_CHOICE
@@ -912,6 +913,46 @@ def test_handle_takeover_incident_transfers_turnout_to_new_user():
     assert new_mission["missing_required_equipment"] == []
     assert interaction.response.edited["embed"].kwargs["title"] == "Transferred incident: Shed Fire"
     assert isinstance(interaction.response.edited["view"], AlertChoiceView)
+
+
+def test_handle_takeover_incident_keeps_offer_open_when_new_user_is_not_ready():
+    original_user = type("User", (), {"id": 1001})()
+    new_user = type("User", (), {"id": 2002})()
+    channel = _Channel()
+    original_mission = {
+        "id": "shed_fire",
+        "title": "Shed Fire",
+        "stage": FireStationCommand.STAGE_STAFF_TURNOUT,
+        "required_staff": 4,
+        "base_credits": 750,
+        "hint": "Caller reports a shed fire behind the house.",
+    }
+    users = {
+        original_user.id: {"active_mission": original_mission},
+        new_user.id: {"started": False, "active_mission": {}, "staff_total": 0},
+    }
+    cog = _cog_with_game_data({})
+    cog.config = _MultiUserConfig(users, {})
+    interaction = _Interaction(new_user, channel=channel, guild=None)
+
+    transferred = asyncio.run(cog.handle_takeover_incident(interaction, channel, None, original_user, new_user))
+
+    assert transferred is False
+    assert users[original_user.id]["active_mission"] == original_mission
+    assert interaction.response.sent["ephemeral"] is True
+    assert interaction.response.sent["args"][0] == "Create a station before taking over incidents."
+
+
+def test_turnout_takeover_original_user_gets_feedback():
+    original_user = type("User", (), {"id": 1001})()
+    view = TurnoutTakeoverView(_cog_with_game_data({}), _Channel(), original_user)
+    interaction = _Interaction(original_user)
+
+    allowed = asyncio.run(view.interaction_check(interaction))
+
+    assert allowed is False
+    assert interaction.response.sent["ephemeral"] is True
+    assert "Another member must take over" in interaction.response.sent["args"][0]
 
 
 def test_turnout_takeover_timeout_clears_original_mission_and_disables_buttons():

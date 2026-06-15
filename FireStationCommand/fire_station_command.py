@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.3.8"
+    __version__ = "1.3.9"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
@@ -3022,32 +3022,32 @@ class FireStationCommand(commands.Cog):
         guild: discord.Guild | None,
         original_user: discord.abc.User,
         new_user: discord.abc.User,
-    ) -> None:
+    ) -> bool:
         if new_user.id == original_user.id:
             await interaction.response.send_message(
                 "The original station already missed this decision window. Another member must take over.",
                 ephemeral=True,
             )
-            return
+            return False
 
         original_conf = self.config.user(original_user)
         original_data = await original_conf.all()
         original_mission = original_data.get("active_mission", {}) or {}
         if not self._mission_is_stage(original_mission, self.STAGE_STAFF_TURNOUT):
             await interaction.response.send_message("This incident is no longer available for takeover.", ephemeral=True)
-            return
+            return False
 
         new_conf = self.config.user(new_user)
         new_data = await new_conf.all()
         if not new_data.get("started", False):
             await interaction.response.send_message("Create a station before taking over incidents.", ephemeral=True)
-            return
+            return False
         if new_data.get("active_mission"):
             await interaction.response.send_message("You already have an active incident.", ephemeral=True)
-            return
+            return False
         if int(new_data.get("staff_total", 0)) <= 0:
             await interaction.response.send_message("You need station staff before taking over incidents.", ephemeral=True)
-            return
+            return False
 
         incident = self._incident_from_active_mission(original_mission)
         mission = self._new_mission_state(
@@ -3079,6 +3079,7 @@ class FireStationCommand(commands.Cog):
 
         view = AlertChoiceView(self, channel, new_user)
         await interaction.response.edit_message(content=None, embed=embed, view=view)
+        return True
 
     async def handle_vehicle_selection(
         self,
@@ -4862,7 +4863,13 @@ class TurnoutTakeoverView(FscTimedView):
         self.original_user = original_user
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.id != self.original_user.id
+        if interaction.user.id != self.original_user.id:
+            return True
+        await interaction.response.send_message(
+            "The original station missed this decision window. Another member must take over this dispatch.",
+            ephemeral=True,
+        )
+        return False
 
     async def on_timeout(self) -> None:
         self._disable_children()
@@ -4890,19 +4897,16 @@ class TurnoutTakeoverView(FscTimedView):
 
     @discord.ui.button(label="Take over dispatch", style=discord.ButtonStyle.danger)
     async def take_over(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self._disable_children()
-        try:
-            await interaction.message.edit(view=self)
-        except Exception:
-            pass
-        await self.cog.handle_takeover_incident(
+        transferred = await self.cog.handle_takeover_incident(
             interaction,
             interaction.channel or self.channel,
             interaction.guild,
             self.original_user,
             interaction.user,
         )
-        self.stop()
+        if transferred:
+            self._disable_children()
+            self.stop()
 
 
 class VehicleSelect(discord.ui.Select):
