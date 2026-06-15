@@ -15,13 +15,13 @@ UPDATED: Enhanced contribution monitoring with:
 
 import asyncio
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 
 import discord
 import aiosqlite
 
-from .utils import calculate_contribution_trend, format_historical_trend  # 🔧 FIXED IMPORT
+from .utils import format_historical_trend  # 🔧 FIXED IMPORT
 
 log = logging.getLogger("red.FARA.MemberManager.automation")
 
@@ -39,11 +39,12 @@ class ContributionMonitor:
     Runs every 12 hours (2x per day).
     """
     
-    def __init__(self, bot, db, config, alliance_scraper):
+    def __init__(self, bot, db, config, member_source):
         self.bot = bot
         self.db = db
         self.config = config
-        self.alliance_scraper = alliance_scraper
+        self.member_source = member_source
+        self.alliance_scraper = member_source
         
         # Track last alert per member to avoid spam
         self._last_alerts: Dict[str, int] = {}
@@ -79,8 +80,8 @@ class ContributionMonitor:
         4. Check consistency (4+ checks below threshold)
         5. Send alert + create note if all checks pass
         """
-        if not self.alliance_scraper:
-            log.warning("AllianceScraper not available, skipping contribution check")
+        if not self.member_source:
+            log.warning("MembersScraper not available, skipping contribution check")
             return
         
         # Get LogsScraper for join date checking
@@ -88,7 +89,7 @@ class ContributionMonitor:
         
         # Get all MC members
         try:
-            mc_members = await self.alliance_scraper.get_members()
+            mc_members = await self.member_source.get_members()
         except Exception as e:
             log.error(f"Failed to get MC members: {e}")
             return
@@ -218,24 +219,30 @@ class ContributionMonitor:
         
         Returns list of rates (most recent first).
         """
-        if not self.alliance_scraper:
+        if not self.member_source:
             return []
         
         try:
-            # Query members_history table for past rates
-            rows = await self.alliance_scraper._query_alliance(
-                """
-                SELECT contribution_rate, scraped_at 
-                FROM members_history 
-                WHERE user_id=? OR mc_user_id=? 
-                ORDER BY scraped_at DESC 
-                LIMIT ?
-                """,
-                (mc_id, mc_id, weeks * 2)  # Get more data for better trend
-            )
-            
-            rates = [row["contribution_rate"] for row in rows if row["contribution_rate"] is not None]
-            return rates
+            get_history = getattr(self.member_source, "get_member_contribution_history", None)
+            if get_history:
+                return await get_history(mc_id, limit=weeks * 2)
+
+            query_alliance = getattr(self.member_source, "_query_alliance", None)
+            if query_alliance:
+                rows = await query_alliance(
+                    """
+                    SELECT contribution_rate, scraped_at 
+                    FROM members_history 
+                    WHERE user_id=? OR mc_user_id=? 
+                    ORDER BY scraped_at DESC 
+                    LIMIT ?
+                    """,
+                    (mc_id, mc_id, weeks * 2)
+                )
+                return [row["contribution_rate"] for row in rows if row["contribution_rate"] is not None]
+
+            log.warning("Member source does not expose contribution history")
+            return []
         
         except Exception as e:
             log.error(f"Failed to get historical rates for {mc_id}: {e}")

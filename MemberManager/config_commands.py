@@ -199,7 +199,7 @@ Integrations:
                         self.bot,
                         self.db,
                         self.config,
-                        self.alliance_scraper
+                        self._get_member_source()
                     )
                     self._automation_task = self.bot.loop.create_task(
                         self.contribution_monitor.run()
