@@ -124,6 +124,7 @@ DISCIPLINES: Dict[str, List[Tuple[str, int]]] = {
 }
 
 FEE_CHOICES = [0, 100, 200, 300, 400, 500]
+MEMBER_PANEL_CHANNEL_ID = 1421627971831070730
 DEVELOPER_PANEL_CHANNEL_ID = 1421242306136113254
 AUTO_BUILDING_LIST_PATH = "/verband/gebauede"
 AUTO_ACADEMY_BUILDINGS = {
@@ -792,7 +793,7 @@ class ReminderOff(discord.ui.Button):
 
 class SubmitButton(discord.ui.Button):
     def __init__(self, parent_view: "SummaryView"):
-        super().__init__(label="Send to Admin", style=discord.ButtonStyle.success, custom_id="tm:submit")
+        super().__init__(label="Submit Request", style=discord.ButtonStyle.success, custom_id="tm:submit")
         self.parent_view = parent_view
 
     async def callback(self, interaction: discord.Interaction):
@@ -825,6 +826,25 @@ class SubmitButton(discord.ui.Button):
         req = self.parent_view.req
         req.request_channel_id = request_channel.id
         user = interaction.user
+
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
+        auto_result = await cog._try_auto_open_training(guild, user, req)
+        if auto_result.success:
+            await cog._send_auto_open_success(
+                guild=guild,
+                user=user,
+                req=req,
+                result=auto_result,
+                log_channel=log_channel,
+            )
+            await cog._notify_auto_open_requester(user, req, auto_result, request_channel)
+            await interaction.followup.send(
+                "Training opened automatically. You'll be notified by DM.",
+                ephemeral=True,
+            )
+            return
 
         end_at = datetime.now(AMS) + timedelta(days=req.days)
         emb = discord.Embed(
@@ -887,7 +907,10 @@ class SubmitButton(discord.ui.Button):
                 queue_emb.add_field(name="References", value="\n".join(ref_lines), inline=False)
         await log_channel.send(embed=queue_emb)
 
-        await safe_update(interaction, content="Sent to Admin. You'll be notified on any change.", embed=None, view=None)
+        if interaction.response.is_done():
+            await interaction.followup.send("Sent to Admin. You'll be notified on any change.", ephemeral=True)
+        else:
+            await safe_update(interaction, content="Sent to Admin. You'll be notified on any change.", embed=None, view=None)
 
 class SummaryView(discord.ui.View):
     def __init__(
@@ -1311,12 +1334,13 @@ class TrainingManager(commands.Cog):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=0xBEEFCAFE, force_registration=True)
         default_guild = {
-            "request_channel_id": None,
+            "request_channel_id": MEMBER_PANEL_CHANNEL_ID,
             "admin_channel_id": None,
             "log_channel_id": None,
             "admin_role_id": None,
             "reminders": [],
             "button_message": None,
+            "panel_message_id": None,
             "developer_panel_channel_id": DEVELOPER_PANEL_CHANNEL_ID,
             "developer_panel_message_id": None,
         }
@@ -1326,11 +1350,14 @@ class TrainingManager(commands.Cog):
         self.bot.add_view(DeveloperTrainingPanelView(self))
 
         self._reminder_task = self.bot.loop.create_task(self._reminder_loop())
+        self._panel_task = self.bot.loop.create_task(self._ensure_member_panels())
         self._developer_panel_task = self.bot.loop.create_task(self._ensure_developer_panels())
 
     def cog_unload(self):
         if self._reminder_task:
             self._reminder_task.cancel()
+        if self._panel_task:
+            self._panel_task.cancel()
         if self._developer_panel_task:
             self._developer_panel_task.cancel()
 
@@ -1720,6 +1747,56 @@ class TrainingManager(commands.Cog):
         except Exception as exc:
             log.info("Could not delete temporary automatic training notification: %s", exc)
 
+    async def _build_member_panel_embed(self, guild: discord.Guild) -> discord.Embed:
+        custom_msg = await self.config.guild(guild).button_message()
+        if custom_msg:
+            description = custom_msg
+        else:
+            description = (
+                "**Start Request**: Submit a full training request. The bot will try to open it automatically. "
+                "If that is not possible, it will be sent to admins for review.\n"
+                "**Reminder Only**: Set a reminder for your training without requesting a new class.\n\n"
+                "Choose an option below to get started."
+            )
+
+        return discord.Embed(
+            title="Training Request System",
+            description=description,
+            color=discord.Color.blurple(),
+        )
+
+    async def _send_member_panel(self, guild: discord.Guild, channel: discord.TextChannel) -> discord.Message:
+        embed = await self._build_member_panel_embed(guild)
+        message = await channel.send(embed=embed, view=StartView(self))
+        await self.config.guild(guild).panel_message_id.set(message.id)
+        return message
+
+    async def _ensure_member_panel_for_guild(self, guild: discord.Guild) -> None:
+        conf = await self.config.guild(guild).all()
+        channel_id = int(conf.get("request_channel_id") or MEMBER_PANEL_CHANNEL_ID)
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            log.warning("TrainingManager member panel channel not found: %s", channel_id)
+            return
+
+        message_id = conf.get("panel_message_id")
+        if message_id:
+            try:
+                await channel.fetch_message(int(message_id))
+                return
+            except Exception as exc:
+                log.info("TrainingManager member panel message missing; reposting: %s", exc)
+
+        await self._send_member_panel(guild, channel)
+
+    async def _ensure_member_panels(self) -> None:
+        await self.bot.wait_until_red_ready()
+        for guild in self.bot.guilds:
+            try:
+                await self._ensure_member_panel_for_guild(guild)
+            except Exception as exc:
+                log.exception("Could not ensure TrainingManager member panel in %s: %s", guild, exc)
+
     async def _send_developer_panel(self, guild: discord.Guild, channel: discord.TextChannel) -> discord.Message:
         embed = discord.Embed(
             title="Developer Training Auto-Open",
@@ -1834,22 +1911,7 @@ class TrainingManager(commands.Cog):
             await ctx.send("The configured request channel was not found.")
             return
         
-        custom_msg = await self.config.guild(ctx.guild).button_message()
-        if custom_msg:
-            description = custom_msg
-        else:
-            description = (
-                "**Start Request**: Submit a full training request with fee and admin approval required.\n"
-                "**Reminder Only**: Set a reminder for your training without needing admin approval.\n\n"
-                "Choose an option below to get started."
-            )
-        
-        emb = discord.Embed(
-            title="Training Request System",
-            description=description,
-            color=discord.Color.blurple(),
-        )
-        await ch.send(embed=emb, view=StartView(self))
+        await self._send_member_panel(ctx.guild, ch)
         await ctx.tick()
 
     @tmset.command(name="devpost")
