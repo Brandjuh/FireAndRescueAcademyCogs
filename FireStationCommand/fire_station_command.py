@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.3.4"
+    __version__ = "1.3.5"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
@@ -4009,8 +4009,10 @@ class FscTimedView(discord.ui.View):
         item: discord.ui.Item,
     ) -> None:
         log.exception("FireStationCommand view error on %r", item, exc_info=(type(error), error, error.__traceback__))
+        label = getattr(item, "label", None)
+        action_text = f" `{label}`" if isinstance(label, str) and label else ""
         message = (
-            "This Fire Station Command menu hit an error while handling the button. "
+            f"This Fire Station Command menu hit an error while handling the{action_text} button. "
             "Open a fresh dashboard with `[p]fsc` and try again."
         )
         response = getattr(interaction, "response", None)
@@ -4569,7 +4571,8 @@ class FscDashboardView(FscTimedView):
 
 class DashboardCategoryButton(discord.ui.Button):
     def __init__(self, category: str):
-        super().__init__(label=category, style=discord.ButtonStyle.primary)
+        custom_id = f"fsc:dashboard:category:{category.lower()}"
+        super().__init__(label=category, style=discord.ButtonStyle.primary, custom_id=custom_id)
         self.category = category
 
     async def callback(self, interaction: discord.Interaction):
@@ -4582,7 +4585,7 @@ class DashboardCategoryButton(discord.ui.Button):
 
 class DashboardActionButton(discord.ui.Button):
     def __init__(self, action: str, label: str):
-        super().__init__(label=label, style=discord.ButtonStyle.secondary)
+        super().__init__(label=label, style=discord.ButtonStyle.secondary, custom_id=f"fsc:dashboard:action:{action}")
         self.action = action
 
     async def callback(self, interaction: discord.Interaction):
