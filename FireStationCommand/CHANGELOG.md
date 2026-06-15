@@ -63,7 +63,7 @@ All notable changes to FireStationCommand will be documented in this file.
 
 ### Changed
 
-- Bumped the cog version to `1.3.5`.
+- Bumped the cog version to `1.3.6`.
 - Vehicle shop options now come from `data/config/vehicles.yaml` when available.
 - Mission definitions now come from `data/config/missions.yaml` when available.
 - Mission embeds now show configured mission images when available.
@@ -90,6 +90,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - Dashboard category setup now removes old action buttons by label so only the category buttons remain on the main dashboard.
 - FireStationCommand button errors now send clear feedback and log the underlying exception instead of surfacing only as a generic Discord interaction failure.
 - Dashboard category and action buttons now use explicit custom IDs, and button error feedback names the failed button.
+- Dashboard submenus now use static Discord button callbacks instead of dynamic button subclasses, and Start mission handles missing channel IDs safely.
 - Short positive wait times now display as at least `in 1 minute` instead of `now`.
 - Station overview images now use the station level instead of vehicle capacity.
 - Default maximum station level is now 10.

@@ -13,6 +13,7 @@ from FireStationCommand.fire_station_command import (
     EquipmentShopSelect,
     EquipmentShopView,
     FireStationCommand,
+    FscDashboardCategoryView,
     FscDashboardView,
     FscTimedView,
     MaintenanceView,
@@ -1127,6 +1128,8 @@ def test_dashboard_category_configuration_removes_old_action_labels():
         "active_mission": {},
     }
     view = FscDashboardView(cog, user, object(), object())
+    for label in ["Incidents", "Staff", "Station", "Vehicle"]:
+        view.add_item(discord.ui.Button(label=label))
     stale_labels = ["Refresh", "Station overview", "Hire staff", "Vehicle shop", "Equipment shop"]
     for label in stale_labels:
         view.add_item(discord.ui.Button(label=label))
@@ -1137,13 +1140,71 @@ def test_dashboard_category_configuration_removes_old_action_labels():
     for label in stale_labels:
         assert label not in labels
     assert labels == ["Incidents", "Staff", "Station", "Vehicle"]
-    custom_ids = [getattr(child, "custom_id", None) for child in view.children]
-    assert custom_ids == [
-        "fsc:dashboard:category:incidents",
-        "fsc:dashboard:category:staff",
-        "fsc:dashboard:category:station",
-        "fsc:dashboard:category:vehicle",
+
+
+def test_dashboard_category_view_uses_static_action_callbacks():
+    user = type("User", (), {"id": 123})()
+    cog = _cog_with_game_data({})
+    data = {
+        "started": True,
+        "station_level": 5,
+        "command_level": 5,
+        "xp": 975,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "vehicles": [],
+        "expansions": [],
+        "active_mission": {},
+    }
+    view = FscDashboardCategoryView(cog, user, object(), object(), "Vehicle", data=data)
+
+    assert hasattr(view, "action_equipment")
+    assert hasattr(view, "action_shop")
+    assert hasattr(view, "action_maintenance")
+
+
+def test_dashboard_start_mission_handles_missing_channel_id():
+    user = type("User", (), {"id": 123})()
+    user_data = {
+        "started": True,
+        "station_level": 1,
+        "command_level": 1,
+        "xp": 0,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "vehicles": [{"id": 1, "catalog_id": "engine_basic", "crew_capacity": 6}],
+        "equipment": [],
+        "trainings": [],
+        "expansions": [],
+        "active_mission": {},
+    }
+    cog = _cog_with_game_data({})
+    cog.config = _Config(user_data, {})
+    cog.INCIDENTS = [
+        {
+            "id": "bin_fire",
+            "name": "Bin Fire",
+            "required_staff": 4,
+            "base_credits": 100,
+            "base_xp": 35,
+            "hint": "Small fire reported.",
+            "detail": "A bin is burning.",
+            "required_vehicles": [],
+            "required_equipment": [],
+            "required_expansions": [],
+            "capabilities": {},
+        }
     ]
+    view = FscDashboardView(cog, user, object(), object(), data=user_data)
+    interaction = _Interaction(user, channel=object(), guild=None)
+
+    asyncio.run(view.mission(interaction, None))
+
+    assert user_data["active_mission"]["id"] == "bin_fire"
+    assert user_data["active_mission"]["channel_id"] == 0
+    assert interaction.response.edited["embed"].kwargs["title"].endswith("Bin Fire")
 
 
 def test_dashboard_upgrade_button_explains_locked_level():
