@@ -14,6 +14,7 @@ from FireStationCommand.fire_station_command import (
     EquipmentShopView,
     FireStationCommand,
     FscDashboardView,
+    FscTimedView,
     MaintenanceView,
     RecruitmentView,
     TurnoutTakeoverView,
@@ -140,6 +141,17 @@ class _Interaction:
         self.guild = guild or object()
         self.message = _Message()
         self.response = _InteractionResponse()
+
+
+def test_timed_view_on_error_sends_clear_feedback():
+    user = type("User", (), {"id": 123})()
+    view = FscTimedView()
+    interaction = _Interaction(user)
+
+    asyncio.run(view.on_error(interaction, RuntimeError("boom"), object()))
+
+    assert interaction.response.sent["ephemeral"] is True
+    assert "Open a fresh dashboard" in interaction.response.sent["args"][0]
 
 
 def test_build_vehicle_catalog_uses_yaml_vehicle_data():
