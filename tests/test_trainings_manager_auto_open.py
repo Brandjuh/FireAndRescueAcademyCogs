@@ -4,7 +4,9 @@ from unittest.mock import AsyncMock
 
 from trainings_manager.trainings_manager import (
     AUTO_BUILDING_LIST_PATH,
+    AutoTrainingResult,
     DEVELOPER_PANEL_CHANNEL_ID,
+    MEMBER_PANEL_CHANNEL_ID,
     DeveloperTrainingPanelView,
     SubmitButton,
     SummaryView,
@@ -238,7 +240,7 @@ def test_auto_open_training_falls_back_when_known_tax_is_below_threshold():
     assert session.posts == []
 
 
-def test_normal_submit_button_uses_admin_flow_without_auto_open():
+def test_normal_submit_button_falls_back_to_admin_when_auto_open_fails():
     user = types.SimpleNamespace(id=123, mention="<@123>")
     request_channel = types.SimpleNamespace(id=10, mention="#requests")
     admin_channel = types.SimpleNamespace(id=11, send=AsyncMock())
@@ -262,7 +264,7 @@ def test_normal_submit_button_uses_admin_flow_without_auto_open():
             )
         )
     )
-    cog._try_auto_open_training = AsyncMock()
+    cog._try_auto_open_training = AsyncMock(return_value=AutoTrainingResult(False, "No academy available"))
     parent = SummaryView(cog, user.id, "Fire", "Hotshot Crew Training", 3, 100, 2, [])
     button = SubmitButton(parent)
     interaction = types.SimpleNamespace(
@@ -272,6 +274,7 @@ def test_normal_submit_button_uses_admin_flow_without_auto_open():
             send_message=AsyncMock(),
             is_done=lambda: False,
             edit_message=AsyncMock(),
+            defer=AsyncMock(),
         ),
         followup=types.SimpleNamespace(send=AsyncMock()),
         message=types.SimpleNamespace(edit=AsyncMock()),
@@ -279,7 +282,7 @@ def test_normal_submit_button_uses_admin_flow_without_auto_open():
 
     asyncio.run(button.callback(interaction))
 
-    cog._try_auto_open_training.assert_not_awaited()
+    cog._try_auto_open_training.assert_awaited_once()
     admin_channel.send.assert_awaited_once()
     log_channel.send.assert_awaited_once()
 
@@ -289,3 +292,7 @@ def test_developer_panel_uses_configured_test_channel():
 
     assert DEVELOPER_PANEL_CHANNEL_ID == 1421242306136113254
     assert hasattr(view, "open_test_training")
+
+
+def test_member_panel_uses_configured_member_channel():
+    assert MEMBER_PANEL_CHANNEL_ID == 1421627971831070730
