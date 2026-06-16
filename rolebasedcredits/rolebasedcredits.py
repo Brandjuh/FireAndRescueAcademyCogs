@@ -39,6 +39,7 @@ CREDIT_RANKS: tuple[CreditRank, ...] = (
 )
 
 RANKS_BY_KEY = {rank.key: rank for rank in CREDIT_RANKS}
+VERIFIED_MEMBER_ROLE_ID = 565988933113085952
 
 DEFAULT_RANK_ROLE_IDS = {
     "probie": 669488072911618048,
@@ -107,8 +108,16 @@ def should_announce_rank_change(
     if not baseline_initialized:
         return False
     if first_assignment:
-        return announce_first_assignment
+        return False
     return is_promotion(previous_key, next_key)
+
+
+def has_verified_member_role(member: discord.Member) -> bool:
+    return any(getattr(role, "id", None) == VERIFIED_MEMBER_ROLE_ID for role in getattr(member, "roles", []))
+
+
+def promotion_message_text(member: discord.Member, rank: CreditRank) -> str:
+    return f"Congratulations to {member.mention}.\nPromoted to **{rank.name}**."
 
 
 def ensure_exit_cleanup_schema(db_path: Path) -> bool:
@@ -319,9 +328,9 @@ class RoleBasedCredits(commands.Cog):
                 ]
                 roles_to_add = [] if target_role in member.roles else [target_role]
                 first_assignment = previous_rank_key is None and current_rank_key is None
-                should_announce = should_announce_rank_change(
-                    previous_rank_key,
-                    target_rank.key,
+                should_announce = has_verified_member_role(member) and should_announce_rank_change(
+                    previous_key=previous_rank_key,
+                    next_key=target_rank.key,
                     baseline_initialized=baseline_initialized,
                     first_assignment=first_assignment,
                     announce_first_assignment=announce_first_assignment,
@@ -348,7 +357,7 @@ class RoleBasedCredits(commands.Cog):
                     if roles_to_add or roles_to_remove:
                         updated += 1
                     if should_announce:
-                        await self.send_promotion_message(guild, member, target_rank, credits)
+                        await self.send_promotion_message(guild, member, target_rank)
                         promotions += 1
                     last_ranks[str(member.id)] = target_rank.key
                 except (discord.Forbidden, discord.HTTPException):
@@ -465,7 +474,6 @@ class RoleBasedCredits(commands.Cog):
         guild: discord.Guild,
         member: discord.Member,
         rank: CreditRank,
-        credits: int,
     ):
         channel_id = await self.config.guild(guild).promotion_channel_id()
         channel = guild.get_channel(channel_id) if channel_id else None
@@ -473,11 +481,9 @@ class RoleBasedCredits(commands.Cog):
             return
         embed = discord.Embed(
             title="Promotion",
-            description=f"{member.mention} has been promoted to **{rank.name}**.",
+            description=promotion_message_text(member, rank),
             color=discord.Color.green(),
         )
-        embed.add_field(name="Credits", value=f"{credits:,}", inline=True)
-        embed.add_field(name="Required", value=f"{rank.min_credits:,}", inline=True)
         await channel.send(embed=embed)
 
     @commands.group(name="creditrankset")
