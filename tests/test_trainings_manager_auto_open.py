@@ -393,3 +393,39 @@ def test_developer_panel_uses_configured_test_channel():
 
 def test_member_panel_uses_configured_member_channel():
     assert MEMBER_PANEL_CHANNEL_ID == 1421627971831070730
+
+
+def test_member_panel_auto_repost_uses_member_channel_and_updates_config():
+    sent_messages = []
+    channel = types.SimpleNamespace(
+        id=MEMBER_PANEL_CHANNEL_ID,
+        send=AsyncMock(side_effect=lambda **kwargs: sent_messages.append(kwargs) or types.SimpleNamespace(id=987)),
+    )
+    guild = types.SimpleNamespace(id=1, get_channel=lambda channel_id: channel if channel_id == MEMBER_PANEL_CHANNEL_ID else None)
+    panel_id_set = AsyncMock()
+    request_channel_set = AsyncMock()
+    last_auto_post_set = AsyncMock()
+    manager = TrainingManager.__new__(TrainingManager)
+    manager.config = types.SimpleNamespace(
+        guild=lambda guild: types.SimpleNamespace(
+            all=AsyncMock(
+                return_value={
+                    "request_channel_id": 123,
+                    "panel_message_id": 456,
+                    "panel_last_auto_post_at": None,
+                    "button_message": None,
+                }
+            ),
+            request_channel_id=types.SimpleNamespace(set=request_channel_set),
+            panel_message_id=types.SimpleNamespace(set=panel_id_set),
+            panel_last_auto_post_at=types.SimpleNamespace(set=last_auto_post_set),
+            button_message=AsyncMock(return_value=None),
+        )
+    )
+
+    asyncio.run(manager._ensure_member_panel_for_guild(guild))
+
+    request_channel_set.assert_awaited_once_with(MEMBER_PANEL_CHANNEL_ID)
+    channel.send.assert_awaited_once()
+    panel_id_set.assert_awaited_once_with(987)
+    last_auto_post_set.assert_awaited_once()
