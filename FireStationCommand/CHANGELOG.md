@@ -60,10 +60,11 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added feature-gated dashboard buttons so training, maintenance, expansions, and career conversion only appear when available.
 - Added temporary out-of-service vehicle handling for heavily damaged units once the maintenance bay is unlocked.
 - Added categorized dashboard menus for Incidents, Staff, Station, and Vehicle actions.
+- Added developer testing mode for user ID `132620654087241729`, including `[p]fsc devmode`, `[p]fsc devmenu`, a developer dashboard category, unlock bypasses, resource grants, max station setup, and active mission clearing.
 
 ### Changed
 
-- Bumped the cog version to `1.3.9`.
+- Bumped the cog version to `1.4.0`.
 - Vehicle shop options now come from `data/config/vehicles.yaml` when available.
 - Mission definitions now come from `data/config/missions.yaml` when available.
 - Mission embeds now show configured mission images when available.

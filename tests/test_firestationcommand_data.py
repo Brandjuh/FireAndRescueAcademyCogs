@@ -16,6 +16,7 @@ from FireStationCommand.fire_station_command import (
     FscDashboardActionSelect,
     FscDashboardCategoryView,
     FscDashboardView,
+    FscDeveloperView,
     FscTimedView,
     MaintenanceView,
     RecruitmentView,
@@ -143,6 +144,21 @@ class _Interaction:
         self.guild = guild or object()
         self.message = _Message()
         self.response = _InteractionResponse()
+
+
+class _Ctx:
+    def __init__(self, author, channel=None, guild=None):
+        self.author = author
+        self.channel = channel or _Channel()
+        self.guild = guild or object()
+        self.sent = []
+
+    async def send(self, *args, **kwargs):
+        self.sent.append({"args": args, **kwargs})
+        message = _Message()
+        if "view" in kwargs:
+            kwargs["view"].message = message
+        return message
 
 
 def test_timed_view_on_error_sends_clear_feedback():
@@ -1133,6 +1149,120 @@ def test_feature_availability_shows_unlocked_facilities():
     assert FireStationCommand._feature_available(cog, data, "maintenance") is True
     assert FireStationCommand._feature_available(cog, data, "expansions") is True
     assert FireStationCommand._feature_available(cog, data, "career_conversion") is True
+
+
+def test_developer_mode_permission_is_limited_to_configured_user():
+    developer = type("User", (), {"id": FireStationCommand.DEVELOPER_USER_ID})()
+    regular = type("User", (), {"id": 123})()
+
+    assert FireStationCommand._user_can_use_developer_mode(developer) is True
+    assert FireStationCommand._user_can_use_developer_mode(regular) is False
+
+
+def test_developer_mode_bypasses_feature_and_unlock_checks():
+    cog = _cog_with_game_data({})
+    data = {
+        "developer_mode": True,
+        "started": True,
+        "station_level": 1,
+        "command_level": 1,
+        "xp": 0,
+        "station_type": "volunteer",
+        "expansions": [],
+    }
+    vehicle = {"name": "Late Vehicle", "unlock_level": 10, "required_expansions": ["ems_bay"]}
+    equipment = {"name": "Late Equipment", "unlock_level": 10, "required_expansions": ["ems_bay"]}
+    training = {"name": "Late Training", "unlock_level": 10}
+    expansion = {"name": "Late Expansion", "unlock_level": 10}
+
+    assert FireStationCommand._command_level_from_data(cog, data) == FireStationCommand.MAX_COMMAND_LEVEL
+    assert FireStationCommand._feature_available(cog, data, "training") is True
+    assert FireStationCommand._vehicle_is_unlocked(cog, vehicle, 1, data) is True
+    assert FireStationCommand._equipment_is_unlocked(cog, equipment, 1, data) is True
+    assert FireStationCommand._training_is_unlocked(cog, training, 1, data) is True
+    assert FireStationCommand._expansion_is_unlocked(cog, expansion, 1, data) is True
+
+
+def test_developer_dashboard_category_only_appears_when_enabled_for_developer():
+    developer = type("User", (), {"id": FireStationCommand.DEVELOPER_USER_ID})()
+    regular = type("User", (), {"id": 123})()
+    cog = _cog_with_game_data({})
+    data = {
+        "developer_mode": True,
+        "started": True,
+        "station_level": 1,
+        "command_level": 1,
+        "xp": 0,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "vehicles": [],
+        "expansions": [],
+        "active_mission": {},
+    }
+
+    developer_view = FscDashboardView(cog, developer, object(), object(), data=data)
+    regular_view = FscDashboardView(cog, regular, object(), object(), data=data)
+
+    assert developer_view._available_categories(data) == ["Developer", "Incidents", "Staff", "Station", "Vehicle"]
+    assert developer_view._category_actions("Developer", data) == ["devmenu"]
+    assert regular_view._available_categories(data) == ["Incidents", "Staff", "Station", "Vehicle"]
+
+
+def test_apply_developer_test_state_maxes_station_and_inventory():
+    user = type("User", (), {"id": FireStationCommand.DEVELOPER_USER_ID})()
+    users = {user.id: {"started": False, "credits": 0}}
+    cog = _cog_with_game_data(
+        {
+            "vehicles": {"vehicles": [{"id": "engine_basic", "name": "Engine", "required_staff": 4}]},
+            "equipment": {"equipment": [{"id": "hose", "name": "Hose", "capabilities": {"fire": 1}}]},
+            "trainings": {"trainings": [{"id": "basic_firefighting", "name": "Basic Firefighting"}]},
+            "expansions": {"expansions": [{"id": "workshop", "name": "Workshop"}]},
+        }
+    )
+    cog.config = _MultiUserConfig(users, {})
+
+    asyncio.run(cog._apply_developer_test_state(user))
+
+    data = users[user.id]
+    assert data["developer_mode"] is True
+    assert data["started"] is True
+    assert data["station_level"] == FireStationCommand.MAX_COMMAND_LEVEL
+    assert data["command_level"] == FireStationCommand.MAX_COMMAND_LEVEL
+    assert data["station_type"] == "career"
+    assert data["vehicles"][0]["catalog_id"] == "engine_basic"
+    assert data["equipment"] == [{"catalog_id": "hose", "quantity": 10}]
+    assert data["trainings"] == ["basic_firefighting"]
+    assert data["expansions"] == ["workshop"]
+    assert data["active_mission"] == {}
+    assert data["credits"] >= 5_000_000
+
+
+def test_developer_view_toggle_off_disables_developer_mode():
+    user = type("User", (), {"id": FireStationCommand.DEVELOPER_USER_ID})()
+    data = {
+        "developer_mode": True,
+        "started": True,
+        "station_level": 1,
+        "command_level": 1,
+        "xp": 0,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "vehicles": [],
+        "equipment": [],
+        "expansions": [],
+        "active_mission": {},
+    }
+    cog = _cog_with_game_data({})
+    cog.config = _Config(data, {})
+    view = FscDeveloperView(cog, user, object(), object(), data=data)
+    interaction = _Interaction(user)
+
+    asyncio.run(view.toggle_off(interaction, None))
+
+    assert data["developer_mode"] is False
+    assert interaction.response.edited["embed"].fields[-1]["name"] == "Developer mode"
 
 
 def test_dashboard_categories_and_actions_are_alphabetized():
