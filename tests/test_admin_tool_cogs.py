@@ -39,11 +39,14 @@ from rolebasedcredits.rolebasedcredits import (
     CREDIT_RANKS,
     DEFAULT_GUILD,
     DEFAULT_RANK_ROLE_IDS,
+    VERIFIED_MEMBER_ROLE_ID,
     ensure_exit_cleanup_schema,
     find_rank,
+    has_verified_member_role,
     is_promotion,
     mark_rank_exit_rows_processed,
     pending_rank_exit_rows,
+    promotion_message_text,
     rank_for_credits,
     should_announce_rank_change,
 )
@@ -421,6 +424,28 @@ def test_credit_rank_first_sync_never_announces_promotions():
         first_assignment=True,
         announce_first_assignment=False,
     )
+    assert not should_announce_rank_change(
+        None,
+        "captain",
+        baseline_initialized=True,
+        first_assignment=True,
+        announce_first_assignment=True,
+    )
+
+
+def test_credit_rank_promotion_announcements_require_verified_role():
+    verified_role = type("Role", (), {"id": VERIFIED_MEMBER_ROLE_ID})()
+    other_role = type("Role", (), {"id": 123})()
+
+    assert has_verified_member_role(type("Member", (), {"roles": [other_role, verified_role]})())
+    assert not has_verified_member_role(type("Member", (), {"roles": [other_role]})())
+
+
+def test_credit_rank_promotion_message_is_short_and_neutral():
+    member = type("Member", (), {"mention": "<@123>"})()
+    rank = find_rank("Captain")
+
+    assert promotion_message_text(member, rank) == "Congratulations to <@123>.\nPromoted to **Captain**."
 
 
 def test_credit_rank_exit_cleanup_reads_and_marks_membersync_rows(tmp_path):
