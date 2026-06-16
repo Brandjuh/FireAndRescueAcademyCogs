@@ -1466,6 +1466,7 @@ class TrainingManager(commands.Cog):
             "reminders": [],
             "button_message": None,
             "panel_message_id": None,
+            "panel_last_auto_post_at": None,
             "developer_panel_channel_id": DEVELOPER_PANEL_CHANNEL_ID,
             "developer_panel_message_id": None,
         }
@@ -1968,21 +1969,30 @@ class TrainingManager(commands.Cog):
 
     async def _ensure_member_panel_for_guild(self, guild: discord.Guild) -> None:
         conf = await self.config.guild(guild).all()
-        channel_id = int(conf.get("request_channel_id") or MEMBER_PANEL_CHANNEL_ID)
+        configured_channel_id = int(conf.get("request_channel_id") or MEMBER_PANEL_CHANNEL_ID)
+        channel_id = MEMBER_PANEL_CHANNEL_ID
         channel = guild.get_channel(channel_id)
         if channel is None:
             log.warning("TrainingManager member panel channel not found: %s", channel_id)
             return
 
-        message_id = conf.get("panel_message_id")
-        if message_id:
+        if configured_channel_id != MEMBER_PANEL_CHANNEL_ID:
+            await self.config.guild(guild).request_channel_id.set(MEMBER_PANEL_CHANNEL_ID)
+
+        now = datetime.now(timezone.utc)
+        last_post = conf.get("panel_last_auto_post_at")
+        if last_post:
             try:
-                await channel.fetch_message(int(message_id))
-                return
-            except Exception as exc:
-                log.info("TrainingManager member panel message missing; reposting: %s", exc)
+                last_dt = datetime.fromisoformat(str(last_post))
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                if (now - last_dt).total_seconds() < 600:
+                    return
+            except ValueError:
+                pass
 
         await self._send_member_panel(guild, channel)
+        await self.config.guild(guild).panel_last_auto_post_at.set(now.isoformat())
 
     async def _ensure_member_panels(self) -> None:
         await self.bot.wait_until_red_ready()
@@ -2097,17 +2107,15 @@ class TrainingManager(commands.Cog):
     @commands.admin()
     async def post(self, ctx: commands.Context):
         """Post or update the 'Start Request' and 'Reminder Only' buttons in the request channel."""
-        request_channel_id = await self.config.guild(ctx.guild).request_channel_id()
-        if not request_channel_id:
-            await ctx.send("Set the request channel first with `[p]tmset requestchannel #channel`.")
-            return
+        request_channel_id = MEMBER_PANEL_CHANNEL_ID
+        await self.config.guild(ctx.guild).request_channel_id.set(request_channel_id)
         ch = ctx.guild.get_channel(request_channel_id)
         if not ch:
             await ctx.send("The configured request channel was not found.")
             return
         
         await self._send_member_panel(ctx.guild, ch)
-        await ctx.tick()
+        await ctx.send(f"TrainingManager panel posted in {ch.mention}.")
 
     @tmset.command(name="devpost")
     @commands.admin()
