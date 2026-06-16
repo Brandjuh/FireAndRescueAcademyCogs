@@ -243,6 +243,28 @@ def test_auto_open_training_finds_dynamic_academy_with_available_rooms():
     assert kwargs["data"]["building_rooms_use"] == "2"
 
 
+def test_collect_training_availability_counts_classrooms_by_discipline():
+    session = _Session(
+        {
+            f"https://www.missionchief.com{AUTO_BUILDING_LIST_PATH}": BUILDING_LIST_HTML,
+            "https://www.missionchief.com/buildings/100": NO_ROOM_ACADEMY_HTML,
+            "https://www.missionchief.com/buildings/200": ACADEMY_HTML.replace("4951748", "200"),
+            "https://www.missionchief.com/buildings/300": ACADEMY_HTML.replace("4951748", "300"),
+        }
+    )
+    manager, _guild, _user, _ = _manager(session=session, contribution_rate=None)
+
+    availability, error = asyncio.run(manager._collect_training_availability())
+
+    assert error is None
+    assert availability["Fire"].academies_checked == 2
+    assert availability["Fire"].academies_available == 2
+    assert availability["Fire"].available_classrooms == 5
+    assert availability["Police"].academies_checked == 1
+    assert availability["Police"].available_classrooms == 4
+    assert availability["EMS"].available_classrooms == 0
+
+
 def test_auto_open_training_falls_back_when_known_tax_is_below_threshold():
     session = _Session(ACADEMY_HTML)
     manager, guild, user, _ = _manager(session=session, contribution_rate=4.9)
