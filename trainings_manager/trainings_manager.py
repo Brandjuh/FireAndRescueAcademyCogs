@@ -134,6 +134,7 @@ AUTO_ACADEMY_BUILDINGS = {
 AUTO_ALLIANCE_DURATION_SECONDS = 3600
 AUTO_MIN_CONTRIBUTION_RATE = 5.0
 AUTO_MAX_CLASSES = 4
+AVAILABILITY_REFRESH_SECONDS = 15 * 60
 
 
 @dataclass
@@ -170,6 +171,15 @@ class AutoTrainingResult:
     course_value: Optional[str] = None
     classes_opened: int = 0
     status: Optional[int] = None
+
+
+@dataclass
+class DisciplineAvailability:
+    discipline: str
+    academies_checked: int = 0
+    academies_available: int = 0
+    available_classrooms: int = 0
+    errors: int = 0
 
 
 def _normalize_training_name(name: str) -> str:
@@ -1469,6 +1479,9 @@ class TrainingManager(commands.Cog):
             "panel_last_auto_post_at": None,
             "developer_panel_channel_id": DEVELOPER_PANEL_CHANNEL_ID,
             "developer_panel_message_id": None,
+            "availability_channel_id": MEMBER_PANEL_CHANNEL_ID,
+            "availability_message_id": None,
+            "availability_enabled": False,
         }
         self.config.register_guild(**default_guild)
 
@@ -1478,6 +1491,7 @@ class TrainingManager(commands.Cog):
         self._reminder_task = self.bot.loop.create_task(self._reminder_loop())
         self._panel_task = self.bot.loop.create_task(self._ensure_member_panels())
         self._developer_panel_task = self.bot.loop.create_task(self._ensure_developer_panels())
+        self._availability_task = self.bot.loop.create_task(self._availability_loop())
 
     def cog_unload(self):
         if self._reminder_task:
@@ -1486,6 +1500,8 @@ class TrainingManager(commands.Cog):
             self._panel_task.cancel()
         if self._developer_panel_task:
             self._developer_panel_task.cancel()
+        if self._availability_task:
+            self._availability_task.cancel()
 
     @asynccontextmanager
     async def _bot_status(self, detail: str, *, priority: int = 70):
@@ -1667,6 +1683,18 @@ class TrainingManager(commands.Cog):
         return None
 
     async def _fetch_available_academies(self, session, discipline: str) -> Tuple[List[AvailableAcademy], Optional[int]]:
+        academies, status = await self._fetch_all_available_academies(session)
+        filtered = [
+            academy
+            for academy in academies
+            if academy.discipline == discipline
+        ]
+        preferred_id = AUTO_ACADEMY_BUILDINGS.get(discipline)
+        if preferred_id:
+            filtered.sort(key=lambda academy: academy.building_id != preferred_id)
+        return filtered, status
+
+    async def _fetch_all_available_academies(self, session) -> Tuple[List[AvailableAcademy], Optional[int]]:
         url = f"https://www.missionchief.com{AUTO_BUILDING_LIST_PATH}"
         async with session.get(url, allow_redirects=True) as response:
             status = getattr(response, "status", None)
@@ -1675,15 +1703,50 @@ class TrainingManager(commands.Cog):
         if status is not None and int(status) >= 400:
             return [], status
 
-        academies = [
-            academy
-            for academy in parse_available_academies(html)
-            if academy.discipline == discipline
-        ]
-        preferred_id = AUTO_ACADEMY_BUILDINGS.get(discipline)
-        if preferred_id:
-            academies.sort(key=lambda academy: academy.building_id != preferred_id)
-        return academies, status
+        return parse_available_academies(html), status
+
+    async def _collect_training_availability(self) -> Tuple[Dict[str, DisciplineAvailability], Optional[str]]:
+        availability = {
+            discipline: DisciplineAvailability(discipline=discipline)
+            for discipline in ("Fire", "Police", "EMS", "Coastal")
+        }
+        cookie_manager = self.bot.get_cog("CookieManager")
+        if not cookie_manager or not hasattr(cookie_manager, "get_session"):
+            return availability, "CookieManager is not loaded"
+
+        try:
+            session = await cookie_manager.get_session()
+            academies, status = await self._fetch_all_available_academies(session)
+        except Exception as exc:
+            log.warning("Could not fetch training academy list: %s", exc)
+            return availability, f"Could not fetch academy list: {exc}"
+
+        if status is not None and int(status) >= 400:
+            return availability, f"Academy list returned HTTP {status}"
+
+        for academy in academies:
+            if academy.discipline not in availability:
+                continue
+            stats = availability[academy.discipline]
+            stats.academies_checked += 1
+            try:
+                async with session.get(f"https://www.missionchief.com/buildings/{academy.building_id}", allow_redirects=True) as response:
+                    academy_status = getattr(response, "status", None)
+                    html = await response.text()
+                if academy_status is not None and int(academy_status) >= 400:
+                    stats.errors += 1
+                    continue
+                page = parse_academy_page(html)
+            except Exception as exc:
+                log.info("Could not inspect academy %s: %s", academy.building_id, exc)
+                stats.errors += 1
+                continue
+
+            if page.available_rooms > 0:
+                stats.academies_available += 1
+                stats.available_classrooms += page.available_rooms
+
+        return availability, None
 
     async def _try_auto_open_training(
         self,
@@ -1943,6 +2006,71 @@ class TrainingManager(commands.Cog):
         except Exception as exc:
             log.info("Could not delete temporary automatic training notification: %s", exc)
 
+    def _build_availability_embed(
+        self,
+        availability: Dict[str, DisciplineAvailability],
+        error: Optional[str] = None,
+    ) -> discord.Embed:
+        embed = discord.Embed(
+            title="Training Academy Availability",
+            description="Available classrooms by discipline. This overview refreshes every 15 minutes.",
+            color=discord.Color.blurple() if not error else discord.Color.orange(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        for discipline in ("Fire", "Police", "EMS", "Coastal"):
+            stats = availability.get(discipline, DisciplineAvailability(discipline=discipline))
+            lines = [
+                f"Available classrooms: **{stats.available_classrooms}**",
+                f"Academies with space: **{stats.academies_available} / {stats.academies_checked}**",
+            ]
+            if stats.errors:
+                lines.append(f"Could not check: **{stats.errors}**")
+            embed.add_field(name=discipline, value="\n".join(lines), inline=True)
+        if error:
+            embed.add_field(name="Status", value=f"Could not refresh automatically: {error}", inline=False)
+        embed.set_footer(text="TrainingManager • refreshes every 15 minutes")
+        return embed
+
+    async def _refresh_availability_panel_for_guild(self, guild: discord.Guild, *, create_if_missing: bool = False) -> Optional[discord.Message]:
+        conf = await self.config.guild(guild).all()
+        if not conf.get("availability_enabled") and not create_if_missing:
+            return None
+
+        channel_id = int(conf.get("availability_channel_id") or MEMBER_PANEL_CHANNEL_ID)
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            log.warning("TrainingManager availability channel not found: %s", channel_id)
+            return None
+
+        availability, error = await self._collect_training_availability()
+        embed = self._build_availability_embed(availability, error)
+        message_id = conf.get("availability_message_id")
+        if message_id:
+            try:
+                message = await channel.fetch_message(int(message_id))
+                await message.edit(embed=embed)
+                return message
+            except Exception as exc:
+                log.info("TrainingManager availability message missing; reposting: %s", exc)
+
+        message = await channel.send(embed=embed)
+        await self.config.guild(guild).availability_message_id.set(message.id)
+        await self.config.guild(guild).availability_channel_id.set(channel.id)
+        await self.config.guild(guild).availability_enabled.set(True)
+        return message
+
+    async def _availability_loop(self) -> None:
+        await self.bot.wait_until_red_ready()
+        while True:
+            try:
+                for guild in self.bot.guilds:
+                    await self._refresh_availability_panel_for_guild(guild)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.exception("TrainingManager availability loop error: %s", exc)
+            await asyncio.sleep(AVAILABILITY_REFRESH_SECONDS)
+
     async def _build_member_panel_embed(self, guild: discord.Guild) -> discord.Embed:
         custom_msg = await self.config.guild(guild).button_message()
         if custom_msg:
@@ -2128,3 +2256,23 @@ class TrainingManager(commands.Cog):
             return
         await self._send_developer_panel(ctx.guild, channel)
         await ctx.send(f"Developer TrainingManager panel posted in {channel.mention}.")
+
+    @tmset.command(name="availabilitypost")
+    @commands.admin()
+    async def availability_post(self, ctx: commands.Context, channel: discord.TextChannel = None):
+        """Post or refresh the training classroom availability overview."""
+        target_channel = channel or ctx.channel
+        await self.config.guild(ctx.guild).availability_channel_id.set(target_channel.id)
+        await self.config.guild(ctx.guild).availability_enabled.set(True)
+        message = await self._refresh_availability_panel_for_guild(ctx.guild, create_if_missing=True)
+        if message:
+            await ctx.send(f"Training availability overview posted in {target_channel.mention}.")
+        else:
+            await ctx.send("Could not post the training availability overview.")
+
+    @tmset.command(name="availabilitystop")
+    @commands.admin()
+    async def availability_stop(self, ctx: commands.Context):
+        """Stop automatic refreshes for the training classroom availability overview."""
+        await self.config.guild(ctx.guild).availability_enabled.set(False)
+        await ctx.send("Training availability overview refresh stopped.")
