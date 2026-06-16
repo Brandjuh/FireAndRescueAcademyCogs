@@ -300,6 +300,13 @@ def parse_profile_username(html: str) -> Optional[str]:
     return None
 
 
+def _is_known_mc_username(value: Optional[str]) -> bool:
+    if not value:
+        return False
+    cleaned = str(value).strip()
+    return cleaned.casefold() not in {"unknown", "unknown user", "n/a", "none", "-"}
+
+
 class AllianceAcademyListParser(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -895,12 +902,21 @@ class SubmitButton(discord.ui.Button):
             await interaction.response.send_message("This only works inside a server.", ephemeral=True)
             return
 
+        if getattr(self.parent_view, "processing", False):
+            await interaction.response.send_message(
+                "This training request is already being processed. Do not submit it again.",
+                ephemeral=True,
+            )
+            return
+        self.parent_view.processing = True
+
         conf = await cog.config.guild(guild).all()
         admin_channel_id = conf.get("admin_channel_id")
         log_channel_id = conf.get("log_channel_id")
         request_channel_id = conf.get("request_channel_id")
 
         if not admin_channel_id or not log_channel_id or not request_channel_id:
+            self.parent_view.processing = False
             await interaction.response.send_message(
                 "Admin/Log/Request channels are not configured yet. Ask an admin to use [p]tmset.",
                 ephemeral=True,
@@ -912,6 +928,7 @@ class SubmitButton(discord.ui.Button):
         request_channel = guild.get_channel(request_channel_id)
 
         if not admin_channel or not log_channel or not request_channel:
+            self.parent_view.processing = False
             await interaction.response.send_message("One or more configured channels could not be found.", ephemeral=True)
             return
 
@@ -1044,6 +1061,7 @@ class SummaryView(discord.ui.View):
             want_reminder=False,
             request_channel_id=0,
         )
+        self.processing = False
         self.add_item(ReminderOff())
         self.add_item(ReminderOn())
         self.add_item(SubmitButton(self))
@@ -1589,14 +1607,14 @@ class TrainingManager(commands.Cog):
             return None
 
     async def _resolve_mc_username(self, mc_user_id: Optional[str], current_name: Optional[str]) -> Optional[str]:
-        if current_name:
+        if _is_known_mc_username(current_name):
             return current_name
         snapshot = await self._get_member_snapshot(mc_user_id)
         if not snapshot:
             return await self._fetch_mc_username_from_profile(mc_user_id)
         for key in ("name", "username", "mc_username", "mc_name"):
             value = snapshot.get(key)
-            if value:
+            if _is_known_mc_username(str(value) if value is not None else None):
                 return str(value)
         return await self._fetch_mc_username_from_profile(mc_user_id)
 
