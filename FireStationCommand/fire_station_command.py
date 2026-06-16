@@ -24,9 +24,10 @@ log = logging.getLogger(__name__)
 class FireStationCommand(commands.Cog):
     """Fire station management & incident mini-game."""
 
-    __version__ = "1.3.9"
+    __version__ = "1.4.0"
     MISSION_SCHEMA_VERSION = 1
     MAX_COMMAND_LEVEL = 10
+    DEVELOPER_USER_ID = 132620654087241729
     STAGE_ALERT_CHOICE = "ALERT_CHOICE"
     STAGE_STAFF_TURNOUT = "STAFF_TURNOUT"
     STAGE_VEHICLE_SELECT = "VEHICLE_SELECT"
@@ -63,6 +64,7 @@ class FireStationCommand(commands.Cog):
             "staff_total": 6,
             "staff_trained": 0,
             "active_mission": {},
+            "developer_mode": False,
         }
 
         self.config.register_global(**default_global)
@@ -226,10 +228,22 @@ class FireStationCommand(commands.Cog):
         )
 
     def _command_level_from_data(self, data: Dict[str, Any]) -> int:
+        if self._developer_mode_enabled(data):
+            return self.MAX_COMMAND_LEVEL
         xp = int(data.get("xp", 0))
         return int(data.get("command_level", self._command_level_for_xp(xp)))
 
+    @classmethod
+    def _user_can_use_developer_mode(cls, user: discord.abc.User) -> bool:
+        return getattr(user, "id", None) == cls.DEVELOPER_USER_ID
+
+    @classmethod
+    def _developer_mode_enabled(cls, data: Dict[str, Any]) -> bool:
+        return bool(data.get("developer_mode", False))
+
     def _feature_available(self, data: Dict[str, Any], feature: str) -> bool:
+        if self._developer_mode_enabled(data):
+            return True
         command_level = self._command_level_from_data(data)
         expansions = self._expansion_inventory_set(data.get("expansions", []))
         station_level = int(data.get("station_level", 1))
@@ -1313,6 +1327,73 @@ class FireStationCommand(commands.Cog):
         await self._give(user, 100_000)
         return True
 
+    async def _apply_developer_test_state(self, user: discord.abc.User) -> None:
+        user_conf = self.config.user(user)
+        data = await user_conf.all()
+        if not data.get("started", False):
+            await self._create_station(user)
+
+        vehicles = []
+        next_vehicle_id = 1
+        for vehicle_id, vehicle in sorted(self.VEHICLE_CATALOG.items()):
+            vehicles.append(
+                {
+                    "id": next_vehicle_id,
+                    "catalog_id": vehicle_id,
+                    "name": vehicle.get("name", vehicle_id),
+                    "crew_capacity": int(vehicle.get("crew_capacity", vehicle.get("required_staff", 4))),
+                    "image": vehicle.get("image"),
+                    "condition": 100,
+                }
+            )
+            next_vehicle_id += 1
+
+        equipment = [
+            {"catalog_id": equipment_id, "quantity": 10}
+            for equipment_id in sorted(self.EQUIPMENT_CATALOG)
+        ]
+        trainings = sorted(self.TRAINING_CATALOG)
+        expansions = sorted(self.EXPANSION_CATALOG)
+
+        await user_conf.started.set(True)
+        await user_conf.developer_mode.set(True)
+        await user_conf.station_level.set(self.MAX_COMMAND_LEVEL)
+        await user_conf.command_level.set(self.MAX_COMMAND_LEVEL)
+        await user_conf.xp.set(self._xp_for_next_command_level(self.MAX_COMMAND_LEVEL - 1) or 7700)
+        await user_conf.reputation.set(100)
+        await user_conf.station_type.set("career")
+        await user_conf.staff_total.set(self._max_staff(self.MAX_COMMAND_LEVEL))
+        await user_conf.staff_trained.set(self._max_staff(self.MAX_COMMAND_LEVEL))
+        await user_conf.vehicles.set(vehicles)
+        await user_conf.next_vehicle_id.set(next_vehicle_id)
+        await user_conf.equipment.set(equipment)
+        await user_conf.trainings.set(trainings)
+        await user_conf.expansions.set(expansions)
+        await user_conf.active_mission.set({})
+        await self._give(user, 5_000_000)
+
+    async def _build_developer_embed(self, user: discord.abc.User) -> discord.Embed:
+        data = await self.config.user(user).all()
+        enabled = self._developer_mode_enabled(data)
+        credits = await self._get_credits(user)
+        embed = discord.Embed(
+            title="Fire Station Command developer menu",
+            description="Testing tools are available only to the configured developer account.",
+            color=discord.Color.purple(),
+        )
+        embed.add_field(name="Developer mode", value="Enabled" if enabled else "Disabled", inline=True)
+        embed.add_field(name="Credits", value=f"{credits:,}", inline=True)
+        embed.add_field(name="Command level", value=str(self._command_level_from_data(data)), inline=True)
+        embed.add_field(
+            name="Available test actions",
+            value=(
+                "Grant credits and XP, max out the test station, clear active missions, "
+                "and refresh the dashboard with unlock checks bypassed."
+            ),
+            inline=False,
+        )
+        return embed
+
     async def _build_station_created_embed(self, user: discord.abc.User) -> discord.Embed:
         credits = await self._get_credits(user)
         embed = discord.Embed(
@@ -1353,6 +1434,8 @@ class FireStationCommand(commands.Cog):
         command_level: int,
         data: Dict[str, Any] | None = None,
     ) -> bool:
+        if data is not None and self._developer_mode_enabled(data):
+            return True
         if command_level < int(vehicle.get("unlock_level", 1)):
             return False
         return data is None or not self._missing_required_expansion_ids(vehicle, data)
@@ -1363,18 +1446,36 @@ class FireStationCommand(commands.Cog):
         command_level: int,
         data: Dict[str, Any] | None = None,
     ) -> bool:
+        if data is not None and self._developer_mode_enabled(data):
+            return True
         if command_level < int(equipment.get("unlock_level", 1)):
             return False
         return data is None or not self._missing_required_expansion_ids(equipment, data)
 
-    def _training_is_unlocked(self, training: Dict[str, Any], command_level: int) -> bool:
+    def _training_is_unlocked(
+        self,
+        training: Dict[str, Any],
+        command_level: int,
+        data: Dict[str, Any] | None = None,
+    ) -> bool:
+        if data is not None and self._developer_mode_enabled(data):
+            return True
         return command_level >= int(training.get("unlock_level", 1))
 
-    def _expansion_is_unlocked(self, expansion: Dict[str, Any], command_level: int) -> bool:
+    def _expansion_is_unlocked(
+        self,
+        expansion: Dict[str, Any],
+        command_level: int,
+        data: Dict[str, Any] | None = None,
+    ) -> bool:
+        if data is not None and self._developer_mode_enabled(data):
+            return True
         return command_level >= int(expansion.get("unlock_level", 1))
 
     def _pick_random_incident(self, data: Dict[str, Any] | None = None) -> Dict[str, Any]:
         if not data:
+            return random.choice(self.INCIDENTS)
+        if self._developer_mode_enabled(data):
             return random.choice(self.INCIDENTS)
 
         command_level = int(data.get("command_level", 1))
@@ -1930,8 +2031,7 @@ class FireStationCommand(commands.Cog):
         return "\n".join(lines)
 
     def _build_vehicle_shop_embed(self, data: Dict[str, Any]) -> discord.Embed:
-        xp = int(data.get("xp", 0))
-        command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
+        command_level = self._command_level_from_data(data)
         vehicles = data.get("vehicles", [])
         max_veh = self._max_vehicles_for_data(data)
         embed = discord.Embed(
@@ -1947,12 +2047,12 @@ class FireStationCommand(commands.Cog):
         locked = [
             vehicle
             for vehicle in self.VEHICLE_CATALOG.values()
-            if command_level < int(vehicle.get("unlock_level", 1))
+            if not self._developer_mode_enabled(data) and command_level < int(vehicle.get("unlock_level", 1))
         ]
         expansion_locked = [
             (vehicle["name"], self._expansion_requirement_display_text(missing) or "Expansion required")
             for vehicle in self.VEHICLE_CATALOG.values()
-            if command_level >= int(vehicle.get("unlock_level", 1))
+            if not self._developer_mode_enabled(data) and command_level >= int(vehicle.get("unlock_level", 1))
             for missing in [self._missing_required_expansion_ids(vehicle, data)]
             if missing
         ]
@@ -1967,8 +2067,7 @@ class FireStationCommand(commands.Cog):
         return embed
 
     def _build_equipment_shop_embed(self, data: Dict[str, Any]) -> discord.Embed:
-        xp = int(data.get("xp", 0))
-        command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
+        command_level = self._command_level_from_data(data)
         counts = self._equipment_inventory_counts(data.get("equipment", []))
         owned = [
             f"{self.EQUIPMENT_CATALOG.get(item_id, {}).get('name', item_id)} x{quantity}"
@@ -1977,12 +2076,12 @@ class FireStationCommand(commands.Cog):
         locked = [
             equipment
             for equipment in self.EQUIPMENT_CATALOG.values()
-            if command_level < int(equipment.get("unlock_level", 1))
+            if not self._developer_mode_enabled(data) and command_level < int(equipment.get("unlock_level", 1))
         ]
         expansion_locked = [
             (equipment["name"], self._expansion_requirement_display_text(missing) or "Expansion required")
             for equipment in self.EQUIPMENT_CATALOG.values()
-            if command_level >= int(equipment.get("unlock_level", 1))
+            if not self._developer_mode_enabled(data) and command_level >= int(equipment.get("unlock_level", 1))
             for missing in [self._missing_required_expansion_ids(equipment, data)]
             if missing
         ]
@@ -2006,7 +2105,7 @@ class FireStationCommand(commands.Cog):
 
     def _build_training_embed(self, data: Dict[str, Any]) -> discord.Embed:
         xp = int(data.get("xp", 0))
-        command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
+        command_level = self._command_level_from_data(data)
         trained = self._training_inventory_set(data.get("trainings", []))
         owned = [
             self.TRAINING_CATALOG.get(training_id, {}).get("name", training_id)
@@ -2018,7 +2117,7 @@ class FireStationCommand(commands.Cog):
             if training_id in trained:
                 continue
             entry = f"{training['name']} ({training['price']:,} cr)"
-            if self._training_is_unlocked(training, command_level):
+            if self._training_is_unlocked(training, command_level, data):
                 available.append(entry)
             else:
                 locked.append(f"{training['name']} (level {training.get('unlock_level', 1)})")
@@ -2043,7 +2142,7 @@ class FireStationCommand(commands.Cog):
 
     def _build_expansion_embed(self, data: Dict[str, Any]) -> discord.Embed:
         xp = int(data.get("xp", 0))
-        command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
+        command_level = self._command_level_from_data(data)
         owned_ids = self._expansion_inventory_set(data.get("expansions", []))
         owned = [
             self.EXPANSION_CATALOG.get(expansion_id, {}).get("name", expansion_id)
@@ -2055,7 +2154,7 @@ class FireStationCommand(commands.Cog):
             if expansion_id in owned_ids:
                 continue
             entry = f"{expansion['name']} ({expansion['price']:,} cr)"
-            if self._expansion_is_unlocked(expansion, command_level):
+            if self._expansion_is_unlocked(expansion, command_level, data):
                 available.append(entry)
             else:
                 locked.append(f"{expansion['name']} (level {expansion.get('unlock_level', 1)})")
@@ -2199,6 +2298,41 @@ class FireStationCommand(commands.Cog):
         except Exception:
             # Fallback if Discord temporarily disconnects
             await ctx.send("Station created. (Discord had trouble sending the embed.)")
+
+    @fsc_group.command(name="devmode")
+    async def fsc_devmode(self, ctx: commands.Context):
+        """Toggle FireStationCommand developer testing mode."""
+        if not self._user_can_use_developer_mode(ctx.author):
+            await ctx.send("Developer mode is not available for this account.")
+            return
+
+        user_conf = self.config.user(ctx.author)
+        data = await user_conf.all()
+        enabled = not self._developer_mode_enabled(data)
+        await user_conf.developer_mode.set(enabled)
+        if enabled and not data.get("started", False):
+            await self._create_station(ctx.author)
+
+        embed = await self._build_developer_embed(ctx.author)
+        embed.add_field(
+            name="Toggle result",
+            value="Developer mode enabled." if enabled else "Developer mode disabled.",
+            inline=False,
+        )
+        await ctx.send(embed=embed)
+
+    @fsc_group.command(name="devmenu")
+    async def fsc_devmenu(self, ctx: commands.Context):
+        """Open FireStationCommand developer testing controls."""
+        if not self._user_can_use_developer_mode(ctx.author):
+            await ctx.send("Developer menu is not available for this account.")
+            return
+
+        data = await self.config.user(ctx.author).all()
+        embed = await self._build_developer_embed(ctx.author)
+        view = FscDeveloperView(self, ctx.author, ctx.channel, ctx.guild, data=data)
+        message = await ctx.send(embed=embed, view=view)
+        view.message = message
 
     @fsc_group.command(name="status")
     async def fsc_status(self, ctx: commands.Context):
@@ -3698,7 +3832,7 @@ class FireStationCommand(commands.Cog):
 
         xp = int(data.get("xp", 0))
         command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
-        if not self._expansion_is_unlocked(expansion, command_level):
+        if not self._expansion_is_unlocked(expansion, command_level, data):
             required_level = int(expansion.get("unlock_level", 1))
             if edit_message:
                 embed = self._build_expansion_embed(data)
@@ -3798,7 +3932,7 @@ class FireStationCommand(commands.Cog):
 
         xp = int(data.get("xp", 0))
         command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
-        if not self._training_is_unlocked(training, command_level):
+        if not self._training_is_unlocked(training, command_level, data):
             required_level = int(training.get("unlock_level", 1))
             if edit_message:
                 embed = self._build_training_embed(data)
@@ -4079,6 +4213,7 @@ class FscDashboardView(FscTimedView):
         "expansions": "Build expansions",
         "career": "Career station",
         "commands": "Command help",
+        "devmenu": "Developer menu",
         "recruit": "Hire staff",
         "maintenance": "Maintenance bay",
         "mission": "Start mission",
@@ -4088,6 +4223,7 @@ class FscDashboardView(FscTimedView):
         "upgrade": "Upgrade station",
     }
     DASHBOARD_CATEGORIES = {
+        "Developer": ("devmenu",),
         "Incidents": ("commands", "mission"),
         "Staff": ("recruit", "training"),
         "Station": ("expansions", "career", "station", "refresh", "upgrade"),
@@ -4098,6 +4234,7 @@ class FscDashboardView(FscTimedView):
         "Build expansions",
         "Career station",
         "Command help",
+        "Developer menu",
         "Equipment shop",
         "Hire staff",
         "Maintenance bay",
@@ -4149,6 +4286,8 @@ class FscDashboardView(FscTimedView):
                 self._remove_buttons_by_label({self.ACTION_LABELS[action] for action in labels})
 
     def _action_available(self, action: str, data: Dict[str, Any]) -> bool:
+        if action == "devmenu":
+            return self.cog._developer_mode_enabled(data) and self.cog._user_can_use_developer_mode(self.user)
         feature = self.ACTION_FEATURES.get(action)
         return feature is None or self.cog._feature_available(data, feature)
 
@@ -4198,6 +4337,10 @@ class FscDashboardView(FscTimedView):
     @discord.ui.button(label="Incidents", style=discord.ButtonStyle.primary, custom_id="fsc:dashboard:category:incidents")
     async def category_incidents(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.open_category(interaction, "Incidents")
+
+    @discord.ui.button(label="Developer", style=discord.ButtonStyle.secondary, custom_id="fsc:dashboard:category:developer")
+    async def category_developer(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.open_category(interaction, "Developer")
 
     @discord.ui.button(label="Staff", style=discord.ButtonStyle.primary, custom_id="fsc:dashboard:category:staff")
     async def category_staff(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -4566,6 +4709,23 @@ class FscDashboardView(FscTimedView):
         embed.add_field(name="Expansions", value="`[p]fsc expansions`", inline=False)
         await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
 
+    async def devmenu(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.config.user(self.user).all()
+        if not self.cog._developer_mode_enabled(data) or not self.cog._user_can_use_developer_mode(self.user):
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Developer menu", value="Developer mode is not enabled.", inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view(data))
+            return
+        embed = await self.cog._build_developer_embed(self.user)
+        view = FscDeveloperView(
+            self.cog,
+            self.user,
+            interaction.channel or self.channel,
+            interaction.guild or self.guild,
+            data=data,
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
 
 class FscDashboardActionSelect(discord.ui.Select):
     def __init__(
@@ -4644,6 +4804,87 @@ class FscDashboardCategoryView(FscTimedView):
             await interaction.response.send_message("Unknown dashboard action.", ephemeral=True)
             return
         await handler(interaction, None)
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, row=4)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.config.user(self.user).all()
+        embed = await self.cog._build_dashboard_embed(self.user)
+        view = FscDashboardView(
+            self.cog,
+            self.user,
+            interaction.channel or self.channel,
+            interaction.guild or self.guild,
+            data=data,
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+
+class FscDeveloperView(FscTimedView):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        user: discord.abc.User,
+        channel: discord.abc.Messageable,
+        guild: discord.Guild | None,
+        data: Dict[str, Any] | None = None,
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.user = user
+        self.channel = channel
+        self.guild = guild
+        self.data = data or {}
+        if not self.cog._user_can_use_developer_mode(user):
+            self.clear_items()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id and self.cog._user_can_use_developer_mode(interaction.user)
+
+    async def _refresh(self, interaction: discord.Interaction, message: str) -> None:
+        data = await self.cog.config.user(self.user).all()
+        embed = await self.cog._build_developer_embed(self.user)
+        embed.add_field(name="Developer action", value=message, inline=False)
+        view = FscDeveloperView(
+            self.cog,
+            self.user,
+            interaction.channel or self.channel,
+            interaction.guild or self.guild,
+            data=data,
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+    @discord.ui.button(label="Grant resources", style=discord.ButtonStyle.success)
+    async def grant_resources(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_conf = self.cog.config.user(self.user)
+        data = await user_conf.all()
+        xp = max(int(data.get("xp", 0)), self.cog._xp_for_next_command_level(self.cog.MAX_COMMAND_LEVEL - 1) or 7700)
+        await user_conf.xp.set(xp)
+        await user_conf.command_level.set(self.cog.MAX_COMMAND_LEVEL)
+        await self.cog._give(self.user, 1_000_000)
+        await self._refresh(interaction, "Granted 1,000,000 credits and max command level XP.")
+
+    @discord.ui.button(label="Max test station", style=discord.ButtonStyle.primary)
+    async def max_station(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog._apply_developer_test_state(self.user)
+        await self._refresh(interaction, "Applied max test station state with all catalog vehicles, equipment, trainings, and expansions.")
+
+    @discord.ui.button(label="Clear mission", style=discord.ButtonStyle.secondary)
+    async def clear_mission(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.config.user(self.user).active_mission.set({})
+        await self._refresh(interaction, "Cleared the active mission.")
+
+    @discord.ui.button(label="Toggle off", style=discord.ButtonStyle.danger)
+    async def toggle_off(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.config.user(self.user).developer_mode.set(False)
+        embed = await self.cog._build_dashboard_embed(self.user)
+        embed.add_field(name="Developer mode", value="Developer mode disabled.", inline=False)
+        view = FscDashboardView(
+            self.cog,
+            self.user,
+            interaction.channel or self.channel,
+            interaction.guild or self.guild,
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
 
     @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, row=4)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -5175,7 +5416,9 @@ class VehicleShopSelect(discord.ui.Select):
         for vid, v in items[start:start + self.PAGE_SIZE]:
             unlock_level = int(v.get("unlock_level", 1))
             missing_expansions = self.cog._missing_required_expansion_ids(v, self.data)
-            locked = command_level < unlock_level or bool(missing_expansions)
+            locked = not self.cog._developer_mode_enabled(self.data) and (
+                command_level < unlock_level or bool(missing_expansions)
+            )
             label = f"{v['name']} ({v['price']:,} cr, cap {v['crew_capacity']})"
             description = None
             if locked:
@@ -5280,8 +5523,7 @@ class VehicleShopView(FscTimedView):
         data = data or {}
         self.data = data
         self.page = max(0, page)
-        xp = int(data.get("xp", 0))
-        command_level = int(data.get("command_level", cog._command_level_for_xp(xp)))
+        command_level = cog._command_level_from_data(data)
         self.add_item(
             VehicleShopSelect(
                 cog,
@@ -5371,7 +5613,9 @@ class EquipmentShopSelect(discord.ui.Select):
         for equipment_id, equipment in items[start:start + self.PAGE_SIZE]:
             unlock_level = int(equipment.get("unlock_level", 1))
             missing_expansions = self.cog._missing_required_expansion_ids(equipment, self.data)
-            locked = command_level < unlock_level or bool(missing_expansions)
+            locked = not self.cog._developer_mode_enabled(self.data) and (
+                command_level < unlock_level or bool(missing_expansions)
+            )
             label = f"{equipment['name']} ({equipment['price']:,} cr)"
             description = None
             if locked:
@@ -5484,8 +5728,7 @@ class EquipmentShopView(FscTimedView):
         data = data or {}
         self.data = data
         self.page = max(0, page)
-        xp = int(data.get("xp", 0))
-        command_level = int(data.get("command_level", cog._command_level_for_xp(xp)))
+        command_level = cog._command_level_from_data(data)
         self.add_item(
             EquipmentShopSelect(
                 cog,
@@ -5541,8 +5784,7 @@ class TrainingSelect(discord.ui.Select):
         self.user = user
         self.guild = guild
         data = data or {}
-        xp = int(data.get("xp", 0))
-        command_level = int(data.get("command_level", cog._command_level_for_xp(xp)))
+        command_level = cog._command_level_from_data(data)
         trained = cog._training_inventory_set(data.get("trainings", []))
 
         options: List[discord.SelectOption] = []
@@ -5550,7 +5792,7 @@ class TrainingSelect(discord.ui.Select):
             if training_id in trained:
                 continue
             unlock_level = int(training.get("unlock_level", 1))
-            locked = command_level < unlock_level
+            locked = not cog._developer_mode_enabled(data) and command_level < unlock_level
             label = f"{training['name']} ({training['price']:,} cr)"
             description = f"{training.get('duration_hours', 0)} hour(s)"
             if locked:
@@ -5600,7 +5842,7 @@ class TrainingSelect(discord.ui.Select):
                 view=TrainingView(self.cog, self.channel, self.user, interaction.guild or self.guild, data=data),
             )
             return
-        if not self.cog._training_is_unlocked(training, command_level):
+        if not self.cog._training_is_unlocked(training, command_level, data):
             required_level = int(training.get("unlock_level", 1))
             embed = self.cog._build_training_embed(data)
             embed.add_field(
@@ -5686,8 +5928,7 @@ class ExpansionSelect(discord.ui.Select):
         self.user = user
         self.guild = guild
         data = data or {}
-        xp = int(data.get("xp", 0))
-        command_level = int(data.get("command_level", cog._command_level_for_xp(xp)))
+        command_level = cog._command_level_from_data(data)
         owned = cog._expansion_inventory_set(data.get("expansions", []))
 
         options: List[discord.SelectOption] = []
@@ -5695,7 +5936,7 @@ class ExpansionSelect(discord.ui.Select):
             if expansion_id in owned:
                 continue
             unlock_level = int(expansion.get("unlock_level", 1))
-            locked = command_level < unlock_level
+            locked = not cog._developer_mode_enabled(data) and command_level < unlock_level
             label = f"{expansion['name']} ({expansion['price']:,} cr)"
             description = str(expansion.get("description", ""))[:100] or f"{expansion.get('build_time_hours', 0)} hour(s)"
             if locked:
@@ -5745,7 +5986,7 @@ class ExpansionSelect(discord.ui.Select):
                 view=ExpansionView(self.cog, self.channel, self.user, interaction.guild or self.guild, data=data),
             )
             return
-        if not self.cog._expansion_is_unlocked(expansion, command_level):
+        if not self.cog._expansion_is_unlocked(expansion, command_level, data):
             required_level = int(expansion.get("unlock_level", 1))
             embed = self.cog._build_expansion_embed(data)
             embed.add_field(
