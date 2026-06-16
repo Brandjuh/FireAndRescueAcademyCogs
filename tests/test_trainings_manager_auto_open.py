@@ -15,6 +15,7 @@ from trainings_manager.trainings_manager import (
     TrainingRequest,
     parse_academy_page,
     parse_available_academies,
+    parse_profile_username,
 )
 
 
@@ -47,6 +48,14 @@ ACADEMY_HTML = """
 </select>
 </form>
 </body>
+</html>
+"""
+
+
+PROFILE_HTML = """
+<html>
+<head><title>DutchFireFighter - MISSIONCHIEF.COM</title></head>
+<body><h1>DutchFireFighter</h1></body>
 </html>
 """
 
@@ -189,6 +198,10 @@ def test_parse_available_academies_extracts_open_training_links():
     ]
 
 
+def test_parse_profile_username_extracts_heading_name():
+    assert parse_profile_username(PROFILE_HTML) == "DutchFireFighter"
+
+
 def test_auto_open_training_posts_missionchief_education_form():
     session = _Session(ACADEMY_HTML)
     manager, guild, user, _ = _manager(session=session, contribution_rate=None)
@@ -258,6 +271,27 @@ def test_auto_open_training_resolves_missing_member_name_from_members_scraper():
     assert result.mc_username == "SnapshotMCUser"
 
 
+def test_auto_open_training_resolves_member_name_from_profile_when_scraper_has_no_name():
+    session = _Session(
+        {
+            f"https://www.missionchief.com{AUTO_BUILDING_LIST_PATH}": BUILDING_LIST_HTML,
+            "https://www.missionchief.com/buildings/100": ACADEMY_HTML.replace("4951748", "100"),
+            "https://www.missionchief.com/profile/456": PROFILE_HTML,
+        }
+    )
+    manager, guild, user, _ = _manager(
+        session=session,
+        member_link={"mc_user_id": "456"},
+        member_snapshot={"contribution_rate": 6.0},
+    )
+    req = _training_request()
+
+    result = asyncio.run(manager._try_auto_open_training(guild, user, req))
+
+    assert result.success is True
+    assert result.mc_username == "DutchFireFighter"
+
+
 def test_normal_submit_button_falls_back_to_admin_when_auto_open_fails():
     user = types.SimpleNamespace(id=123, mention="<@123>", send=AsyncMock())
     request_channel = types.SimpleNamespace(id=10, mention="#requests", send=AsyncMock())
@@ -287,7 +321,7 @@ def test_normal_submit_button_falls_back_to_admin_when_auto_open_fails():
     button = SubmitButton(parent)
     response_state = {"done": False}
 
-    async def defer_response(*args, **kwargs):
+    async def edit_response(*args, **kwargs):
         response_state["done"] = True
 
     interaction = types.SimpleNamespace(
@@ -296,8 +330,7 @@ def test_normal_submit_button_falls_back_to_admin_when_auto_open_fails():
         response=types.SimpleNamespace(
             send_message=AsyncMock(),
             is_done=lambda: response_state["done"],
-            edit_message=AsyncMock(),
-            defer=AsyncMock(side_effect=defer_response),
+            edit_message=AsyncMock(side_effect=edit_response),
         ),
         followup=types.SimpleNamespace(send=AsyncMock()),
         message=types.SimpleNamespace(edit=AsyncMock()),
@@ -314,6 +347,9 @@ def test_normal_submit_button_falls_back_to_admin_when_auto_open_fails():
     assert "Automatic opening" in admin_fields
     assert "No academy available" in admin_fields["Automatic opening"]
     assert "No academy available" in interaction.followup.send.await_args.args[0]
+    assert all(child.disabled for child in parent.children)
+    assert button.label == "Processing..."
+    interaction.response.edit_message.assert_awaited_once()
 
 
 def test_developer_panel_uses_configured_test_channel():

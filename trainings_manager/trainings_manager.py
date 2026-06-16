@@ -251,6 +251,55 @@ def parse_academy_page(html: str) -> AcademyPage:
     return parser.page()
 
 
+class MissionChiefProfileParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.title_text = ""
+        self.heading_texts: List[str] = []
+        self._in_title = False
+        self._heading_depth = 0
+        self._current_heading: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]):
+        del attrs
+        if tag == "title":
+            self._in_title = True
+        elif tag in {"h1", "h2"}:
+            self._heading_depth += 1
+            self._current_heading = []
+
+    def handle_data(self, data: str):
+        if self._in_title:
+            self.title_text += data
+        if self._heading_depth:
+            self._current_heading.append(data)
+
+    def handle_endtag(self, tag: str):
+        if tag == "title":
+            self._in_title = False
+        elif tag in {"h1", "h2"} and self._heading_depth:
+            text = re.sub(r"\s+", " ", "".join(self._current_heading)).strip()
+            if text:
+                self.heading_texts.append(text)
+            self._heading_depth = 0
+            self._current_heading = []
+
+
+def parse_profile_username(html: str) -> Optional[str]:
+    parser = MissionChiefProfileParser()
+    parser.feed(html)
+    candidates = parser.heading_texts
+    if parser.title_text:
+        candidates.append(parser.title_text)
+    for candidate in candidates:
+        cleaned = re.sub(r"\s+", " ", candidate).strip()
+        cleaned = re.sub(r"\s*-\s*MISSIONCHIEF\.COM.*$", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^Profile\s*[:\-]\s*", "", cleaned, flags=re.IGNORECASE)
+        if cleaned and "missionchief" not in cleaned.casefold():
+            return cleaned
+    return None
+
+
 class AllianceAcademyListParser(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -796,6 +845,49 @@ class SubmitButton(discord.ui.Button):
         super().__init__(label="Submit Request", style=discord.ButtonStyle.success, custom_id="tm:submit")
         self.parent_view = parent_view
 
+    async def _mark_processing(self, interaction: discord.Interaction) -> None:
+        for child in self.parent_view.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        self.label = "Processing..."
+        self.style = discord.ButtonStyle.secondary
+
+        embed = discord.Embed(
+            title="Training request is being processed",
+            description=(
+                "The bot is checking MissionChief and trying to open the training automatically.\n"
+                "Do not submit this request again."
+            ),
+            color=discord.Color.orange(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        req = self.parent_view.req
+        embed.add_field(name="Training", value=f"{req.discipline} → {req.training}", inline=False)
+        embed.add_field(name="Classes", value=str(req.num_classes), inline=True)
+        fee_txt = "Free" if req.fee_per_day == 0 else f"{req.fee_per_day} credits/day/trainee"
+        embed.add_field(name="Fee", value=fee_txt, inline=True)
+
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.edit_message(
+                    content="Processing your training request...",
+                    embed=embed,
+                    view=self.parent_view,
+                )
+                return
+        except Exception as exc:
+            log.debug("Could not mark training request as processing via response edit: %s", exc)
+
+        try:
+            if getattr(interaction, "message", None) is not None:
+                await interaction.message.edit(
+                    content="Processing your training request...",
+                    embed=embed,
+                    view=self.parent_view,
+                )
+        except Exception as exc:
+            log.debug("Could not mark training request as processing via message edit: %s", exc)
+
     async def callback(self, interaction: discord.Interaction):
         cog: TrainingManager = self.parent_view.cog  # type: ignore
         guild = interaction.guild
@@ -827,8 +919,7 @@ class SubmitButton(discord.ui.Button):
         req.request_channel_id = request_channel.id
         user = interaction.user
 
-        if not interaction.response.is_done():
-            await interaction.response.defer(ephemeral=True)
+        await self._mark_processing(interaction)
 
         auto_result = await cog._try_auto_open_training(guild, user, req)
         if auto_result.success:
@@ -1502,11 +1593,39 @@ class TrainingManager(commands.Cog):
             return current_name
         snapshot = await self._get_member_snapshot(mc_user_id)
         if not snapshot:
-            return None
+            return await self._fetch_mc_username_from_profile(mc_user_id)
         for key in ("name", "username", "mc_username", "mc_name"):
             value = snapshot.get(key)
             if value:
                 return str(value)
+        return await self._fetch_mc_username_from_profile(mc_user_id)
+
+    async def _fetch_mc_username_from_profile(self, mc_user_id: Optional[str]) -> Optional[str]:
+        if not mc_user_id:
+            return None
+        cookie_manager = self.bot.get_cog("CookieManager")
+        if not cookie_manager or not hasattr(cookie_manager, "get_session"):
+            return None
+        try:
+            session = await cookie_manager.get_session()
+        except Exception as exc:
+            log.info("Could not get MissionChief session to resolve profile %s: %s", mc_user_id, exc)
+            return None
+
+        for path in (f"/profile/{mc_user_id}", f"/users/{mc_user_id}"):
+            url = f"https://www.missionchief.com{path}"
+            try:
+                async with session.get(url, allow_redirects=True) as response:
+                    status = getattr(response, "status", None)
+                    html = await response.text()
+            except Exception as exc:
+                log.info("Could not fetch MissionChief profile %s: %s", url, exc)
+                continue
+            if status is not None and int(status) >= 400:
+                continue
+            username = parse_profile_username(html)
+            if username:
+                return username
         return None
 
     async def _get_latest_contribution_rate(self, mc_user_id: Optional[str]) -> Optional[float]:
