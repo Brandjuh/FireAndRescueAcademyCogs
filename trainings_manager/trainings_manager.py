@@ -846,6 +846,7 @@ class SubmitButton(discord.ui.Button):
             )
             return
 
+        fallback_reason = auto_result.reason or "Unknown automatic opening failure"
         end_at = datetime.now(AMS) + timedelta(days=req.days)
         emb = discord.Embed(
             title="New training request" + (" - MULTIPLE CLASSES" if req.num_classes > 1 else ""),
@@ -876,6 +877,11 @@ class SubmitButton(discord.ui.Button):
         else:
             emb.add_field(name="Reference", value="—", inline=False)
         
+        emb.add_field(
+            name="Automatic opening",
+            value=f"Manual admin start required.\nReason: {fallback_reason}",
+            inline=False,
+        )
         emb.add_field(name="Expected end time", value=fmt_dt(end_at), inline=False)
         
         if req.num_classes > 1:
@@ -905,12 +911,22 @@ class SubmitButton(discord.ui.Button):
                 for i, ref in enumerate(req.references, 1):
                     ref_lines.append(f"Class {i}: {ref if ref else '—'}")
                 queue_emb.add_field(name="References", value="\n".join(ref_lines), inline=False)
+        queue_emb.add_field(name="Automatic opening", value=f"Fallback to admin: {fallback_reason}", inline=False)
         await log_channel.send(embed=queue_emb)
+        await cog._notify_auto_open_fallback_requester(user, req, fallback_reason, request_channel)
 
         if interaction.response.is_done():
-            await interaction.followup.send("Sent to Admin. You'll be notified on any change.", ephemeral=True)
+            await interaction.followup.send(
+                f"Automatic opening was not possible, so this was sent to Admin.\nReason: {fallback_reason}",
+                ephemeral=True,
+            )
         else:
-            await safe_update(interaction, content="Sent to Admin. You'll be notified on any change.", embed=None, view=None)
+            await safe_update(
+                interaction,
+                content=f"Automatic opening was not possible, so this was sent to Admin.\nReason: {fallback_reason}",
+                embed=None,
+                view=None,
+            )
 
 class SummaryView(discord.ui.View):
     def __init__(
@@ -1466,7 +1482,7 @@ class TrainingManager(commands.Cog):
 
         return False, None, None, "requester is not verified"
 
-    async def _get_latest_contribution_rate(self, mc_user_id: Optional[str]) -> Optional[float]:
+    async def _get_member_snapshot(self, mc_user_id: Optional[str]) -> Optional[dict]:
         if not mc_user_id:
             return None
         members_scraper = self.bot.get_cog("MembersScraper")
@@ -1476,10 +1492,25 @@ class TrainingManager(commands.Cog):
         if not get_snapshot:
             return None
         try:
-            snapshot = await get_snapshot(str(mc_user_id))
+            return await get_snapshot(str(mc_user_id))
         except Exception as exc:
-            log.warning("Could not fetch latest contribution snapshot for %s: %s", mc_user_id, exc)
+            log.warning("Could not fetch member snapshot for %s: %s", mc_user_id, exc)
             return None
+
+    async def _resolve_mc_username(self, mc_user_id: Optional[str], current_name: Optional[str]) -> Optional[str]:
+        if current_name:
+            return current_name
+        snapshot = await self._get_member_snapshot(mc_user_id)
+        if not snapshot:
+            return None
+        for key in ("name", "username", "mc_username", "mc_name"):
+            value = snapshot.get(key)
+            if value:
+                return str(value)
+        return None
+
+    async def _get_latest_contribution_rate(self, mc_user_id: Optional[str]) -> Optional[float]:
+        snapshot = await self._get_member_snapshot(mc_user_id)
         if not snapshot:
             return None
         value = snapshot.get("contribution_rate")
@@ -1530,6 +1561,7 @@ class TrainingManager(commands.Cog):
         verified, mc_user_id, mc_username, verified_source = await self._resolve_verified_requester(guild, user)
         if not verified:
             return AutoTrainingResult(False, verified_source, academy_id=fallback_academy_id)
+        mc_username = await self._resolve_mc_username(mc_user_id, mc_username)
 
         contribution_rate = await self._get_latest_contribution_rate(mc_user_id)
         if contribution_rate is not None and contribution_rate < AUTO_MIN_CONTRIBUTION_RATE:
@@ -1739,6 +1771,32 @@ class TrainingManager(commands.Cog):
             asyncio.create_task(self._delete_later(fallback_message, 15 * 60))
         except Exception as exc:
             log.info("Could not send/delete automatic training fallback notification: %s", exc)
+
+    async def _notify_auto_open_fallback_requester(
+        self,
+        user: discord.abc.User,
+        req: TrainingRequest,
+        reason: str,
+        request_channel: Optional[discord.abc.Messageable],
+    ) -> None:
+        message = (
+            f"Your training request for **{req.training}** could not be opened automatically "
+            f"and has been sent to admins for manual start.\nReason: {reason}"
+        )
+        try:
+            await user.send(message)
+            return
+        except Exception as exc:
+            log.info("Could not DM automatic training fallback to %s: %s", getattr(user, "id", "unknown"), exc)
+
+        if request_channel is None:
+            return
+
+        try:
+            fallback_message = await request_channel.send(f"{getattr(user, 'mention', '')} {message}")
+            asyncio.create_task(self._delete_later(fallback_message, 15 * 60))
+        except Exception as exc:
+            log.info("Could not send/delete automatic training fallback explanation: %s", exc)
 
     async def _delete_later(self, message: discord.Message, delay_seconds: int) -> None:
         await asyncio.sleep(delay_seconds)

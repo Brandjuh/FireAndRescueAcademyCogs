@@ -131,7 +131,7 @@ def _training_request(**overrides):
     return TrainingRequest(**data)
 
 
-def _manager(*, session=None, contribution_rate=None):
+def _manager(*, session=None, contribution_rate=None, member_link=None, member_snapshot=None):
     role = object()
     user = types.SimpleNamespace(id=123, roles=[role])
     guild = types.SimpleNamespace(
@@ -141,11 +141,13 @@ def _manager(*, session=None, contribution_rate=None):
     )
     membersync = types.SimpleNamespace(
         get_link_for_discord=AsyncMock(
-            return_value={"mc_user_id": "456", "mc_username": "MCUser"}
+            return_value=member_link or {"mc_user_id": "456", "mc_username": "MCUser"}
         ),
         config=types.SimpleNamespace(verified_role_id=AsyncMock(return_value=555)),
     )
-    if contribution_rate is None:
+    if member_snapshot is not None:
+        members_scraper = types.SimpleNamespace(get_member_snapshot=AsyncMock(return_value=member_snapshot))
+    elif contribution_rate is None:
         members_scraper = types.SimpleNamespace(get_member_snapshot=AsyncMock(return_value=None))
     else:
         members_scraper = types.SimpleNamespace(
@@ -240,9 +242,25 @@ def test_auto_open_training_falls_back_when_known_tax_is_below_threshold():
     assert session.posts == []
 
 
+def test_auto_open_training_resolves_missing_member_name_from_members_scraper():
+    session = _Session(ACADEMY_HTML)
+    manager, guild, user, _ = _manager(
+        session=session,
+        member_link={"mc_user_id": "456"},
+        member_snapshot={"name": "SnapshotMCUser", "contribution_rate": 6.0},
+    )
+    req = _training_request()
+
+    result = asyncio.run(manager._try_auto_open_training(guild, user, req))
+
+    assert result.success is True
+    assert result.mc_user_id == "456"
+    assert result.mc_username == "SnapshotMCUser"
+
+
 def test_normal_submit_button_falls_back_to_admin_when_auto_open_fails():
-    user = types.SimpleNamespace(id=123, mention="<@123>")
-    request_channel = types.SimpleNamespace(id=10, mention="#requests")
+    user = types.SimpleNamespace(id=123, mention="<@123>", send=AsyncMock())
+    request_channel = types.SimpleNamespace(id=10, mention="#requests", send=AsyncMock())
     admin_channel = types.SimpleNamespace(id=11, send=AsyncMock())
     log_channel = types.SimpleNamespace(id=12, send=AsyncMock())
     guild = types.SimpleNamespace(
@@ -267,14 +285,19 @@ def test_normal_submit_button_falls_back_to_admin_when_auto_open_fails():
     cog._try_auto_open_training = AsyncMock(return_value=AutoTrainingResult(False, "No academy available"))
     parent = SummaryView(cog, user.id, "Fire", "Hotshot Crew Training", 3, 100, 2, [])
     button = SubmitButton(parent)
+    response_state = {"done": False}
+
+    async def defer_response(*args, **kwargs):
+        response_state["done"] = True
+
     interaction = types.SimpleNamespace(
         guild=guild,
         user=user,
         response=types.SimpleNamespace(
             send_message=AsyncMock(),
-            is_done=lambda: False,
+            is_done=lambda: response_state["done"],
             edit_message=AsyncMock(),
-            defer=AsyncMock(),
+            defer=AsyncMock(side_effect=defer_response),
         ),
         followup=types.SimpleNamespace(send=AsyncMock()),
         message=types.SimpleNamespace(edit=AsyncMock()),
@@ -285,6 +308,12 @@ def test_normal_submit_button_falls_back_to_admin_when_auto_open_fails():
     cog._try_auto_open_training.assert_awaited_once()
     admin_channel.send.assert_awaited_once()
     log_channel.send.assert_awaited_once()
+    user.send.assert_awaited_once()
+    admin_embed = admin_channel.send.await_args.kwargs["embed"]
+    admin_fields = {field["name"]: field["value"] for field in admin_embed.fields}
+    assert "Automatic opening" in admin_fields
+    assert "No academy available" in admin_fields["Automatic opening"]
+    assert "No academy available" in interaction.followup.send.await_args.args[0]
 
 
 def test_developer_panel_uses_configured_test_channel():
