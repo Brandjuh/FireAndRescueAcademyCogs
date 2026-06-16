@@ -292,6 +292,27 @@ def test_auto_open_training_resolves_member_name_from_profile_when_scraper_has_n
     assert result.mc_username == "DutchFireFighter"
 
 
+def test_auto_open_training_treats_unknown_member_name_as_missing():
+    session = _Session(
+        {
+            f"https://www.missionchief.com{AUTO_BUILDING_LIST_PATH}": BUILDING_LIST_HTML,
+            "https://www.missionchief.com/buildings/100": ACADEMY_HTML.replace("4951748", "100"),
+            "https://www.missionchief.com/profile/456": PROFILE_HTML,
+        }
+    )
+    manager, guild, user, _ = _manager(
+        session=session,
+        member_link={"mc_user_id": "456", "mc_username": "Unknown"},
+        member_snapshot={"contribution_rate": 6.0},
+    )
+    req = _training_request()
+
+    result = asyncio.run(manager._try_auto_open_training(guild, user, req))
+
+    assert result.success is True
+    assert result.mc_username == "DutchFireFighter"
+
+
 def test_normal_submit_button_falls_back_to_admin_when_auto_open_fails():
     user = types.SimpleNamespace(id=123, mention="<@123>", send=AsyncMock())
     request_channel = types.SimpleNamespace(id=10, mention="#requests", send=AsyncMock())
@@ -350,6 +371,17 @@ def test_normal_submit_button_falls_back_to_admin_when_auto_open_fails():
     assert all(child.disabled for child in parent.children)
     assert button.label == "Processing..."
     interaction.response.edit_message.assert_awaited_once()
+
+    second_interaction = types.SimpleNamespace(
+        guild=guild,
+        user=user,
+        response=types.SimpleNamespace(send_message=AsyncMock()),
+    )
+    asyncio.run(button.callback(second_interaction))
+
+    cog._try_auto_open_training.assert_awaited_once()
+    second_interaction.response.send_message.assert_awaited_once()
+    assert "already being processed" in second_interaction.response.send_message.await_args.args[0]
 
 
 def test_developer_panel_uses_configured_test_channel():
