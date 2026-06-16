@@ -10,6 +10,7 @@ This document tracks larger gameplay systems that should be implemented after th
 - Add a developer menu toggle for user ID `132620654087241729` that enables a testing mode with all unlocks, unrestricted actions, and fast access to credits, XP, station levels, vehicles, equipment, missions, and outcome controls.
 - Add a daily command that grants a once-per-day credit and XP bonus, with clear cooldown feedback and balance fields for reward amounts.
 - Add level-up messaging that clearly lists newly unlocked missions, vehicles, equipment, trainings, expansions, station upgrades, and feature buttons when a player reaches a new command level.
+- Add a repeatable parking lot upgrade that adds extra vehicle parking capacity. It should be purchasable indefinitely, with each additional parking lot upgrade becoming more expensive than the previous one.
 
 ## Mutual Aid
 
