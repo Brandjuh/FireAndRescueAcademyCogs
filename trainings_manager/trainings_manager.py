@@ -2011,24 +2011,19 @@ class TrainingManager(commands.Cog):
         availability: Dict[str, DisciplineAvailability],
         error: Optional[str] = None,
     ) -> discord.Embed:
+        description = "\n".join(
+            f"**{discipline}:** {availability.get(discipline, DisciplineAvailability(discipline=discipline)).available_classrooms} classes"
+            for discipline in ("Fire", "Police", "EMS", "Coastal")
+        )
         embed = discord.Embed(
-            title="Training Academy Availability",
-            description="Available classrooms by discipline. This overview refreshes every 15 minutes.",
+            title="Academy Availability",
+            description=description,
             color=discord.Color.blurple() if not error else discord.Color.orange(),
             timestamp=datetime.now(timezone.utc),
         )
-        for discipline in ("Fire", "Police", "EMS", "Coastal"):
-            stats = availability.get(discipline, DisciplineAvailability(discipline=discipline))
-            lines = [
-                f"Available classrooms: **{stats.available_classrooms}**",
-                f"Academies with space: **{stats.academies_available} / {stats.academies_checked}**",
-            ]
-            if stats.errors:
-                lines.append(f"Could not check: **{stats.errors}**")
-            embed.add_field(name=discipline, value="\n".join(lines), inline=True)
         if error:
             embed.add_field(name="Status", value=f"Could not refresh automatically: {error}", inline=False)
-        embed.set_footer(text="TrainingManager • refreshes every 15 minutes")
+        embed.set_footer(text="TrainingManager - refreshes every 15 minutes")
         return embed
 
     async def _refresh_availability_panel_for_guild(self, guild: discord.Guild, *, create_if_missing: bool = False) -> Optional[discord.Message]:

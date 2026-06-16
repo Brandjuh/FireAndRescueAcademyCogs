@@ -13,6 +13,7 @@ from trainings_manager.trainings_manager import (
     AUTO_ALLIANCE_DURATION_SECONDS,
     TrainingManager,
     TrainingRequest,
+    DisciplineAvailability,
     parse_academy_page,
     parse_available_academies,
     parse_profile_username,
@@ -263,6 +264,29 @@ def test_collect_training_availability_counts_classrooms_by_discipline():
     assert availability["Police"].academies_checked == 1
     assert availability["Police"].available_classrooms == 4
     assert availability["EMS"].available_classrooms == 0
+
+
+def test_training_availability_embed_uses_simple_class_counts():
+    manager, _guild, _user, _ = _manager(session=_Session(ACADEMY_HTML), contribution_rate=None)
+    availability = {
+        "Fire": DisciplineAvailability(discipline="Fire", available_classrooms=5, academies_checked=2),
+        "Police": DisciplineAvailability(discipline="Police", available_classrooms=4, academies_checked=1),
+        "EMS": DisciplineAvailability(discipline="EMS", available_classrooms=0, academies_checked=0),
+        "Coastal": DisciplineAvailability(discipline="Coastal", available_classrooms=1, academies_checked=1),
+    }
+
+    embed = manager._build_availability_embed(availability)
+
+    assert embed.kwargs["title"] == "Academy Availability"
+    assert embed.kwargs["description"] == "\n".join(
+        [
+            "**Fire:** 5 classes",
+            "**Police:** 4 classes",
+            "**EMS:** 0 classes",
+            "**Coastal:** 1 classes",
+        ]
+    )
+    assert not embed.fields
 
 
 def test_auto_open_training_falls_back_when_known_tax_is_below_threshold():
