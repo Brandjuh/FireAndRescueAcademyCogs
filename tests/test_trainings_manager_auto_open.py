@@ -141,6 +141,84 @@ BUILDING_LIST_ALL_ACADEMIES_HTML = """
 """
 
 
+BUILDING_LIST_IMAGE_MARKERS_HTML = """
+<table>
+<tr search_attribute="[AA] Coastal Rescue #0001">
+  <td><img class="building_marker_image" building_id="4825891" src="/images/building_water_rescue_school.png"></td>
+  <td><a href="/buildings/4825891">[AA] Coastal Rescue #0001</a></td>
+  <td><a href="/buildings/4825891">Start a new training course</a></td>
+</tr>
+<tr search_attribute="[AA] Fire Academy #0001">
+  <td><img class="building_marker_image" building_id="4842509" src="/images/building_fireschool.png"></td>
+  <td><a href="/buildings/4842509">[AA] Fire Academy #0001</a></td>
+  <td><a href="/buildings/4842509">Start a new training course</a></td>
+</tr>
+<tr search_attribute="[AA] Police Academy #0001">
+  <td><img class="building_marker_image" building_id="282585" src="/images/policechief_building_polizeischule.png"></td>
+  <td><a href="/buildings/282585">[AA] Police Academy #0001</a></td>
+  <td><a href="/buildings/282585">Start a new training course</a></td>
+</tr>
+<tr search_attribute="[AA] Rescue Academy #0001">
+  <td><img class="building_marker_image" building_id="1243355" src="/images/building_rettungsschule.png"></td>
+  <td><a href="/buildings/1243355">[AA] Rescue Academy #0001</a></td>
+  <td><a href="/buildings/1243355">Start a new training course</a></td>
+</tr>
+</table>
+"""
+
+
+BUILDING_LIST_PAGE_ONE_HTML = """
+<table>
+<tr search_attribute="[AA] Fire Academy #0001">
+  <td><img src="/images/building_fireschool.png" /></td>
+  <td><a href="/buildings/100">[AA] Fire Academy #0001</a></td>
+  <td><a class="btn btn-success" href="/buildings/100">Start a new training course</a></td>
+</tr>
+</table>
+<ul class="pagination">
+  <li><a href="/verband/gebauede?page=2">Next →</a></li>
+</ul>
+"""
+
+
+BUILDING_LIST_PAGE_TWO_HTML = """
+<table>
+<tr search_attribute="[AA] Fire Academy #0003">
+  <td><img src="/images/building_fireschool.png" /></td>
+  <td><a href="/buildings/400">[AA] Fire Academy #0003</a></td>
+  <td><a class="btn btn-success" href="/buildings/400">Start a new training course</a></td>
+</tr>
+</table>
+"""
+
+
+BUILDING_LIST_NEW_ACADEMY_HTML = """
+<table>
+<tr search_attribute="[AA] Fire Academy #0010">
+  <td><img src="/images/building_fireschool.png" alt="Alliance academy" /></td>
+  <td><a href="/buildings/500">[AA] Fire Academy #0010</a></td>
+  <td><a class="btn btn-default" href="/buildings/500">Start a new training course</a></td>
+</tr>
+</table>
+"""
+
+
+BUILDING_LIST_ALL_ACADEMIES_HTML = """
+<table>
+<tr search_attribute="[AA] Fire Academy #0011">
+  <td><img src="/images/building_fireschool.png" /></td>
+  <td><a href="/buildings/600">[AA] Fire Academy #0011</a></td>
+  <td>Training courses currently running</td>
+</tr>
+<tr search_attribute="[AA] Fire Academy #0012">
+  <td><img src="/images/building_fireschool.png" /></td>
+  <td><a href="/buildings/700">[AA] Fire Academy #0012</a></td>
+  <td>Training courses currently running</td>
+</tr>
+</table>
+"""
+
+
 NO_ROOM_ACADEMY_HTML = ACADEMY_HTML.replace(
     """
   <option value="2">2</option>
@@ -283,10 +361,25 @@ def test_parse_available_academies_includes_academies_without_start_button():
     assert [academy.has_start_button for academy in academies] == [False, False]
 
 
+def test_parse_available_academies_uses_missionchief_school_image_markers():
+    academies = parse_available_academies(BUILDING_LIST_IMAGE_MARKERS_HTML)
+
+    assert [(academy.building_id, academy.discipline) for academy in academies] == [
+        (4825891, "Coastal"),
+        (4842509, "Fire"),
+        (282585, "Police"),
+        (1243355, "EMS"),
+    ]
+    assert [academy.has_start_button for academy in academies] == [True, True, True, True]
+
+
 def test_infer_academy_discipline_from_image_sources():
     assert infer_academy_discipline("/images/building_fireschool.png") == "Fire"
     assert infer_academy_discipline("/images/policechief_building_polizeischule.png") == "Police"
     assert infer_academy_discipline("/images/building_rettungsschule.png") == "EMS"
+    assert infer_academy_discipline("/images/building_rescue_school.png") == "EMS"
+    assert infer_academy_discipline("/images/building_ems_school.png") == "EMS"
+    assert infer_academy_discipline("/images/building_ambulance_school.png") == "EMS"
     assert infer_academy_discipline("/images/water_rescue_school.png") == "Coastal"
 
 

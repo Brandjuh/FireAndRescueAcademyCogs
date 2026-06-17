@@ -59,6 +59,11 @@ class MemberManagerSanctionsTests(unittest.TestCase):
 
         self.assertEqual(module.DEFAULT_REVIEW_CHANNEL_ID, 1421625293130567690)
 
+    def test_sanctionmanager_default_bulk_review_channel_is_configured(self):
+        module = load_sanction_manager_module()
+
+        self.assertEqual(module.DEFAULT_BULK_REVIEW_CHANNEL_ID, 668874956175573005)
+
     def test_sanction_manager_permission_helper_accepts_administrator(self):
         SanctionsManager = load_sanctions_manager_class()
         manager = SanctionsManager.__new__(SanctionsManager)
@@ -191,6 +196,47 @@ class MemberManagerSanctionsTests(unittest.TestCase):
         self.assertEqual(sleep_mock.await_count, 2)
         sleep_mock.assert_any_await(0.25)
         self.assertEqual(cog.db.update_game_log_review.call_count, 3)
+
+    def test_sanctionmanager_sends_bulk_game_log_review_to_bulk_channel(self):
+        module = load_sanction_manager_module()
+
+        class GuildConfig:
+            game_log_review_channel_id = AsyncMock(return_value=1421625293130567690)
+            game_log_bulk_review_channel_id = AsyncMock(return_value=668874956175573005)
+
+        review_channel = types.SimpleNamespace(send=AsyncMock())
+        bulk_channel = types.SimpleNamespace(send=AsyncMock(return_value=types.SimpleNamespace(id=9001)))
+        cog = module.SanctionsManager.__new__(module.SanctionsManager)
+        cog.bot = types.SimpleNamespace(
+            get_channel=lambda channel_id: {
+                1421625293130567690: review_channel,
+                668874956175573005: bulk_channel,
+            }.get(channel_id)
+        )
+        cog.config = types.SimpleNamespace(guild=lambda guild: GuildConfig())
+        cog.db = types.SimpleNamespace(update_game_log_review=Mock())
+        cog._build_game_log_bulk_embed = Mock(return_value=types.SimpleNamespace())
+        guild = types.SimpleNamespace(id=1, get_channel=lambda channel_id: None)
+        created = [
+            {
+                "row": {"id": 1, "affected_name": "User One"},
+                "sanction_id": 11,
+                "sanction_type": "Kick",
+                "discord_user_id": None,
+            },
+            {
+                "row": {"id": 2, "affected_name": "User Two"},
+                "sanction_id": 12,
+                "sanction_type": "Mute",
+                "discord_user_id": None,
+            },
+        ]
+
+        asyncio.run(cog._send_game_log_review_messages(guild, created, bulk_threshold=2))
+
+        bulk_channel.send.assert_awaited_once()
+        review_channel.send.assert_not_awaited()
+        self.assertEqual(cog.db.update_game_log_review.call_count, 2)
 
     def test_sanctionmanager_deduplicates_existing_panel_messages(self):
         module = load_sanction_manager_module()

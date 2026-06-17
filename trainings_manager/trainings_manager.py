@@ -326,7 +326,23 @@ def infer_academy_discipline(text: str) -> Optional[str]:
         return "Police"
     if any(token in haystack for token in ("coastal", "water rescue", "water_rescue_school", "coast")):
         return "Coastal"
-    if any(token in haystack for token in ("ems", "ambulance", "medical", "rettungsschule", "rescue academy")):
+    if any(
+        token in haystack
+        for token in (
+            "ems",
+            "ems_school",
+            "ems-school",
+            "ambulance",
+            "ambulance_school",
+            "ambulance-school",
+            "medical",
+            "rescue_school",
+            "rescue-school",
+            "rescueschool",
+            "rescue academy",
+            "rettungsschule",
+        )
+    ):
         return "EMS"
     if any(token in haystack for token in ("fire", "fireschool", "brandweer")):
         return "Fire"
@@ -381,6 +397,9 @@ class AllianceAcademyListParser(HTMLParser):
             )
             self._row_text += f" {image_text}"
             self._row_discipline = self._row_discipline or infer_academy_discipline(image_text)
+            building_id = attr.get("building_id")
+            if building_id and str(building_id).isdigit() and self._row_building_id is None:
+                self._row_building_id = int(building_id)
         elif tag == "a":
             href = re.sub(r"\s+", "", attr.get("href") or "")
             match = re.search(r"/buildings/(\d+)", href)
@@ -417,7 +436,6 @@ class AllianceAcademyListParser(HTMLParser):
             return
 
         building_id = self._row_start_building_id or self._row_building_id
-        self._row_discipline = self._row_discipline or infer_academy_discipline(self._row_text)
         if building_id and self._row_discipline:
             self.academies.append(
                 AvailableAcademy(
