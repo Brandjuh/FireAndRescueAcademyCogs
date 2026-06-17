@@ -14,8 +14,10 @@ from trainings_manager.trainings_manager import (
     TrainingManager,
     TrainingRequest,
     DisciplineAvailability,
+    infer_academy_discipline,
     parse_academy_page,
     parse_available_academies,
+    parse_available_academies_page,
     parse_profile_username,
 )
 
@@ -77,6 +79,58 @@ BUILDING_LIST_HTML = """
   <td><img src="/images/policechief_building_polizeischule.png" /></td>
   <td><a href="/buildings/300">[AA] Police Academy #0001</a></td>
   <td><a class="btn btn-success" href="/buildings/300">Start a new training course</a></td>
+</tr>
+</table>
+"""
+
+
+BUILDING_LIST_PAGE_ONE_HTML = """
+<table>
+<tr search_attribute="[AA] Fire Academy #0001">
+  <td><img src="/images/building_fireschool.png" /></td>
+  <td><a href="/buildings/100">[AA] Fire Academy #0001</a></td>
+  <td><a class="btn btn-success" href="/buildings/100">Start a new training course</a></td>
+</tr>
+</table>
+<ul class="pagination">
+  <li><a href="/verband/gebauede?page=2">Next →</a></li>
+</ul>
+"""
+
+
+BUILDING_LIST_PAGE_TWO_HTML = """
+<table>
+<tr search_attribute="[AA] Fire Academy #0003">
+  <td><img src="/images/building_fireschool.png" /></td>
+  <td><a href="/buildings/400">[AA] Fire Academy #0003</a></td>
+  <td><a class="btn btn-success" href="/buildings/400">Start a new training course</a></td>
+</tr>
+</table>
+"""
+
+
+BUILDING_LIST_NEW_ACADEMY_HTML = """
+<table>
+<tr search_attribute="[AA] Fire Academy #0010">
+  <td><img src="/images/building_fireschool.png" alt="Alliance academy" /></td>
+  <td><a href="/buildings/500">[AA] Fire Academy #0010</a></td>
+  <td><a class="btn btn-default" href="/buildings/500">Start a new training course</a></td>
+</tr>
+</table>
+"""
+
+
+BUILDING_LIST_ALL_ACADEMIES_HTML = """
+<table>
+<tr search_attribute="[AA] Fire Academy #0011">
+  <td><img src="/images/building_fireschool.png" /></td>
+  <td><a href="/buildings/600">[AA] Fire Academy #0011</a></td>
+  <td>Training courses currently running</td>
+</tr>
+<tr search_attribute="[AA] Fire Academy #0012">
+  <td><img src="/images/building_fireschool.png" /></td>
+  <td><a href="/buildings/700">[AA] Fire Academy #0012</a></td>
+  <td>Training courses currently running</td>
 </tr>
 </table>
 """
@@ -197,6 +251,40 @@ def test_parse_available_academies_extracts_open_training_links():
         (200, "Fire"),
         (300, "Police"),
     ]
+    assert [academy.has_start_button for academy in academies] == [True, True, True]
+
+
+def test_parse_available_academies_page_extracts_next_link():
+    academies, next_page = parse_available_academies_page(BUILDING_LIST_PAGE_ONE_HTML)
+
+    assert [(academy.building_id, academy.discipline) for academy in academies] == [(100, "Fire")]
+    assert next_page == "/verband/gebauede?page=2"
+
+
+def test_parse_available_academies_detects_new_academy_from_row_and_link_text():
+    academies = parse_available_academies(BUILDING_LIST_NEW_ACADEMY_HTML)
+
+    assert [(academy.building_id, academy.discipline) for academy in academies] == [(500, "Fire")]
+
+
+def test_parse_available_academies_includes_academies_without_start_button():
+    academies = parse_available_academies(BUILDING_LIST_ALL_ACADEMIES_HTML)
+
+    assert [(academy.building_id, academy.discipline) for academy in academies] == [
+        (600, "Fire"),
+        (700, "Fire"),
+    ]
+    assert [academy.has_start_button for academy in academies] == [False, False]
+
+
+def test_infer_academy_discipline_from_image_sources():
+    assert infer_academy_discipline("/images/building_fireschool.png") == "Fire"
+    assert infer_academy_discipline("/images/policechief_building_polizeischule.png") == "Police"
+    assert infer_academy_discipline("/images/building_rettungsschule.png") == "EMS"
+    assert infer_academy_discipline("/images/building_rescue_school.png") == "EMS"
+    assert infer_academy_discipline("/images/building_ems_school.png") == "EMS"
+    assert infer_academy_discipline("/images/building_ambulance_school.png") == "EMS"
+    assert infer_academy_discipline("/images/water_rescue_school.png") == "Coastal"
 
 
 def test_parse_profile_username_extracts_heading_name():
@@ -204,18 +292,23 @@ def test_parse_profile_username_extracts_heading_name():
 
 
 def test_auto_open_training_posts_missionchief_education_form():
-    session = _Session(ACADEMY_HTML)
+    session = _Session(
+        {
+            f"https://www.missionchief.com{AUTO_BUILDING_LIST_PATH}": BUILDING_LIST_HTML,
+            "https://www.missionchief.com/buildings/100": ACADEMY_HTML.replace("4951748", "100"),
+        }
+    )
     manager, guild, user, _ = _manager(session=session, contribution_rate=None)
     req = _training_request()
 
     result = asyncio.run(manager._try_auto_open_training(guild, user, req))
 
     assert result.success is True
-    assert result.academy_id == 4951748
+    assert result.academy_id == 100
     assert result.course_value == "hotshot:17"
     assert len(session.posts) == 1
     post_url, kwargs = session.posts[0]
-    assert post_url == "https://www.missionchief.com/buildings/4951748/education"
+    assert post_url == "https://www.missionchief.com/buildings/100/education"
     assert kwargs["data"]["building_rooms_use"] == "2"
     assert kwargs["data"]["education_select"] == "hotshot:17"
     assert kwargs["data"]["alliance[duration]"] == str(AUTO_ALLIANCE_DURATION_SECONDS)
@@ -242,6 +335,67 @@ def test_auto_open_training_finds_dynamic_academy_with_available_rooms():
     post_url, kwargs = session.posts[0]
     assert post_url == "https://www.missionchief.com/buildings/200/education"
     assert kwargs["data"]["building_rooms_use"] == "2"
+
+
+def test_auto_open_training_finds_new_academy_on_next_building_list_page():
+    session = _Session(
+        {
+            f"https://www.missionchief.com{AUTO_BUILDING_LIST_PATH}": BUILDING_LIST_PAGE_ONE_HTML,
+            f"https://www.missionchief.com{AUTO_BUILDING_LIST_PATH}?page=2": BUILDING_LIST_PAGE_TWO_HTML,
+            "https://www.missionchief.com/buildings/100": NO_ROOM_ACADEMY_HTML,
+            "https://www.missionchief.com/buildings/400": ACADEMY_HTML.replace("4951748", "400"),
+        }
+    )
+    manager, guild, user, _ = _manager(session=session, contribution_rate=None)
+    req = _training_request()
+
+    result = asyncio.run(manager._try_auto_open_training(guild, user, req))
+
+    assert result.success is True
+    assert result.academy_id == 400
+    assert f"https://www.missionchief.com{AUTO_BUILDING_LIST_PATH}?page=2" in session.get_urls
+    post_url, kwargs = session.posts[0]
+    assert post_url == "https://www.missionchief.com/buildings/400/education"
+    assert kwargs["data"]["building_rooms_use"] == "2"
+
+
+def test_auto_open_training_uses_newly_detected_academy_on_current_page():
+    session = _Session(
+        {
+            f"https://www.missionchief.com{AUTO_BUILDING_LIST_PATH}": BUILDING_LIST_NEW_ACADEMY_HTML,
+            "https://www.missionchief.com/buildings/500": ACADEMY_HTML.replace("4951748", "500"),
+        }
+    )
+    manager, guild, user, _ = _manager(session=session, contribution_rate=None)
+    req = _training_request()
+
+    result = asyncio.run(manager._try_auto_open_training(guild, user, req))
+
+    assert result.success is True
+    assert result.academy_id == 500
+    post_url, kwargs = session.posts[0]
+    assert post_url == "https://www.missionchief.com/buildings/500/education"
+    assert kwargs["data"]["building_rooms_use"] == "2"
+
+
+def test_auto_open_training_skips_academies_without_start_button_on_list():
+    session = _Session(
+        {
+            f"https://www.missionchief.com{AUTO_BUILDING_LIST_PATH}": BUILDING_LIST_ALL_ACADEMIES_HTML,
+            "https://www.missionchief.com/buildings/600": NO_ROOM_ACADEMY_HTML,
+            "https://www.missionchief.com/buildings/700": ACADEMY_HTML.replace("4951748", "700"),
+        }
+    )
+    manager, guild, user, _ = _manager(session=session, contribution_rate=None)
+    req = _training_request()
+
+    result = asyncio.run(manager._try_auto_open_training(guild, user, req))
+
+    assert result.success is False
+    assert "No available Fire academies found on the alliance building list" in result.reason
+    assert "https://www.missionchief.com/buildings/600" not in session.get_urls
+    assert "https://www.missionchief.com/buildings/700" not in session.get_urls
+    assert session.posts == []
 
 
 def test_collect_training_availability_counts_classrooms_by_discipline():
@@ -302,7 +456,12 @@ def test_auto_open_training_falls_back_when_known_tax_is_below_threshold():
 
 
 def test_auto_open_training_resolves_missing_member_name_from_members_scraper():
-    session = _Session(ACADEMY_HTML)
+    session = _Session(
+        {
+            f"https://www.missionchief.com{AUTO_BUILDING_LIST_PATH}": BUILDING_LIST_HTML,
+            "https://www.missionchief.com/buildings/100": ACADEMY_HTML.replace("4951748", "100"),
+        }
+    )
     manager, guild, user, _ = _manager(
         session=session,
         member_link={"mc_user_id": "456"},

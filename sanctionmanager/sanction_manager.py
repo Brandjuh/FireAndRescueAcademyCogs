@@ -18,6 +18,7 @@ log = logging.getLogger("red.cog.sanctions_manager")
 WARNING_EXPIRY_SECONDS = 30 * 86400
 DEFAULT_PANEL_CHANNEL_ID = 1426226521231589507
 DEFAULT_REVIEW_CHANNEL_ID = 1421625293130567690
+DEFAULT_BULK_REVIEW_CHANNEL_ID = 668874956175573005
 GAME_LOG_DUPLICATE_LOOKBACK_SECONDS = 6 * 3600
 GAME_LOG_DUPLICATE_EVENT_GRACE_SECONDS = 30 * 60
 GAME_LOG_DUPLICATE_FUTURE_GRACE_SECONDS = 5 * 60
@@ -2289,6 +2290,7 @@ class SanctionsManager(commands.Cog):
             "panel_message_id": None,
             "game_log_review_enabled": True,
             "game_log_review_channel_id": DEFAULT_REVIEW_CHANNEL_ID,
+            "game_log_bulk_review_channel_id": DEFAULT_BULK_REVIEW_CHANNEL_ID,
             "game_log_review_last_id": 0,
         }
         self.config.register_guild(**default_guild)
@@ -3184,7 +3186,12 @@ class SanctionsManager(commands.Cog):
         if not created:
             return
 
-        channel_id = await self.config.guild(guild).game_log_review_channel_id()
+        guild_config = self.config.guild(guild)
+        is_bulk_review = len(created) >= bulk_threshold
+        if is_bulk_review and hasattr(guild_config, "game_log_bulk_review_channel_id"):
+            channel_id = await guild_config.game_log_bulk_review_channel_id()
+        else:
+            channel_id = await guild_config.game_log_review_channel_id()
         channel = self.bot.get_channel(int(channel_id)) if channel_id else None
         if channel is None:
             channel = guild.get_channel(int(channel_id)) if channel_id else None
@@ -3192,7 +3199,7 @@ class SanctionsManager(commands.Cog):
             log.warning("SanctionManager game-log review channel not found: %s", channel_id)
             return
 
-        if len(created) >= bulk_threshold:
+        if is_bulk_review:
             message = await channel.send(embed=self._build_game_log_bulk_embed(created=created))
             for item in created:
                 self.db.update_game_log_review(item["row"]["id"], review_message_id=message.id)

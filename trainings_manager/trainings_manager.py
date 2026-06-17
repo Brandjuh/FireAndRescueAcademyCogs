@@ -9,6 +9,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urljoin
 
 import discord
 from redbot.core import commands, Config
@@ -127,6 +128,7 @@ FEE_CHOICES = [0, 100, 200, 300, 400, 500]
 MEMBER_PANEL_CHANNEL_ID = 1421627971831070730
 DEVELOPER_PANEL_CHANNEL_ID = 1421242306136113254
 AUTO_BUILDING_LIST_PATH = "/verband/gebauede"
+AUTO_ACADEMY_LIST_MAX_PAGES = 25
 AUTO_ACADEMY_BUILDINGS = {
     "Fire": 4951748,
     "Police": 4951746,
@@ -134,7 +136,7 @@ AUTO_ACADEMY_BUILDINGS = {
 AUTO_ALLIANCE_DURATION_SECONDS = 3600
 AUTO_MIN_CONTRIBUTION_RATE = 5.0
 AUTO_MAX_CLASSES = 4
-AVAILABILITY_REFRESH_SECONDS = 15 * 60
+AVAILABILITY_REFRESH_SECONDS = 60 * 60
 
 
 @dataclass
@@ -158,6 +160,7 @@ class AvailableAcademy:
     building_id: int
     name: str
     discipline: str
+    has_start_button: bool = False
 
 
 @dataclass
@@ -317,69 +320,147 @@ def _is_known_mc_username(value: Optional[str]) -> bool:
     return cleaned.casefold() not in {"unknown", "unknown user", "n/a", "none", "-"}
 
 
+def infer_academy_discipline(text: str) -> Optional[str]:
+    haystack = (text or "").casefold()
+    if any(token in haystack for token in ("police", "polizeischule", "politie")):
+        return "Police"
+    if any(token in haystack for token in ("coastal", "water rescue", "water_rescue_school", "coast")):
+        return "Coastal"
+    if any(
+        token in haystack
+        for token in (
+            "ems",
+            "ems_school",
+            "ems-school",
+            "ambulance",
+            "ambulance_school",
+            "ambulance-school",
+            "medical",
+            "rescue_school",
+            "rescue-school",
+            "rescueschool",
+            "rettungsschule",
+        )
+    ):
+        return "EMS"
+    if any(token in haystack for token in ("fire", "fireschool", "brandweer")):
+        return "Fire"
+    return None
+
+
 class AllianceAcademyListParser(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.academies: List[AvailableAcademy] = []
+        self.next_page_path: Optional[str] = None
         self._in_row = False
         self._row_name = ""
+        self._row_text = ""
         self._row_discipline: Optional[str] = None
+        self._row_building_id: Optional[int] = None
         self._row_start_building_id: Optional[int] = None
+        self._row_has_start_button = False
+        self._link_href: Optional[str] = None
+        self._link_class_text = ""
+        self._link_text = ""
 
     def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]):
         attr = {key: value for key, value in attrs}
+        if tag == "a":
+            self._link_href = attr.get("href")
+            classes = attr.get("class") or ""
+            self._link_class_text = " ".join(classes) if isinstance(classes, list) else str(classes)
+            self._link_text = ""
+            rel = attr.get("rel") or ""
+            rel_text = " ".join(rel) if isinstance(rel, list) else str(rel)
+            if self._link_href and "next" in rel_text.casefold():
+                self.next_page_path = self._link_href
+
         if tag == "tr":
             self._in_row = True
             self._row_name = attr.get("search_attribute") or ""
+            self._row_text = self._row_name
             self._row_discipline = None
+            self._row_building_id = None
             self._row_start_building_id = None
+            self._row_has_start_button = False
             return
 
         if not self._in_row:
             return
 
         if tag == "img":
-            src = (attr.get("src") or "").casefold()
-            if "polizeischule" in src:
-                self._row_discipline = "Police"
-            elif "fireschool" in src:
-                self._row_discipline = "Fire"
-            elif "water_rescue_school" in src:
-                self._row_discipline = "Coastal"
-            elif "rettungsschule" in src:
-                self._row_discipline = "EMS"
+            image_text = " ".join(
+                str(attr.get(key) or "")
+                for key in ("src", "alt", "title")
+            )
+            self._row_text += f" {image_text}"
+            self._row_discipline = self._row_discipline or infer_academy_discipline(image_text)
         elif tag == "a":
             href = re.sub(r"\s+", "", attr.get("href") or "")
-            classes = attr.get("class") or ""
-            class_text = " ".join(classes) if isinstance(classes, list) else str(classes)
-            if "btn-success" in class_text:
-                match = re.search(r"/buildings/(\d+)", href)
+            match = re.search(r"/buildings/(\d+)", href)
+            if match and self._row_building_id is None:
+                self._row_building_id = int(match.group(1))
+            if "btn-success" in self._link_class_text:
                 if match:
                     self._row_start_building_id = int(match.group(1))
+                    self._row_has_start_button = True
+
+    def handle_data(self, data: str):
+        if self._in_row:
+            self._row_text += f" {data}"
+        if self._link_href is not None:
+            self._link_text += data
 
     def handle_endtag(self, tag: str):
+        if tag == "a" and self._link_href is not None:
+            if "next" in self._link_text.casefold():
+                self.next_page_path = self._link_href
+            if self._in_row:
+                if "start a new training course" in self._link_text.casefold():
+                    href = re.sub(r"\s+", "", self._link_href)
+                    match = re.search(r"/buildings/(\d+)", href)
+                    if match:
+                        self._row_start_building_id = int(match.group(1))
+                        self._row_has_start_button = True
+            self._link_href = None
+            self._link_class_text = ""
+            self._link_text = ""
+            return
+
         if tag != "tr" or not self._in_row:
             return
 
-        if self._row_start_building_id and self._row_discipline:
+        building_id = self._row_start_building_id or self._row_building_id
+        if building_id and self._row_discipline:
             self.academies.append(
                 AvailableAcademy(
-                    building_id=self._row_start_building_id,
-                    name=self._row_name.strip() or f"Building {self._row_start_building_id}",
+                    building_id=building_id,
+                    name=self._row_name.strip() or f"Building {building_id}",
                     discipline=self._row_discipline,
+                    has_start_button=self._row_has_start_button,
                 )
             )
 
         self._in_row = False
         self._row_name = ""
+        self._row_text = ""
         self._row_discipline = None
+        self._row_building_id = None
         self._row_start_building_id = None
+        self._row_has_start_button = False
 
 
 def parse_available_academies(html: str) -> List[AvailableAcademy]:
     parser = AllianceAcademyListParser()
     parser.feed(html)
     return parser.academies
+
+
+def parse_available_academies_page(html: str) -> Tuple[List[AvailableAcademy], Optional[str]]:
+    parser = AllianceAcademyListParser()
+    parser.feed(html)
+    return parser.academies, parser.next_page_path
 
 # ---------- Model ----------
 
@@ -1687,7 +1768,7 @@ class TrainingManager(commands.Cog):
         filtered = [
             academy
             for academy in academies
-            if academy.discipline == discipline
+            if academy.discipline == discipline and academy.has_start_button
         ]
         preferred_id = AUTO_ACADEMY_BUILDINGS.get(discipline)
         if preferred_id:
@@ -1695,15 +1776,31 @@ class TrainingManager(commands.Cog):
         return filtered, status
 
     async def _fetch_all_available_academies(self, session) -> Tuple[List[AvailableAcademy], Optional[int]]:
-        url = f"https://www.missionchief.com{AUTO_BUILDING_LIST_PATH}"
-        async with session.get(url, allow_redirects=True) as response:
-            status = getattr(response, "status", None)
-            html = await response.text()
+        next_url = f"https://www.missionchief.com{AUTO_BUILDING_LIST_PATH}"
+        academies: List[AvailableAcademy] = []
+        seen_urls = set()
+        last_status: Optional[int] = None
 
-        if status is not None and int(status) >= 400:
-            return [], status
+        for _page_number in range(AUTO_ACADEMY_LIST_MAX_PAGES):
+            if next_url in seen_urls:
+                break
+            seen_urls.add(next_url)
 
-        return parse_available_academies(html), status
+            async with session.get(next_url, allow_redirects=True) as response:
+                status = getattr(response, "status", None)
+                html = await response.text()
+            last_status = status
+
+            if status is not None and int(status) >= 400:
+                return academies, status
+
+            page_academies, next_page_path = parse_available_academies_page(html)
+            academies.extend(page_academies)
+            if not next_page_path:
+                break
+            next_url = urljoin(next_url, next_page_path)
+
+        return academies, last_status
 
     async def _collect_training_availability(self) -> Tuple[Dict[str, DisciplineAvailability], Optional[str]]:
         availability = {
@@ -1729,6 +1826,8 @@ class TrainingManager(commands.Cog):
                 continue
             stats = availability[academy.discipline]
             stats.academies_checked += 1
+            if not academy.has_start_button:
+                continue
             try:
                 async with session.get(f"https://www.missionchief.com/buildings/{academy.building_id}", allow_redirects=True) as response:
                     academy_status = getattr(response, "status", None)
@@ -1788,12 +1887,13 @@ class TrainingManager(commands.Cog):
 
         session = await cookie_manager.get_session()
         academies, list_status = await self._fetch_available_academies(session, req.discipline)
-        if not academies and fallback_academy_id:
+        if not academies and fallback_academy_id and list_status is not None and int(list_status) >= 400:
             academies = [
                 AvailableAcademy(
                     building_id=fallback_academy_id,
                     name=f"Configured {req.discipline} academy",
                     discipline=req.discipline,
+                    has_start_button=True,
                 )
             ]
         if not academies:
@@ -2023,7 +2123,7 @@ class TrainingManager(commands.Cog):
         )
         if error:
             embed.add_field(name="Status", value=f"Could not refresh automatically: {error}", inline=False)
-        embed.set_footer(text="TrainingManager - refreshes every 15 minutes")
+        embed.set_footer(text="TrainingManager - refreshes every hour")
         return embed
 
     async def _refresh_availability_panel_for_guild(self, guild: discord.Guild, *, create_if_missing: bool = False) -> Optional[discord.Message]:
