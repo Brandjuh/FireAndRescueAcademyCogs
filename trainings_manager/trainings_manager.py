@@ -326,7 +326,7 @@ def infer_academy_discipline(text: str) -> Optional[str]:
         return "Police"
     if any(token in haystack for token in ("coastal", "water rescue", "water_rescue_school", "coast")):
         return "Coastal"
-    if any(token in haystack for token in ("ems", "ambulance", "medical", "rettungsschule")):
+    if any(token in haystack for token in ("ems", "ambulance", "medical", "rettungsschule", "rescue academy")):
         return "EMS"
     if any(token in haystack for token in ("fire", "fireschool", "brandweer")):
         return "Fire"
@@ -417,6 +417,7 @@ class AllianceAcademyListParser(HTMLParser):
             return
 
         building_id = self._row_start_building_id or self._row_building_id
+        self._row_discipline = self._row_discipline or infer_academy_discipline(self._row_text)
         if building_id and self._row_discipline:
             self.academies.append(
                 AvailableAcademy(

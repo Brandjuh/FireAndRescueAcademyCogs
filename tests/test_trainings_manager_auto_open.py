@@ -80,6 +80,11 @@ BUILDING_LIST_HTML = """
   <td><a href="/buildings/300">[AA] Police Academy #0001</a></td>
   <td><a class="btn btn-success" href="/buildings/300">Start a new training course</a></td>
 </tr>
+<tr search_attribute="[AA] Rescue Academy #0001">
+  <td><img src="/images/building_rescue_academy.png" alt="Rescue Academy" /></td>
+  <td><a href="/buildings/400">[AA] Rescue Academy #0001</a></td>
+  <td><a class="btn btn-success" href="/buildings/400">Start a new training course</a></td>
+</tr>
 </table>
 """
 
@@ -250,8 +255,9 @@ def test_parse_available_academies_extracts_open_training_links():
         (100, "Fire"),
         (200, "Fire"),
         (300, "Police"),
+        (400, "EMS"),
     ]
-    assert [academy.has_start_button for academy in academies] == [True, True, True]
+    assert [academy.has_start_button for academy in academies] == [True, True, True, True]
 
 
 def test_parse_available_academies_page_extracts_next_link():
@@ -402,6 +408,7 @@ def test_collect_training_availability_counts_classrooms_by_discipline():
             "https://www.missionchief.com/buildings/100": NO_ROOM_ACADEMY_HTML,
             "https://www.missionchief.com/buildings/200": ACADEMY_HTML.replace("4951748", "200"),
             "https://www.missionchief.com/buildings/300": ACADEMY_HTML.replace("4951748", "300"),
+            "https://www.missionchief.com/buildings/400": ACADEMY_HTML.replace("4951748", "400"),
         }
     )
     manager, _guild, _user, _ = _manager(session=session, contribution_rate=None)
@@ -414,7 +421,8 @@ def test_collect_training_availability_counts_classrooms_by_discipline():
     assert availability["Fire"].available_classrooms == 5
     assert availability["Police"].academies_checked == 1
     assert availability["Police"].available_classrooms == 4
-    assert availability["EMS"].available_classrooms == 0
+    assert availability["EMS"].academies_checked == 1
+    assert availability["EMS"].available_classrooms == 4
 
 
 def test_training_availability_embed_uses_simple_class_counts():
