@@ -130,20 +130,12 @@ class LocationParser:
         if match:
             return (float(match.group(1)), float(match.group(2)))
 
-        # Pattern 2b: Apple Maps ?ll=lat,lon or ?sll=lat,lon
+        # Pattern 2b: Supported map query parameters
         parsed = urlparse(decoded_text.strip())
         query = parse_qs(parsed.query)
-        for key in ("ll", "sll"):
-            value = (query.get(key) or [None])[0]
-            if value:
-                match = re.match(r"\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$", value)
-                if match:
-                    return (float(match.group(1)), float(match.group(2)))
-
-        # Pattern 2c: Bing Maps ?cp=lat~lon
-        value = (query.get("cp") or [None])[0]
+        value = (query.get("query") or [None])[0]
         if value:
-            match = re.match(r"\s*(-?\d+\.?\d*)\s*~\s*(-?\d+\.?\d*)\s*$", value)
+            match = re.match(r"\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$", value)
             if match:
                 return (float(match.group(1)), float(match.group(2)))
         
@@ -188,20 +180,6 @@ class LocationParser:
         parsed = urlparse(decoded_text.strip())
         host = parsed.netloc.lower()
         query = parse_qs(parsed.query)
-
-        if "maps.apple." in host:
-            for key in ("q", "address"):
-                value = (query.get(key) or [None])[0]
-                cleaned = LocationParser._clean_place_query(value)
-                if cleaned:
-                    return cleaned
-
-        if "bing.com" in host:
-            for key in ("where1", "q"):
-                value = (query.get(key) or [None])[0]
-                cleaned = LocationParser._clean_place_query(value)
-                if cleaned:
-                    return cleaned
 
         if "google." in host or "maps.app.goo.gl" in host:
             for key in ("query", "q"):
@@ -1055,11 +1033,11 @@ class BuildingTypeSelect(discord.ui.Select):
 
 class BuildingRequestModal(discord.ui.Modal, title="Building Request"):
     location = discord.ui.TextInput(
-        label="Maps link",
+        label="Google Maps link",
         style=discord.TextStyle.short,
         max_length=500,
         required=True,
-        placeholder="Paste a Google Maps, Apple Maps, or Bing Maps link",
+        placeholder="Paste a Google Maps place link or maps.app.goo.gl short link",
     )
     
     notes = discord.ui.TextInput(
@@ -1603,9 +1581,8 @@ class BuildingManager(commands.Cog):
             description = (
                 "Request a new Hospital or Prison placement by clicking the button below.\n\n"
                 "Accepted location formats:\n"
-                "- Google Maps place link or short link, for example `https://maps.app.goo.gl/...`\n"
-                "- Apple Maps link\n"
-                "- Bing Maps link\n\n"
+                "- Google Maps place link\n"
+                "- Google Maps short link, for example `https://maps.app.goo.gl/...`\n\n"
                 "The building name is detected automatically from the location when possible. "
                 "Your request will be reviewed by admins."
             )
