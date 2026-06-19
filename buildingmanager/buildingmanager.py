@@ -1,18 +1,20 @@
+from __future__ import annotations
+
 import asyncio
 import aiohttp
-import json
 import logging
 import re
 import sqlite3
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
-from urllib.parse import quote, unquote
+from typing import Optional, Tuple
+from urllib.parse import quote, unquote, urlparse
 
 import discord
 from redbot.core import commands, Config
 from redbot.core.bot import Red
-from redbot.core.utils.chat_formatting import box, pagify
+from redbot.core.utils.chat_formatting import box
 
 log = logging.getLogger("red.cog.building_manager")
 
@@ -52,41 +54,171 @@ async def safe_update(interaction: discord.Interaction, *, content=None, embed=N
 
 # ---------- Location Parser ----------
 
+@dataclass
+class LocationDetails:
+    """Resolved location details for a building request."""
+
+    original_input: str
+    resolved_input: str
+    coordinates: Optional[str] = None
+    address: Optional[str] = None
+    country: Optional[str] = None
+    region: Optional[str] = None
+    maps_url: Optional[str] = None
+    provider: Optional[str] = None
+    facility_warning: Optional[str] = None
+    detected_facility_type: Optional[str] = None
+
+
 class LocationParser:
     """Parse and geocode location inputs."""
     
     # Rate limiting for Nominatim (1 req/sec)
     _last_nominatim_call = 0
     _nominatim_delay = 1.0
+    _health_keywords = {
+        "hospital",
+        "medical",
+        "clinic",
+        "health",
+        "healthcare",
+        "ziekenhuis",
+        "medisch",
+        "kliniek",
+        "zorg",
+        "mc",
+    }
+    _justice_keywords = {
+        "prison",
+        "jail",
+        "detention",
+        "correctional",
+        "justice",
+        "courthouse",
+        "gevangenis",
+        "justitie",
+        "penitentiaire",
+        "inrichting",
+        "detentie",
+    }
     
     @staticmethod
     def extract_coordinates(text: str) -> Optional[Tuple[float, float]]:
         """Extract coordinates from various formats."""
+        decoded_text = unquote(text)
+
+        # Pattern 0: Google Maps place data !3dlat!4dlon. This is usually the
+        # exact place marker and is better than the viewport /@ coordinates.
+        pattern0 = r'!3d(-?\d+\.?\d*)!4d(-?\d+\.?\d*)'
+        match = re.search(pattern0, decoded_text)
+        if match:
+            return (float(match.group(1)), float(match.group(2)))
+
         # Pattern 1: Google Maps ?q=lat,lon
         pattern1 = r'[?&]q=(-?\d+\.?\d*),\s*(-?\d+\.?\d*)'
-        match = re.search(pattern1, text)
+        match = re.search(pattern1, decoded_text)
         if match:
             return (float(match.group(1)), float(match.group(2)))
         
         # Pattern 2: Google Maps /@lat,lon
         pattern2 = r'/@(-?\d+\.?\d*),\s*(-?\d+\.?\d*)'
-        match = re.search(pattern2, text)
+        match = re.search(pattern2, decoded_text)
         if match:
             return (float(match.group(1)), float(match.group(2)))
         
         # Pattern 3: Direct coordinates "lat, lon" or "lat,lon"
         pattern3 = r'^(-?\d+\.?\d*)[,\s]+(-?\d+\.?\d*)$'
-        match = re.search(pattern3, text.strip())
+        match = re.search(pattern3, decoded_text.strip())
         if match:
             return (float(match.group(1)), float(match.group(2)))
         
         # Pattern 4: X: lat, Y: lon format
         pattern4 = r'X:\s*(-?\d+\.?\d*)[,\s]+Y:\s*(-?\d+\.?\d*)'
-        match = re.search(pattern4, text, re.IGNORECASE)
+        match = re.search(pattern4, decoded_text, re.IGNORECASE)
         if match:
             return (float(match.group(1)), float(match.group(2)))
         
         return None
+
+    @staticmethod
+    def is_maps_short_url(text: str) -> bool:
+        """Return whether the input is a Google Maps short URL."""
+        try:
+            host = urlparse(text.strip()).netloc.lower()
+        except Exception:
+            return False
+        return host in {"maps.app.goo.gl", "goo.gl"} or host.endswith(".goo.gl")
+
+    @staticmethod
+    def make_maps_url(coordinates: Optional[str], fallback_query: str) -> str:
+        """Build a stable Google Maps URL for admins."""
+        if coordinates:
+            return f"https://www.google.com/maps/search/?api=1&query={quote(coordinates)}"
+        return f"https://www.google.com/maps/search/?api=1&query={quote(fallback_query)}"
+
+    @staticmethod
+    def extract_place_name(text: str) -> Optional[str]:
+        """Extract the visible place name from a Google Maps place URL."""
+        decoded_text = unquote(text)
+        match = re.search(r"/maps/place/([^/@?]+)", decoded_text)
+        if not match:
+            return None
+        return match.group(1).replace("+", " ").strip() or None
+
+    @classmethod
+    async def expand_maps_url(cls, text: str) -> str:
+        """Resolve Google Maps short URLs to their final URL when possible."""
+        if not cls.is_maps_short_url(text):
+            return text
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(text, allow_redirects=True, timeout=10) as resp:
+                    return str(resp.url)
+        except Exception as e:
+            log.warning("Google Maps URL expansion failed: %r", e)
+            return text
+
+    @classmethod
+    async def resolve_location(cls, location_input: str, google_key: Optional[str] = None) -> LocationDetails:
+        """Resolve user-provided location input into admin-facing location details."""
+        cleaned_input = location_input.strip()
+        resolved_input = await cls.expand_maps_url(cleaned_input)
+        coords = cls.extract_coordinates(resolved_input)
+
+        address = None
+        country = None
+        region = None
+        provider = None
+        detected_facility_type = None
+
+        if coords:
+            lat, lon = coords
+            coordinates_str = f"{lat}, {lon}"
+            geocode = await cls.reverse_geocode_details(lat, lon, google_key=google_key)
+        else:
+            geocode = await cls.forward_geocode_details(resolved_input, google_key=google_key)
+            coordinates_str = geocode.get("coordinates") if geocode else None
+
+        if geocode:
+            address = geocode.get("address")
+            country = geocode.get("country")
+            region = geocode.get("region")
+            provider = geocode.get("provider")
+            detected_facility_type = geocode.get("facility_type")
+
+        maps_url = cls.make_maps_url(coordinates_str, resolved_input)
+        return LocationDetails(
+            original_input=cleaned_input,
+            resolved_input=resolved_input,
+            coordinates=coordinates_str,
+            address=address,
+            country=country,
+            region=region,
+            maps_url=maps_url,
+            provider=provider,
+            detected_facility_type=detected_facility_type,
+        )
     
     @classmethod
     async def geocode_nominatim(cls, lat: float, lon: float) -> Optional[str]:
@@ -99,7 +231,7 @@ class LocationParser:
         
         cls._last_nominatim_call = time.time()
         
-        url = f"https://nominatim.openstreetmap.org/reverse"
+        url = "https://nominatim.openstreetmap.org/reverse"
         params = {
             "lat": lat,
             "lon": lon,
@@ -120,6 +252,225 @@ class LocationParser:
         except Exception as e:
             log.warning("Nominatim geocoding failed: %r", e)
         
+        return None
+
+    @classmethod
+    async def reverse_geocode_details(
+        cls,
+        lat: float,
+        lon: float,
+        *,
+        google_key: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Reverse geocode and return structured address details."""
+        details = await cls.reverse_geocode_nominatim_details(lat, lon)
+        if details:
+            return details
+
+        if google_key:
+            return await cls.reverse_geocode_google_details(lat, lon, google_key)
+        return None
+
+    @classmethod
+    async def reverse_geocode_nominatim_details(cls, lat: float, lon: float) -> Optional[dict]:
+        """Reverse geocode using Nominatim with country and region details."""
+        now = time.time()
+        elapsed = now - cls._last_nominatim_call
+        if elapsed < cls._nominatim_delay:
+            await asyncio.sleep(cls._nominatim_delay - elapsed)
+
+        cls._last_nominatim_call = time.time()
+
+        url = "https://nominatim.openstreetmap.org/reverse"
+        params = {
+            "lat": lat,
+            "lon": lon,
+            "format": "json",
+            "addressdetails": 1,
+        }
+        headers = {
+            "User-Agent": "DiscordBot-BuildingManager/1.0"
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params, headers=headers, timeout=10) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await resp.json()
+        except Exception as e:
+            log.warning("Nominatim structured reverse geocoding failed: %r", e)
+            return None
+
+        return cls._nominatim_result_to_details(data)
+
+    @classmethod
+    async def forward_geocode_details(cls, query: str, *, google_key: Optional[str] = None) -> Optional[dict]:
+        """Forward geocode text, addresses, and plus codes."""
+        if google_key:
+            details = await cls.forward_geocode_google_details(query, google_key)
+            if details:
+                return details
+        return await cls.forward_geocode_nominatim_details(query)
+
+    @classmethod
+    async def forward_geocode_nominatim_details(cls, query: str) -> Optional[dict]:
+        """Forward geocode using Nominatim for addresses and plus codes."""
+        now = time.time()
+        elapsed = now - cls._last_nominatim_call
+        if elapsed < cls._nominatim_delay:
+            await asyncio.sleep(cls._nominatim_delay - elapsed)
+
+        cls._last_nominatim_call = time.time()
+
+        url = "https://nominatim.openstreetmap.org/search"
+        params = {
+            "q": query,
+            "format": "json",
+            "addressdetails": 1,
+            "limit": 1,
+        }
+        headers = {
+            "User-Agent": "DiscordBot-BuildingManager/1.0"
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params, headers=headers, timeout=10) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await resp.json()
+        except Exception as e:
+            log.warning("Nominatim structured forward geocoding failed: %r", e)
+            return None
+
+        if not data:
+            return None
+        return cls._nominatim_result_to_details(data[0])
+
+    @staticmethod
+    async def reverse_geocode_google_details(lat: float, lon: float, api_key: str) -> Optional[dict]:
+        """Reverse geocode using Google and return structured address details."""
+        url = "https://maps.googleapis.com/maps/api/geocode/json"
+        params = {
+            "latlng": f"{lat},{lon}",
+            "key": api_key,
+        }
+        return await LocationParser._google_geocode_details(url, params)
+
+    @staticmethod
+    async def forward_geocode_google_details(query: str, api_key: str) -> Optional[dict]:
+        """Forward geocode using Google and return structured address details."""
+        url = "https://maps.googleapis.com/maps/api/geocode/json"
+        params = {
+            "address": query,
+            "key": api_key,
+        }
+        return await LocationParser._google_geocode_details(url, params)
+
+    @staticmethod
+    async def _google_geocode_details(url: str, params: dict) -> Optional[dict]:
+        """Run a Google geocoding request and normalize the first result."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params, timeout=10) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await resp.json()
+        except Exception as e:
+            log.warning("Google structured geocoding failed: %r", e)
+            return None
+
+        if data.get("status") != "OK" or not data.get("results"):
+            return None
+        return LocationParser._google_result_to_details(data["results"][0])
+
+    @staticmethod
+    def _nominatim_result_to_details(data: dict) -> dict:
+        """Normalize a Nominatim response."""
+        address_data = data.get("address") or {}
+        lat = data.get("lat")
+        lon = data.get("lon")
+        region = (
+            address_data.get("state")
+            or address_data.get("region")
+            or address_data.get("province")
+            or address_data.get("county")
+        )
+        facility_type = " ".join(
+            str(value)
+            for value in (
+                data.get("class"),
+                data.get("type"),
+                address_data.get("amenity"),
+                address_data.get("healthcare"),
+            )
+            if value
+        ).strip() or None
+
+        return {
+            "coordinates": f"{float(lat)}, {float(lon)}" if lat and lon else None,
+            "address": data.get("display_name"),
+            "country": address_data.get("country"),
+            "region": region,
+            "provider": "nominatim",
+            "facility_type": facility_type,
+        }
+
+    @staticmethod
+    def _google_result_to_details(result: dict) -> dict:
+        """Normalize a Google geocoding result."""
+        components = result.get("address_components") or []
+
+        def component(*types: str) -> Optional[str]:
+            for item in components:
+                item_types = set(item.get("types") or [])
+                if item_types.intersection(types):
+                    return item.get("long_name")
+            return None
+
+        location = (result.get("geometry") or {}).get("location") or {}
+        lat = location.get("lat")
+        lon = location.get("lng")
+        region = component("administrative_area_level_1", "administrative_area_level_2")
+        facility_type = " ".join(result.get("types") or []) or None
+
+        return {
+            "coordinates": f"{float(lat)}, {float(lon)}" if lat is not None and lon is not None else None,
+            "address": result.get("formatted_address"),
+            "country": component("country"),
+            "region": region,
+            "provider": "google",
+            "facility_type": facility_type,
+        }
+
+    @classmethod
+    def facility_warning(
+        cls,
+        building_type: str,
+        building_name: str,
+        location_details: LocationDetails,
+    ) -> Optional[str]:
+        """Return a warning if the location does not clearly match the requested type."""
+        searchable = " ".join(
+            value
+            for value in (
+                building_name,
+                location_details.address,
+                cls.extract_place_name(location_details.resolved_input),
+                location_details.resolved_input,
+                location_details.detected_facility_type,
+            )
+            if value
+        )
+        searchable = unquote(searchable).replace("+", " ").lower()
+
+        if building_type == "Hospital":
+            if not any(keyword in searchable for keyword in cls._health_keywords):
+                return "This location does not clearly look like a health facility."
+        elif building_type == "Prison":
+            if not any(keyword in searchable for keyword in cls._justice_keywords):
+                return "This location does not clearly look like a justice or correctional facility."
         return None
     
     @staticmethod
@@ -561,6 +912,10 @@ class BuildingRequest:
         location_input: str,
         coordinates: Optional[str] = None,
         address: Optional[str] = None,
+        country: Optional[str] = None,
+        region: Optional[str] = None,
+        maps_url: Optional[str] = None,
+        facility_warning: Optional[str] = None,
         notes: Optional[str] = None,
         request_id: Optional[int] = None,
     ):
@@ -571,6 +926,10 @@ class BuildingRequest:
         self.location_input = location_input
         self.coordinates = coordinates
         self.address = address
+        self.country = country
+        self.region = region
+        self.maps_url = maps_url
+        self.facility_warning = facility_warning
         self.notes = notes
         self.request_id = request_id
 
@@ -645,34 +1004,13 @@ class BuildingRequestModal(discord.ui.Modal, title="Building Request"):
         await interaction.response.defer(ephemeral=True)
         
         location_input = str(self.location)
-        coords = LocationParser.extract_coordinates(location_input)
-        
-        coordinates_str = None
-        address = None
-        
-        if coords:
-            lat, lon = coords
-            coordinates_str = f"{lat}, {lon}"
-            
-            # Check cache first
-            cached = self.cog.db.get_cached_geocode(location_input)
-            if cached:
-                _, address, _ = cached
-            else:
-                # Try Nominatim first
-                address = await LocationParser.geocode_nominatim(lat, lon)
-                provider = "nominatim"
-                
-                # Fallback to Google if available and Nominatim failed
-                if not address:
-                    google_key = await self.cog.config.google_api_key()
-                    if google_key:
-                        address = await LocationParser.geocode_google(lat, lon, google_key)
-                        provider = "google"
-                
-                # Cache result
-                if address:
-                    self.cog.db.cache_geocode(location_input, coordinates_str, address, provider)
+        google_key = await self.cog.config.google_api_key()
+        location_details = await LocationParser.resolve_location(location_input, google_key=google_key)
+        location_details.facility_warning = LocationParser.facility_warning(
+            self.building_type,
+            str(self.building_name),
+            location_details,
+        )
         
         # Create request object
         req = BuildingRequest(
@@ -681,8 +1019,12 @@ class BuildingRequestModal(discord.ui.Modal, title="Building Request"):
             building_type=self.building_type,
             building_name=str(self.building_name),
             location_input=location_input,
-            coordinates=coordinates_str,
-            address=address,
+            coordinates=location_details.coordinates,
+            address=location_details.address,
+            country=location_details.country,
+            region=location_details.region,
+            maps_url=location_details.maps_url,
+            facility_warning=location_details.facility_warning,
             notes=str(self.notes) if self.notes.value else None,
         )
         
@@ -706,6 +1048,25 @@ class SummaryView(discord.ui.View):
             view=self
         )
 
+    def _add_location_details(self, embed: discord.Embed, *, warning_title: str = "Facility Check"):
+        """Add resolved location fields to a request embed."""
+        region_text = ", ".join(part for part in (self.req.region, self.req.country) if part)
+        if region_text:
+            embed.add_field(name="Country / Region", value=region_text[:200], inline=True)
+
+        if self.req.address:
+            embed.add_field(name="Address", value=self.req.address[:300], inline=False)
+
+        if self.req.maps_url:
+            embed.add_field(name="Maps URL", value=f"[Open in Google Maps]({self.req.maps_url})", inline=False)
+
+        if self.req.facility_warning:
+            embed.add_field(
+                name=warning_title,
+                value=f"⚠️ {self.req.facility_warning}",
+                inline=False,
+            )
+
     def _create_embed(self, user: discord.User) -> discord.Embed:
         """Create summary embed."""
         emoji_map = {"Hospital": "🏥", "Prison": "🔒"}
@@ -726,9 +1087,8 @@ class SummaryView(discord.ui.View):
             embed.add_field(name="📍 Coordinates", value=self.req.coordinates, inline=True)
         else:
             embed.add_field(name="📍 Coordinates", value="Not detected", inline=True)
-        
-        if self.req.address:
-            embed.add_field(name="📫 Address", value=self.req.address[:200], inline=False)
+
+        self._add_location_details(embed)
         
         if self.req.notes:
             embed.add_field(name="Notes", value=self.req.notes[:200], inline=False)
@@ -804,9 +1164,8 @@ class SummaryView(discord.ui.View):
             emb.add_field(name="📍 Coordinates", value=self.req.coordinates, inline=True)
         else:
             emb.add_field(name="📍 Coordinates", value="Not detected", inline=True)
-        
-        if self.req.address:
-            emb.add_field(name="📫 Address", value=self.req.address[:200], inline=False)
+
+        self._add_location_details(emb, warning_title="Facility Check Warning")
         
         if self.req.notes:
             emb.add_field(name="Notes", value=self.req.notes[:200], inline=False)
@@ -824,6 +1183,10 @@ class SummaryView(discord.ui.View):
             timestamp=datetime.now(timezone.utc),
         )
         log_emb.add_field(name="Building", value=f"{self.req.building_type} - {self.req.building_name}", inline=False)
+        if self.req.coordinates:
+            log_emb.add_field(name="Coordinates", value=self.req.coordinates, inline=True)
+        if self.req.maps_url:
+            log_emb.add_field(name="Maps", value=f"[Open]({self.req.maps_url})", inline=True)
         log_emb.add_field(name="Request ID", value=str(request_id), inline=True)
         await log_channel.send(embed=log_emb)
 
@@ -891,6 +1254,8 @@ class AdminDecisionView(discord.ui.View):
         )
         if self.req.coordinates:
             ok_text += f"📍 Coordinates: {self.req.coordinates}\n"
+        if self.req.maps_url:
+            ok_text += f"Maps: {self.req.maps_url}\n"
         if self.req.address:
             ok_text += f"📫 Address: {self.req.address}\n"
         if self.req.notes:
@@ -913,6 +1278,11 @@ class AdminDecisionView(discord.ui.View):
             emb.add_field(name="Building", value=f"{self.req.building_type} - {self.req.building_name}", inline=False)
             if self.req.coordinates:
                 emb.add_field(name="Coordinates", value=self.req.coordinates, inline=True)
+            if self.req.maps_url:
+                emb.add_field(name="Maps", value=f"[Open]({self.req.maps_url})", inline=True)
+            region_text = ", ".join(part for part in (self.req.region, self.req.country) if part)
+            if region_text:
+                emb.add_field(name="Country / Region", value=region_text[:200], inline=True)
             emb.add_field(name="Approved by", value=f"{interaction.user.mention} ({interaction.user.id})", inline=False)
             emb.add_field(name="Request ID", value=str(self.req.request_id), inline=True)
             await log_channel.send(embed=emb)
@@ -924,7 +1294,7 @@ class AdminDecisionView(discord.ui.View):
 
         await interaction.response.send_message("Request approved and processed.", ephemeral=True)
 
-    @discord.ui.button(label="❌ Deny", style=discord.ButtonStyle.danger, custom_id="bm:deny")
+    @discord.ui.button(label="❌ Reject", style=discord.ButtonStyle.danger, custom_id="bm:deny")
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._is_admin(interaction):
             await interaction.response.send_message("You don't have permission to do this.", ephemeral=True)
@@ -1200,7 +1570,7 @@ class BuildingManager(commands.Cog):
             await ctx.send("✅ Google API key set.")
             try:
                 await ctx.message.delete()
-            except:
+            except Exception:
                 pass
         else:
             await self.config.google_api_key.set(None)
