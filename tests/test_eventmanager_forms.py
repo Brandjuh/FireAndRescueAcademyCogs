@@ -14,6 +14,7 @@ from eventmanager.event_manager import (
     profile_name_from_label,
     random_location_for_region,
     select_scheduled_profile,
+    summarize_payload_for_debug,
     summarize_form,
     valid_time,
     _validate_free_submit,
@@ -322,6 +323,21 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertEqual(payload["mission_position[amount]"], "1")
         self.assertEqual(payload["mission_position[coins]"], "0")
         self.assertEqual(payload["mission_position[shape]"], "")
+
+    def test_safe_payload_summary_excludes_authenticity_token(self):
+        summary = summarize_payload_for_debug(
+            [
+                ("authenticity_token", "secret"),
+                ("mission_position[latitude]", "40.729500"),
+                ("mission_position[address]", "70 Washington Square South"),
+                ("commit", "Start 1 mission (Free)"),
+            ]
+        )
+
+        self.assertNotIn("secret", summary)
+        self.assertNotIn("authenticity_token", summary)
+        self.assertIn("mission_position[latitude]=40.729500", summary)
+        self.assertIn("commit=Start 1 mission (Free)", summary)
 
     def test_summarize_form_includes_option_preview(self):
         form = parse_event_form(FORM_HTML, "https://www.missionchief.com/missionAllianceNew")

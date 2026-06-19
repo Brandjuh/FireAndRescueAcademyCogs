@@ -470,6 +470,26 @@ def build_payload(form: EventForm, overrides: Dict[str, str]) -> Payload:
     return payload
 
 
+def summarize_payload_for_debug(payload: Payload, *, limit: int = 900) -> str:
+    """Summarize non-sensitive MissionChief POST fields."""
+    safe_names = {
+        MISSION_TYPE_FIELD,
+        EVENT_RADIO_FIELD,
+        LATITUDE_FIELD,
+        LONGITUDE_FIELD,
+        ADDRESS_FIELD,
+        POI_TYPE_FIELD,
+        SIZE_FIELD,
+        SHAPE_FIELD,
+        AMOUNT_FIELD,
+        COINS_FIELD,
+        "commit",
+    }
+    parts = [f"{name}={value}" for name, value in payload if name in safe_names]
+    summary = "; ".join(parts) if parts else "no safe payload fields"
+    return summary[:limit]
+
+
 def parse_location_value(value: str) -> Tuple[str, str]:
     """Parse `lat, lon` input for profile location shortcuts."""
     parts = [part.strip() for part in (value or "").replace(";", ",").split(",")]
@@ -927,14 +947,26 @@ class EventManager(commands.Cog):
 
             session = await self._get_session()
             try:
-                async with session.post(form.action, data=payload, allow_redirects=True) as response:
+                async with session.post(
+                    form.action,
+                    data=payload,
+                    allow_redirects=False,
+                    headers={"Origin": BASE_URL, "Referer": EVENT_KINDS[kind]["url"]},
+                ) as response:
                     status = getattr(response, "status", None)
                     await response.text()
             except Exception as exc:
                 return EventStartResult(False, f"MissionChief POST failed: {exc}", post_url=form.action)
 
         if status is None or int(status) >= 400:
-            return EventStartResult(False, f"MissionChief returned HTTP {status}.", status=status, post_url=form.action)
+            debug = summarize_payload_for_debug(payload)
+            log.warning("EventManager %s POST failed with HTTP %s. Payload: %s", kind, status, debug)
+            return EventStartResult(
+                False,
+                f"MissionChief returned HTTP {status}. Safe payload: {debug}",
+                status=status,
+                post_url=form.action,
+            )
 
         await self._log_run(kind, profile_name, status)
         return EventStartResult(True, "Started successfully.", status=status, post_url=form.action)
@@ -1164,6 +1196,51 @@ class EventManager(commands.Cog):
         await ctx.send(
             f"Full {EVENT_KINDS[kind]['label']} form inspection:",
             file=discord.File(data, filename=f"eventmanager-{kind}-form.txt"),
+        )
+
+    @eventmanager.command(name="debugpayload")
+    @commands.admin()
+    async def debug_payload(self, ctx: commands.Context, kind: str, profile_name: Optional[str] = None):
+        """Show the safe POST payload EventManager would submit."""
+        try:
+            kind = normalize_kind(kind)
+            form = await self._fetch_form(kind)
+        except Exception as exc:
+            await ctx.send(f"Could not build debug payload: {exc}")
+            return
+
+        profile = None
+        label = "quick"
+        if profile_name:
+            profiles = await self.config.profiles()
+            profile = profiles.get(kind, {}).get(profile_name.strip().lower())
+            label = profile_name.strip().lower()
+            if not profile:
+                await ctx.send(f"Profile `{label}` was not found.")
+                return
+        else:
+            options = field_options_for_kind(form, kind)
+            if not options:
+                await ctx.send("No MissionChief options were found on the live form.")
+                return
+            random_region = "nyc_or_bermuda" if kind == "event" else "nyc"
+            profile = fields_for_selection(kind, options[0].value, random_region=random_region)
+
+        payload = build_payload(form, profile_fields_for_start(profile))
+        summary = "\n".join(
+            [
+                f"Kind: {kind}",
+                f"Profile: {label}",
+                f"Action: {form.action}",
+                f"Submit: {form.submit_name}={form.submit_value or ''}",
+                "",
+                summarize_payload_for_debug(payload, limit=1800),
+            ]
+        )
+        data = io.BytesIO(summary.encode("utf-8"))
+        await ctx.send(
+            f"Safe EventManager payload debug for `{kind}`:",
+            file=discord.File(data, filename=f"eventmanager-{kind}-payload.txt"),
         )
 
     @eventmanager.command(name="panel")
