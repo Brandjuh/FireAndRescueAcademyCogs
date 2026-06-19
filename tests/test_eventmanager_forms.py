@@ -322,7 +322,7 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertEqual(payload["mission_position[size]"], "1")
         self.assertEqual(payload["mission_position[amount]"], "1")
         self.assertEqual(payload["mission_position[coins]"], "0")
-        self.assertEqual(payload["mission_position[shape]"], "")
+        self.assertEqual(payload["mission_position[shape]"], "circle")
 
     def test_safe_payload_summary_excludes_authenticity_token(self):
         summary = summarize_payload_for_debug(
