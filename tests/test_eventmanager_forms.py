@@ -30,6 +30,22 @@ FORM_HTML = """
 </html>
 """
 
+RADIO_HTML = """
+<html>
+  <body>
+    <form action="/missionAllianceCreate" method="post">
+      <input type="hidden" name="authenticity_token" value="abc123" />
+      <input type="radio" name="mission_position[mission_type_id]" value="41" />
+      <input type="radio" name="mission_position[mission_type_id]" value="61" checked />
+      <input type="radio" name="mission_position[mission_type_id]" value="62" />
+      <input type="checkbox" name="event_radio_group" value="fire" checked />
+      <input type="checkbox" name="event_radio_group" value="police" />
+      <input type="submit" name="commit" value="Start 1 mission (Free)" />
+    </form>
+  </body>
+</html>
+"""
+
 
 class EventManagerFormTests(unittest.TestCase):
     def test_parse_event_form_extracts_fields_options_and_submit(self):
@@ -56,13 +72,38 @@ class EventManagerFormTests(unittest.TestCase):
                 "mission_alliance[latitude]": "41.0",
             },
         )
+        payload_dict = dict(payload)
 
-        self.assertEqual(payload["authenticity_token"], "abc123")
-        self.assertEqual(payload["mission_alliance[caption]"], "FARA Daily Mission")
-        self.assertEqual(payload["mission_alliance[latitude]"], "41.0")
-        self.assertEqual(payload["mission_alliance[longitude]"], "-73.9")
-        self.assertEqual(payload["mission_alliance[mission_type_id]"], "2")
-        self.assertEqual(payload["commit"], "Start")
+        self.assertEqual(payload_dict["authenticity_token"], "abc123")
+        self.assertEqual(payload_dict["mission_alliance[caption]"], "FARA Daily Mission")
+        self.assertEqual(payload_dict["mission_alliance[latitude]"], "41.0")
+        self.assertEqual(payload_dict["mission_alliance[longitude]"], "-73.9")
+        self.assertEqual(payload_dict["mission_alliance[mission_type_id]"], "2")
+        self.assertEqual(payload_dict["commit"], "Start")
+
+    def test_radio_inputs_are_grouped_and_only_selected_value_is_posted(self):
+        form = parse_event_form(RADIO_HTML, "https://www.missionchief.com/missionAllianceNew")
+
+        mission_type = next(field for field in form.fields if field.name == "mission_position[mission_type_id]")
+        self.assertEqual(mission_type.field_type, "radio")
+        self.assertEqual(mission_type.value, "61")
+        self.assertEqual([option.value for option in mission_type.options], ["41", "61", "62"])
+
+        payload = build_payload(form, {"mission_position[mission_type_id]": "62"})
+        self.assertEqual(
+            [item for item in payload if item[0] == "mission_position[mission_type_id]"],
+            [("mission_position[mission_type_id]", "62")],
+        )
+
+    def test_checked_checkbox_values_are_preserved(self):
+        form = parse_event_form(RADIO_HTML, "https://www.missionchief.com/missionAllianceNew")
+
+        payload = build_payload(form, {})
+
+        self.assertEqual(
+            [item for item in payload if item[0] == "event_radio_group"],
+            [("event_radio_group", "fire")],
+        )
 
     def test_summarize_form_includes_option_preview(self):
         form = parse_event_form(FORM_HTML, "https://www.missionchief.com/missionAllianceNew")

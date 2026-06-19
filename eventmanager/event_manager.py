@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -45,6 +46,7 @@ class FormOption:
     value: str
     label: str
     selected: bool = False
+    field_type: str = ""
 
 
 @dataclass
@@ -72,6 +74,9 @@ class EventStartResult:
     reason: str
     status: Optional[int] = None
     post_url: Optional[str] = None
+
+
+Payload = List[Tuple[str, str]]
 
 
 def normalize_kind(kind: str) -> str:
@@ -114,6 +119,7 @@ def parse_event_form(html: str, page_url: str) -> EventForm:
     submit_name = None
     submit_value = None
 
+    grouped_inputs: Dict[str, List] = {}
     for input_el in form.find_all("input"):
         name = input_el.get("name")
         field_type = (input_el.get("type") or "text").lower()
@@ -126,6 +132,9 @@ def parse_event_form(html: str, page_url: str) -> EventForm:
             continue
         if not name:
             continue
+        if field_type in {"radio", "checkbox"}:
+            grouped_inputs.setdefault(name, []).append(input_el)
+            continue
         fields.append(
             FormField(
                 name=name,
@@ -133,6 +142,38 @@ def parse_event_form(html: str, page_url: str) -> EventForm:
                 field_type=field_type,
                 value=input_el.get("value") or "",
                 required=input_el.has_attr("required"),
+            )
+        )
+
+    for name, input_group in grouped_inputs.items():
+        options: List[FormOption] = []
+        selected_values: List[str] = []
+        field_type = (input_group[0].get("type") or "").lower()
+        for index, input_el in enumerate(input_group, start=1):
+            value = input_el.get("value") or ""
+            option = FormOption(
+                value=value,
+                label=input_el.get("title") or input_el.get("aria-label") or f"option {index}",
+                selected=input_el.has_attr("checked"),
+                field_type=field_type,
+            )
+            options.append(option)
+            if option.selected:
+                selected_values.append(value)
+
+        if field_type == "radio":
+            field_value = selected_values[0] if selected_values else ""
+        else:
+            field_value = ",".join(selected_values)
+
+        fields.append(
+            FormField(
+                name=name,
+                tag="input",
+                field_type=field_type,
+                value=field_value,
+                required=any(input_el.has_attr("required") for input_el in input_group),
+                options=options,
             )
         )
 
@@ -185,14 +226,40 @@ def parse_event_form(html: str, page_url: str) -> EventForm:
     )
 
 
-def build_payload(form: EventForm, overrides: Dict[str, str]) -> Dict[str, str]:
+def _append_payload_value(payload: Payload, name: str, value: str):
+    payload.append((name, str(value or "")))
+
+
+def build_payload(form: EventForm, overrides: Dict[str, str]) -> Payload:
     """Build a POST payload from form defaults plus configured overrides."""
-    payload: Dict[str, str] = {}
+    payload: Payload = []
+    used_names = set()
     for field_info in form.fields:
-        payload[field_info.name] = str(field_info.value or "")
-    payload.update({str(key): str(value) for key, value in overrides.items()})
-    if form.submit_name and form.submit_name not in payload:
-        payload[form.submit_name] = form.submit_value or ""
+        override_present = field_info.name in overrides
+        value = str(overrides[field_info.name] if override_present else field_info.value or "")
+
+        if field_info.field_type == "checkbox":
+            selected_values = {
+                item.strip()
+                for item in value.split(",")
+                if item.strip()
+            }
+            for option in field_info.options:
+                if option.value in selected_values:
+                    _append_payload_value(payload, field_info.name, option.value)
+        elif field_info.field_type == "radio":
+            if value:
+                _append_payload_value(payload, field_info.name, value)
+        else:
+            _append_payload_value(payload, field_info.name, value)
+        used_names.add(field_info.name)
+
+    for key, value in overrides.items():
+        if key not in used_names:
+            _append_payload_value(payload, str(key), str(value))
+
+    if form.submit_name and form.submit_name not in used_names and not any(name == form.submit_name for name, _ in payload):
+        _append_payload_value(payload, form.submit_name, form.submit_value or "")
     return payload
 
 
@@ -208,11 +275,12 @@ def summarize_form(form: EventForm, *, limit: int = 15) -> str:
 
     for field_info in form.fields[:limit]:
         required = " required" if field_info.required else ""
+        field_type = f":{field_info.field_type}" if field_info.field_type else ""
         value = f" = {field_info.value}" if field_info.value else ""
-        lines.append(f"- {field_info.name} ({field_info.tag}{required}){value}")
+        lines.append(f"- {field_info.name} ({field_info.tag}{field_type}{required}){value}")
         if field_info.options:
             option_preview = ", ".join(
-                f"{option.value}:{option.label}" for option in field_info.options[:5]
+                f"{'*' if option.selected else ''}{option.value}:{option.label}" for option in field_info.options[:5]
             )
             lines.append(f"  options: {option_preview}")
     if len(form.fields) > limit:
@@ -435,14 +503,34 @@ class EventManager(commands.Cog):
 
     @eventmanager.command(name="inspect")
     @commands.admin()
-    async def inspect_form(self, ctx: commands.Context, kind: str):
+    async def inspect_form(self, ctx: commands.Context, kind: str, limit: int = 20):
         """Inspect the live MissionChief form for `large` or `event`."""
         try:
+            kind = normalize_kind(kind)
             form = await self._fetch_form(kind)
         except Exception as exc:
             await ctx.send(f"Could not inspect form: {exc}")
             return
-        await ctx.send(box(summarize_form(form), lang="ini"))
+        limit = max(1, min(int(limit), 40))
+        await ctx.send(box(summarize_form(form, limit=limit), lang="ini"))
+
+    @eventmanager.command(name="inspectfile")
+    @commands.admin()
+    async def inspect_form_file(self, ctx: commands.Context, kind: str):
+        """Send the complete live MissionChief form inspection as a text file."""
+        try:
+            kind = normalize_kind(kind)
+            form = await self._fetch_form(kind)
+        except Exception as exc:
+            await ctx.send(f"Could not inspect form: {exc}")
+            return
+
+        summary = summarize_form(form, limit=len(form.fields))
+        data = io.BytesIO(summary.encode("utf-8"))
+        await ctx.send(
+            f"Full {EVENT_KINDS[kind]['label']} form inspection:",
+            file=discord.File(data, filename=f"eventmanager-{kind}-form.txt"),
+        )
 
     @eventmanager.command(name="start")
     @commands.admin()
