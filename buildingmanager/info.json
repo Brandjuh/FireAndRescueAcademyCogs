@@ -2,9 +2,9 @@
     "author": [
         "Brandjuh"
     ],
-    "description": "Building request system with Google Maps link parsing, admin approval workflow, and comprehensive statistics tracking.",
-    "install_msg": "Thank you for installing BuildingManager! 🏢\n\n**Quick Setup:**\n1. `[p]buildset requestchannel #channel` - Where users request\n2. `[p]buildset adminchannel #channel` - Where admins review\n3. `[p]buildset logchannel #channel` - Where actions log\n4. `[p]buildset adminrole @role` - Who can approve/reject\n5. `[p]buildset post` - Post the request button\n\n**Optional:**\n• `[p]buildset buttonmessage <text>` - Custom button text\n\n**Features:**\n✅ Google Maps link parsing & coordinate extraction\n✅ Building name detection from Google Maps place links\n✅ Admin approval workflow with preset rejection reasons\n✅ Comprehensive statistics tracking\n✅ SQLite database storage\n\n**Commands:**\n• `[p]buildstats` - View statistics\n• `[p]help BuildingManager` - Full command list\n\nNeed help? Check the README on GitHub!",
-    "short": "Building request system with Google Maps location parsing and statistics",
+    "description": "Building request system with maps link parsing, admin approval workflow, and comprehensive statistics tracking.",
+    "install_msg": "Thank you for installing BuildingManager! 🏢\n\n**Quick Setup:**\n1. `[p]buildset requestchannel #channel` - Where users request\n2. `[p]buildset adminchannel #channel` - Where admins review\n3. `[p]buildset logchannel #channel` - Where actions log\n4. `[p]buildset adminrole @role` - Who can approve/reject\n5. `[p]buildset post` - Post the request button\n\n**Optional:**\n• `[p]buildset buttonmessage <text>` - Custom button text\n\n**Features:**\n✅ Google Maps, Apple Maps, and Bing Maps link parsing\n✅ Coordinate extraction and building name detection\n✅ Admin approval workflow with preset rejection reasons\n✅ Comprehensive statistics tracking\n✅ SQLite database storage\n\n**Commands:**\n• `[p]buildstats` - View statistics\n• `[p]help BuildingManager` - Full command list\n\nNeed help? Check the README on GitHub!",
+    "short": "Building request system with maps location parsing and statistics",
     "tags": [
         "buildings",
         "requests",

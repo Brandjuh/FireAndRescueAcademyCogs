@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, Tuple
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import discord
 from redbot.core import commands, Config
@@ -129,6 +129,23 @@ class LocationParser:
         match = re.search(pattern2, decoded_text)
         if match:
             return (float(match.group(1)), float(match.group(2)))
+
+        # Pattern 2b: Apple Maps ?ll=lat,lon or ?sll=lat,lon
+        parsed = urlparse(decoded_text.strip())
+        query = parse_qs(parsed.query)
+        for key in ("ll", "sll"):
+            value = (query.get(key) or [None])[0]
+            if value:
+                match = re.match(r"\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$", value)
+                if match:
+                    return (float(match.group(1)), float(match.group(2)))
+
+        # Pattern 2c: Bing Maps ?cp=lat~lon
+        value = (query.get("cp") or [None])[0]
+        if value:
+            match = re.match(r"\s*(-?\d+\.?\d*)\s*~\s*(-?\d+\.?\d*)\s*$", value)
+            if match:
+                return (float(match.group(1)), float(match.group(2)))
         
         # Pattern 3: Direct coordinates "lat, lon" or "lat,lon"
         pattern3 = r'^(-?\d+\.?\d*)[,\s]+(-?\d+\.?\d*)$'
@@ -162,12 +179,50 @@ class LocationParser:
 
     @staticmethod
     def extract_place_name(text: str) -> Optional[str]:
-        """Extract the visible place name from a Google Maps place URL."""
+        """Extract the visible place name from supported map URLs."""
         decoded_text = unquote(text)
         match = re.search(r"/maps/place/([^/@?]+)", decoded_text)
-        if not match:
+        if match:
+            return match.group(1).replace("+", " ").strip() or None
+
+        parsed = urlparse(decoded_text.strip())
+        host = parsed.netloc.lower()
+        query = parse_qs(parsed.query)
+
+        if "maps.apple." in host:
+            for key in ("q", "address"):
+                value = (query.get(key) or [None])[0]
+                cleaned = LocationParser._clean_place_query(value)
+                if cleaned:
+                    return cleaned
+
+        if "bing.com" in host:
+            for key in ("where1", "q"):
+                value = (query.get(key) or [None])[0]
+                cleaned = LocationParser._clean_place_query(value)
+                if cleaned:
+                    return cleaned
+
+        if "google." in host or "maps.app.goo.gl" in host:
+            for key in ("query", "q"):
+                value = (query.get(key) or [None])[0]
+                cleaned = LocationParser._clean_place_query(value)
+                if cleaned:
+                    return cleaned
+
+        return None
+
+    @staticmethod
+    def _clean_place_query(value: Optional[str]) -> Optional[str]:
+        """Return a human place query, ignoring coordinate-only values."""
+        if not value:
             return None
-        return match.group(1).replace("+", " ").strip() or None
+        cleaned = unquote(value).replace("+", " ").strip()
+        if not cleaned:
+            return None
+        if re.fullmatch(r"-?\d+\.?\d*\s*[,~]\s*-?\d+\.?\d*", cleaned):
+            return None
+        return cleaned
 
     @staticmethod
     def derive_building_name(building_type: str, location_details: LocationDetails) -> str:
@@ -1000,11 +1055,11 @@ class BuildingTypeSelect(discord.ui.Select):
 
 class BuildingRequestModal(discord.ui.Modal, title="Building Request"):
     location = discord.ui.TextInput(
-        label="Google Maps link",
+        label="Maps link",
         style=discord.TextStyle.short,
         max_length=500,
         required=True,
-        placeholder="Paste a full Google Maps link or maps.app.goo.gl short link",
+        placeholder="Paste a Google Maps, Apple Maps, or Bing Maps link",
     )
     
     notes = discord.ui.TextInput(
@@ -1505,6 +1560,7 @@ class BuildingManager(commands.Cog):
         }
         default_global = {
             "google_api_key": None,
+            "default_request_panel_message_id": None,
         }
         self.config.register_guild(**default_guild)
         self.config.register_global(**default_global)
@@ -1514,12 +1570,32 @@ class BuildingManager(commands.Cog):
         db_path = str(data_manager.cog_data_path(self) / "building_manager.db")
         self.db = BuildingDatabase(db_path)
 
-        self.bot.add_view(StartView(self))
-        self._panel_task = self.bot.loop.create_task(self._ensure_default_request_panel())
+        self._panel_task = None
+        self._persistent_view_registered = False
+        self._register_persistent_views()
+        self._start_panel_task()
 
     def cog_unload(self):  # <-- Let op: 4 spaties inspringing, zelfde niveau als __init__
         if getattr(self, "_panel_task", None):
             self._panel_task.cancel()
+
+    async def cog_load(self):
+        """Register persistent views and ensure the default request panel exists."""
+        self._register_persistent_views()
+        self._start_panel_task()
+
+    def _register_persistent_views(self):
+        """Register persistent component views once per cog instance."""
+        if self._persistent_view_registered:
+            return
+        self.bot.add_view(StartView(self))
+        self._persistent_view_registered = True
+
+    def _start_panel_task(self):
+        """Start the default panel task if it is not already running."""
+        if self._panel_task and not self._panel_task.done():
+            return
+        self._panel_task = self.bot.loop.create_task(self._ensure_default_request_panel())
 
     def _request_panel_embed(self, description: Optional[str] = None) -> discord.Embed:
         """Build the persistent request panel embed."""
@@ -1527,8 +1603,9 @@ class BuildingManager(commands.Cog):
             description = (
                 "Request a new Hospital or Prison placement by clicking the button below.\n\n"
                 "Accepted location formats:\n"
-                "• Full Google Maps place link\n"
-                "• Google Maps short link, for example `https://maps.app.goo.gl/...`\n\n"
+                "- Google Maps place link or short link, for example `https://maps.app.goo.gl/...`\n"
+                "- Apple Maps link\n"
+                "- Bing Maps link\n\n"
                 "The building name is detected automatically from the location when possible. "
                 "Your request will be reviewed by admins."
             )
@@ -1552,14 +1629,30 @@ class BuildingManager(commands.Cog):
                     return
 
             embed = self._request_panel_embed()
-            async for message in channel.history(limit=50):
-                if getattr(message.author, "id", None) != getattr(self.bot.user, "id", None):
-                    continue
-                if any(getattr(existing, "title", None) == REQUEST_PANEL_TITLE for existing in message.embeds):
+            message_id = await self.config.default_request_panel_message_id()
+            if message_id:
+                try:
+                    message = await channel.fetch_message(message_id)
                     await message.edit(embed=embed, view=StartView(self))
                     return
+                except discord.NotFound:
+                    await self.config.default_request_panel_message_id.set(None)
+                except Exception:
+                    log.warning("Stored BuildingManager request panel could not be edited; trying history scan.")
 
-            await channel.send(embed=embed, view=StartView(self))
+            try:
+                async for message in channel.history(limit=50):
+                    if getattr(message.author, "id", None) != getattr(self.bot.user, "id", None):
+                        continue
+                    if any(getattr(existing, "title", None) == REQUEST_PANEL_TITLE for existing in message.embeds):
+                        await message.edit(embed=embed, view=StartView(self))
+                        await self.config.default_request_panel_message_id.set(message.id)
+                        return
+            except Exception:
+                log.warning("Could not scan for an existing BuildingManager request panel; posting a new one.")
+
+            sent = await channel.send(embed=embed, view=StartView(self))
+            await self.config.default_request_panel_message_id.set(sent.id)
         except asyncio.CancelledError:
             raise
         except Exception:
