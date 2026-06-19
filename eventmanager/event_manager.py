@@ -81,6 +81,16 @@ LATITUDE_FIELD = "mission_position[latitude]"
 LONGITUDE_FIELD = "mission_position[longitude]"
 ADDRESS_FIELD = "mission_position[address]"
 COINS_FIELD = "mission_position[coins]"
+MISSION_TYPE_FIELD = "mission_position[mission_type_id]"
+EVENT_RADIO_FIELD = "event_radio_group"
+SIZE_FIELD = "mission_position[size]"
+SHAPE_FIELD = "mission_position[shape]"
+AMOUNT_FIELD = "mission_position[amount]"
+EVENT_DEFAULT_OVERRIDES = {
+    SIZE_FIELD: "2",
+    SHAPE_FIELD: "circle",
+    AMOUNT_FIELD: "0",
+}
 
 
 def normalize_kind(kind: str) -> str:
@@ -265,14 +275,14 @@ def _append_payload_value(payload: Payload, name: str, value: str):
 def _normalize_overrides(form: EventForm, overrides: Dict[str, str]) -> Dict[str, str]:
     normalized = {str(key): str(value) for key, value in overrides.items()}
     field_names = {field_info.name for field_info in form.fields}
-    mission_type_name = "mission_position[mission_type_id]"
-    event_radio_name = "event_radio_group"
 
-    if event_radio_name in field_names:
-        if event_radio_name in normalized and mission_type_name not in normalized:
-            normalized[mission_type_name] = normalized[event_radio_name]
-        elif mission_type_name in normalized and event_radio_name not in normalized:
-            normalized[event_radio_name] = normalized[mission_type_name]
+    if EVENT_RADIO_FIELD in field_names:
+        for key, value in EVENT_DEFAULT_OVERRIDES.items():
+            normalized.setdefault(key, value)
+        if EVENT_RADIO_FIELD in normalized and MISSION_TYPE_FIELD not in normalized:
+            normalized[MISSION_TYPE_FIELD] = normalized[EVENT_RADIO_FIELD]
+        elif MISSION_TYPE_FIELD in normalized and EVENT_RADIO_FIELD not in normalized:
+            normalized[EVENT_RADIO_FIELD] = normalized[MISSION_TYPE_FIELD]
 
     return normalized
 
@@ -300,11 +310,7 @@ def build_payload(form: EventForm, overrides: Dict[str, str]) -> Payload:
         value = str(overrides[field_info.name] if override_present else field_info.value or "")
 
         if field_info.field_type == "checkbox":
-            selected_values = {
-                item.strip()
-                for item in value.split(",")
-                if item.strip()
-            }
+            selected_values = {item.strip() for item in value.split(",")}
             for option in field_info.options:
                 if option.value in selected_values:
                     _append_payload_value(payload, field_info.name, option.value)
@@ -669,6 +675,43 @@ class EventManager(commands.Cog):
             fields[LONGITUDE_FIELD] = longitude
             fields.pop(ADDRESS_FIELD, None)
         await ctx.tick()
+
+    @profile.command(name="seedweeklyevents")
+    @commands.admin()
+    async def profile_seed_weekly_events(self, ctx: commands.Context, *, location: str):
+        """Create one weekly event profile for every available event type at one location."""
+        try:
+            latitude, longitude = parse_location_value(location)
+            form = await self._fetch_form("event")
+        except Exception as exc:
+            await ctx.send(f"Could not seed event profiles: {exc}")
+            return
+
+        event_group = next((field_info for field_info in form.fields if field_info.name == EVENT_RADIO_FIELD), None)
+        if not event_group or not event_group.options:
+            await ctx.send("No event options were found on the MissionChief form.")
+            return
+
+        created = []
+        async with self.config.profiles() as profiles:
+            event_profiles = profiles.setdefault("event", {})
+            for option in event_group.options:
+                profile_name = option.label.lower().replace(" ", "_").replace("-", "_")
+                event_profiles[profile_name] = {
+                    "fields": {
+                        EVENT_RADIO_FIELD: option.value,
+                        MISSION_TYPE_FIELD: option.value,
+                        LATITUDE_FIELD: latitude,
+                        LONGITUDE_FIELD: longitude,
+                        **EVENT_DEFAULT_OVERRIDES,
+                    }
+                }
+                created.append(profile_name)
+
+        await ctx.send(
+            "Created weekly event profiles with Large/Circle/Every 30 seconds:\n"
+            + box(", ".join(created), lang="ini")
+        )
 
     @profile.command(name="remove")
     @commands.admin()

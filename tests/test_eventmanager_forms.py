@@ -83,6 +83,7 @@ MISSIONCHIEF_EVENT_HTML = """
   <input name="mission_position[latitude]" type="hidden" />
   <input name="mission_position[longitude]" type="hidden" />
   <input name="mission_position[duration]" type="hidden" value="3" />
+  <input type="checkbox" name="event_precondition_0_fire_investigation_count" value="" checked />
   <input type="submit" name="commit" value="Start Event ( Free )" />
 </form>
 """
@@ -171,6 +172,22 @@ class EventManagerFormTests(unittest.TestCase):
 
         self.assertIn(("event_radio_group", "1"), payload)
         self.assertIn(("mission_position[mission_type_id]", "1"), payload)
+
+    def test_event_payload_applies_standard_area_shape_and_call_volume(self):
+        form = parse_event_form(MISSIONCHIEF_EVENT_HTML, "https://www.missionchief.com/missionAllianceEventNew")
+
+        payload = dict(build_payload(form, {"event_radio_group": "1"}))
+
+        self.assertEqual(payload["mission_position[size]"], "2")
+        self.assertEqual(payload["mission_position[shape]"], "circle")
+        self.assertEqual(payload["mission_position[amount]"], "0")
+
+    def test_event_payload_preserves_extension_precondition_defaults(self):
+        form = parse_event_form(MISSIONCHIEF_EVENT_HTML, "https://www.missionchief.com/missionAllianceEventNew")
+
+        payload = build_payload(form, {"event_radio_group": "1"})
+
+        self.assertIn(("event_precondition_0_fire_investigation_count", ""), payload)
 
     def test_free_submit_validation_rejects_coin_button(self):
         form = parse_event_form(MISSIONCHIEF_LARGE_HTML, "https://www.missionchief.com/missionAllianceNew")
