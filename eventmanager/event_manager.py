@@ -535,6 +535,25 @@ def summarize_payload_for_debug(payload: Payload, *, limit: int = 900) -> str:
     return summary[:limit]
 
 
+def _redact_debug_value(name: str, value: str) -> str:
+    lowered = str(name or "").lower()
+    if "token" in lowered or "cookie" in lowered or lowered in {"authorization", "x-csrf-token"}:
+        return "REDACTED"
+    return str(value or "")
+
+
+def safe_debug_mapping(mapping: Dict[str, str]) -> str:
+    if not mapping:
+        return "none"
+    return "\n".join(f"{key}: {_redact_debug_value(key, value)}" for key, value in sorted(mapping.items()))
+
+
+def safe_debug_payload(payload: Payload) -> str:
+    if not payload:
+        return "none"
+    return "\n".join(f"{name}={_redact_debug_value(name, value)}" for name, value in payload)
+
+
 def summarize_response_for_debug(text: str, *, limit: int = 350) -> str:
     """Summarize a MissionChief error response without leaking form tokens."""
     text = re.sub(r"<script\b[^>]*>.*?</script>", " ", str(text or ""), flags=re.IGNORECASE | re.DOTALL)
@@ -1014,6 +1033,66 @@ class EventManager(commands.Cog):
             return payload
         return _replace_payload_value(payload, ADDRESS_FIELD, address)
 
+    async def _build_safe_diagnostics(self, kind: str, profile_name: Optional[str] = None) -> Tuple[str, str]:
+        """Build a safe no-submit diagnostics report for a MissionChief start flow."""
+        kind = normalize_kind(kind)
+        initial_form = await self._fetch_form(kind)
+        label = "quick"
+        profile = None
+        if profile_name:
+            label = profile_name.strip().lower()
+            profiles = await self.config.profiles()
+            profile = profiles.get(kind, {}).get(label)
+            if not profile:
+                raise ValueError(f"Profile `{label}` was not found.")
+        else:
+            options = field_options_for_kind(initial_form, kind)
+            if not options:
+                raise ValueError("No MissionChief options were found on the live form.")
+            random_region = "nyc_or_bermuda" if kind == "event" else "nyc"
+            profile = fields_for_selection(kind, options[0].value, random_region=random_region)
+
+        start_fields = profile_fields_for_start(profile)
+        form_params = _form_position_params(start_fields)
+        form = await self._fetch_form(kind, start_fields)
+        payload_before_address = build_payload(form, start_fields)
+        payload = await self._resolve_reverse_address(await self._get_session(), kind, payload_before_address)
+        headers = _ajax_submit_headers(kind, payload)
+        reverse_address_changed = _payload_value(payload_before_address, ADDRESS_FIELD) != _payload_value(payload, ADDRESS_FIELD)
+
+        lines = [
+            "EventManager Safe Diagnostics",
+            "NO POST WAS SENT. NO MISSION OR EVENT WAS STARTED.",
+            "",
+            f"Kind: {kind}",
+            f"Profile: {label}",
+            f"Form URL: {EVENT_KINDS[kind]['url']}",
+            f"Form GET params: {form_params or 'none'}",
+            f"Action: {form.action}",
+            f"Method: {form.method}",
+            f"Submit: {form.submit_name}={form.submit_value or ''}",
+            f"Reverse address changed: {reverse_address_changed}",
+            "",
+            "[Start fields]",
+            safe_debug_mapping(start_fields),
+            "",
+            "[POST headers]",
+            safe_debug_mapping(headers),
+            "",
+            "[POST payload before reverse_address]",
+            safe_debug_payload(payload_before_address),
+            "",
+            "[POST payload after reverse_address]",
+            safe_debug_payload(payload),
+            "",
+            "[Safe payload summary]",
+            summarize_payload_for_debug(payload, limit=4000),
+            "",
+            "[Parsed form]",
+            summarize_form(form, limit=len(form.fields)),
+        ]
+        return "\n".join(lines), f"eventmanager-{kind}-diagnostics.txt"
+
     async def _start_profile_data(self, kind: str, profile_name: str, profile: dict) -> EventStartResult:
         kind = normalize_kind(kind)
         async with self._start_lock:
@@ -1345,6 +1424,22 @@ class EventManager(commands.Cog):
         await ctx.send(
             f"Safe EventManager payload debug for `{kind}`:",
             file=discord.File(data, filename=f"eventmanager-{kind}-payload.txt"),
+        )
+
+    @eventmanager.command(name="diagnose")
+    @commands.admin()
+    async def diagnose_start_flow(self, ctx: commands.Context, kind: str, profile_name: Optional[str] = None):
+        """Create a safe no-submit diagnostics report for a MissionChief start flow."""
+        try:
+            report, filename = await self._build_safe_diagnostics(kind, profile_name)
+        except Exception as exc:
+            await ctx.send(f"Could not build diagnostics: {exc}")
+            return
+
+        data = io.BytesIO(report.encode("utf-8"))
+        await ctx.send(
+            "Safe EventManager diagnostics generated. No mission/event was started.",
+            file=discord.File(data, filename=filename),
         )
 
     @eventmanager.command(name="panel")
