@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
-import random
 import re
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -99,19 +98,10 @@ EVENT_DEFAULT_OVERRIDES = {
 RANDOM_LOCATION_KEY = "random_location"
 RANDOM_LOCATION_ANCHORS = {
     "nyc": [
-        (40.7580, -73.9855, "Times Square, Manhattan, New York"),
-        (40.7829, -73.9654, "Central Park, Manhattan, New York"),
-        (40.7128, -74.0060, "New York City Hall, Manhattan, New York"),
-        (40.6782, -73.9442, "Crown Heights, Brooklyn, New York"),
-        (40.7282, -73.7949, "Fresh Meadows, Queens, New York"),
-        (40.8448, -73.8648, "Bronx Zoo, Bronx, New York"),
-        (40.5795, -74.1502, "Staten Island Mall, Staten Island, New York"),
+        (40.7295, -73.9972, "70 Washington Square South, 10012 New York, Manhattan"),
     ],
     "bermuda": [
         (32.2948, -64.7814, "Hamilton, Bermuda"),
-        (32.3818, -64.6781, "St. George's, Bermuda"),
-        (32.3000, -64.8670, "Royal Naval Dockyard, Bermuda"),
-        (32.3630, -64.7040, "L.F. Wade International Airport, Bermuda"),
     ],
 }
 RANDOM_LOCATION_ALIASES = {
@@ -128,11 +118,10 @@ RANDOM_LOCATION_ALIASES = {
     "nyc/bermuda": "nyc_or_bermuda",
     "both": "nyc_or_bermuda",
 }
-RANDOM_LOCATION_JITTER = 0.006
 CUSTOM_LOCATION_LABELS = {
-    "nyc": "Random New York City",
-    "bermuda": "Random Bermuda",
-    "nyc_or_bermuda": "Random NYC or Bermuda",
+    "nyc": "Fixed New York City",
+    "bermuda": "Fixed Bermuda",
+    "nyc_or_bermuda": "Fixed New York City",
 }
 
 
@@ -196,13 +185,10 @@ def normalize_random_location_region(region: str) -> str:
 
 
 def random_location_for_region(region: str, *, rng=None) -> Tuple[str, str, str, str]:
-    """Return latitude, longitude, address, and the concrete region used for a random start location."""
-    rng = rng or random
+    """Return latitude, longitude, address, and the concrete region used for a fixed start location."""
     normalized = normalize_random_location_region(region)
-    concrete_region = rng.choice(["nyc", "bermuda"]) if normalized == "nyc_or_bermuda" else normalized
-    latitude, longitude, address = rng.choice(RANDOM_LOCATION_ANCHORS[concrete_region])
-    latitude += rng.uniform(-RANDOM_LOCATION_JITTER, RANDOM_LOCATION_JITTER)
-    longitude += rng.uniform(-RANDOM_LOCATION_JITTER, RANDOM_LOCATION_JITTER)
+    concrete_region = "nyc" if normalized == "nyc_or_bermuda" else normalized
+    latitude, longitude, address = RANDOM_LOCATION_ANCHORS[concrete_region][0]
     return f"{latitude:.6f}", f"{longitude:.6f}", address, concrete_region
 
 

@@ -1,5 +1,4 @@
 import unittest
-import random
 
 from eventmanager.event_manager import (
     build_payload,
@@ -254,13 +253,13 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertEqual(parse_location_or_random_region("40.1, -73.9"), ("40.1", "-73.9", None))
         self.assertEqual(normalize_random_location_region("Bermuda Islands"), "bermuda")
 
-    def test_random_location_for_region_returns_supported_coordinates(self):
-        latitude, longitude, address, region = random_location_for_region("nyc_or_bermuda", rng=random.Random(1))
+    def test_random_location_for_region_returns_fixed_supported_coordinates(self):
+        latitude, longitude, address, region = random_location_for_region("nyc_or_bermuda")
 
-        self.assertIn(region, {"nyc", "bermuda"})
-        self.assertTrue(-90 <= float(latitude) <= 90)
-        self.assertTrue(-180 <= float(longitude) <= 180)
-        self.assertTrue(address)
+        self.assertEqual(region, "nyc")
+        self.assertEqual(latitude, "40.729500")
+        self.assertEqual(longitude, "-73.997200")
+        self.assertEqual(address, "70 Washington Square South, 10012 New York, Manhattan")
 
     def test_profile_fields_for_start_resolves_random_location_and_sets_address(self):
         fields = profile_fields_for_start(
@@ -271,7 +270,6 @@ class EventManagerFormTests(unittest.TestCase):
                     "mission_position[mission_type_id]": "41",
                 },
             },
-            rng=random.Random(2),
         )
 
         self.assertIn("mission_position[address]", fields)
