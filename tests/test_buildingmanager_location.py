@@ -26,6 +26,30 @@ class BuildingManagerLocationTests(unittest.TestCase):
             "Máxima MC Eindhoven",
         )
 
+    def test_apple_maps_link_extracts_coordinates_and_place_name(self):
+        url = "https://maps.apple.com/?ll=51.4541382,5.4871691&q=Maxima%20MC%20Eindhoven"
+
+        self.assertEqual(
+            LocationParser.extract_coordinates(url),
+            (51.4541382, 5.4871691),
+        )
+        self.assertEqual(
+            LocationParser.extract_place_name(url),
+            "Maxima MC Eindhoven",
+        )
+
+    def test_bing_maps_link_extracts_coordinates_and_place_name(self):
+        url = "https://www.bing.com/maps?where1=Maxima%20MC%20Eindhoven&cp=51.4541382~5.4871691"
+
+        self.assertEqual(
+            LocationParser.extract_coordinates(url),
+            (51.4541382, 5.4871691),
+        )
+        self.assertEqual(
+            LocationParser.extract_place_name(url),
+            "Maxima MC Eindhoven",
+        )
+
     def test_hospital_facility_check_accepts_healthcare_place_name(self):
         details = LocationDetails(
             original_input="input",
