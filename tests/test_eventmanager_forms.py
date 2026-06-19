@@ -22,6 +22,7 @@ from eventmanager.event_manager import (
     LATITUDE_FIELD,
     LONGITUDE_FIELD,
     ADDRESS_FIELD,
+    _ajax_submit_headers,
     _form_position_params,
     _replace_payload_value,
     _validate_free_submit,
@@ -452,6 +453,14 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
             {"tlat": "40.729500", "tlng": "-73.997200"},
         )
         self.assertEqual(_form_position_params({LATITUDE_FIELD: "40.729500"}), {})
+
+    def test_ajax_submit_headers_include_xhr_and_csrf_token(self):
+        headers = _ajax_submit_headers("large", [("authenticity_token", "csrf-secret")])
+
+        self.assertEqual(headers["X-Requested-With"], "XMLHttpRequest")
+        self.assertEqual(headers["X-CSRF-Token"], "csrf-secret")
+        self.assertEqual(headers["Origin"], "https://www.missionchief.com")
+        self.assertIn("text/javascript", headers["Accept"])
 
 
 if __name__ == "__main__":
