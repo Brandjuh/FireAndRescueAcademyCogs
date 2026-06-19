@@ -66,36 +66,37 @@ class BuildingManagerLocationTests(unittest.TestCase):
         self.assertEqual(details["region"], "North Brabant")
         self.assertEqual(details["facility_type"], "hospital health")
 
-    def test_resolve_location_uses_forward_geocode_for_plus_code(self):
-        original_forward = LocationParser.forward_geocode_details
+    def test_resolve_location_uses_place_name_when_link_has_no_coordinates(self):
+        original_forward = LocationParser.forward_geocode_nominatim_details
         original_expand = LocationParser.expand_maps_url
 
         async def fake_expand(text):
             return text
 
-        async def fake_forward(query, *, google_key=None):
-            self.assertEqual(query, "FF3P+MV Eindhoven")
-            self.assertEqual(google_key, "key")
+        async def fake_forward(query):
+            self.assertEqual(query, "Máxima MC Eindhoven")
             return {
                 "coordinates": "51.4541382, 5.4871691",
-                "address": "Eindhoven, Netherlands",
+                "address": "Máxima MC, Eindhoven, Netherlands",
+                "place_name": "Máxima MC Eindhoven",
                 "country": "Netherlands",
                 "region": "North Brabant",
-                "provider": "google",
-                "facility_type": "plus_code",
+                "provider": "nominatim",
+                "facility_type": "hospital",
             }
 
         try:
             LocationParser.expand_maps_url = fake_expand
-            LocationParser.forward_geocode_details = fake_forward
+            LocationParser.forward_geocode_nominatim_details = fake_forward
             details = asyncio.run(
-                LocationParser.resolve_location("FF3P+MV Eindhoven", google_key="key")
+                LocationParser.resolve_location("https://www.google.nl/maps/place/M%C3%A1xima+MC+Eindhoven/")
             )
         finally:
             LocationParser.expand_maps_url = original_expand
-            LocationParser.forward_geocode_details = original_forward
+            LocationParser.forward_geocode_nominatim_details = original_forward
 
         self.assertEqual(details.coordinates, "51.4541382, 5.4871691")
+        self.assertEqual(details.place_name, "Máxima MC Eindhoven")
         self.assertEqual(details.country, "Netherlands")
         self.assertIn("51.4541382", details.maps_url)
 
