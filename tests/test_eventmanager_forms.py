@@ -345,7 +345,7 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertEqual(profile["fields"]["mission_position[longitude]"], "-73.9")
         self.assertEqual(profile["fields"]["mission_position[address]"], "Manual NYC")
 
-    def test_large_payload_adds_missionchief_position_defaults(self):
+    def test_large_payload_matches_browser_marker_defaults(self):
         form = parse_event_form(MISSIONCHIEF_LARGE_HTML, "https://www.missionchief.com/missionAllianceNew")
         profile = fields_for_selection("large", "41", random_region="nyc")
 
@@ -359,7 +359,7 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertEqual(payload["mission_position[size]"], "1")
         self.assertEqual(payload["mission_position[amount]"], "1")
         self.assertEqual(payload["mission_position[coins]"], "0")
-        self.assertEqual(payload["mission_position[shape]"], "")
+        self.assertEqual(payload["mission_position[shape]"], "circle")
 
     def test_safe_payload_summary_excludes_authenticity_token(self):
         summary = summarize_payload_for_debug(

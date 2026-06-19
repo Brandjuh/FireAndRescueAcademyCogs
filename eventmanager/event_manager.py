@@ -156,7 +156,7 @@ SHAPE_FIELD = "mission_position[shape]"
 AMOUNT_FIELD = "mission_position[amount]"
 MISSION_POSITION_DEFAULT_OVERRIDES = {
     POI_TYPE_FIELD: "0",
-    SHAPE_FIELD: "",
+    SHAPE_FIELD: "circle",
     SIZE_FIELD: "1",
     AMOUNT_FIELD: "1",
     COINS_FIELD: "0",
