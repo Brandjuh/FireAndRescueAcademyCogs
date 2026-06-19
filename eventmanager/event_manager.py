@@ -87,9 +87,17 @@ ADDRESS_FIELD = "mission_position[address]"
 COINS_FIELD = "mission_position[coins]"
 MISSION_TYPE_FIELD = "mission_position[mission_type_id]"
 EVENT_RADIO_FIELD = "event_radio_group"
+POI_TYPE_FIELD = "mission_position[poi_type]"
 SIZE_FIELD = "mission_position[size]"
 SHAPE_FIELD = "mission_position[shape]"
 AMOUNT_FIELD = "mission_position[amount]"
+MISSION_POSITION_DEFAULT_OVERRIDES = {
+    POI_TYPE_FIELD: "0",
+    SHAPE_FIELD: "",
+    SIZE_FIELD: "1",
+    AMOUNT_FIELD: "1",
+    COINS_FIELD: "0",
+}
 EVENT_DEFAULT_OVERRIDES = {
     SIZE_FIELD: "2",
     SHAPE_FIELD: "circle",
@@ -404,9 +412,13 @@ def _normalize_overrides(form: EventForm, overrides: Dict[str, str]) -> Dict[str
     normalized = {str(key): str(value) for key, value in overrides.items()}
     field_names = {field_info.name for field_info in form.fields}
 
+    if MISSION_TYPE_FIELD in field_names or EVENT_RADIO_FIELD in field_names:
+        for key, value in MISSION_POSITION_DEFAULT_OVERRIDES.items():
+            normalized.setdefault(key, value)
+
     if EVENT_RADIO_FIELD in field_names:
         for key, value in EVENT_DEFAULT_OVERRIDES.items():
-            normalized.setdefault(key, value)
+            normalized[key] = value
         if EVENT_RADIO_FIELD in normalized and MISSION_TYPE_FIELD not in normalized:
             normalized[MISSION_TYPE_FIELD] = normalized[EVENT_RADIO_FIELD]
         elif MISSION_TYPE_FIELD in normalized and EVENT_RADIO_FIELD not in normalized:
