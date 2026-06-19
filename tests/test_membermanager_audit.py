@@ -33,7 +33,7 @@ class MemberManagerAuditTests(unittest.TestCase):
 
         self.assertIsNotNone(event)
         self.assertEqual(event.source, "MemberManager")
-        self.assertEqual(event.title, "Note Created")
+        self.assertEqual(event.title, "Note created")
         self.assertEqual(event.reference, "NOTE-1")
         self.assertIn("Needs follow-up", event.details)
 
@@ -78,7 +78,7 @@ class MemberManagerAuditTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(event)
-        self.assertEqual(event.title, "Warning - Official 1st added for CrashTestDummy")
+        self.assertEqual(event.title, "Warning - Official 1st - CrashTestDummy")
         self.assertEqual(event.reference, "Sanction #84")
         self.assertIn("Low contribution", event.details)
 
@@ -121,7 +121,8 @@ class MemberManagerAuditTests(unittest.TestCase):
         embed = discord.Embed(title="Audit", color=discord.Color.dark_gray())
         result = asyncio.run(view._build_audit_timeline_embed(embed))
 
-        self.assertIn("Warning - Official 1st added for CrashTestDummy", result.description)
+        self.assertIn("Warning - Official 1st - CrashTestDummy", result.description)
+        self.assertIn("Ref: `Sanction #84`", result.description)
         self.assertIn("Low contribution", result.description)
         self.assertNotIn("Admin Nick", result.description)
 
@@ -289,7 +290,7 @@ class MemberManagerAuditTests(unittest.TestCase):
 
         self.assertEqual(len(events), 1)
         self.assertTrue(all(event.source == "MissionChief" for event in events))
-        self.assertEqual(events[0].title, "Chat ban set")
+        self.assertEqual(events[0].title, "Muted - Academy #1")
 
     def test_audit_embed_combines_membermanager_and_missionchief_events(self):
         class FakeDB:
@@ -391,10 +392,10 @@ class MemberManagerAuditTests(unittest.TestCase):
             embed = discord.Embed(title="Audit", color=discord.Color.dark_gray())
             result = asyncio.run(view._build_audit_timeline_embed(embed))
 
-        self.assertIn("Chat ban set", result.description)
-        self.assertIn("Note Created", result.description)
-        self.assertIn("Admin Nick", result.description)
-        self.assertIn("Target: MCUser", result.description)
+        self.assertIn("Muted - Academy #1", result.description)
+        self.assertIn("Note created - MCUser", result.description)
+        self.assertNotIn("Admin Nick", result.description)
+        self.assertNotIn("Target: MCUser", result.description)
         self.assertNotIn("Building constructed", result.description)
 
     def test_audit_embed_uses_logscraper_public_contract_when_available(self):
@@ -451,7 +452,7 @@ class MemberManagerAuditTests(unittest.TestCase):
         embed = discord.Embed(title="Audit", color=discord.Color.dark_gray())
         result = asyncio.run(view._build_audit_timeline_embed(embed))
 
-        self.assertIn("Chat ban set", result.description)
+        self.assertIn("Muted - MCUser", result.description)
         self.assertNotIn("Building constructed", result.description)
         logs_scraper.get_member_logs.assert_awaited_once_with(
             mc_user_id="456",

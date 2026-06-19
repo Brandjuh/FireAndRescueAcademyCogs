@@ -191,6 +191,64 @@ class MemberManagerViewFilterTests(unittest.TestCase):
         self.assertEqual(view.overview_mode, "advanced")
         view._update_view.assert_awaited_once_with(interaction)
 
+    def test_advanced_overview_shows_available_admin_activity_counts(self):
+        class FakeCursor:
+            async def fetchone(self):
+                return (3,)
+
+        class FakeConnection:
+            async def execute(self, query, params):
+                self.query = query
+                self.params = params
+                return FakeCursor()
+
+        sanction_manager = types.SimpleNamespace(
+            db=types.SimpleNamespace(
+                get_stats_admin=lambda guild_id, admin_id: {
+                    "type_counts": {
+                        "Warning - Verbal warning": 2,
+                        "Kick": 1,
+                    }
+                }
+            )
+        )
+        logs_scraper = types.SimpleNamespace(
+            get_member_logs=AsyncMock(
+                side_effect=[
+                    {"rows": [], "total": 4},
+                    {"rows": [], "total": 2},
+                ]
+            )
+        )
+        view = MemberOverviewView.__new__(MemberOverviewView)
+        view.member_data = MemberData(
+            discord_id=123,
+            mc_user_id="456",
+            discord_username="DiscordUser",
+            mc_username="MCUser",
+            link_status="approved",
+            is_verified=True,
+        )
+        view.db = types.SimpleNamespace(_conn=FakeConnection())
+        view.integrations = {
+            "logs_scraper": logs_scraper,
+            "sanction_manager": sanction_manager,
+        }
+        view.guild = types.SimpleNamespace(id=999)
+        view.overview_mode = "advanced"
+
+        embed = asyncio.run(view.get_overview_embed())
+
+        admin_activity = next(
+            field["value"]
+            for field in embed.fields
+            if field["name"] == "Admin Activity"
+        )
+        self.assertIn("Notes created:** 3", admin_activity)
+        self.assertIn("Sanctions issued:** 3", admin_activity)
+        self.assertIn("Building actions:** 4", admin_activity)
+        self.assertIn("Alliance operation events:** 2", admin_activity)
+
     def test_simple_overview_triage_can_show_clean_profile(self):
         view = MemberOverviewView.__new__(MemberOverviewView)
         view.member_data = MemberData(

@@ -280,6 +280,15 @@ class MemberOverviewView(discord.ui.View):
     
     async def _update_view(self, interaction: discord.Interaction):
         """Update the view based on current tab."""
+        response = getattr(interaction, "response", None)
+        if response and hasattr(response, "is_done") and not response.is_done():
+            defer = getattr(response, "defer", None)
+            if defer:
+                try:
+                    await defer()
+                except Exception:
+                    log.debug("Could not defer MemberManager interaction", exc_info=True)
+
         self._rebuild_buttons()
         
         # Get appropriate embed
@@ -299,7 +308,10 @@ class MemberOverviewView(discord.ui.View):
             embed = await self.get_overview_embed()
         
         try:
-            await interaction.response.edit_message(embed=embed, view=self)
+            if response and hasattr(response, "is_done") and not response.is_done():
+                await response.edit_message(embed=embed, view=self)
+            else:
+                await interaction.edit_original_response(embed=embed, view=self)
         except discord.errors.InteractionResponded:
             await interaction.edit_original_response(embed=embed, view=self)
     
@@ -334,7 +346,7 @@ class MemberOverviewView(discord.ui.View):
             return self._build_simple_overview_embed()
 
         data = self.member_data
-        
+
         embed = discord.Embed(
             title=f"👤 Member Overview: {self._get_member_display_name()}",
             color=discord.Color.blue() if data.is_verified else discord.Color.orange()
@@ -471,6 +483,14 @@ class MemberOverviewView(discord.ui.View):
             value="\n".join(stats_lines),
             inline=False
         )
+
+        admin_activity_lines = await self._build_admin_activity_lines()
+        if admin_activity_lines:
+            embed.add_field(
+                name="Admin Activity",
+                value="\n".join(admin_activity_lines),
+                inline=False,
+            )
         
         # Link status footer
         if data.is_linked():
@@ -908,6 +928,86 @@ class MemberOverviewView(discord.ui.View):
             return f"Discord User {data.discord_id}"
         return "Unknown User"
 
+    async def _build_admin_activity_lines(self) -> List[str]:
+        """Return available counts for actions performed by the opened profile."""
+        lines = []
+
+        notes_count = await self._count_notes_created_by_member()
+        if notes_count is not None:
+            lines.append(f"**Notes created:** {notes_count}")
+
+        sanctions_count = self._count_sanctions_issued_by_member()
+        if sanctions_count is not None:
+            lines.append(f"**Sanctions issued:** {sanctions_count}")
+
+        buildings_count = await self._count_filtered_logs(BUILDING_ACTIVITY_ACTION_KEYS)
+        if buildings_count is not None:
+            lines.append(f"**Building actions:** {buildings_count}")
+
+        operations_count = await self._count_filtered_logs(OPERATIONS_ACTION_KEYS)
+        if operations_count is not None:
+            lines.append(f"**Alliance operation events:** {operations_count}")
+
+        if not lines and (
+            self.member_data.discord_id
+            or self.member_data.mc_user_id
+            or self.member_data.mc_username
+        ):
+            return ["*No admin activity data available from loaded integrations.*"]
+        return lines
+
+    async def _count_notes_created_by_member(self) -> Optional[int]:
+        """Count notes authored by this Discord user when the MemberManager DB is available."""
+        discord_id = self.member_data.discord_id
+        connection = getattr(getattr(self, "db", None), "_conn", None)
+        if not discord_id or not connection:
+            return None
+
+        try:
+            cursor = await connection.execute(
+                "SELECT COUNT(*) FROM notes WHERE author_id=?",
+                (discord_id,),
+            )
+            row = await cursor.fetchone()
+            return int(row[0] if row else 0)
+        except Exception:
+            log.debug("Could not count authored notes for MemberManager overview", exc_info=True)
+            return None
+
+    def _count_sanctions_issued_by_member(self) -> Optional[int]:
+        """Count sanctions issued by this Discord user through SanctionManager."""
+        integrations = getattr(self, "integrations", {}) or {}
+        sanction_manager = integrations.get("sanction_manager")
+        guild = getattr(self, "guild", None)
+        if not sanction_manager or not guild or not self.member_data.discord_id:
+            return None
+
+        try:
+            stats = sanction_manager.db.get_stats_admin(guild.id, self.member_data.discord_id)
+            return sum(int(count) for count in (stats.get("type_counts") or {}).values())
+        except Exception:
+            log.debug("Could not count issued sanctions for MemberManager overview", exc_info=True)
+            return None
+
+    async def _count_filtered_logs(self, action_keys: set[str]) -> Optional[int]:
+        """Count stored LogsScraper rows for this member and action category."""
+        if not getattr(self, "integrations", None):
+            return None
+
+        try:
+            _rows, total_count, error = await self._fetch_member_log_rows(
+                action_keys,
+                page=0,
+                per_page=1,
+            )
+        except Exception:
+            log.debug("Could not count filtered logs for MemberManager overview", exc_info=True)
+            return None
+
+        if error:
+            return None
+        return total_count
+
     def _get_warning_insights(
         self,
         all_sanctions: List[Dict[str, Any]],
@@ -1211,8 +1311,6 @@ class MemberOverviewView(discord.ui.View):
         
         🔧 NEW: Full audit log with search, pagination, and server nicknames
         """
-        data = self.member_data
-        
         embed = discord.Embed(
             title=f"📋 Audit Log - {self._get_member_display_name()}",
             color=discord.Color.dark_gray()
@@ -1281,26 +1379,18 @@ class MemberOverviewView(discord.ui.View):
         lines = []
         for entry in page_events:
             timestamp = format_timestamp(entry.timestamp, "R") if entry.timestamp else "Unknown time"
-            actor_display = entry.actor_name or "system"
-            if entry.actor_id and self.guild:
-                member = self.guild.get_member(entry.actor_id)
-                if member:
-                    actor_display = member.display_name
 
             action_emoji = EVENT_EMOJI.get(
                 entry.event_type,
                 EVENT_EMOJI.get(entry.source.lower(), "•"),
             )
 
-            lines.append(f"{action_emoji} **{entry.title}**")
-            context_parts = [entry.source, timestamp] if entry.event_type.startswith("sanction_") else [entry.source, actor_display, timestamp]
-            target_display = self._get_member_display_name()
-            if target_display and target_display != actor_display:
-                context_parts.append(f"Target: {target_display}")
-            lines.append(f"  *{' • '.join(context_parts)}*")
-
+            lines.append(f"{action_emoji} **{self._format_audit_entry_title(entry)}**")
+            metadata = []
             if entry.reference:
-                lines.append(f"  Ref: `{entry.reference}`")
+                metadata.append(f"Ref: `{entry.reference}`")
+            metadata.append(timestamp)
+            lines.append(f"  *{' • '.join(metadata)}*")
             if entry.details:
                 lines.append(f"  {truncate_text(entry.details, 120)}")
 
@@ -1315,6 +1405,21 @@ class MemberOverviewView(discord.ui.View):
         embed.set_footer(text=footer_text)
 
         return embed
+
+    def _format_audit_entry_title(self, entry) -> str:
+        """Format audit titles as action plus affected member."""
+        title = str(entry.title or "Audit entry").strip()
+        target_display = self._get_member_display_name()
+        if not target_display:
+            return title
+
+        if target_display.lower() in title.lower():
+            return title
+
+        if entry.event_type.startswith(("note_", "sanction_", "infraction_")):
+            return f"{title} - {target_display}"
+
+        return title
 
 
 # ==================== BUTTON COMPONENTS ====================
