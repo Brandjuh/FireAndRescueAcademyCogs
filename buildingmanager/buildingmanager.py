@@ -18,6 +18,9 @@ from redbot.core.utils.chat_formatting import box
 
 log = logging.getLogger("red.cog.building_manager")
 
+DEFAULT_REQUEST_PANEL_CHANNEL_ID = 1421627971831070730
+REQUEST_PANEL_TITLE = "🏢 Building Request System"
+
 # ---------- Utilities ----------
 
 def ts() -> int:
@@ -60,6 +63,7 @@ class LocationDetails:
 
     original_input: str
     resolved_input: str
+    place_name: Optional[str] = None
     coordinates: Optional[str] = None
     address: Optional[str] = None
     country: Optional[str] = None
@@ -165,6 +169,23 @@ class LocationParser:
             return None
         return match.group(1).replace("+", " ").strip() or None
 
+    @staticmethod
+    def derive_building_name(building_type: str, location_details: LocationDetails) -> str:
+        """Return the best building name from resolved location details."""
+        if location_details.place_name:
+            return location_details.place_name
+
+        if location_details.address:
+            first_part = location_details.address.split(",", 1)[0].strip()
+            if first_part:
+                return first_part
+
+        place_name = LocationParser.extract_place_name(location_details.resolved_input)
+        if place_name:
+            return place_name
+
+        return f"{building_type} location"
+
     @classmethod
     async def expand_maps_url(cls, text: str) -> str:
         """Resolve Google Maps short URLs to their final URL when possible."""
@@ -180,7 +201,7 @@ class LocationParser:
             return text
 
     @classmethod
-    async def resolve_location(cls, location_input: str, google_key: Optional[str] = None) -> LocationDetails:
+    async def resolve_location(cls, location_input: str) -> LocationDetails:
         """Resolve user-provided location input into admin-facing location details."""
         cleaned_input = location_input.strip()
         resolved_input = await cls.expand_maps_url(cleaned_input)
@@ -190,14 +211,15 @@ class LocationParser:
         country = None
         region = None
         provider = None
+        place_name = cls.extract_place_name(resolved_input)
         detected_facility_type = None
 
         if coords:
             lat, lon = coords
             coordinates_str = f"{lat}, {lon}"
-            geocode = await cls.reverse_geocode_details(lat, lon, google_key=google_key)
+            geocode = await cls.reverse_geocode_details(lat, lon)
         else:
-            geocode = await cls.forward_geocode_details(resolved_input, google_key=google_key)
+            geocode = await cls.forward_geocode_nominatim_details(place_name or resolved_input)
             coordinates_str = geocode.get("coordinates") if geocode else None
 
         if geocode:
@@ -205,12 +227,14 @@ class LocationParser:
             country = geocode.get("country")
             region = geocode.get("region")
             provider = geocode.get("provider")
+            place_name = place_name or geocode.get("place_name")
             detected_facility_type = geocode.get("facility_type")
 
         maps_url = cls.make_maps_url(coordinates_str, resolved_input)
         return LocationDetails(
             original_input=cleaned_input,
             resolved_input=resolved_input,
+            place_name=place_name,
             coordinates=coordinates_str,
             address=address,
             country=country,
@@ -306,7 +330,7 @@ class LocationParser:
 
     @classmethod
     async def forward_geocode_details(cls, query: str, *, google_key: Optional[str] = None) -> Optional[dict]:
-        """Forward geocode text, addresses, and plus codes."""
+        """Forward geocode text or place names."""
         if google_key:
             details = await cls.forward_geocode_google_details(query, google_key)
             if details:
@@ -315,7 +339,7 @@ class LocationParser:
 
     @classmethod
     async def forward_geocode_nominatim_details(cls, query: str) -> Optional[dict]:
-        """Forward geocode using Nominatim for addresses and plus codes."""
+        """Forward geocode using Nominatim for addresses or place names."""
         now = time.time()
         elapsed = now - cls._last_nominatim_call
         if elapsed < cls._nominatim_delay:
@@ -328,6 +352,7 @@ class LocationParser:
             "q": query,
             "format": "json",
             "addressdetails": 1,
+            "namedetails": 1,
             "limit": 1,
         }
         headers = {
@@ -389,6 +414,7 @@ class LocationParser:
     def _nominatim_result_to_details(data: dict) -> dict:
         """Normalize a Nominatim response."""
         address_data = data.get("address") or {}
+        namedetails = data.get("namedetails") or {}
         lat = data.get("lat")
         lon = data.get("lon")
         region = (
@@ -411,6 +437,7 @@ class LocationParser:
         return {
             "coordinates": f"{float(lat)}, {float(lon)}" if lat and lon else None,
             "address": data.get("display_name"),
+            "place_name": data.get("name") or namedetails.get("name") or (data.get("display_name") or "").split(",", 1)[0],
             "country": address_data.get("country"),
             "region": region,
             "provider": "nominatim",
@@ -434,10 +461,12 @@ class LocationParser:
         lon = location.get("lng")
         region = component("administrative_area_level_1", "administrative_area_level_2")
         facility_type = " ".join(result.get("types") or []) or None
+        formatted_address = result.get("formatted_address")
 
         return {
             "coordinates": f"{float(lat)}, {float(lon)}" if lat is not None and lon is not None else None,
-            "address": result.get("formatted_address"),
+            "address": formatted_address,
+            "place_name": result.get("name") or (formatted_address or "").split(",", 1)[0],
             "country": component("country"),
             "region": region,
             "provider": "google",
@@ -970,20 +999,12 @@ class BuildingTypeSelect(discord.ui.Select):
         await interaction.response.send_modal(modal)
 
 class BuildingRequestModal(discord.ui.Modal, title="Building Request"):
-    building_name = discord.ui.TextInput(
-        label="Building Name",
-        style=discord.TextStyle.short,
-        max_length=100,
-        required=True,
-        placeholder="e.g., Central Medical Center",
-    )
-    
     location = discord.ui.TextInput(
-        label="Location (Google Maps link or coordinates)",
+        label="Google Maps link",
         style=discord.TextStyle.short,
         max_length=500,
         required=True,
-        placeholder="Paste Google Maps link, coordinates, or description",
+        placeholder="Paste a full Google Maps link or maps.app.goo.gl short link",
     )
     
     notes = discord.ui.TextInput(
@@ -1004,11 +1025,11 @@ class BuildingRequestModal(discord.ui.Modal, title="Building Request"):
         await interaction.response.defer(ephemeral=True)
         
         location_input = str(self.location)
-        google_key = await self.cog.config.google_api_key()
-        location_details = await LocationParser.resolve_location(location_input, google_key=google_key)
+        location_details = await LocationParser.resolve_location(location_input)
+        building_name = LocationParser.derive_building_name(self.building_type, location_details)
         location_details.facility_warning = LocationParser.facility_warning(
             self.building_type,
-            str(self.building_name),
+            building_name,
             location_details,
         )
         
@@ -1017,7 +1038,7 @@ class BuildingRequestModal(discord.ui.Modal, title="Building Request"):
             user_id=interaction.user.id,
             username=str(interaction.user),
             building_type=self.building_type,
-            building_name=str(self.building_name),
+            building_name=building_name,
             location_input=location_input,
             coordinates=location_details.coordinates,
             address=location_details.address,
@@ -1098,7 +1119,6 @@ class SummaryView(discord.ui.View):
     @discord.ui.button(label="✏️ Edit", style=discord.ButtonStyle.secondary, custom_id="bm:edit")
     async def edit(self, interaction: discord.Interaction, button: discord.ui.Button):
         modal = BuildingRequestModal(self.cog, self.req.building_type)
-        modal.building_name.default = self.req.building_name
         modal.location.default = self.req.location_input
         if self.req.notes:
             modal.notes.default = self.req.notes
@@ -1495,9 +1515,55 @@ class BuildingManager(commands.Cog):
         self.db = BuildingDatabase(db_path)
 
         self.bot.add_view(StartView(self))
+        self._panel_task = self.bot.loop.create_task(self._ensure_default_request_panel())
 
     def cog_unload(self):  # <-- Let op: 4 spaties inspringing, zelfde niveau als __init__
-        pass
+        if getattr(self, "_panel_task", None):
+            self._panel_task.cancel()
+
+    def _request_panel_embed(self, description: Optional[str] = None) -> discord.Embed:
+        """Build the persistent request panel embed."""
+        if description is None:
+            description = (
+                "Request a new Hospital or Prison placement by clicking the button below.\n\n"
+                "Accepted location formats:\n"
+                "• Full Google Maps place link\n"
+                "• Google Maps short link, for example `https://maps.app.goo.gl/...`\n\n"
+                "The building name is detected automatically from the location when possible. "
+                "Your request will be reviewed by admins."
+            )
+
+        return discord.Embed(
+            title=REQUEST_PANEL_TITLE,
+            description=description,
+            color=discord.Color.blue(),
+        )
+
+    async def _ensure_default_request_panel(self):
+        """Post or update the default request panel after the cog loads."""
+        try:
+            await self.bot.wait_until_ready()
+            channel = self.bot.get_channel(DEFAULT_REQUEST_PANEL_CHANNEL_ID)
+            if channel is None:
+                try:
+                    channel = await self.bot.fetch_channel(DEFAULT_REQUEST_PANEL_CHANNEL_ID)
+                except Exception:
+                    log.warning("Default BuildingManager request panel channel was not found.")
+                    return
+
+            embed = self._request_panel_embed()
+            async for message in channel.history(limit=50):
+                if getattr(message.author, "id", None) != getattr(self.bot.user, "id", None):
+                    continue
+                if any(getattr(existing, "title", None) == REQUEST_PANEL_TITLE for existing in message.embeds):
+                    await message.edit(embed=embed, view=StartView(self))
+                    return
+
+            await channel.send(embed=embed, view=StartView(self))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Failed to ensure default BuildingManager request panel")
 
     @commands.group(name="buildset", invoke_without_command=True)
     @commands.admin()
@@ -1512,9 +1578,6 @@ class BuildingManager(commands.Cog):
             f"Admin role: {ctx.guild.get_role(conf['admin_role_id']).mention if conf.get('admin_role_id') else '—'}\n"
             f"Custom button message: {'Set' if conf.get('button_message') else 'Not set (using default)'}\n"
         )
-        google_key = await self.config.google_api_key()
-        txt += f"Google API Key: {'Set' if google_key else 'Not set'}\n"
-        
         await ctx.send(box(txt, lang="ini"))
 
     @buildset.command(name="requestchannel")
@@ -1561,21 +1624,6 @@ class BuildingManager(commands.Cog):
             await self.config.guild(ctx.guild).button_message.set(None)
             await ctx.send(f"Button message reset to default. Use `{ctx.prefix}buildset post` to update the message.")
 
-    @buildset.command(name="googlekey")
-    @commands.is_owner()
-    async def googlekey(self, ctx: commands.Context, api_key: str = None):
-        """Set Google Geocoding API key (optional)."""
-        if api_key:
-            await self.config.google_api_key.set(api_key)
-            await ctx.send("✅ Google API key set.")
-            try:
-                await ctx.message.delete()
-            except Exception:
-                pass
-        else:
-            await self.config.google_api_key.set(None)
-            await ctx.send("Google API key removed.")
-
     @buildset.command(name="post")
     @commands.admin()
     @commands.guild_only()
@@ -1594,21 +1642,9 @@ class BuildingManager(commands.Cog):
         if custom_msg:
             description = custom_msg
         else:
-            description = (
-                "Request a new building placement by clicking the button below.\n\n"
-                "You'll be asked to provide:\n"
-                "• Building type (Hospital, Prison, etc.)\n"
-                "• Building name\n"
-                "• Location (Google Maps link or coordinates)\n"
-                "• Optional notes\n\n"
-                "Your request will be reviewed by admins."
-            )
+            description = None
         
-        emb = discord.Embed(
-            title="🏢 Building Request System",
-            description=description,
-            color=discord.Color.blue(),
-        )
+        emb = self._request_panel_embed(description)
         await ch.send(embed=emb, view=StartView(self))
         await ctx.tick()
 
