@@ -4,10 +4,12 @@ from eventmanager.event_manager import (
     build_payload,
     normalize_kind,
     parse_event_form,
+    parse_location_value,
     parse_profile_names,
     select_scheduled_profile,
     summarize_form,
     valid_time,
+    _validate_free_submit,
 )
 
 
@@ -169,6 +171,26 @@ class EventManagerFormTests(unittest.TestCase):
 
         self.assertIn(("event_radio_group", "1"), payload)
         self.assertIn(("mission_position[mission_type_id]", "1"), payload)
+
+    def test_free_submit_validation_rejects_coin_button(self):
+        form = parse_event_form(MISSIONCHIEF_LARGE_HTML, "https://www.missionchief.com/missionAllianceNew")
+        form.submit_value = "Start 1 mission (10 Coins)"
+
+        payload = build_payload(form, {})
+
+        self.assertIn("non-free", _validate_free_submit(form, payload))
+
+    def test_free_submit_validation_rejects_nonzero_coins(self):
+        form = parse_event_form(MISSIONCHIEF_LARGE_HTML, "https://www.missionchief.com/missionAllianceNew")
+
+        payload = build_payload(form, {"mission_position[coins]": "10"})
+
+        self.assertIn("spend coins", _validate_free_submit(form, payload))
+
+    def test_parse_location_value_accepts_latitude_longitude_only(self):
+        self.assertEqual(parse_location_value("40.7128, -74.0060"), ("40.7128", "-74.006"))
+        with self.assertRaises(ValueError):
+            parse_location_value("New York")
 
     def test_summarize_form_includes_option_preview(self):
         form = parse_event_form(FORM_HTML, "https://www.missionchief.com/missionAllianceNew")

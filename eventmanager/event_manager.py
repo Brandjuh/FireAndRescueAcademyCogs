@@ -77,6 +77,10 @@ class EventStartResult:
 
 
 Payload = List[Tuple[str, str]]
+LATITUDE_FIELD = "mission_position[latitude]"
+LONGITUDE_FIELD = "mission_position[longitude]"
+ADDRESS_FIELD = "mission_position[address]"
+COINS_FIELD = "mission_position[coins]"
 
 
 def normalize_kind(kind: str) -> str:
@@ -273,6 +277,19 @@ def _normalize_overrides(form: EventForm, overrides: Dict[str, str]) -> Dict[str
     return normalized
 
 
+def _validate_free_submit(form: EventForm, payload: Payload) -> Optional[str]:
+    submit_text = (form.submit_value or "").lower()
+    if "free" not in submit_text:
+        return f"Refusing to submit non-free action `{form.submit_value or 'unknown'}`."
+
+    for name, value in payload:
+        if name == COINS_FIELD and str(value or "0") not in {"", "0"}:
+            return "Refusing to submit a payload that would spend coins."
+        if name == "commit" and "coin" in str(value).lower():
+            return f"Refusing to submit coin action `{value}`."
+    return None
+
+
 def build_payload(form: EventForm, overrides: Dict[str, str]) -> Payload:
     """Build a POST payload from form defaults plus configured overrides."""
     overrides = _normalize_overrides(form, overrides)
@@ -305,6 +322,23 @@ def build_payload(form: EventForm, overrides: Dict[str, str]) -> Payload:
     if form.submit_name and form.submit_name not in used_names and not any(name == form.submit_name for name, _ in payload):
         _append_payload_value(payload, form.submit_name, form.submit_value or "")
     return payload
+
+
+def parse_location_value(value: str) -> Tuple[str, str]:
+    """Parse `lat, lon` input for profile location shortcuts."""
+    parts = [part.strip() for part in (value or "").replace(";", ",").split(",")]
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError("Location must be formatted as `latitude, longitude`.")
+    try:
+        latitude = float(parts[0])
+        longitude = float(parts[1])
+    except ValueError as exc:
+        raise ValueError("Location must contain numeric latitude and longitude.") from exc
+    if not -90 <= latitude <= 90:
+        raise ValueError("Latitude must be between -90 and 90.")
+    if not -180 <= longitude <= 180:
+        raise ValueError("Longitude must be between -180 and 180.")
+    return str(latitude), str(longitude)
 
 
 def summarize_form(form: EventForm, *, limit: int = 15) -> str:
@@ -468,6 +502,10 @@ class EventManager(commands.Cog):
                 return EventStartResult(False, f"Unexpected form method `{form.method}`.")
 
             payload = build_payload(form, profile.get("fields", {}))
+            validation_error = _validate_free_submit(form, payload)
+            if validation_error:
+                return EventStartResult(False, validation_error, post_url=form.action)
+
             session = await self._get_session()
             try:
                 async with session.post(form.action, data=payload, allow_redirects=True) as response:
@@ -610,6 +648,26 @@ class EventManager(commands.Cog):
         async with self.config.profiles() as profiles:
             profile = profiles.setdefault(kind, {}).setdefault(profile_name, {"fields": {}})
             profile.setdefault("fields", {})[field_name] = value
+        await ctx.tick()
+
+    @profile.command(name="location")
+    @commands.admin()
+    async def profile_location(self, ctx: commands.Context, kind: str, profile_name: str, *, location: str):
+        """Set profile coordinates as `latitude, longitude`; address is left for MissionChief."""
+        try:
+            kind = normalize_kind(kind)
+            latitude, longitude = parse_location_value(location)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+
+        profile_name = profile_name.strip().lower()
+        async with self.config.profiles() as profiles:
+            profile = profiles.setdefault(kind, {}).setdefault(profile_name, {"fields": {}})
+            fields = profile.setdefault("fields", {})
+            fields[LATITUDE_FIELD] = latitude
+            fields[LONGITUDE_FIELD] = longitude
+            fields.pop(ADDRESS_FIELD, None)
         await ctx.tick()
 
     @profile.command(name="remove")
