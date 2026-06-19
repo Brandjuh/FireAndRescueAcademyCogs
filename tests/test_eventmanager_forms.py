@@ -1,6 +1,7 @@
 import unittest
 
 from eventmanager.event_manager import (
+    BROWSER_CAPTURE_SCRIPT,
     build_payload,
     fields_for_selection,
     field_options_for_kind,
@@ -484,6 +485,12 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("mission_position[address]=NYC", payload)
         self.assertNotIn("secret", mapping.replace("REDACTED", ""))
         self.assertNotIn("secret", payload.replace("REDACTED", ""))
+
+    def test_browser_capture_script_does_not_submit(self):
+        self.assertIn("No submit was sent", BROWSER_CAPTURE_SCRIPT)
+        self.assertNotIn(".submit(", BROWSER_CAPTURE_SCRIPT)
+        self.assertNotIn("fetch(", BROWSER_CAPTURE_SCRIPT)
+        self.assertNotIn("XMLHttpRequest", BROWSER_CAPTURE_SCRIPT)
 
 
 if __name__ == "__main__":

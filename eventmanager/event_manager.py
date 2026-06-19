@@ -35,6 +35,67 @@ EVENT_KINDS = {
 DEFAULT_TIMEZONE = "America/New_York"
 DEFAULT_PANEL_CHANNEL_ID = 1421256548977606827
 PANEL_TITLE = "EventManager Control Panel"
+BROWSER_CAPTURE_SCRIPT = r"""
+(() => {
+  const form = document.querySelector("#new_mission_position")
+    || [...document.querySelectorAll("form")].find((item) => (item.action || "").includes("missionAlliance"));
+  if (!form) {
+    console.log("EventManager capture: no MissionChief alliance form found.");
+    return;
+  }
+
+  const redact = (name, value) => {
+    const lowered = String(name || "").toLowerCase();
+    if (lowered.includes("token") || lowered.includes("cookie") || lowered === "authorization") {
+      return "REDACTED";
+    }
+    return value;
+  };
+
+  const fields = [...form.querySelectorAll("input, select, textarea")].map((field) => ({
+    tag: field.tagName.toLowerCase(),
+    type: field.type || "",
+    name: field.name || "",
+    id: field.id || "",
+    value: redact(field.name || field.id, field.value || ""),
+    checked: field.checked || false,
+    disabled: field.disabled || false,
+    readonly: field.readOnly || false,
+  }));
+
+  const submitButtons = [...form.querySelectorAll("input[type='submit'], button[type='submit'], button:not([type])")].map((button) => ({
+    tag: button.tagName.toLowerCase(),
+    type: button.type || "",
+    name: button.name || "",
+    id: button.id || "",
+    value: redact(button.name || button.id, button.value || button.textContent.trim() || ""),
+    disabled: button.disabled || false,
+    className: button.className || "",
+  }));
+
+  const report = {
+    note: "No submit was sent. This only reads the current browser DOM.",
+    pageUrl: location.href,
+    formAction: form.action,
+    formMethod: form.method,
+    formClass: form.className,
+    fields,
+    submitButtons,
+  };
+
+  const output = JSON.stringify(report, null, 2);
+  console.log(output);
+  if (typeof copy === "function") {
+    copy(output);
+    console.log("EventManager capture copied to clipboard.");
+  } else if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(output).then(
+      () => console.log("EventManager capture copied to clipboard."),
+      () => console.log("EventManager capture could not be copied automatically.")
+    );
+  }
+})();
+""".strip()
 WEEKDAYS = {
     "monday": 0,
     "tuesday": 1,
@@ -1466,6 +1527,20 @@ class EventManager(commands.Cog):
         await ctx.send(
             "Safe EventManager diagnostics generated. No mission/event was started.",
             file=discord.File(data, filename=filename),
+        )
+
+    @eventmanager.command(name="browsercapture")
+    @commands.admin()
+    async def browser_capture_script(self, ctx: commands.Context):
+        """Send a no-submit browser snippet for capturing the live MissionChief form DOM."""
+        instructions = (
+            "Open the MissionChief large mission/event form in your browser, move the marker, "
+            "then run this snippet in the browser console. It only reads the DOM and does not submit the form."
+        )
+        data = io.BytesIO(BROWSER_CAPTURE_SCRIPT.encode("utf-8"))
+        await ctx.send(
+            instructions,
+            file=discord.File(data, filename="eventmanager-browser-capture.js"),
         )
 
     @eventmanager.command(name="panel")
