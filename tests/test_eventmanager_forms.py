@@ -3,6 +3,8 @@ import random
 
 from eventmanager.event_manager import (
     build_payload,
+    fields_for_selection,
+    field_options_for_kind,
     normalize_kind,
     normalize_random_location_region,
     parse_event_form,
@@ -279,6 +281,31 @@ class EventManagerFormTests(unittest.TestCase):
     def test_profile_name_from_label_is_stable(self):
         self.assertEqual(profile_name_from_label("Major fire", prefix="large_"), "large_major_fire")
         self.assertEqual(profile_name_from_label("Storm Surge"), "storm_surge")
+
+    def test_field_options_for_kind_reads_large_and_event_options(self):
+        large_form = parse_event_form(MISSIONCHIEF_LARGE_HTML, "https://www.missionchief.com/missionAllianceNew")
+        event_form = parse_event_form(MISSIONCHIEF_EVENT_HTML, "https://www.missionchief.com/missionAllianceEventNew")
+
+        self.assertEqual([option.label for option in field_options_for_kind(large_form, "large")], ["Major fire", "Unannounced demonstration"])
+        self.assertEqual([option.label for option in field_options_for_kind(event_form, "event")], ["Storm", "Civil Unrest"])
+
+    def test_fields_for_selection_applies_event_defaults_and_random_region(self):
+        profile = fields_for_selection("event", "1", random_region="nyc_or_bermuda")
+
+        self.assertEqual(profile["random_location"], "nyc_or_bermuda")
+        self.assertEqual(profile["fields"]["event_radio_group"], "1")
+        self.assertEqual(profile["fields"]["mission_position[mission_type_id]"], "1")
+        self.assertEqual(profile["fields"]["mission_position[size]"], "2")
+        self.assertEqual(profile["fields"]["mission_position[shape]"], "circle")
+        self.assertEqual(profile["fields"]["mission_position[amount]"], "0")
+
+    def test_fields_for_selection_accepts_manual_large_coordinates(self):
+        profile = fields_for_selection("large", "41", latitude="40.1", longitude="-73.9")
+
+        self.assertNotIn("random_location", profile)
+        self.assertEqual(profile["fields"]["mission_position[mission_type_id]"], "41")
+        self.assertEqual(profile["fields"]["mission_position[latitude]"], "40.1")
+        self.assertEqual(profile["fields"]["mission_position[longitude]"], "-73.9")
 
     def test_summarize_form_includes_option_preview(self):
         form = parse_event_form(FORM_HTML, "https://www.missionchief.com/missionAllianceNew")

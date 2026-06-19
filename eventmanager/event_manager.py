@@ -5,9 +5,10 @@ import io
 import logging
 import random
 import re
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
@@ -32,6 +33,8 @@ EVENT_KINDS = {
     },
 }
 DEFAULT_TIMEZONE = "America/New_York"
+DEFAULT_PANEL_CHANNEL_ID = 1426226521231589507
+PANEL_TITLE = "EventManager Control Panel"
 WEEKDAYS = {
     "monday": 0,
     "tuesday": 1,
@@ -126,6 +129,11 @@ RANDOM_LOCATION_ALIASES = {
     "both": "nyc_or_bermuda",
 }
 RANDOM_LOCATION_JITTER = 0.006
+CUSTOM_LOCATION_LABELS = {
+    "nyc": "Random New York City",
+    "bermuda": "Random Bermuda",
+    "nyc_or_bermuda": "Random NYC or Bermuda",
+}
 
 
 def normalize_kind(kind: str) -> str:
@@ -208,6 +216,47 @@ def profile_fields_for_start(profile: dict, *, rng=None) -> Dict[str, str]:
         fields[LONGITUDE_FIELD] = longitude
         fields.pop(ADDRESS_FIELD, None)
     return fields
+
+
+def field_options_for_kind(form: EventForm, kind: str) -> List[FormOption]:
+    """Return the user-selectable MissionChief type options for an event kind."""
+    kind = normalize_kind(kind)
+    field_name = EVENT_RADIO_FIELD if kind == "event" else MISSION_TYPE_FIELD
+    field_info = next((field for field in form.fields if field.name == field_name), None)
+    if not field_info:
+        return []
+    return field_info.options
+
+
+def truncate_discord_text(value: str, limit: int) -> str:
+    """Trim text to a Discord component limit."""
+    value = str(value or "")
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 1)] + "…"
+
+
+def fields_for_selection(
+    kind: str,
+    selected_value: str,
+    *,
+    random_region: Optional[str] = None,
+    latitude: Optional[str] = None,
+    longitude: Optional[str] = None,
+) -> dict:
+    """Build profile-like fields for a one-off panel start."""
+    kind = normalize_kind(kind)
+    profile: Dict[str, Any] = {"fields": {MISSION_TYPE_FIELD: selected_value}}
+    if kind == "event":
+        profile["fields"][EVENT_RADIO_FIELD] = selected_value
+        profile["fields"].update(EVENT_DEFAULT_OVERRIDES)
+
+    if random_region:
+        profile[RANDOM_LOCATION_KEY] = normalize_random_location_region(random_region)
+    elif latitude is not None and longitude is not None:
+        profile["fields"][LATITUDE_FIELD] = latitude
+        profile["fields"][LONGITUDE_FIELD] = longitude
+    return profile
 
 
 def parse_event_form(html: str, page_url: str) -> EventForm:
@@ -512,6 +561,259 @@ def select_scheduled_profile(schedule: dict) -> Tuple[Optional[str], int]:
     return profile, next_index
 
 
+class EventManagerPanelView(discord.ui.View):
+    """Persistent admin entry point for EventManager."""
+
+    def __init__(self, cog: "EventManager"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    async def _require_admin(self, interaction: discord.Interaction) -> bool:
+        if await self.cog.can_manage(interaction):
+            return True
+        await interaction.response.send_message("You do not have permission to use EventManager.", ephemeral=True)
+        return False
+
+    async def _quick_start(self, interaction: discord.Interaction, kind: str):
+        if not await self._require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        result = await self.cog.start_quick(kind)
+        if result.ok:
+            await interaction.followup.send(f"Started {EVENT_KINDS[kind]['label']} with quick settings.", ephemeral=True)
+        else:
+            await interaction.followup.send(f"Could not start {EVENT_KINDS[kind]['label']}: {result.reason}", ephemeral=True)
+
+    async def _custom_start(self, interaction: discord.Interaction, kind: str):
+        if not await self._require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            view = await self.cog.build_custom_start_view(kind)
+        except Exception as exc:
+            await interaction.followup.send(f"Could not load MissionChief options: {exc}", ephemeral=True)
+            return
+        await interaction.followup.send(embed=view.build_embed(), view=view, ephemeral=True)
+
+    @discord.ui.button(
+        label="Alliance Event (Quick)",
+        style=discord.ButtonStyle.success,
+        custom_id="eventmanager:quick:event",
+        row=0,
+    )
+    async def event_quick(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._quick_start(interaction, "event")
+
+    @discord.ui.button(
+        label="Alliance Event (Custom)",
+        style=discord.ButtonStyle.primary,
+        custom_id="eventmanager:custom:event",
+        row=0,
+    )
+    async def event_custom(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._custom_start(interaction, "event")
+
+    @discord.ui.button(
+        label="Large Scale Mission (Quick)",
+        style=discord.ButtonStyle.success,
+        custom_id="eventmanager:quick:large",
+        row=1,
+    )
+    async def large_quick(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._quick_start(interaction, "large")
+
+    @discord.ui.button(
+        label="Large Scale Mission (Custom)",
+        style=discord.ButtonStyle.primary,
+        custom_id="eventmanager:custom:large",
+        row=1,
+    )
+    async def large_custom(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._custom_start(interaction, "large")
+
+
+class CustomTypeSelect(discord.ui.Select):
+    """Select the MissionChief event or mission type for a custom start."""
+
+    def __init__(self, parent: "CustomStartView"):
+        self.parent_view = parent
+        options = [
+            discord.SelectOption(
+                label=truncate_discord_text(option.label, 100),
+                value=option.value,
+                default=option.value == parent.selected_value,
+            )
+            for option in parent.options[:25]
+        ]
+        super().__init__(
+            placeholder="Choose MissionChief type",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.parent_view.selected_value = self.values[0]
+        await interaction.response.edit_message(embed=self.parent_view.build_embed(), view=self.parent_view.rebuild())
+
+
+class CustomLocationSelect(discord.ui.Select):
+    """Select how the custom start location should be chosen."""
+
+    def __init__(self, parent: "CustomStartView"):
+        self.parent_view = parent
+        allowed_regions = ["nyc", "bermuda", "nyc_or_bermuda"] if parent.kind == "event" else ["nyc"]
+        options = [
+            discord.SelectOption(
+                label=CUSTOM_LOCATION_LABELS[region],
+                value=f"random:{region}",
+                default=parent.random_region == region,
+            )
+            for region in allowed_regions
+        ]
+        if parent.latitude and parent.longitude:
+            options.append(
+                discord.SelectOption(
+                    label="Manual coordinates",
+                    value="manual",
+                    description=f"{parent.latitude}, {parent.longitude}",
+                    default=not parent.random_region,
+                )
+            )
+        super().__init__(
+            placeholder="Choose location",
+            min_values=1,
+            max_values=1,
+            options=options[:25],
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        value = self.values[0]
+        if value.startswith("random:"):
+            self.parent_view.random_region = value.split(":", 1)[1]
+            self.parent_view.latitude = None
+            self.parent_view.longitude = None
+        await interaction.response.edit_message(embed=self.parent_view.build_embed(), view=self.parent_view.rebuild())
+
+
+class CustomLocationModal(discord.ui.Modal, title="Custom start location"):
+    """Modal for manual latitude/longitude input."""
+
+    location = discord.ui.TextInput(
+        label="Latitude, longitude",
+        placeholder="Example: 40.7295, -73.9972",
+        required=True,
+        max_length=60,
+    )
+
+    def __init__(self, parent: "CustomStartView"):
+        super().__init__()
+        self.parent_view = parent
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            latitude, longitude = parse_location_value(str(self.location.value))
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        self.parent_view.latitude = latitude
+        self.parent_view.longitude = longitude
+        self.parent_view.random_region = None
+        await interaction.response.send_message(
+            f"Location set to `{latitude}, {longitude}`. Return to the custom start message and press Start.",
+            ephemeral=True,
+        )
+
+
+class CustomStartView(discord.ui.View):
+    """Transient private flow for one custom MissionChief start."""
+
+    def __init__(self, cog: "EventManager", kind: str, options: List[FormOption]):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.kind = normalize_kind(kind)
+        self.options = options
+        self.selected_value = options[0].value if options else ""
+        self.random_region = "nyc_or_bermuda" if self.kind == "event" else "nyc"
+        self.latitude: Optional[str] = None
+        self.longitude: Optional[str] = None
+        self.rebuild()
+
+    def selected_label(self) -> str:
+        selected = next((option for option in self.options if option.value == self.selected_value), None)
+        return selected.label if selected else self.selected_value or "None"
+
+    def location_label(self) -> str:
+        if self.random_region:
+            return CUSTOM_LOCATION_LABELS.get(self.random_region, self.random_region)
+        if self.latitude and self.longitude:
+            return f"{self.latitude}, {self.longitude}"
+        return "Not configured"
+
+    def rebuild(self):
+        self.clear_items()
+        if self.options:
+            self.add_item(CustomTypeSelect(self))
+        self.add_item(CustomLocationSelect(self))
+        self.add_item(CustomLocationButton(self))
+        self.add_item(CustomStartButton(self))
+        return self
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"Custom {EVENT_KINDS[self.kind]['label']}",
+            description="Choose the MissionChief option and location, then press Start.",
+            color=discord.Color.blue(),
+        )
+        embed.add_field(name="Selected type", value=self.selected_label(), inline=False)
+        embed.add_field(name="Location", value=self.location_label(), inline=False)
+        if self.kind == "event":
+            embed.add_field(name="Defaults", value="Large area • Circle • Every 30 seconds", inline=False)
+        return embed
+
+    async def start(self, interaction: discord.Interaction):
+        if not await self.cog.can_manage(interaction):
+            await interaction.response.send_message("You do not have permission to use EventManager.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        profile = fields_for_selection(
+            self.kind,
+            self.selected_value,
+            random_region=self.random_region,
+            latitude=self.latitude,
+            longitude=self.longitude,
+        )
+        result = await self.cog.start_one_off(self.kind, profile, f"custom:{self.selected_label()}")
+        if result.ok:
+            await interaction.followup.send(f"Started {EVENT_KINDS[self.kind]['label']}: {self.selected_label()}", ephemeral=True)
+        else:
+            await interaction.followup.send(f"Could not start {EVENT_KINDS[self.kind]['label']}: {result.reason}", ephemeral=True)
+
+
+class CustomLocationButton(discord.ui.Button):
+    """Open the manual coordinate modal."""
+
+    def __init__(self, parent: CustomStartView):
+        super().__init__(label="Use Coordinates", style=discord.ButtonStyle.secondary, row=2)
+        self.parent_view = parent
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(CustomLocationModal(self.parent_view))
+
+
+class CustomStartButton(discord.ui.Button):
+    """Start the selected custom item."""
+
+    def __init__(self, parent: CustomStartView):
+        super().__init__(label="Start", style=discord.ButtonStyle.success, row=2)
+        self.parent_view = parent
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.parent_view.start(interaction)
+
+
 class EventManager(commands.Cog):
     """Start and schedule MissionChief alliance missions and alliance events."""
 
@@ -542,16 +844,23 @@ class EventManager(commands.Cog):
             },
             last_runs={},
             log_channel_id=None,
+            panel_channel_id=DEFAULT_PANEL_CHANNEL_ID,
+            panel_message_id=None,
         )
         self._task: Optional[asyncio.Task] = None
+        self._panel_task: Optional[asyncio.Task] = None
         self._start_lock = asyncio.Lock()
 
     async def cog_load(self):
+        self.bot.add_view(EventManagerPanelView(self))
         self._task = asyncio.create_task(self._scheduler_loop())
+        self._panel_task = asyncio.create_task(self._ensure_panels_after_ready())
 
     async def cog_unload(self):
         if self._task:
             self._task.cancel()
+        if self._panel_task:
+            self._panel_task.cancel()
 
     async def _scheduler_loop(self):
         await self.bot.wait_until_ready()
@@ -590,14 +899,8 @@ class EventManager(commands.Cog):
             raise RuntimeError(f"MissionChief returned HTTP {status}.")
         return parse_event_form(html, page_url)
 
-    async def _start_from_profile(self, kind: str, profile_name: str) -> EventStartResult:
+    async def _start_profile_data(self, kind: str, profile_name: str, profile: dict) -> EventStartResult:
         kind = normalize_kind(kind)
-        profile_name = profile_name.strip().lower()
-        profiles = await self.config.profiles()
-        profile = profiles.get(kind, {}).get(profile_name)
-        if not profile:
-            return EventStartResult(False, f"Profile `{profile_name}` was not found.")
-
         async with self._start_lock:
             try:
                 form = await self._fetch_form(kind)
@@ -625,6 +928,139 @@ class EventManager(commands.Cog):
 
         await self._log_run(kind, profile_name, status)
         return EventStartResult(True, "Started successfully.", status=status, post_url=form.action)
+
+    async def _start_from_profile(self, kind: str, profile_name: str) -> EventStartResult:
+        kind = normalize_kind(kind)
+        profile_name = profile_name.strip().lower()
+        profiles = await self.config.profiles()
+        profile = profiles.get(kind, {}).get(profile_name)
+        if not profile:
+            return EventStartResult(False, f"Profile `{profile_name}` was not found.")
+        return await self._start_profile_data(kind, profile_name, profile)
+
+    async def start_one_off(self, kind: str, profile: dict, label: str) -> EventStartResult:
+        """Start an item from an in-memory profile."""
+        return await self._start_profile_data(kind, label, profile)
+
+    async def start_quick(self, kind: str) -> EventStartResult:
+        """Start using configured rotation when available, otherwise fall back to live defaults."""
+        kind = normalize_kind(kind)
+        profiles = await self.config.profiles()
+        schedules = await self.config.schedules()
+        schedule = schedules.get(kind, {})
+        profile_name, next_rotation_index = select_scheduled_profile(schedule)
+        if profile_name and profile_name in profiles.get(kind, {}):
+            result = await self._start_from_profile(kind, profile_name)
+            if result.ok:
+                async with self.config.schedules() as saved_schedules:
+                    saved_schedules[kind]["profile"] = profile_name
+                    saved_schedules[kind]["rotation_index"] = next_rotation_index
+            return result
+
+        form = await self._fetch_form(kind)
+        options = field_options_for_kind(form, kind)
+        if not options:
+            return EventStartResult(False, "No MissionChief options were found on the live form.")
+        random_region = "nyc_or_bermuda" if kind == "event" else "nyc"
+        profile = fields_for_selection(kind, options[0].value, random_region=random_region)
+        return await self._start_profile_data(kind, f"quick:{options[0].label}", profile)
+
+    async def build_custom_start_view(self, kind: str) -> CustomStartView:
+        """Build a custom start view from the live MissionChief form."""
+        kind = normalize_kind(kind)
+        form = await self._fetch_form(kind)
+        options = field_options_for_kind(form, kind)
+        if not options:
+            raise RuntimeError("No selectable MissionChief options were found.")
+        return CustomStartView(self, kind, options)
+
+    async def can_manage(self, interaction: discord.Interaction) -> bool:
+        """Check if an interaction user can use EventManager."""
+        guild = interaction.guild
+        user = interaction.user
+        if guild is None or not isinstance(user, discord.Member):
+            return False
+        if user.guild_permissions.administrator:
+            return True
+        is_admin = getattr(self.bot, "is_admin", None)
+        if is_admin:
+            with suppress(Exception):
+                return bool(await is_admin(user))
+        return False
+
+    async def _ensure_panels_after_ready(self):
+        await self.bot.wait_until_ready()
+        for guild in self.bot.guilds:
+            with suppress(Exception):
+                await self.ensure_panel_message(guild, create=True)
+
+    async def panel_channel(self, guild: discord.Guild):
+        channel_id = int(await self.config.panel_channel_id() or DEFAULT_PANEL_CHANNEL_ID)
+        return guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
+
+    def is_panel_message(self, message: discord.Message) -> bool:
+        bot_user_id = getattr(getattr(self.bot, "user", None), "id", None)
+        if bot_user_id and getattr(getattr(message, "author", None), "id", None) != bot_user_id:
+            return False
+        for embed in getattr(message, "embeds", []) or []:
+            if getattr(embed, "title", None) == PANEL_TITLE:
+                return True
+        return False
+
+    async def build_panel_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title=PANEL_TITLE,
+            description=(
+                "Start free MissionChief alliance missions and events.\n\n"
+                "Quick uses configured/default settings. Custom lets admins choose the live MissionChief option "
+                "and location before starting."
+            ),
+            color=discord.Color.orange(),
+        )
+        embed.add_field(name="Safety", value="Free starts only. Coin actions are refused.", inline=False)
+        embed.add_field(name="Visibility", value="Button actions are private to the admin using them.", inline=False)
+        return embed
+
+    async def find_existing_panel_message(self, channel: Any):
+        history = getattr(channel, "history", None)
+        if not history:
+            return None
+        found = []
+        with suppress(discord.Forbidden, discord.HTTPException):
+            async for message in channel.history(limit=50):
+                if self.is_panel_message(message):
+                    found.append(message)
+        if not found:
+            return None
+        keep = found[0]
+        for duplicate in found[1:]:
+            with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                await duplicate.delete()
+        return keep
+
+    async def ensure_panel_message(self, guild: discord.Guild, *, create: bool = True):
+        channel = await self.panel_channel(guild)
+        if not channel:
+            return None
+        embed = await self.build_panel_embed()
+        view = EventManagerPanelView(self)
+        message_id = await self.config.panel_message_id()
+        if message_id and hasattr(channel, "fetch_message"):
+            with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                message = await channel.fetch_message(int(message_id))
+                await message.edit(embed=embed, view=view)
+                return message
+
+        existing = await self.find_existing_panel_message(channel)
+        if existing:
+            await existing.edit(embed=embed, view=view)
+            await self.config.panel_message_id.set(existing.id)
+            return existing
+        if not create:
+            return None
+        message = await channel.send(embed=embed, view=view)
+        await self.config.panel_message_id.set(message.id)
+        return message
 
     async def _log_run(self, kind: str, profile_name: str, status: Optional[int]):
         channel_id = await self.config.log_channel_id()
@@ -719,6 +1155,20 @@ class EventManager(commands.Cog):
             f"Full {EVENT_KINDS[kind]['label']} form inspection:",
             file=discord.File(data, filename=f"eventmanager-{kind}-form.txt"),
         )
+
+    @eventmanager.command(name="panel")
+    @commands.admin()
+    @commands.guild_only()
+    async def panel(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
+        """Post or refresh the EventManager control panel."""
+        if channel is not None:
+            await self.config.panel_channel_id.set(channel.id)
+            await self.config.panel_message_id.set(None)
+        message = await self.ensure_panel_message(ctx.guild, create=True)
+        if message:
+            await ctx.send(f"EventManager panel ready in {message.channel.mention}: {message.jump_url}")
+        else:
+            await ctx.send("Could not post the EventManager panel. Check the configured channel and bot permissions.")
 
     @eventmanager.command(name="start")
     @commands.admin()
