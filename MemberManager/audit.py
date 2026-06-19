@@ -98,6 +98,24 @@ EVENT_EMOJI = {
     "role_restored": "🔄",
 }
 
+MISSIONCHIEF_ACTION_LABELS = {
+    "added_to_alliance": "Joined",
+    "left_alliance": "Left",
+    "kicked_from_alliance": "Kicked",
+    "chat_ban_removed": "Mute removed",
+    "chat_ban_set": "Muted",
+    "set_admin": "Admin added",
+    "removed_admin": "Admin removed",
+    "set_co_admin": "Co-admin added",
+    "removed_co_admin": "Co-admin removed",
+    "set_mod_action_admin": "Mod action admin added",
+    "removed_mod_action_admin": "Mod action admin removed",
+    "set_as_staff": "Staff added",
+    "removed_as_staff": "Staff removed",
+    "promoted_to_event_manager": "Event manager added",
+    "removed_event_manager": "Event manager removed",
+}
+
 
 @dataclass(frozen=True)
 class AuditTimelineEvent:
@@ -189,18 +207,28 @@ def normalize_member_event(event: dict[str, Any]) -> Optional[AuditTimelineEvent
         reference = f"Timer #{event_data['reminder_id']}"
 
     title = event_type.replace("_", " ").title()
+    if event_type == "note_created":
+        title = "Note created"
+    elif event_type == "note_edited":
+        title = "Note edited"
+    elif event_type == "note_deleted":
+        title = "Note deleted"
+    elif event_type == "note_pinned":
+        title = "Note pinned"
+    elif event_type == "note_unpinned":
+        title = "Note unpinned"
     if event_type == "sanction_added":
-        title = f"{sanction_type or 'Sanction'} added"
+        title = sanction_type or "Sanction"
         if target_name:
-            title += f" for {target_name}"
+            title += f" - {target_name}"
     elif event_type == "sanction_edited":
         title = f"{sanction_type or 'Sanction'} edited"
         if target_name:
-            title += f" for {target_name}"
+            title += f" - {target_name}"
     elif event_type == "sanction_removed":
         title = f"{sanction_type or 'Sanction'} removed"
         if target_name:
-            title += f" for {target_name}"
+            title += f" - {target_name}"
 
     return AuditTimelineEvent(
         source="MemberManager",
@@ -217,12 +245,17 @@ def normalize_member_event(event: dict[str, Any]) -> Optional[AuditTimelineEvent
 def normalize_log_row(row: dict[str, Any]) -> AuditTimelineEvent:
     """Convert a LogsScraper row to an audit timeline entry."""
     action_key = row.get("action_key") or "missionchief_log"
-    title = row.get("action_text") or action_key.replace("_", " ").title()
+    executed_name = row.get("executed_name")
+    affected_name = row.get("affected_name")
+    target_name = affected_name or executed_name
+    action_label = MISSIONCHIEF_ACTION_LABELS.get(action_key)
+    if action_label and target_name:
+        title = f"{action_label} - {target_name}"
+    else:
+        title = row.get("action_text") or action_key.replace("_", " ").title()
     timestamp = parse_timestamp(row.get("event_timestamp")) or parse_timestamp(row.get("ts"))
 
     parts = []
-    executed_name = row.get("executed_name")
-    affected_name = row.get("affected_name")
     description = row.get("description")
     if executed_name:
         parts.append(f"Executed by {executed_name}")
