@@ -255,13 +255,14 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertEqual(normalize_random_location_region("Bermuda Islands"), "bermuda")
 
     def test_random_location_for_region_returns_supported_coordinates(self):
-        latitude, longitude, region = random_location_for_region("nyc_or_bermuda", rng=random.Random(1))
+        latitude, longitude, address, region = random_location_for_region("nyc_or_bermuda", rng=random.Random(1))
 
         self.assertIn(region, {"nyc", "bermuda"})
         self.assertTrue(-90 <= float(latitude) <= 90)
         self.assertTrue(-180 <= float(longitude) <= 180)
+        self.assertTrue(address)
 
-    def test_profile_fields_for_start_resolves_random_location_and_removes_address(self):
+    def test_profile_fields_for_start_resolves_random_location_and_sets_address(self):
         fields = profile_fields_for_start(
             {
                 "random_location": "nyc",
@@ -273,7 +274,7 @@ class EventManagerFormTests(unittest.TestCase):
             rng=random.Random(2),
         )
 
-        self.assertNotIn("mission_position[address]", fields)
+        self.assertIn("mission_position[address]", fields)
         self.assertEqual(fields["mission_position[mission_type_id]"], "41")
         self.assertIn("mission_position[latitude]", fields)
         self.assertIn("mission_position[longitude]", fields)
@@ -299,13 +300,14 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertEqual(profile["fields"]["mission_position[shape]"], "circle")
         self.assertEqual(profile["fields"]["mission_position[amount]"], "0")
 
-    def test_fields_for_selection_accepts_manual_large_coordinates(self):
-        profile = fields_for_selection("large", "41", latitude="40.1", longitude="-73.9")
+    def test_fields_for_selection_accepts_manual_large_coordinates_and_address(self):
+        profile = fields_for_selection("large", "41", latitude="40.1", longitude="-73.9", address="Manual NYC")
 
         self.assertNotIn("random_location", profile)
         self.assertEqual(profile["fields"]["mission_position[mission_type_id]"], "41")
         self.assertEqual(profile["fields"]["mission_position[latitude]"], "40.1")
         self.assertEqual(profile["fields"]["mission_position[longitude]"], "-73.9")
+        self.assertEqual(profile["fields"]["mission_position[address]"], "Manual NYC")
 
     def test_summarize_form_includes_option_preview(self):
         form = parse_event_form(FORM_HTML, "https://www.missionchief.com/missionAllianceNew")
