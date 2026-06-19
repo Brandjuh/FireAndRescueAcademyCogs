@@ -33,7 +33,7 @@ EVENT_KINDS = {
     },
 }
 DEFAULT_TIMEZONE = "America/New_York"
-DEFAULT_PANEL_CHANNEL_ID = 1426226521231589507
+DEFAULT_PANEL_CHANNEL_ID = 1421256548977606827
 PANEL_TITLE = "EventManager Control Panel"
 WEEKDAYS = {
     "monday": 0,
@@ -453,6 +453,14 @@ def _ajax_submit_headers(kind: str, payload: Payload) -> Dict[str, str]:
     return headers
 
 
+def _ajax_get_headers(kind: str) -> Dict[str, str]:
+    return {
+        "Accept": "text/javascript, application/javascript, application/ecmascript, application/x-ecmascript, */*; q=0.01",
+        "Referer": BASE_URL,
+        "X-Requested-With": "XMLHttpRequest",
+    }
+
+
 def _normalize_overrides(form: EventForm, overrides: Dict[str, str]) -> Dict[str, str]:
     normalized = {str(key): str(value) for key, value in overrides.items()}
     field_names = {field_info.name for field_info in form.fields}
@@ -605,7 +613,8 @@ def summarize_form(form: EventForm, *, limit: int = 15) -> str:
     for field_info in form.fields[:limit]:
         required = " required" if field_info.required else ""
         field_type = f":{field_info.field_type}" if field_info.field_type else ""
-        value = f" = {field_info.value}" if field_info.value else ""
+        safe_value = _redact_debug_value(field_info.name, field_info.value)
+        value = f" = {safe_value}" if safe_value else ""
         lines.append(f"- {field_info.name} ({field_info.tag}{field_type}{required}){value}")
         if field_info.options:
             option_preview = ", ".join(
@@ -994,12 +1003,17 @@ class EventManager(commands.Cog):
             raise RuntimeError("CookieManager did not return a session.")
         return session
 
-    async def _fetch_form(self, kind: str, fields: Optional[Dict[str, str]] = None) -> EventForm:
+    async def _fetch_form(self, kind: str, fields: Optional[Dict[str, str]] = None, *, ajax: bool = False) -> EventForm:
         kind = normalize_kind(kind)
         page_url = EVENT_KINDS[kind]["url"]
         params = _form_position_params(fields or {})
         session = await self._get_session()
-        async with session.get(page_url, allow_redirects=True, params=params or None) as response:
+        async with session.get(
+            page_url,
+            allow_redirects=True,
+            params=params or None,
+            headers=_ajax_get_headers(kind) if ajax else None,
+        ) as response:
             status = getattr(response, "status", None)
             html = await response.text()
         if status is not None and int(status) >= 400:
@@ -1055,6 +1069,11 @@ class EventManager(commands.Cog):
         start_fields = profile_fields_for_start(profile)
         form_params = _form_position_params(start_fields)
         form = await self._fetch_form(kind, start_fields)
+        try:
+            ajax_form = await self._fetch_form(kind, start_fields, ajax=True)
+            ajax_form_summary = summarize_form(ajax_form, limit=len(ajax_form.fields))
+        except Exception as exc:
+            ajax_form_summary = f"AJAX form fetch failed or did not parse: {exc}"
         payload_before_address = build_payload(form, start_fields)
         payload = await self._resolve_reverse_address(await self._get_session(), kind, payload_before_address)
         headers = _ajax_submit_headers(kind, payload)
@@ -1068,6 +1087,10 @@ class EventManager(commands.Cog):
             f"Profile: {label}",
             f"Form URL: {EVENT_KINDS[kind]['url']}",
             f"Form GET params: {form_params or 'none'}",
+            "",
+            "[Form GET headers if AJAX]",
+            safe_debug_mapping(_ajax_get_headers(kind)),
+            "",
             f"Action: {form.action}",
             f"Method: {form.method}",
             f"Submit: {form.submit_name}={form.submit_value or ''}",
@@ -1090,6 +1113,9 @@ class EventManager(commands.Cog):
             "",
             "[Parsed form]",
             summarize_form(form, limit=len(form.fields)),
+            "",
+            "[Parsed AJAX form comparison]",
+            ajax_form_summary,
         ]
         return "\n".join(lines), f"eventmanager-{kind}-diagnostics.txt"
 

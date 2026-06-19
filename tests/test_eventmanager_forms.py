@@ -24,6 +24,7 @@ from eventmanager.event_manager import (
     LATITUDE_FIELD,
     LONGITUDE_FIELD,
     ADDRESS_FIELD,
+    _ajax_get_headers,
     _ajax_submit_headers,
     _form_position_params,
     _replace_payload_value,
@@ -392,6 +393,8 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertIn("Action: https://www.missionchief.com/missionAlliance", summary)
         self.assertIn("mission_alliance[mission_type_id]", summary)
         self.assertIn("1:Storm", summary)
+        self.assertIn("authenticity_token (input:hidden) = REDACTED", summary)
+        self.assertNotIn("abc123", summary)
 
     def test_normalize_kind_accepts_aliases(self):
         self.assertEqual(normalize_kind("mission"), "large")
@@ -462,6 +465,13 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(headers["X-Requested-With"], "XMLHttpRequest")
         self.assertEqual(headers["X-CSRF-Token"], "csrf-secret")
         self.assertEqual(headers["Origin"], "https://www.missionchief.com")
+        self.assertIn("text/javascript", headers["Accept"])
+
+    def test_ajax_get_headers_include_xhr(self):
+        headers = _ajax_get_headers("large")
+
+        self.assertEqual(headers["X-Requested-With"], "XMLHttpRequest")
+        self.assertEqual(headers["Referer"], "https://www.missionchief.com")
         self.assertIn("text/javascript", headers["Accept"])
 
     def test_safe_debug_helpers_redact_tokens(self):
