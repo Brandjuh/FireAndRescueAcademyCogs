@@ -15,8 +15,15 @@ from eventmanager.event_manager import (
     random_location_for_region,
     select_scheduled_profile,
     summarize_payload_for_debug,
+    summarize_response_for_debug,
     summarize_form,
     valid_time,
+    EventManager,
+    LATITUDE_FIELD,
+    LONGITUDE_FIELD,
+    ADDRESS_FIELD,
+    _form_position_params,
+    _replace_payload_value,
     _validate_free_submit,
 )
 
@@ -110,6 +117,31 @@ BUTTON_SUBMIT_HTML = """
   <button type="submit" name="commit">Start Event ( Free )</button>
 </form>
 """
+
+
+class FakeResponse:
+    def __init__(self, text: str, status: int = 200):
+        self._text = text
+        self.status = status
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def text(self):
+        return self._text
+
+
+class FakeSession:
+    def __init__(self, response: FakeResponse):
+        self.response = response
+        self.requests = []
+
+    def get(self, url, **kwargs):
+        self.requests.append((url, kwargs))
+        return self.response
 
 
 class EventManagerFormTests(unittest.TestCase):
@@ -339,6 +371,16 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertIn("mission_position[latitude]=40.729500", summary)
         self.assertIn("commit=Start 1 mission (Free)", summary)
 
+    def test_response_summary_strips_html_and_redacts_tokens(self):
+        summary = summarize_response_for_debug(
+            "<html><script>secret()</script><body>Server error authenticity_token=abc123 failed</body></html>"
+        )
+
+        self.assertIn("Server error", summary)
+        self.assertIn("authenticity_token=REDACTED", summary)
+        self.assertNotIn("abc123", summary)
+        self.assertNotIn("<body>", summary)
+
     def test_summarize_form_includes_option_preview(self):
         form = parse_event_form(FORM_HTML, "https://www.missionchief.com/missionAllianceNew")
 
@@ -370,6 +412,46 @@ class EventManagerFormTests(unittest.TestCase):
 
         self.assertEqual(profile, "bravo")
         self.assertEqual(next_index, 0)
+
+
+class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reverse_address_replaces_payload_address(self):
+        session = FakeSession(FakeResponse("MissionChief Address"))
+        payload = [
+            (LATITUDE_FIELD, "40.729500"),
+            (LONGITUDE_FIELD, "-73.997200"),
+            (ADDRESS_FIELD, "Fallback Address"),
+        ]
+
+        updated = await EventManager._resolve_reverse_address(None, session, "large", payload)
+
+        self.assertIn((ADDRESS_FIELD, "MissionChief Address"), updated)
+        self.assertNotIn((ADDRESS_FIELD, "Fallback Address"), updated)
+        self.assertEqual(session.requests[0][1]["params"], {"latitude": "40.729500", "longitude": "-73.997200"})
+
+    async def test_reverse_address_keeps_payload_when_response_is_empty(self):
+        session = FakeSession(FakeResponse(""))
+        payload = [
+            (LATITUDE_FIELD, "40.729500"),
+            (LONGITUDE_FIELD, "-73.997200"),
+            (ADDRESS_FIELD, "Fallback Address"),
+        ]
+
+        updated = await EventManager._resolve_reverse_address(None, session, "large", payload)
+
+        self.assertIn((ADDRESS_FIELD, "Fallback Address"), updated)
+
+    def test_replace_payload_value_deduplicates_existing_values(self):
+        payload = [(ADDRESS_FIELD, "old"), (ADDRESS_FIELD, "older")]
+
+        self.assertEqual(_replace_payload_value(payload, ADDRESS_FIELD, "new"), [(ADDRESS_FIELD, "new")])
+
+    def test_form_position_params_uses_latitude_and_longitude(self):
+        self.assertEqual(
+            _form_position_params({LATITUDE_FIELD: "40.729500", LONGITUDE_FIELD: "-73.997200"}),
+            {"tlat": "40.729500", "tlng": "-73.997200"},
+        )
+        self.assertEqual(_form_position_params({LATITUDE_FIELD: "40.729500"}), {})
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ from redbot.core.utils.chat_formatting import box
 log = logging.getLogger("red.cog.eventmanager")
 
 BASE_URL = "https://www.missionchief.com"
+REVERSE_ADDRESS_URL = f"{BASE_URL}/reverse_address"
 EVENT_KINDS = {
     "large": {
         "label": "Large scale alliance mission",
@@ -408,6 +409,36 @@ def _append_payload_value(payload: Payload, name: str, value: str):
     payload.append((name, str(value or "")))
 
 
+def _payload_value(payload: Payload, name: str) -> Optional[str]:
+    for key, value in payload:
+        if key == name:
+            return value
+    return None
+
+
+def _replace_payload_value(payload: Payload, name: str, value: str) -> Payload:
+    replaced = False
+    updated: Payload = []
+    for key, current_value in payload:
+        if key == name:
+            if not replaced:
+                updated.append((key, str(value or "")))
+                replaced = True
+            continue
+        updated.append((key, current_value))
+    if not replaced:
+        updated.append((name, str(value or "")))
+    return updated
+
+
+def _form_position_params(fields: Dict[str, str]) -> Dict[str, str]:
+    latitude = fields.get(LATITUDE_FIELD)
+    longitude = fields.get(LONGITUDE_FIELD)
+    if not latitude or not longitude:
+        return {}
+    return {"tlat": latitude, "tlng": longitude}
+
+
 def _normalize_overrides(form: EventForm, overrides: Dict[str, str]) -> Dict[str, str]:
     normalized = {str(key): str(value) for key, value in overrides.items()}
     field_names = {field_info.name for field_info in form.fields}
@@ -488,6 +519,18 @@ def summarize_payload_for_debug(payload: Payload, *, limit: int = 900) -> str:
     parts = [f"{name}={value}" for name, value in payload if name in safe_names]
     summary = "; ".join(parts) if parts else "no safe payload fields"
     return summary[:limit]
+
+
+def summarize_response_for_debug(text: str, *, limit: int = 350) -> str:
+    """Summarize a MissionChief error response without leaking form tokens."""
+    text = re.sub(r"<script\b[^>]*>.*?</script>", " ", str(text or ""), flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<style\b[^>]*>.*?</style>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"authenticity_token[^\s&<>\"]+", "authenticity_token=REDACTED", text, flags=re.IGNORECASE)
+    text = " ".join(text.split())
+    if not text:
+        return ""
+    return text[:limit]
 
 
 def parse_location_value(value: str) -> Tuple[str, str]:
@@ -918,34 +961,64 @@ class EventManager(commands.Cog):
             raise RuntimeError("CookieManager did not return a session.")
         return session
 
-    async def _fetch_form(self, kind: str) -> EventForm:
+    async def _fetch_form(self, kind: str, fields: Optional[Dict[str, str]] = None) -> EventForm:
         kind = normalize_kind(kind)
         page_url = EVENT_KINDS[kind]["url"]
+        params = _form_position_params(fields or {})
         session = await self._get_session()
-        async with session.get(page_url, allow_redirects=True) as response:
+        async with session.get(page_url, allow_redirects=True, params=params or None) as response:
             status = getattr(response, "status", None)
             html = await response.text()
         if status is not None and int(status) >= 400:
             raise RuntimeError(f"MissionChief returned HTTP {status}.")
         return parse_event_form(html, page_url)
 
+    async def _resolve_reverse_address(self, session, kind: str, payload: Payload) -> Payload:
+        """Use MissionChief's marker reverse-address endpoint before submitting the form."""
+        latitude = _payload_value(payload, LATITUDE_FIELD)
+        longitude = _payload_value(payload, LONGITUDE_FIELD)
+        if not latitude or not longitude:
+            return payload
+
+        try:
+            async with session.get(
+                REVERSE_ADDRESS_URL,
+                params={"latitude": latitude, "longitude": longitude},
+                headers={"Referer": EVENT_KINDS[kind]["url"], "X-Requested-With": "XMLHttpRequest"},
+            ) as response:
+                status = getattr(response, "status", None)
+                address = (await response.text()).strip()
+        except Exception:
+            log.exception("EventManager reverse-address lookup failed")
+            return payload
+
+        if status is not None and int(status) >= 400:
+            log.warning("EventManager reverse-address lookup returned HTTP %s", status)
+            return payload
+        if not address:
+            log.warning("EventManager reverse-address lookup returned an empty address")
+            return payload
+        return _replace_payload_value(payload, ADDRESS_FIELD, address)
+
     async def _start_profile_data(self, kind: str, profile_name: str, profile: dict) -> EventStartResult:
         kind = normalize_kind(kind)
         async with self._start_lock:
+            start_fields = profile_fields_for_start(profile)
             try:
-                form = await self._fetch_form(kind)
+                form = await self._fetch_form(kind, start_fields)
             except Exception as exc:
                 return EventStartResult(False, f"Could not fetch form: {exc}")
 
             if form.method != "post":
                 return EventStartResult(False, f"Unexpected form method `{form.method}`.")
 
-            payload = build_payload(form, profile_fields_for_start(profile))
+            session = await self._get_session()
+            payload = build_payload(form, start_fields)
+            payload = await self._resolve_reverse_address(session, kind, payload)
             validation_error = _validate_free_submit(form, payload)
             if validation_error:
                 return EventStartResult(False, validation_error, post_url=form.action)
 
-            session = await self._get_session()
             try:
                 async with session.post(
                     form.action,
@@ -954,16 +1027,24 @@ class EventManager(commands.Cog):
                     headers={"Origin": BASE_URL, "Referer": EVENT_KINDS[kind]["url"]},
                 ) as response:
                     status = getattr(response, "status", None)
-                    await response.text()
+                    response_text = await response.text()
             except Exception as exc:
                 return EventStartResult(False, f"MissionChief POST failed: {exc}", post_url=form.action)
 
         if status is None or int(status) >= 400:
             debug = summarize_payload_for_debug(payload)
-            log.warning("EventManager %s POST failed with HTTP %s. Payload: %s", kind, status, debug)
+            response_debug = summarize_response_for_debug(response_text)
+            log.warning(
+                "EventManager %s POST failed with HTTP %s. Payload: %s. Response: %s",
+                kind,
+                status,
+                debug,
+                response_debug,
+            )
+            response_suffix = f" Response: {response_debug}" if response_debug else ""
             return EventStartResult(
                 False,
-                f"MissionChief returned HTTP {status}. Safe payload: {debug}",
+                f"MissionChief returned HTTP {status}. Safe payload: {debug}{response_suffix}",
                 status=status,
                 post_url=form.action,
             )
@@ -1226,7 +1307,16 @@ class EventManager(commands.Cog):
             random_region = "nyc_or_bermuda" if kind == "event" else "nyc"
             profile = fields_for_selection(kind, options[0].value, random_region=random_region)
 
-        payload = build_payload(form, profile_fields_for_start(profile))
+        try:
+            session = await self._get_session()
+            start_fields = profile_fields_for_start(profile)
+            form = await self._fetch_form(kind, start_fields)
+            payload = build_payload(form, start_fields)
+            payload = await self._resolve_reverse_address(session, kind, payload)
+        except Exception as exc:
+            await ctx.send(f"Could not build debug payload: {exc}")
+            return
+
         summary = "\n".join(
             [
                 f"Kind: {kind}",
