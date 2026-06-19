@@ -46,6 +46,45 @@ RADIO_HTML = """
 </html>
 """
 
+MISSIONCHIEF_LARGE_HTML = """
+<form action="/missionAllianceCreate" method="post">
+  <input name="utf8" type="hidden" value="&#x2713;" />
+  <input name="authenticity_token" type="hidden" value="abc123" />
+  <label><input checked="checked" name="mission_position[mission_type_id]" type="radio" value="41" />Major fire</label>
+  <label><input name="mission_position[mission_type_id]" type="radio" value="61" />Unannounced demonstration</label>
+  <label><input name="mission_position[mission_type_id]" type="radio" value="-1" />Own mission</label>
+  <div id="custom_mission_creator">
+    <input name="mission_position[mission_custom][caption]" type="text" />
+    <input name="mission_position[mission_custom][mission_custom_values][need_lf]" value="0" />
+  </div>
+  <input name="mission_position[latitude]" type="hidden" />
+  <input name="mission_position[longitude]" type="hidden" />
+  <input name="mission_position[size]" type="hidden" value="1" />
+  <input type="submit" name="commit" value="Start 1 mission (Free)" />
+</form>
+"""
+
+MISSIONCHIEF_EVENT_HTML = """
+<form action="/missionAllianceEventCreate" method="post">
+  <input name="utf8" type="hidden" value="&#x2713;" />
+  <input name="authenticity_token" type="hidden" value="abc123" />
+  <input id="event_identifier" name="event_identifier" type="hidden" value="" />
+  <label class="radio">
+    <input type="radio" name="event_radio_group" id="event_0" data-event-id="0" />
+    Storm
+  </label>
+  <label class="radio">
+    <input type="radio" name="event_radio_group" id="event_1" data-event-id="1" />
+    Civil Unrest
+  </label>
+  <input id="hidden_mission_type_id" name="mission_position[mission_type_id]" type="hidden" value="" />
+  <input name="mission_position[latitude]" type="hidden" />
+  <input name="mission_position[longitude]" type="hidden" />
+  <input name="mission_position[duration]" type="hidden" value="3" />
+  <input type="submit" name="commit" value="Start Event ( Free )" />
+</form>
+"""
+
 
 class EventManagerFormTests(unittest.TestCase):
     def test_parse_event_form_extracts_fields_options_and_submit(self):
@@ -104,6 +143,32 @@ class EventManagerFormTests(unittest.TestCase):
             [item for item in payload if item[0] == "event_radio_group"],
             [("event_radio_group", "fire")],
         )
+
+    def test_missionchief_large_form_ignores_custom_missions(self):
+        form = parse_event_form(MISSIONCHIEF_LARGE_HTML, "https://www.missionchief.com/missionAllianceNew")
+
+        field_names = {field.name for field in form.fields}
+        self.assertNotIn("mission_position[mission_custom][caption]", field_names)
+        mission_type = next(field for field in form.fields if field.name == "mission_position[mission_type_id]")
+        self.assertEqual(mission_type.value, "41")
+        self.assertEqual(
+            [(option.value, option.label) for option in mission_type.options],
+            [("41", "Major fire"), ("61", "Unannounced demonstration")],
+        )
+
+    def test_missionchief_event_data_event_id_sets_hidden_mission_type(self):
+        form = parse_event_form(MISSIONCHIEF_EVENT_HTML, "https://www.missionchief.com/missionAllianceEventNew")
+
+        event_group = next(field for field in form.fields if field.name == "event_radio_group")
+        self.assertEqual(
+            [(option.value, option.label) for option in event_group.options],
+            [("0", "Storm"), ("1", "Civil Unrest")],
+        )
+
+        payload = build_payload(form, {"event_radio_group": "1"})
+
+        self.assertIn(("event_radio_group", "1"), payload)
+        self.assertIn(("mission_position[mission_type_id]", "1"), payload)
 
     def test_summarize_form_includes_option_preview(self):
         form = parse_event_form(FORM_HTML, "https://www.missionchief.com/missionAllianceNew")

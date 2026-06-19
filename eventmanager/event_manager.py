@@ -99,6 +99,23 @@ def _text(element) -> str:
     return " ".join(element.get_text(" ", strip=True).split())
 
 
+def _inside_custom_mission_creator(element) -> bool:
+    return element.find_parent(id="custom_mission_creator") is not None
+
+
+def _input_option_label(input_el, fallback: str) -> str:
+    parent_label = input_el.find_parent("label")
+    if parent_label:
+        label = _text(parent_label)
+        if label:
+            return label
+    return input_el.get("title") or input_el.get("aria-label") or fallback
+
+
+def _input_option_value(input_el) -> str:
+    return input_el.get("value") or input_el.get("data-event-id") or ""
+
+
 def parse_event_form(html: str, page_url: str) -> EventForm:
     """Parse the MissionChief alliance mission/event form."""
     soup = BeautifulSoup(html, "html.parser")
@@ -121,6 +138,8 @@ def parse_event_form(html: str, page_url: str) -> EventForm:
 
     grouped_inputs: Dict[str, List] = {}
     for input_el in form.find_all("input"):
+        if _inside_custom_mission_creator(input_el):
+            continue
         name = input_el.get("name")
         field_type = (input_el.get("type") or "text").lower()
         if field_type in {"button", "image", "reset"}:
@@ -150,16 +169,21 @@ def parse_event_form(html: str, page_url: str) -> EventForm:
         selected_values: List[str] = []
         field_type = (input_group[0].get("type") or "").lower()
         for index, input_el in enumerate(input_group, start=1):
-            value = input_el.get("value") or ""
+            value = _input_option_value(input_el)
+            if name == "mission_position[mission_type_id]" and value == "-1":
+                continue
             option = FormOption(
                 value=value,
-                label=input_el.get("title") or input_el.get("aria-label") or f"option {index}",
+                label=_input_option_label(input_el, f"option {index}"),
                 selected=input_el.has_attr("checked"),
                 field_type=field_type,
             )
             options.append(option)
             if option.selected:
                 selected_values.append(value)
+
+        if not options:
+            continue
 
         if field_type == "radio":
             field_value = selected_values[0] if selected_values else ""
@@ -178,6 +202,8 @@ def parse_event_form(html: str, page_url: str) -> EventForm:
         )
 
     for select_el in form.find_all("select"):
+        if _inside_custom_mission_creator(select_el):
+            continue
         name = select_el.get("name")
         if not name:
             continue
@@ -205,6 +231,8 @@ def parse_event_form(html: str, page_url: str) -> EventForm:
         )
 
     for textarea in form.find_all("textarea"):
+        if _inside_custom_mission_creator(textarea):
+            continue
         name = textarea.get("name")
         if not name:
             continue
@@ -230,8 +258,24 @@ def _append_payload_value(payload: Payload, name: str, value: str):
     payload.append((name, str(value or "")))
 
 
+def _normalize_overrides(form: EventForm, overrides: Dict[str, str]) -> Dict[str, str]:
+    normalized = {str(key): str(value) for key, value in overrides.items()}
+    field_names = {field_info.name for field_info in form.fields}
+    mission_type_name = "mission_position[mission_type_id]"
+    event_radio_name = "event_radio_group"
+
+    if event_radio_name in field_names:
+        if event_radio_name in normalized and mission_type_name not in normalized:
+            normalized[mission_type_name] = normalized[event_radio_name]
+        elif mission_type_name in normalized and event_radio_name not in normalized:
+            normalized[event_radio_name] = normalized[mission_type_name]
+
+    return normalized
+
+
 def build_payload(form: EventForm, overrides: Dict[str, str]) -> Payload:
     """Build a POST payload from form defaults plus configured overrides."""
+    overrides = _normalize_overrides(form, overrides)
     payload: Payload = []
     used_names = set()
     for field_info in form.fields:
