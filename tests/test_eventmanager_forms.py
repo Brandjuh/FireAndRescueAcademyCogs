@@ -1,13 +1,23 @@
 import unittest
+import random
 
 from eventmanager.event_manager import (
     build_payload,
+    fields_for_selection,
+    field_options_for_kind,
     normalize_kind,
+    normalize_random_location_region,
     parse_event_form,
+    parse_location_or_random_region,
+    parse_location_value,
     parse_profile_names,
+    profile_fields_for_start,
+    profile_name_from_label,
+    random_location_for_region,
     select_scheduled_profile,
     summarize_form,
     valid_time,
+    _validate_free_submit,
 )
 
 
@@ -81,7 +91,23 @@ MISSIONCHIEF_EVENT_HTML = """
   <input name="mission_position[latitude]" type="hidden" />
   <input name="mission_position[longitude]" type="hidden" />
   <input name="mission_position[duration]" type="hidden" value="3" />
+  <input type="checkbox" name="event_precondition_0_fire_investigation_count" value="" checked />
   <input type="submit" name="commit" value="Start Event ( Free )" />
+</form>
+"""
+
+DISABLED_FREE_SUBMIT_HTML = """
+<form action="/missionAllianceCreate" method="post">
+  <input name="authenticity_token" type="hidden" value="abc123" />
+  <input type="submit" name="commit" value="Start 1 mission (Free)" disabled />
+  <input type="submit" name="commit" value="Start 1 mission (10 Coins)" />
+</form>
+"""
+
+BUTTON_SUBMIT_HTML = """
+<form action="/missionAllianceEventCreate" method="post">
+  <input name="authenticity_token" type="hidden" value="abc123" />
+  <button type="submit" name="commit">Start Event ( Free )</button>
 </form>
 """
 
@@ -169,6 +195,117 @@ class EventManagerFormTests(unittest.TestCase):
 
         self.assertIn(("event_radio_group", "1"), payload)
         self.assertIn(("mission_position[mission_type_id]", "1"), payload)
+
+    def test_event_payload_applies_standard_area_shape_and_call_volume(self):
+        form = parse_event_form(MISSIONCHIEF_EVENT_HTML, "https://www.missionchief.com/missionAllianceEventNew")
+
+        payload = dict(build_payload(form, {"event_radio_group": "1"}))
+
+        self.assertEqual(payload["mission_position[size]"], "2")
+        self.assertEqual(payload["mission_position[shape]"], "circle")
+        self.assertEqual(payload["mission_position[amount]"], "0")
+
+    def test_event_payload_preserves_extension_precondition_defaults(self):
+        form = parse_event_form(MISSIONCHIEF_EVENT_HTML, "https://www.missionchief.com/missionAllianceEventNew")
+
+        payload = build_payload(form, {"event_radio_group": "1"})
+
+        self.assertIn(("event_precondition_0_fire_investigation_count", ""), payload)
+
+    def test_free_submit_validation_rejects_coin_button(self):
+        form = parse_event_form(MISSIONCHIEF_LARGE_HTML, "https://www.missionchief.com/missionAllianceNew")
+        form.submit_value = "Start 1 mission (10 Coins)"
+
+        payload = build_payload(form, {})
+
+        self.assertIn("non-free", _validate_free_submit(form, payload))
+
+    def test_free_submit_validation_rejects_nonzero_coins(self):
+        form = parse_event_form(MISSIONCHIEF_LARGE_HTML, "https://www.missionchief.com/missionAllianceNew")
+
+        payload = build_payload(form, {"mission_position[coins]": "10"})
+
+        self.assertIn("spend coins", _validate_free_submit(form, payload))
+
+    def test_disabled_free_submit_is_not_used(self):
+        form = parse_event_form(DISABLED_FREE_SUBMIT_HTML, "https://www.missionchief.com/missionAllianceNew")
+
+        payload = build_payload(form, {})
+
+        self.assertEqual(form.submit_value, "Start 1 mission (10 Coins)")
+        self.assertIn("non-free", _validate_free_submit(form, payload))
+
+    def test_button_submit_is_supported(self):
+        form = parse_event_form(BUTTON_SUBMIT_HTML, "https://www.missionchief.com/missionAllianceEventNew")
+
+        payload = build_payload(form, {})
+
+        self.assertEqual(form.submit_name, "commit")
+        self.assertEqual(form.submit_value, "Start Event ( Free )")
+        self.assertIn(("commit", "Start Event ( Free )"), payload)
+
+    def test_parse_location_value_accepts_latitude_longitude_only(self):
+        self.assertEqual(parse_location_value("40.7128, -74.0060"), ("40.7128", "-74.006"))
+        with self.assertRaises(ValueError):
+            parse_location_value("New York")
+
+    def test_parse_location_or_random_region_accepts_regions(self):
+        self.assertEqual(parse_location_or_random_region("nyc"), (None, None, "nyc"))
+        self.assertEqual(parse_location_or_random_region("40.1, -73.9"), ("40.1", "-73.9", None))
+        self.assertEqual(normalize_random_location_region("Bermuda Islands"), "bermuda")
+
+    def test_random_location_for_region_returns_supported_coordinates(self):
+        latitude, longitude, region = random_location_for_region("nyc_or_bermuda", rng=random.Random(1))
+
+        self.assertIn(region, {"nyc", "bermuda"})
+        self.assertTrue(-90 <= float(latitude) <= 90)
+        self.assertTrue(-180 <= float(longitude) <= 180)
+
+    def test_profile_fields_for_start_resolves_random_location_and_removes_address(self):
+        fields = profile_fields_for_start(
+            {
+                "random_location": "nyc",
+                "fields": {
+                    "mission_position[address]": "old address",
+                    "mission_position[mission_type_id]": "41",
+                },
+            },
+            rng=random.Random(2),
+        )
+
+        self.assertNotIn("mission_position[address]", fields)
+        self.assertEqual(fields["mission_position[mission_type_id]"], "41")
+        self.assertIn("mission_position[latitude]", fields)
+        self.assertIn("mission_position[longitude]", fields)
+
+    def test_profile_name_from_label_is_stable(self):
+        self.assertEqual(profile_name_from_label("Major fire", prefix="large_"), "large_major_fire")
+        self.assertEqual(profile_name_from_label("Storm Surge"), "storm_surge")
+
+    def test_field_options_for_kind_reads_large_and_event_options(self):
+        large_form = parse_event_form(MISSIONCHIEF_LARGE_HTML, "https://www.missionchief.com/missionAllianceNew")
+        event_form = parse_event_form(MISSIONCHIEF_EVENT_HTML, "https://www.missionchief.com/missionAllianceEventNew")
+
+        self.assertEqual([option.label for option in field_options_for_kind(large_form, "large")], ["Major fire", "Unannounced demonstration"])
+        self.assertEqual([option.label for option in field_options_for_kind(event_form, "event")], ["Storm", "Civil Unrest"])
+
+    def test_fields_for_selection_applies_event_defaults_and_random_region(self):
+        profile = fields_for_selection("event", "1", random_region="nyc_or_bermuda")
+
+        self.assertEqual(profile["random_location"], "nyc_or_bermuda")
+        self.assertEqual(profile["fields"]["event_radio_group"], "1")
+        self.assertEqual(profile["fields"]["mission_position[mission_type_id]"], "1")
+        self.assertEqual(profile["fields"]["mission_position[size]"], "2")
+        self.assertEqual(profile["fields"]["mission_position[shape]"], "circle")
+        self.assertEqual(profile["fields"]["mission_position[amount]"], "0")
+
+    def test_fields_for_selection_accepts_manual_large_coordinates(self):
+        profile = fields_for_selection("large", "41", latitude="40.1", longitude="-73.9")
+
+        self.assertNotIn("random_location", profile)
+        self.assertEqual(profile["fields"]["mission_position[mission_type_id]"], "41")
+        self.assertEqual(profile["fields"]["mission_position[latitude]"], "40.1")
+        self.assertEqual(profile["fields"]["mission_position[longitude]"], "-73.9")
 
     def test_summarize_form_includes_option_preview(self):
         form = parse_event_form(FORM_HTML, "https://www.missionchief.com/missionAllianceNew")

@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import random
+import re
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
@@ -30,6 +33,8 @@ EVENT_KINDS = {
     },
 }
 DEFAULT_TIMEZONE = "America/New_York"
+DEFAULT_PANEL_CHANNEL_ID = 1426226521231589507
+PANEL_TITLE = "EventManager Control Panel"
 WEEKDAYS = {
     "monday": 0,
     "tuesday": 1,
@@ -77,6 +82,58 @@ class EventStartResult:
 
 
 Payload = List[Tuple[str, str]]
+LATITUDE_FIELD = "mission_position[latitude]"
+LONGITUDE_FIELD = "mission_position[longitude]"
+ADDRESS_FIELD = "mission_position[address]"
+COINS_FIELD = "mission_position[coins]"
+MISSION_TYPE_FIELD = "mission_position[mission_type_id]"
+EVENT_RADIO_FIELD = "event_radio_group"
+SIZE_FIELD = "mission_position[size]"
+SHAPE_FIELD = "mission_position[shape]"
+AMOUNT_FIELD = "mission_position[amount]"
+EVENT_DEFAULT_OVERRIDES = {
+    SIZE_FIELD: "2",
+    SHAPE_FIELD: "circle",
+    AMOUNT_FIELD: "0",
+}
+RANDOM_LOCATION_KEY = "random_location"
+RANDOM_LOCATION_ANCHORS = {
+    "nyc": [
+        (40.7580, -73.9855),
+        (40.7829, -73.9654),
+        (40.7128, -74.0060),
+        (40.6782, -73.9442),
+        (40.7282, -73.7949),
+        (40.8448, -73.8648),
+        (40.5795, -74.1502),
+    ],
+    "bermuda": [
+        (32.2948, -64.7814),
+        (32.3818, -64.6781),
+        (32.3000, -64.8670),
+        (32.3630, -64.7040),
+    ],
+}
+RANDOM_LOCATION_ALIASES = {
+    "newyork": "nyc",
+    "new_york": "nyc",
+    "new-york": "nyc",
+    "new york": "nyc",
+    "new york city": "nyc",
+    "bermuda islands": "bermuda",
+    "bermuda_islands": "bermuda",
+    "bermuda-islands": "bermuda",
+    "nyc_or_bermuda": "nyc_or_bermuda",
+    "nyc-or-bermuda": "nyc_or_bermuda",
+    "nyc/bermuda": "nyc_or_bermuda",
+    "both": "nyc_or_bermuda",
+}
+RANDOM_LOCATION_JITTER = 0.006
+CUSTOM_LOCATION_LABELS = {
+    "nyc": "Random New York City",
+    "bermuda": "Random Bermuda",
+    "nyc_or_bermuda": "Random NYC or Bermuda",
+}
 
 
 def normalize_kind(kind: str) -> str:
@@ -116,6 +173,92 @@ def _input_option_value(input_el) -> str:
     return input_el.get("value") or input_el.get("data-event-id") or ""
 
 
+def _submit_button_value(button_el) -> str:
+    return button_el.get("value") or _text(button_el)
+
+
+def profile_name_from_label(label: str, prefix: str = "") -> str:
+    """Create a stable profile name from a MissionChief option label."""
+    name = re.sub(r"[^a-z0-9]+", "_", (label or "").strip().lower()).strip("_")
+    if not name:
+        name = "profile"
+    return f"{prefix}{name}"
+
+
+def normalize_random_location_region(region: str) -> str:
+    """Normalize configured random location regions."""
+    normalized = " ".join(str(region or "").strip().lower().replace("_", " ").replace("-", " ").split())
+    normalized = RANDOM_LOCATION_ALIASES.get(normalized, normalized)
+    normalized = normalized.replace(" ", "_")
+    if normalized not in {"nyc", "bermuda", "nyc_or_bermuda"}:
+        raise ValueError("Random location must be `nyc`, `bermuda`, or `nyc_or_bermuda`.")
+    return normalized
+
+
+def random_location_for_region(region: str, *, rng=None) -> Tuple[str, str, str]:
+    """Return latitude, longitude, and the concrete region used for a random start location."""
+    rng = rng or random
+    normalized = normalize_random_location_region(region)
+    concrete_region = rng.choice(["nyc", "bermuda"]) if normalized == "nyc_or_bermuda" else normalized
+    latitude, longitude = rng.choice(RANDOM_LOCATION_ANCHORS[concrete_region])
+    latitude += rng.uniform(-RANDOM_LOCATION_JITTER, RANDOM_LOCATION_JITTER)
+    longitude += rng.uniform(-RANDOM_LOCATION_JITTER, RANDOM_LOCATION_JITTER)
+    return f"{latitude:.6f}", f"{longitude:.6f}", concrete_region
+
+
+def profile_fields_for_start(profile: dict, *, rng=None) -> Dict[str, str]:
+    """Resolve runtime-only profile options into MissionChief form fields."""
+    fields = dict(profile.get("fields", {}))
+    random_region = profile.get(RANDOM_LOCATION_KEY)
+    if random_region:
+        latitude, longitude, _region = random_location_for_region(random_region, rng=rng)
+        fields[LATITUDE_FIELD] = latitude
+        fields[LONGITUDE_FIELD] = longitude
+        fields.pop(ADDRESS_FIELD, None)
+    return fields
+
+
+def field_options_for_kind(form: EventForm, kind: str) -> List[FormOption]:
+    """Return the user-selectable MissionChief type options for an event kind."""
+    kind = normalize_kind(kind)
+    field_name = EVENT_RADIO_FIELD if kind == "event" else MISSION_TYPE_FIELD
+    field_info = next((field for field in form.fields if field.name == field_name), None)
+    if not field_info:
+        return []
+    return field_info.options
+
+
+def truncate_discord_text(value: str, limit: int) -> str:
+    """Trim text to a Discord component limit."""
+    value = str(value or "")
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 1)] + "…"
+
+
+def fields_for_selection(
+    kind: str,
+    selected_value: str,
+    *,
+    random_region: Optional[str] = None,
+    latitude: Optional[str] = None,
+    longitude: Optional[str] = None,
+) -> dict:
+    """Build profile-like fields for a one-off panel start."""
+    kind = normalize_kind(kind)
+    profile: Dict[str, Any] = {"fields": {MISSION_TYPE_FIELD: selected_value}}
+    if kind == "event":
+        profile["fields"][EVENT_RADIO_FIELD] = selected_value
+        profile["fields"].update(EVENT_DEFAULT_OVERRIDES)
+
+    if random_region:
+        profile[RANDOM_LOCATION_KEY] = normalize_random_location_region(random_region)
+    elif latitude is not None and longitude is not None:
+        profile["fields"][LATITUDE_FIELD] = latitude
+        profile["fields"][LONGITUDE_FIELD] = longitude
+    return profile
+
+
 def parse_event_form(html: str, page_url: str) -> EventForm:
     """Parse the MissionChief alliance mission/event form."""
     soup = BeautifulSoup(html, "html.parser")
@@ -145,7 +288,7 @@ def parse_event_form(html: str, page_url: str) -> EventForm:
         if field_type in {"button", "image", "reset"}:
             continue
         if field_type == "submit":
-            if name and submit_name is None:
+            if name and submit_name is None and not input_el.has_attr("disabled"):
                 submit_name = name
                 submit_value = input_el.get("value") or ""
             continue
@@ -245,6 +388,17 @@ def parse_event_form(html: str, page_url: str) -> EventForm:
             )
         )
 
+    for button_el in form.find_all("button"):
+        if _inside_custom_mission_creator(button_el):
+            continue
+        button_type = (button_el.get("type") or "submit").lower()
+        if button_type != "submit" or button_el.has_attr("disabled"):
+            continue
+        name = button_el.get("name")
+        if name and submit_name is None:
+            submit_name = name
+            submit_value = _submit_button_value(button_el)
+
     return EventForm(
         action=urljoin(page_url, action),
         method=method,
@@ -261,16 +415,29 @@ def _append_payload_value(payload: Payload, name: str, value: str):
 def _normalize_overrides(form: EventForm, overrides: Dict[str, str]) -> Dict[str, str]:
     normalized = {str(key): str(value) for key, value in overrides.items()}
     field_names = {field_info.name for field_info in form.fields}
-    mission_type_name = "mission_position[mission_type_id]"
-    event_radio_name = "event_radio_group"
 
-    if event_radio_name in field_names:
-        if event_radio_name in normalized and mission_type_name not in normalized:
-            normalized[mission_type_name] = normalized[event_radio_name]
-        elif mission_type_name in normalized and event_radio_name not in normalized:
-            normalized[event_radio_name] = normalized[mission_type_name]
+    if EVENT_RADIO_FIELD in field_names:
+        for key, value in EVENT_DEFAULT_OVERRIDES.items():
+            normalized.setdefault(key, value)
+        if EVENT_RADIO_FIELD in normalized and MISSION_TYPE_FIELD not in normalized:
+            normalized[MISSION_TYPE_FIELD] = normalized[EVENT_RADIO_FIELD]
+        elif MISSION_TYPE_FIELD in normalized and EVENT_RADIO_FIELD not in normalized:
+            normalized[EVENT_RADIO_FIELD] = normalized[MISSION_TYPE_FIELD]
 
     return normalized
+
+
+def _validate_free_submit(form: EventForm, payload: Payload) -> Optional[str]:
+    submit_text = (form.submit_value or "").lower()
+    if "free" not in submit_text:
+        return f"Refusing to submit non-free action `{form.submit_value or 'unknown'}`."
+
+    for name, value in payload:
+        if name == COINS_FIELD and str(value or "0") not in {"", "0"}:
+            return "Refusing to submit a payload that would spend coins."
+        if name == "commit" and "coin" in str(value).lower():
+            return f"Refusing to submit coin action `{value}`."
+    return None
 
 
 def build_payload(form: EventForm, overrides: Dict[str, str]) -> Payload:
@@ -283,11 +450,7 @@ def build_payload(form: EventForm, overrides: Dict[str, str]) -> Payload:
         value = str(overrides[field_info.name] if override_present else field_info.value or "")
 
         if field_info.field_type == "checkbox":
-            selected_values = {
-                item.strip()
-                for item in value.split(",")
-                if item.strip()
-            }
+            selected_values = {item.strip() for item in value.split(",")}
             for option in field_info.options:
                 if option.value in selected_values:
                     _append_payload_value(payload, field_info.name, option.value)
@@ -305,6 +468,32 @@ def build_payload(form: EventForm, overrides: Dict[str, str]) -> Payload:
     if form.submit_name and form.submit_name not in used_names and not any(name == form.submit_name for name, _ in payload):
         _append_payload_value(payload, form.submit_name, form.submit_value or "")
     return payload
+
+
+def parse_location_value(value: str) -> Tuple[str, str]:
+    """Parse `lat, lon` input for profile location shortcuts."""
+    parts = [part.strip() for part in (value or "").replace(";", ",").split(",")]
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError("Location must be formatted as `latitude, longitude`.")
+    try:
+        latitude = float(parts[0])
+        longitude = float(parts[1])
+    except ValueError as exc:
+        raise ValueError("Location must contain numeric latitude and longitude.") from exc
+    if not -90 <= latitude <= 90:
+        raise ValueError("Latitude must be between -90 and 90.")
+    if not -180 <= longitude <= 180:
+        raise ValueError("Longitude must be between -180 and 180.")
+    return str(latitude), str(longitude)
+
+
+def parse_location_or_random_region(value: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Parse coordinates or a random-location region."""
+    try:
+        latitude, longitude = parse_location_value(value)
+    except ValueError:
+        return None, None, normalize_random_location_region(value)
+    return latitude, longitude, None
 
 
 def summarize_form(form: EventForm, *, limit: int = 15) -> str:
@@ -372,6 +561,259 @@ def select_scheduled_profile(schedule: dict) -> Tuple[Optional[str], int]:
     return profile, next_index
 
 
+class EventManagerPanelView(discord.ui.View):
+    """Persistent admin entry point for EventManager."""
+
+    def __init__(self, cog: "EventManager"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    async def _require_admin(self, interaction: discord.Interaction) -> bool:
+        if await self.cog.can_manage(interaction):
+            return True
+        await interaction.response.send_message("You do not have permission to use EventManager.", ephemeral=True)
+        return False
+
+    async def _quick_start(self, interaction: discord.Interaction, kind: str):
+        if not await self._require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        result = await self.cog.start_quick(kind)
+        if result.ok:
+            await interaction.followup.send(f"Started {EVENT_KINDS[kind]['label']} with quick settings.", ephemeral=True)
+        else:
+            await interaction.followup.send(f"Could not start {EVENT_KINDS[kind]['label']}: {result.reason}", ephemeral=True)
+
+    async def _custom_start(self, interaction: discord.Interaction, kind: str):
+        if not await self._require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            view = await self.cog.build_custom_start_view(kind)
+        except Exception as exc:
+            await interaction.followup.send(f"Could not load MissionChief options: {exc}", ephemeral=True)
+            return
+        await interaction.followup.send(embed=view.build_embed(), view=view, ephemeral=True)
+
+    @discord.ui.button(
+        label="Alliance Event (Quick)",
+        style=discord.ButtonStyle.success,
+        custom_id="eventmanager:quick:event",
+        row=0,
+    )
+    async def event_quick(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._quick_start(interaction, "event")
+
+    @discord.ui.button(
+        label="Alliance Event (Custom)",
+        style=discord.ButtonStyle.primary,
+        custom_id="eventmanager:custom:event",
+        row=0,
+    )
+    async def event_custom(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._custom_start(interaction, "event")
+
+    @discord.ui.button(
+        label="Large Scale Mission (Quick)",
+        style=discord.ButtonStyle.success,
+        custom_id="eventmanager:quick:large",
+        row=1,
+    )
+    async def large_quick(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._quick_start(interaction, "large")
+
+    @discord.ui.button(
+        label="Large Scale Mission (Custom)",
+        style=discord.ButtonStyle.primary,
+        custom_id="eventmanager:custom:large",
+        row=1,
+    )
+    async def large_custom(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._custom_start(interaction, "large")
+
+
+class CustomTypeSelect(discord.ui.Select):
+    """Select the MissionChief event or mission type for a custom start."""
+
+    def __init__(self, parent: "CustomStartView"):
+        self.parent_view = parent
+        options = [
+            discord.SelectOption(
+                label=truncate_discord_text(option.label, 100),
+                value=option.value,
+                default=option.value == parent.selected_value,
+            )
+            for option in parent.options[:25]
+        ]
+        super().__init__(
+            placeholder="Choose MissionChief type",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.parent_view.selected_value = self.values[0]
+        await interaction.response.edit_message(embed=self.parent_view.build_embed(), view=self.parent_view.rebuild())
+
+
+class CustomLocationSelect(discord.ui.Select):
+    """Select how the custom start location should be chosen."""
+
+    def __init__(self, parent: "CustomStartView"):
+        self.parent_view = parent
+        allowed_regions = ["nyc", "bermuda", "nyc_or_bermuda"] if parent.kind == "event" else ["nyc"]
+        options = [
+            discord.SelectOption(
+                label=CUSTOM_LOCATION_LABELS[region],
+                value=f"random:{region}",
+                default=parent.random_region == region,
+            )
+            for region in allowed_regions
+        ]
+        if parent.latitude and parent.longitude:
+            options.append(
+                discord.SelectOption(
+                    label="Manual coordinates",
+                    value="manual",
+                    description=f"{parent.latitude}, {parent.longitude}",
+                    default=not parent.random_region,
+                )
+            )
+        super().__init__(
+            placeholder="Choose location",
+            min_values=1,
+            max_values=1,
+            options=options[:25],
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        value = self.values[0]
+        if value.startswith("random:"):
+            self.parent_view.random_region = value.split(":", 1)[1]
+            self.parent_view.latitude = None
+            self.parent_view.longitude = None
+        await interaction.response.edit_message(embed=self.parent_view.build_embed(), view=self.parent_view.rebuild())
+
+
+class CustomLocationModal(discord.ui.Modal, title="Custom start location"):
+    """Modal for manual latitude/longitude input."""
+
+    location = discord.ui.TextInput(
+        label="Latitude, longitude",
+        placeholder="Example: 40.7295, -73.9972",
+        required=True,
+        max_length=60,
+    )
+
+    def __init__(self, parent: "CustomStartView"):
+        super().__init__()
+        self.parent_view = parent
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            latitude, longitude = parse_location_value(str(self.location.value))
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        self.parent_view.latitude = latitude
+        self.parent_view.longitude = longitude
+        self.parent_view.random_region = None
+        await interaction.response.send_message(
+            f"Location set to `{latitude}, {longitude}`. Return to the custom start message and press Start.",
+            ephemeral=True,
+        )
+
+
+class CustomStartView(discord.ui.View):
+    """Transient private flow for one custom MissionChief start."""
+
+    def __init__(self, cog: "EventManager", kind: str, options: List[FormOption]):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.kind = normalize_kind(kind)
+        self.options = options
+        self.selected_value = options[0].value if options else ""
+        self.random_region = "nyc_or_bermuda" if self.kind == "event" else "nyc"
+        self.latitude: Optional[str] = None
+        self.longitude: Optional[str] = None
+        self.rebuild()
+
+    def selected_label(self) -> str:
+        selected = next((option for option in self.options if option.value == self.selected_value), None)
+        return selected.label if selected else self.selected_value or "None"
+
+    def location_label(self) -> str:
+        if self.random_region:
+            return CUSTOM_LOCATION_LABELS.get(self.random_region, self.random_region)
+        if self.latitude and self.longitude:
+            return f"{self.latitude}, {self.longitude}"
+        return "Not configured"
+
+    def rebuild(self):
+        self.clear_items()
+        if self.options:
+            self.add_item(CustomTypeSelect(self))
+        self.add_item(CustomLocationSelect(self))
+        self.add_item(CustomLocationButton(self))
+        self.add_item(CustomStartButton(self))
+        return self
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"Custom {EVENT_KINDS[self.kind]['label']}",
+            description="Choose the MissionChief option and location, then press Start.",
+            color=discord.Color.blue(),
+        )
+        embed.add_field(name="Selected type", value=self.selected_label(), inline=False)
+        embed.add_field(name="Location", value=self.location_label(), inline=False)
+        if self.kind == "event":
+            embed.add_field(name="Defaults", value="Large area • Circle • Every 30 seconds", inline=False)
+        return embed
+
+    async def start(self, interaction: discord.Interaction):
+        if not await self.cog.can_manage(interaction):
+            await interaction.response.send_message("You do not have permission to use EventManager.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        profile = fields_for_selection(
+            self.kind,
+            self.selected_value,
+            random_region=self.random_region,
+            latitude=self.latitude,
+            longitude=self.longitude,
+        )
+        result = await self.cog.start_one_off(self.kind, profile, f"custom:{self.selected_label()}")
+        if result.ok:
+            await interaction.followup.send(f"Started {EVENT_KINDS[self.kind]['label']}: {self.selected_label()}", ephemeral=True)
+        else:
+            await interaction.followup.send(f"Could not start {EVENT_KINDS[self.kind]['label']}: {result.reason}", ephemeral=True)
+
+
+class CustomLocationButton(discord.ui.Button):
+    """Open the manual coordinate modal."""
+
+    def __init__(self, parent: CustomStartView):
+        super().__init__(label="Use Coordinates", style=discord.ButtonStyle.secondary, row=2)
+        self.parent_view = parent
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(CustomLocationModal(self.parent_view))
+
+
+class CustomStartButton(discord.ui.Button):
+    """Start the selected custom item."""
+
+    def __init__(self, parent: CustomStartView):
+        super().__init__(label="Start", style=discord.ButtonStyle.success, row=2)
+        self.parent_view = parent
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.parent_view.start(interaction)
+
+
 class EventManager(commands.Cog):
     """Start and schedule MissionChief alliance missions and alliance events."""
 
@@ -402,16 +844,23 @@ class EventManager(commands.Cog):
             },
             last_runs={},
             log_channel_id=None,
+            panel_channel_id=DEFAULT_PANEL_CHANNEL_ID,
+            panel_message_id=None,
         )
         self._task: Optional[asyncio.Task] = None
+        self._panel_task: Optional[asyncio.Task] = None
         self._start_lock = asyncio.Lock()
 
     async def cog_load(self):
+        self.bot.add_view(EventManagerPanelView(self))
         self._task = asyncio.create_task(self._scheduler_loop())
+        self._panel_task = asyncio.create_task(self._ensure_panels_after_ready())
 
     async def cog_unload(self):
         if self._task:
             self._task.cancel()
+        if self._panel_task:
+            self._panel_task.cancel()
 
     async def _scheduler_loop(self):
         await self.bot.wait_until_ready()
@@ -450,14 +899,8 @@ class EventManager(commands.Cog):
             raise RuntimeError(f"MissionChief returned HTTP {status}.")
         return parse_event_form(html, page_url)
 
-    async def _start_from_profile(self, kind: str, profile_name: str) -> EventStartResult:
+    async def _start_profile_data(self, kind: str, profile_name: str, profile: dict) -> EventStartResult:
         kind = normalize_kind(kind)
-        profile_name = profile_name.strip().lower()
-        profiles = await self.config.profiles()
-        profile = profiles.get(kind, {}).get(profile_name)
-        if not profile:
-            return EventStartResult(False, f"Profile `{profile_name}` was not found.")
-
         async with self._start_lock:
             try:
                 form = await self._fetch_form(kind)
@@ -467,7 +910,11 @@ class EventManager(commands.Cog):
             if form.method != "post":
                 return EventStartResult(False, f"Unexpected form method `{form.method}`.")
 
-            payload = build_payload(form, profile.get("fields", {}))
+            payload = build_payload(form, profile_fields_for_start(profile))
+            validation_error = _validate_free_submit(form, payload)
+            if validation_error:
+                return EventStartResult(False, validation_error, post_url=form.action)
+
             session = await self._get_session()
             try:
                 async with session.post(form.action, data=payload, allow_redirects=True) as response:
@@ -481,6 +928,139 @@ class EventManager(commands.Cog):
 
         await self._log_run(kind, profile_name, status)
         return EventStartResult(True, "Started successfully.", status=status, post_url=form.action)
+
+    async def _start_from_profile(self, kind: str, profile_name: str) -> EventStartResult:
+        kind = normalize_kind(kind)
+        profile_name = profile_name.strip().lower()
+        profiles = await self.config.profiles()
+        profile = profiles.get(kind, {}).get(profile_name)
+        if not profile:
+            return EventStartResult(False, f"Profile `{profile_name}` was not found.")
+        return await self._start_profile_data(kind, profile_name, profile)
+
+    async def start_one_off(self, kind: str, profile: dict, label: str) -> EventStartResult:
+        """Start an item from an in-memory profile."""
+        return await self._start_profile_data(kind, label, profile)
+
+    async def start_quick(self, kind: str) -> EventStartResult:
+        """Start using configured rotation when available, otherwise fall back to live defaults."""
+        kind = normalize_kind(kind)
+        profiles = await self.config.profiles()
+        schedules = await self.config.schedules()
+        schedule = schedules.get(kind, {})
+        profile_name, next_rotation_index = select_scheduled_profile(schedule)
+        if profile_name and profile_name in profiles.get(kind, {}):
+            result = await self._start_from_profile(kind, profile_name)
+            if result.ok:
+                async with self.config.schedules() as saved_schedules:
+                    saved_schedules[kind]["profile"] = profile_name
+                    saved_schedules[kind]["rotation_index"] = next_rotation_index
+            return result
+
+        form = await self._fetch_form(kind)
+        options = field_options_for_kind(form, kind)
+        if not options:
+            return EventStartResult(False, "No MissionChief options were found on the live form.")
+        random_region = "nyc_or_bermuda" if kind == "event" else "nyc"
+        profile = fields_for_selection(kind, options[0].value, random_region=random_region)
+        return await self._start_profile_data(kind, f"quick:{options[0].label}", profile)
+
+    async def build_custom_start_view(self, kind: str) -> CustomStartView:
+        """Build a custom start view from the live MissionChief form."""
+        kind = normalize_kind(kind)
+        form = await self._fetch_form(kind)
+        options = field_options_for_kind(form, kind)
+        if not options:
+            raise RuntimeError("No selectable MissionChief options were found.")
+        return CustomStartView(self, kind, options)
+
+    async def can_manage(self, interaction: discord.Interaction) -> bool:
+        """Check if an interaction user can use EventManager."""
+        guild = interaction.guild
+        user = interaction.user
+        if guild is None or not isinstance(user, discord.Member):
+            return False
+        if user.guild_permissions.administrator:
+            return True
+        is_admin = getattr(self.bot, "is_admin", None)
+        if is_admin:
+            with suppress(Exception):
+                return bool(await is_admin(user))
+        return False
+
+    async def _ensure_panels_after_ready(self):
+        await self.bot.wait_until_ready()
+        for guild in self.bot.guilds:
+            with suppress(Exception):
+                await self.ensure_panel_message(guild, create=True)
+
+    async def panel_channel(self, guild: discord.Guild):
+        channel_id = int(await self.config.panel_channel_id() or DEFAULT_PANEL_CHANNEL_ID)
+        return guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
+
+    def is_panel_message(self, message: discord.Message) -> bool:
+        bot_user_id = getattr(getattr(self.bot, "user", None), "id", None)
+        if bot_user_id and getattr(getattr(message, "author", None), "id", None) != bot_user_id:
+            return False
+        for embed in getattr(message, "embeds", []) or []:
+            if getattr(embed, "title", None) == PANEL_TITLE:
+                return True
+        return False
+
+    async def build_panel_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title=PANEL_TITLE,
+            description=(
+                "Start free MissionChief alliance missions and events.\n\n"
+                "Quick uses configured/default settings. Custom lets admins choose the live MissionChief option "
+                "and location before starting."
+            ),
+            color=discord.Color.orange(),
+        )
+        embed.add_field(name="Safety", value="Free starts only. Coin actions are refused.", inline=False)
+        embed.add_field(name="Visibility", value="Button actions are private to the admin using them.", inline=False)
+        return embed
+
+    async def find_existing_panel_message(self, channel: Any):
+        history = getattr(channel, "history", None)
+        if not history:
+            return None
+        found = []
+        with suppress(discord.Forbidden, discord.HTTPException):
+            async for message in channel.history(limit=50):
+                if self.is_panel_message(message):
+                    found.append(message)
+        if not found:
+            return None
+        keep = found[0]
+        for duplicate in found[1:]:
+            with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                await duplicate.delete()
+        return keep
+
+    async def ensure_panel_message(self, guild: discord.Guild, *, create: bool = True):
+        channel = await self.panel_channel(guild)
+        if not channel:
+            return None
+        embed = await self.build_panel_embed()
+        view = EventManagerPanelView(self)
+        message_id = await self.config.panel_message_id()
+        if message_id and hasattr(channel, "fetch_message"):
+            with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                message = await channel.fetch_message(int(message_id))
+                await message.edit(embed=embed, view=view)
+                return message
+
+        existing = await self.find_existing_panel_message(channel)
+        if existing:
+            await existing.edit(embed=embed, view=view)
+            await self.config.panel_message_id.set(existing.id)
+            return existing
+        if not create:
+            return None
+        message = await channel.send(embed=embed, view=view)
+        await self.config.panel_message_id.set(message.id)
+        return message
 
     async def _log_run(self, kind: str, profile_name: str, status: Optional[int]):
         channel_id = await self.config.log_channel_id()
@@ -576,6 +1156,20 @@ class EventManager(commands.Cog):
             file=discord.File(data, filename=f"eventmanager-{kind}-form.txt"),
         )
 
+    @eventmanager.command(name="panel")
+    @commands.admin()
+    @commands.guild_only()
+    async def panel(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
+        """Post or refresh the EventManager control panel."""
+        if channel is not None:
+            await self.config.panel_channel_id.set(channel.id)
+            await self.config.panel_message_id.set(None)
+        message = await self.ensure_panel_message(ctx.guild, create=True)
+        if message:
+            await ctx.send(f"EventManager panel ready in {message.channel.mention}: {message.jump_url}")
+        else:
+            await ctx.send("Could not post the EventManager panel. Check the configured channel and bot permissions.")
+
     @eventmanager.command(name="start")
     @commands.admin()
     async def start_profile(self, ctx: commands.Context, kind: str, profile_name: str):
@@ -611,6 +1205,125 @@ class EventManager(commands.Cog):
             profile = profiles.setdefault(kind, {}).setdefault(profile_name, {"fields": {}})
             profile.setdefault("fields", {})[field_name] = value
         await ctx.tick()
+
+    @profile.command(name="location")
+    @commands.admin()
+    async def profile_location(self, ctx: commands.Context, kind: str, profile_name: str, *, location: str):
+        """Set profile coordinates as `latitude, longitude`; address is left for MissionChief."""
+        try:
+            kind = normalize_kind(kind)
+            latitude, longitude = parse_location_value(location)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+
+        profile_name = profile_name.strip().lower()
+        async with self.config.profiles() as profiles:
+            profile = profiles.setdefault(kind, {}).setdefault(profile_name, {"fields": {}})
+            fields = profile.setdefault("fields", {})
+            fields[LATITUDE_FIELD] = latitude
+            fields[LONGITUDE_FIELD] = longitude
+            fields.pop(ADDRESS_FIELD, None)
+            profile.pop(RANDOM_LOCATION_KEY, None)
+        await ctx.tick()
+
+    @profile.command(name="randomlocation")
+    @commands.admin()
+    async def profile_random_location(self, ctx: commands.Context, kind: str, profile_name: str, region: str):
+        """Set a profile to choose a random start location from `nyc`, `bermuda`, or `nyc_or_bermuda`."""
+        try:
+            kind = normalize_kind(kind)
+            region = normalize_random_location_region(region)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+
+        profile_name = profile_name.strip().lower()
+        async with self.config.profiles() as profiles:
+            profile = profiles.setdefault(kind, {}).setdefault(profile_name, {"fields": {}})
+            profile[RANDOM_LOCATION_KEY] = region
+            fields = profile.setdefault("fields", {})
+            fields.pop(LATITUDE_FIELD, None)
+            fields.pop(LONGITUDE_FIELD, None)
+            fields.pop(ADDRESS_FIELD, None)
+        await ctx.tick()
+
+    @profile.command(name="seeddailymissions")
+    @commands.admin()
+    async def profile_seed_daily_missions(self, ctx: commands.Context):
+        """Create one daily large-scale mission profile per available mission type with random NYC locations."""
+        try:
+            form = await self._fetch_form("large")
+        except Exception as exc:
+            await ctx.send(f"Could not seed daily mission profiles: {exc}")
+            return
+
+        mission_type = next((field_info for field_info in form.fields if field_info.name == MISSION_TYPE_FIELD), None)
+        if not mission_type or not mission_type.options:
+            await ctx.send("No large-scale mission options were found on the MissionChief form.")
+            return
+
+        created = []
+        async with self.config.profiles() as profiles:
+            large_profiles = profiles.setdefault("large", {})
+            for option in mission_type.options:
+                profile_name = profile_name_from_label(option.label, prefix="large_")
+                large_profiles[profile_name] = {
+                    RANDOM_LOCATION_KEY: "nyc",
+                    "fields": {
+                        MISSION_TYPE_FIELD: option.value,
+                    },
+                }
+                created.append(profile_name)
+
+        await ctx.send(
+            "Created daily large-scale mission profiles with random New York City locations:\n"
+            + box(", ".join(created), lang="ini")
+        )
+
+    @profile.command(name="seedweeklyevents")
+    @commands.admin()
+    async def profile_seed_weekly_events(self, ctx: commands.Context, *, location: str = "nyc_or_bermuda"):
+        """Create one weekly event profile per event type with coordinates or random NYC/Bermuda locations."""
+        try:
+            latitude, longitude, random_region = parse_location_or_random_region(location)
+            form = await self._fetch_form("event")
+        except Exception as exc:
+            await ctx.send(f"Could not seed event profiles: {exc}")
+            return
+
+        event_group = next((field_info for field_info in form.fields if field_info.name == EVENT_RADIO_FIELD), None)
+        if not event_group or not event_group.options:
+            await ctx.send("No event options were found on the MissionChief form.")
+            return
+
+        created = []
+        async with self.config.profiles() as profiles:
+            event_profiles = profiles.setdefault("event", {})
+            for option in event_group.options:
+                profile_name = profile_name_from_label(option.label)
+                profile = {
+                    "fields": {
+                        EVENT_RADIO_FIELD: option.value,
+                        MISSION_TYPE_FIELD: option.value,
+                        **EVENT_DEFAULT_OVERRIDES,
+                    }
+                }
+                if random_region:
+                    profile[RANDOM_LOCATION_KEY] = random_region
+                else:
+                    profile["fields"][LATITUDE_FIELD] = latitude
+                    profile["fields"][LONGITUDE_FIELD] = longitude
+                event_profiles[profile_name] = profile
+                created.append(profile_name)
+
+        location_note = (
+            f"random `{random_region}` locations" if random_region else f"fixed location `{latitude}, {longitude}`"
+        )
+        await ctx.send(
+            f"Created weekly event profiles with Large/Circle/Every 30 seconds and {location_note}:\n"
+            + box(", ".join(created), lang="ini")
+        )
 
     @profile.command(name="remove")
     @commands.admin()
@@ -662,6 +1375,8 @@ class EventManager(commands.Cog):
             await ctx.send("Profile not found.")
             return
         lines = [f"{kind}/{profile_name.strip().lower()}"]
+        if profile.get(RANDOM_LOCATION_KEY):
+            lines.append(f"{RANDOM_LOCATION_KEY} = {profile[RANDOM_LOCATION_KEY]}")
         for field_name, value in sorted(profile.get("fields", {}).items()):
             lines.append(f"{field_name} = {value}")
         await ctx.send(box("\n".join(lines), lang="ini"))
