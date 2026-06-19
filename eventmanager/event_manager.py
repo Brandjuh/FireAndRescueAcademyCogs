@@ -130,6 +130,10 @@ def _input_option_value(input_el) -> str:
     return input_el.get("value") or input_el.get("data-event-id") or ""
 
 
+def _submit_button_value(button_el) -> str:
+    return button_el.get("value") or _text(button_el)
+
+
 def parse_event_form(html: str, page_url: str) -> EventForm:
     """Parse the MissionChief alliance mission/event form."""
     soup = BeautifulSoup(html, "html.parser")
@@ -159,7 +163,7 @@ def parse_event_form(html: str, page_url: str) -> EventForm:
         if field_type in {"button", "image", "reset"}:
             continue
         if field_type == "submit":
-            if name and submit_name is None:
+            if name and submit_name is None and not input_el.has_attr("disabled"):
                 submit_name = name
                 submit_value = input_el.get("value") or ""
             continue
@@ -258,6 +262,17 @@ def parse_event_form(html: str, page_url: str) -> EventForm:
                 required=textarea.has_attr("required"),
             )
         )
+
+    for button_el in form.find_all("button"):
+        if _inside_custom_mission_creator(button_el):
+            continue
+        button_type = (button_el.get("type") or "submit").lower()
+        if button_type != "submit" or button_el.has_attr("disabled"):
+            continue
+        name = button_el.get("name")
+        if name and submit_name is None:
+            submit_name = name
+            submit_value = _submit_button_value(button_el)
 
     return EventForm(
         action=urljoin(page_url, action),

@@ -88,6 +88,21 @@ MISSIONCHIEF_EVENT_HTML = """
 </form>
 """
 
+DISABLED_FREE_SUBMIT_HTML = """
+<form action="/missionAllianceCreate" method="post">
+  <input name="authenticity_token" type="hidden" value="abc123" />
+  <input type="submit" name="commit" value="Start 1 mission (Free)" disabled />
+  <input type="submit" name="commit" value="Start 1 mission (10 Coins)" />
+</form>
+"""
+
+BUTTON_SUBMIT_HTML = """
+<form action="/missionAllianceEventCreate" method="post">
+  <input name="authenticity_token" type="hidden" value="abc123" />
+  <button type="submit" name="commit">Start Event ( Free )</button>
+</form>
+"""
+
 
 class EventManagerFormTests(unittest.TestCase):
     def test_parse_event_form_extracts_fields_options_and_submit(self):
@@ -203,6 +218,23 @@ class EventManagerFormTests(unittest.TestCase):
         payload = build_payload(form, {"mission_position[coins]": "10"})
 
         self.assertIn("spend coins", _validate_free_submit(form, payload))
+
+    def test_disabled_free_submit_is_not_used(self):
+        form = parse_event_form(DISABLED_FREE_SUBMIT_HTML, "https://www.missionchief.com/missionAllianceNew")
+
+        payload = build_payload(form, {})
+
+        self.assertEqual(form.submit_value, "Start 1 mission (10 Coins)")
+        self.assertIn("non-free", _validate_free_submit(form, payload))
+
+    def test_button_submit_is_supported(self):
+        form = parse_event_form(BUTTON_SUBMIT_HTML, "https://www.missionchief.com/missionAllianceEventNew")
+
+        payload = build_payload(form, {})
+
+        self.assertEqual(form.submit_name, "commit")
+        self.assertEqual(form.submit_value, "Start Event ( Free )")
+        self.assertIn(("commit", "Start Event ( Free )"), payload)
 
     def test_parse_location_value_accepts_latitude_longitude_only(self):
         self.assertEqual(parse_location_value("40.7128, -74.0060"), ("40.7128", "-74.006"))
