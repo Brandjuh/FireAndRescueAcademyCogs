@@ -99,19 +99,19 @@ EVENT_DEFAULT_OVERRIDES = {
 RANDOM_LOCATION_KEY = "random_location"
 RANDOM_LOCATION_ANCHORS = {
     "nyc": [
-        (40.7580, -73.9855),
-        (40.7829, -73.9654),
-        (40.7128, -74.0060),
-        (40.6782, -73.9442),
-        (40.7282, -73.7949),
-        (40.8448, -73.8648),
-        (40.5795, -74.1502),
+        (40.7580, -73.9855, "Times Square, Manhattan, New York"),
+        (40.7829, -73.9654, "Central Park, Manhattan, New York"),
+        (40.7128, -74.0060, "New York City Hall, Manhattan, New York"),
+        (40.6782, -73.9442, "Crown Heights, Brooklyn, New York"),
+        (40.7282, -73.7949, "Fresh Meadows, Queens, New York"),
+        (40.8448, -73.8648, "Bronx Zoo, Bronx, New York"),
+        (40.5795, -74.1502, "Staten Island Mall, Staten Island, New York"),
     ],
     "bermuda": [
-        (32.2948, -64.7814),
-        (32.3818, -64.6781),
-        (32.3000, -64.8670),
-        (32.3630, -64.7040),
+        (32.2948, -64.7814, "Hamilton, Bermuda"),
+        (32.3818, -64.6781, "St. George's, Bermuda"),
+        (32.3000, -64.8670, "Royal Naval Dockyard, Bermuda"),
+        (32.3630, -64.7040, "L.F. Wade International Airport, Bermuda"),
     ],
 }
 RANDOM_LOCATION_ALIASES = {
@@ -195,15 +195,15 @@ def normalize_random_location_region(region: str) -> str:
     return normalized
 
 
-def random_location_for_region(region: str, *, rng=None) -> Tuple[str, str, str]:
-    """Return latitude, longitude, and the concrete region used for a random start location."""
+def random_location_for_region(region: str, *, rng=None) -> Tuple[str, str, str, str]:
+    """Return latitude, longitude, address, and the concrete region used for a random start location."""
     rng = rng or random
     normalized = normalize_random_location_region(region)
     concrete_region = rng.choice(["nyc", "bermuda"]) if normalized == "nyc_or_bermuda" else normalized
-    latitude, longitude = rng.choice(RANDOM_LOCATION_ANCHORS[concrete_region])
+    latitude, longitude, address = rng.choice(RANDOM_LOCATION_ANCHORS[concrete_region])
     latitude += rng.uniform(-RANDOM_LOCATION_JITTER, RANDOM_LOCATION_JITTER)
     longitude += rng.uniform(-RANDOM_LOCATION_JITTER, RANDOM_LOCATION_JITTER)
-    return f"{latitude:.6f}", f"{longitude:.6f}", concrete_region
+    return f"{latitude:.6f}", f"{longitude:.6f}", address, concrete_region
 
 
 def profile_fields_for_start(profile: dict, *, rng=None) -> Dict[str, str]:
@@ -211,10 +211,10 @@ def profile_fields_for_start(profile: dict, *, rng=None) -> Dict[str, str]:
     fields = dict(profile.get("fields", {}))
     random_region = profile.get(RANDOM_LOCATION_KEY)
     if random_region:
-        latitude, longitude, _region = random_location_for_region(random_region, rng=rng)
+        latitude, longitude, address, _region = random_location_for_region(random_region, rng=rng)
         fields[LATITUDE_FIELD] = latitude
         fields[LONGITUDE_FIELD] = longitude
-        fields.pop(ADDRESS_FIELD, None)
+        fields[ADDRESS_FIELD] = address
     return fields
 
 
@@ -243,6 +243,7 @@ def fields_for_selection(
     random_region: Optional[str] = None,
     latitude: Optional[str] = None,
     longitude: Optional[str] = None,
+    address: Optional[str] = None,
 ) -> dict:
     """Build profile-like fields for a one-off panel start."""
     kind = normalize_kind(kind)
@@ -256,6 +257,7 @@ def fields_for_selection(
     elif latitude is not None and longitude is not None:
         profile["fields"][LATITUDE_FIELD] = latitude
         profile["fields"][LONGITUDE_FIELD] = longitude
+        profile["fields"][ADDRESS_FIELD] = address or "Custom EventManager location"
     return profile
 
 
@@ -707,6 +709,12 @@ class CustomLocationModal(discord.ui.Modal, title="Custom start location"):
         required=True,
         max_length=60,
     )
+    address = discord.ui.TextInput(
+        label="Address or map label",
+        placeholder="Example: Washington Square Park, New York",
+        required=False,
+        max_length=120,
+    )
 
     def __init__(self, parent: "CustomStartView"):
         super().__init__()
@@ -720,6 +728,7 @@ class CustomLocationModal(discord.ui.Modal, title="Custom start location"):
             return
         self.parent_view.latitude = latitude
         self.parent_view.longitude = longitude
+        self.parent_view.address = str(self.address.value or "").strip() or "Custom EventManager location"
         self.parent_view.random_region = None
         await interaction.response.send_message(
             f"Location set to `{latitude}, {longitude}`. Return to the custom start message and press Start.",
@@ -739,6 +748,7 @@ class CustomStartView(discord.ui.View):
         self.random_region = "nyc_or_bermuda" if self.kind == "event" else "nyc"
         self.latitude: Optional[str] = None
         self.longitude: Optional[str] = None
+        self.address: Optional[str] = None
         self.rebuild()
 
     def selected_label(self) -> str:
@@ -749,7 +759,8 @@ class CustomStartView(discord.ui.View):
         if self.random_region:
             return CUSTOM_LOCATION_LABELS.get(self.random_region, self.random_region)
         if self.latitude and self.longitude:
-            return f"{self.latitude}, {self.longitude}"
+            address = f" - {self.address}" if self.address else ""
+            return f"{self.latitude}, {self.longitude}{address}"
         return "Not configured"
 
     def rebuild(self):
@@ -784,6 +795,7 @@ class CustomStartView(discord.ui.View):
             random_region=self.random_region,
             latitude=self.latitude,
             longitude=self.longitude,
+            address=self.address,
         )
         result = await self.cog.start_one_off(self.kind, profile, f"custom:{self.selected_label()}")
         if result.ok:
@@ -1223,7 +1235,7 @@ class EventManager(commands.Cog):
             fields = profile.setdefault("fields", {})
             fields[LATITUDE_FIELD] = latitude
             fields[LONGITUDE_FIELD] = longitude
-            fields.pop(ADDRESS_FIELD, None)
+            fields[ADDRESS_FIELD] = "Custom EventManager location"
             profile.pop(RANDOM_LOCATION_KEY, None)
         await ctx.tick()
 
@@ -1314,6 +1326,7 @@ class EventManager(commands.Cog):
                 else:
                     profile["fields"][LATITUDE_FIELD] = latitude
                     profile["fields"][LONGITUDE_FIELD] = longitude
+                    profile["fields"][ADDRESS_FIELD] = "Custom EventManager location"
                 event_profiles[profile_name] = profile
                 created.append(profile_name)
 
