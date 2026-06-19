@@ -1,11 +1,17 @@
 import unittest
+import random
 
 from eventmanager.event_manager import (
     build_payload,
     normalize_kind,
+    normalize_random_location_region,
     parse_event_form,
+    parse_location_or_random_region,
     parse_location_value,
     parse_profile_names,
+    profile_fields_for_start,
+    profile_name_from_label,
+    random_location_for_region,
     select_scheduled_profile,
     summarize_form,
     valid_time,
@@ -240,6 +246,39 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertEqual(parse_location_value("40.7128, -74.0060"), ("40.7128", "-74.006"))
         with self.assertRaises(ValueError):
             parse_location_value("New York")
+
+    def test_parse_location_or_random_region_accepts_regions(self):
+        self.assertEqual(parse_location_or_random_region("nyc"), (None, None, "nyc"))
+        self.assertEqual(parse_location_or_random_region("40.1, -73.9"), ("40.1", "-73.9", None))
+        self.assertEqual(normalize_random_location_region("Bermuda Islands"), "bermuda")
+
+    def test_random_location_for_region_returns_supported_coordinates(self):
+        latitude, longitude, region = random_location_for_region("nyc_or_bermuda", rng=random.Random(1))
+
+        self.assertIn(region, {"nyc", "bermuda"})
+        self.assertTrue(-90 <= float(latitude) <= 90)
+        self.assertTrue(-180 <= float(longitude) <= 180)
+
+    def test_profile_fields_for_start_resolves_random_location_and_removes_address(self):
+        fields = profile_fields_for_start(
+            {
+                "random_location": "nyc",
+                "fields": {
+                    "mission_position[address]": "old address",
+                    "mission_position[mission_type_id]": "41",
+                },
+            },
+            rng=random.Random(2),
+        )
+
+        self.assertNotIn("mission_position[address]", fields)
+        self.assertEqual(fields["mission_position[mission_type_id]"], "41")
+        self.assertIn("mission_position[latitude]", fields)
+        self.assertIn("mission_position[longitude]", fields)
+
+    def test_profile_name_from_label_is_stable(self):
+        self.assertEqual(profile_name_from_label("Major fire", prefix="large_"), "large_major_fire")
+        self.assertEqual(profile_name_from_label("Storm Surge"), "storm_surge")
 
     def test_summarize_form_includes_option_preview(self):
         form = parse_event_form(FORM_HTML, "https://www.missionchief.com/missionAllianceNew")

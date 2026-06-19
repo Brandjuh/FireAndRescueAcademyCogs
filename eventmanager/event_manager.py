@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import random
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -91,6 +93,39 @@ EVENT_DEFAULT_OVERRIDES = {
     SHAPE_FIELD: "circle",
     AMOUNT_FIELD: "0",
 }
+RANDOM_LOCATION_KEY = "random_location"
+RANDOM_LOCATION_ANCHORS = {
+    "nyc": [
+        (40.7580, -73.9855),
+        (40.7829, -73.9654),
+        (40.7128, -74.0060),
+        (40.6782, -73.9442),
+        (40.7282, -73.7949),
+        (40.8448, -73.8648),
+        (40.5795, -74.1502),
+    ],
+    "bermuda": [
+        (32.2948, -64.7814),
+        (32.3818, -64.6781),
+        (32.3000, -64.8670),
+        (32.3630, -64.7040),
+    ],
+}
+RANDOM_LOCATION_ALIASES = {
+    "newyork": "nyc",
+    "new_york": "nyc",
+    "new-york": "nyc",
+    "new york": "nyc",
+    "new york city": "nyc",
+    "bermuda islands": "bermuda",
+    "bermuda_islands": "bermuda",
+    "bermuda-islands": "bermuda",
+    "nyc_or_bermuda": "nyc_or_bermuda",
+    "nyc-or-bermuda": "nyc_or_bermuda",
+    "nyc/bermuda": "nyc_or_bermuda",
+    "both": "nyc_or_bermuda",
+}
+RANDOM_LOCATION_JITTER = 0.006
 
 
 def normalize_kind(kind: str) -> str:
@@ -132,6 +167,47 @@ def _input_option_value(input_el) -> str:
 
 def _submit_button_value(button_el) -> str:
     return button_el.get("value") or _text(button_el)
+
+
+def profile_name_from_label(label: str, prefix: str = "") -> str:
+    """Create a stable profile name from a MissionChief option label."""
+    name = re.sub(r"[^a-z0-9]+", "_", (label or "").strip().lower()).strip("_")
+    if not name:
+        name = "profile"
+    return f"{prefix}{name}"
+
+
+def normalize_random_location_region(region: str) -> str:
+    """Normalize configured random location regions."""
+    normalized = " ".join(str(region or "").strip().lower().replace("_", " ").replace("-", " ").split())
+    normalized = RANDOM_LOCATION_ALIASES.get(normalized, normalized)
+    normalized = normalized.replace(" ", "_")
+    if normalized not in {"nyc", "bermuda", "nyc_or_bermuda"}:
+        raise ValueError("Random location must be `nyc`, `bermuda`, or `nyc_or_bermuda`.")
+    return normalized
+
+
+def random_location_for_region(region: str, *, rng=None) -> Tuple[str, str, str]:
+    """Return latitude, longitude, and the concrete region used for a random start location."""
+    rng = rng or random
+    normalized = normalize_random_location_region(region)
+    concrete_region = rng.choice(["nyc", "bermuda"]) if normalized == "nyc_or_bermuda" else normalized
+    latitude, longitude = rng.choice(RANDOM_LOCATION_ANCHORS[concrete_region])
+    latitude += rng.uniform(-RANDOM_LOCATION_JITTER, RANDOM_LOCATION_JITTER)
+    longitude += rng.uniform(-RANDOM_LOCATION_JITTER, RANDOM_LOCATION_JITTER)
+    return f"{latitude:.6f}", f"{longitude:.6f}", concrete_region
+
+
+def profile_fields_for_start(profile: dict, *, rng=None) -> Dict[str, str]:
+    """Resolve runtime-only profile options into MissionChief form fields."""
+    fields = dict(profile.get("fields", {}))
+    random_region = profile.get(RANDOM_LOCATION_KEY)
+    if random_region:
+        latitude, longitude, _region = random_location_for_region(random_region, rng=rng)
+        fields[LATITUDE_FIELD] = latitude
+        fields[LONGITUDE_FIELD] = longitude
+        fields.pop(ADDRESS_FIELD, None)
+    return fields
 
 
 def parse_event_form(html: str, page_url: str) -> EventForm:
@@ -362,6 +438,15 @@ def parse_location_value(value: str) -> Tuple[str, str]:
     return str(latitude), str(longitude)
 
 
+def parse_location_or_random_region(value: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Parse coordinates or a random-location region."""
+    try:
+        latitude, longitude = parse_location_value(value)
+    except ValueError:
+        return None, None, normalize_random_location_region(value)
+    return latitude, longitude, None
+
+
 def summarize_form(form: EventForm, *, limit: int = 15) -> str:
     """Return a compact admin-facing form summary."""
     lines = [
@@ -522,7 +607,7 @@ class EventManager(commands.Cog):
             if form.method != "post":
                 return EventStartResult(False, f"Unexpected form method `{form.method}`.")
 
-            payload = build_payload(form, profile.get("fields", {}))
+            payload = build_payload(form, profile_fields_for_start(profile))
             validation_error = _validate_free_submit(form, payload)
             if validation_error:
                 return EventStartResult(False, validation_error, post_url=form.action)
@@ -689,14 +774,69 @@ class EventManager(commands.Cog):
             fields[LATITUDE_FIELD] = latitude
             fields[LONGITUDE_FIELD] = longitude
             fields.pop(ADDRESS_FIELD, None)
+            profile.pop(RANDOM_LOCATION_KEY, None)
         await ctx.tick()
+
+    @profile.command(name="randomlocation")
+    @commands.admin()
+    async def profile_random_location(self, ctx: commands.Context, kind: str, profile_name: str, region: str):
+        """Set a profile to choose a random start location from `nyc`, `bermuda`, or `nyc_or_bermuda`."""
+        try:
+            kind = normalize_kind(kind)
+            region = normalize_random_location_region(region)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+
+        profile_name = profile_name.strip().lower()
+        async with self.config.profiles() as profiles:
+            profile = profiles.setdefault(kind, {}).setdefault(profile_name, {"fields": {}})
+            profile[RANDOM_LOCATION_KEY] = region
+            fields = profile.setdefault("fields", {})
+            fields.pop(LATITUDE_FIELD, None)
+            fields.pop(LONGITUDE_FIELD, None)
+            fields.pop(ADDRESS_FIELD, None)
+        await ctx.tick()
+
+    @profile.command(name="seeddailymissions")
+    @commands.admin()
+    async def profile_seed_daily_missions(self, ctx: commands.Context):
+        """Create one daily large-scale mission profile per available mission type with random NYC locations."""
+        try:
+            form = await self._fetch_form("large")
+        except Exception as exc:
+            await ctx.send(f"Could not seed daily mission profiles: {exc}")
+            return
+
+        mission_type = next((field_info for field_info in form.fields if field_info.name == MISSION_TYPE_FIELD), None)
+        if not mission_type or not mission_type.options:
+            await ctx.send("No large-scale mission options were found on the MissionChief form.")
+            return
+
+        created = []
+        async with self.config.profiles() as profiles:
+            large_profiles = profiles.setdefault("large", {})
+            for option in mission_type.options:
+                profile_name = profile_name_from_label(option.label, prefix="large_")
+                large_profiles[profile_name] = {
+                    RANDOM_LOCATION_KEY: "nyc",
+                    "fields": {
+                        MISSION_TYPE_FIELD: option.value,
+                    },
+                }
+                created.append(profile_name)
+
+        await ctx.send(
+            "Created daily large-scale mission profiles with random New York City locations:\n"
+            + box(", ".join(created), lang="ini")
+        )
 
     @profile.command(name="seedweeklyevents")
     @commands.admin()
-    async def profile_seed_weekly_events(self, ctx: commands.Context, *, location: str):
-        """Create one weekly event profile for every available event type at one location."""
+    async def profile_seed_weekly_events(self, ctx: commands.Context, *, location: str = "nyc_or_bermuda"):
+        """Create one weekly event profile per event type with coordinates or random NYC/Bermuda locations."""
         try:
-            latitude, longitude = parse_location_value(location)
+            latitude, longitude, random_region = parse_location_or_random_region(location)
             form = await self._fetch_form("event")
         except Exception as exc:
             await ctx.send(f"Could not seed event profiles: {exc}")
@@ -711,20 +851,27 @@ class EventManager(commands.Cog):
         async with self.config.profiles() as profiles:
             event_profiles = profiles.setdefault("event", {})
             for option in event_group.options:
-                profile_name = option.label.lower().replace(" ", "_").replace("-", "_")
-                event_profiles[profile_name] = {
+                profile_name = profile_name_from_label(option.label)
+                profile = {
                     "fields": {
                         EVENT_RADIO_FIELD: option.value,
                         MISSION_TYPE_FIELD: option.value,
-                        LATITUDE_FIELD: latitude,
-                        LONGITUDE_FIELD: longitude,
                         **EVENT_DEFAULT_OVERRIDES,
                     }
                 }
+                if random_region:
+                    profile[RANDOM_LOCATION_KEY] = random_region
+                else:
+                    profile["fields"][LATITUDE_FIELD] = latitude
+                    profile["fields"][LONGITUDE_FIELD] = longitude
+                event_profiles[profile_name] = profile
                 created.append(profile_name)
 
+        location_note = (
+            f"random `{random_region}` locations" if random_region else f"fixed location `{latitude}, {longitude}`"
+        )
         await ctx.send(
-            "Created weekly event profiles with Large/Circle/Every 30 seconds:\n"
+            f"Created weekly event profiles with Large/Circle/Every 30 seconds and {location_note}:\n"
             + box(", ".join(created), lang="ini")
         )
 
@@ -778,6 +925,8 @@ class EventManager(commands.Cog):
             await ctx.send("Profile not found.")
             return
         lines = [f"{kind}/{profile_name.strip().lower()}"]
+        if profile.get(RANDOM_LOCATION_KEY):
+            lines.append(f"{RANDOM_LOCATION_KEY} = {profile[RANDOM_LOCATION_KEY]}")
         for field_name, value in sorted(profile.get("fields", {}).items()):
             lines.append(f"{field_name} = {value}")
         await ctx.send(box("\n".join(lines), lang="ini"))
