@@ -88,6 +88,7 @@ ADDRESS_FIELD = "mission_position[address]"
 COINS_FIELD = "mission_position[coins]"
 MISSION_TYPE_FIELD = "mission_position[mission_type_id]"
 EVENT_RADIO_FIELD = "event_radio_group"
+AUTHENTICITY_TOKEN_FIELD = "authenticity_token"
 POI_TYPE_FIELD = "mission_position[poi_type]"
 SIZE_FIELD = "mission_position[size]"
 SHAPE_FIELD = "mission_position[shape]"
@@ -437,6 +438,19 @@ def _form_position_params(fields: Dict[str, str]) -> Dict[str, str]:
     if not latitude or not longitude:
         return {}
     return {"tlat": latitude, "tlng": longitude}
+
+
+def _ajax_submit_headers(kind: str, payload: Payload) -> Dict[str, str]:
+    headers = {
+        "Accept": "text/javascript, application/javascript, application/ecmascript, application/x-ecmascript, */*; q=0.01",
+        "Origin": BASE_URL,
+        "Referer": EVENT_KINDS[kind]["url"],
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    csrf_token = _payload_value(payload, AUTHENTICITY_TOKEN_FIELD)
+    if csrf_token:
+        headers["X-CSRF-Token"] = csrf_token
+    return headers
 
 
 def _normalize_overrides(form: EventForm, overrides: Dict[str, str]) -> Dict[str, str]:
@@ -1024,7 +1038,7 @@ class EventManager(commands.Cog):
                     form.action,
                     data=payload,
                     allow_redirects=False,
-                    headers={"Origin": BASE_URL, "Referer": EVENT_KINDS[kind]["url"]},
+                    headers=_ajax_submit_headers(kind, payload),
                 ) as response:
                     status = getattr(response, "status", None)
                     response_text = await response.text()
