@@ -13,6 +13,8 @@ from eventmanager.event_manager import (
     profile_fields_for_start,
     profile_name_from_label,
     random_location_for_region,
+    safe_debug_mapping,
+    safe_debug_payload,
     select_scheduled_profile,
     summarize_payload_for_debug,
     summarize_response_for_debug,
@@ -461,6 +463,17 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(headers["X-CSRF-Token"], "csrf-secret")
         self.assertEqual(headers["Origin"], "https://www.missionchief.com")
         self.assertIn("text/javascript", headers["Accept"])
+
+    def test_safe_debug_helpers_redact_tokens(self):
+        mapping = safe_debug_mapping({"X-CSRF-Token": "secret", "Origin": "https://www.missionchief.com"})
+        payload = safe_debug_payload([("authenticity_token", "secret"), ("mission_position[address]", "NYC")])
+
+        self.assertIn("X-CSRF-Token: REDACTED", mapping)
+        self.assertIn("Origin: https://www.missionchief.com", mapping)
+        self.assertIn("authenticity_token=REDACTED", payload)
+        self.assertIn("mission_position[address]=NYC", payload)
+        self.assertNotIn("secret", mapping.replace("REDACTED", ""))
+        self.assertNotIn("secret", payload.replace("REDACTED", ""))
 
 
 if __name__ == "__main__":
