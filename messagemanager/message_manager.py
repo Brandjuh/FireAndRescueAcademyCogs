@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import random
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urljoin
@@ -21,8 +23,47 @@ SUCCESS_MARKER = "Message Sent."
 MESSAGE_MANAGER_ROLE_ID = 544117282167586836
 DEFAULT_PANEL_CHANNEL_ID = 1421242306136113254
 DEFAULT_FORUM_CHANNEL_ID = 1517694938501087342
-INBOX_SCAN_INTERVAL_SECONDS = 3600
+INBOX_SCAN_INTERVAL_SECONDS = 15 * 60
+INBOX_SCAN_JITTER_SECONDS = 5 * 60
 MAX_THREAD_TITLE_LENGTH = 100
+TAX_WARNING_SCAN_INTERVAL_SECONDS = 6 * 3600
+TAX_WARNING_SCAN_JITTER_SECONDS = 10 * 60
+TAX_WARNING_MIN_RATE = 5.0
+TAX_WARNING_MIN_DAYS_BETWEEN = 3
+TAX_WARNING_SEND_DELAY_SECONDS = 90
+TAX_WARNING_MAX_PER_RUN = 5
+TAX_WARNING_REASON_CATEGORY = "Contribution"
+TAX_WARNING_REASON_DETAIL = "4.1. 5% donation to alliance - Minimum 5% donation required."
+TAX_WARNING_SANCTION_TYPES = {
+    1: "Warning - Official 1st warning",
+    2: "Warning - Official 2nd warning",
+    3: "Warning - Official 3rd and last warning",
+}
+TAX_WARNING_PRESETS = {
+    1: (
+        "Contribution warning",
+        "Hello {username},\n\n"
+        "Your alliance contribution is currently {rate:.1f}%. The minimum requirement is 5% tax.\n"
+        "Please increase your contribution before the next review.\n\n"
+        "Fire and Rescue Academy",
+    ),
+    2: (
+        "Second contribution warning",
+        "Hello {username},\n\n"
+        "Your alliance contribution is still below the required 5% tax. "
+        "This is your second warning.\n"
+        "Please correct this before the next review.\n\n"
+        "Fire and Rescue Academy",
+    ),
+    3: (
+        "Final contribution warning",
+        "Hello {username},\n\n"
+        "Your alliance contribution is still below the required 5% tax. "
+        "This is your third and final warning.\n"
+        "Further action may follow if this is not corrected.\n\n"
+        "Fire and Rescue Academy",
+    ),
+}
 
 
 @dataclass
@@ -375,6 +416,62 @@ def build_forum_thread_title(username: str, subject: str, conversation_id: str =
     return title[: MAX_THREAD_TITLE_LENGTH - 1].rstrip() + "…"
 
 
+def inbox_scan_delay_seconds(rng=random) -> float:
+    """Return the next inbox scan delay with jitter."""
+    return INBOX_SCAN_INTERVAL_SECONDS + float(rng.uniform(0, INBOX_SCAN_JITTER_SECONDS))
+
+
+def tax_warning_scan_delay_seconds(rng=random) -> float:
+    """Return the next tax-warning scan delay with jitter."""
+    return TAX_WARNING_SCAN_INTERVAL_SECONDS + float(rng.uniform(0, TAX_WARNING_SCAN_JITTER_SECONDS))
+
+
+def tax_warning_level(existing_warning_count: int) -> Optional[int]:
+    """Return the next tax warning level, capped at three warnings."""
+    count = max(0, int(existing_warning_count or 0))
+    if count >= 3:
+        return None
+    return count + 1
+
+
+def tax_warning_is_due(
+    *,
+    existing_warning_count: int,
+    last_warning_at: Optional[int],
+    now: int,
+    min_days_between: int,
+) -> bool:
+    """Return whether another tax warning may be sent without rushing the member."""
+    if tax_warning_level(existing_warning_count) is None:
+        return False
+    if not last_warning_at:
+        return True
+    min_gap = max(0, int(min_days_between or 0)) * 86400
+    return int(now) - int(last_warning_at) >= min_gap
+
+
+def tax_warning_member_identity(member: Dict[str, object]) -> Tuple[str, str, float]:
+    """Extract the MissionChief id, username, and contribution rate from a member record."""
+    mc_id = str(
+        member.get("mc_user_id")
+        or member.get("user_id")
+        or member.get("member_id")
+        or member.get("id")
+        or ""
+    ).strip()
+    username = str(
+        member.get("name")
+        or member.get("username")
+        or member.get("mc_username")
+        or ""
+    ).strip()
+    try:
+        rate = float(member.get("contribution_rate") or 0.0)
+    except (TypeError, ValueError):
+        rate = 0.0
+    return mc_id, username, rate
+
+
 def _visible_text_field_is_empty(field_info: MessageField, value: str) -> bool:
     if field_info.tag == "textarea":
         return not str(value or "").strip()
@@ -644,9 +741,16 @@ class MessageManager(commands.Cog):
             forum_channel_id=DEFAULT_FORUM_CHANNEL_ID,
             conversation_threads={},
             inbox_scan_enabled=True,
+            tax_warning_enabled=False,
+            tax_warning_min_rate=TAX_WARNING_MIN_RATE,
+            tax_warning_min_days_between=TAX_WARNING_MIN_DAYS_BETWEEN,
+            tax_warning_send_delay_seconds=TAX_WARNING_SEND_DELAY_SECONDS,
+            tax_warning_max_per_run=TAX_WARNING_MAX_PER_RUN,
+            tax_warning_state={},
         )
         self._panel_task: Optional[asyncio.Task] = None
         self._inbox_task: Optional[asyncio.Task] = None
+        self._tax_warning_task: Optional[asyncio.Task] = None
 
     async def cog_load(self):
         add_view = getattr(self.bot, "add_view", None)
@@ -654,6 +758,7 @@ class MessageManager(commands.Cog):
             add_view(MessageManagerPanelView(self))
         self._panel_task = asyncio.create_task(self._delayed_panel_start())
         self._inbox_task = asyncio.create_task(self._inbox_scan_loop())
+        self._tax_warning_task = asyncio.create_task(self._tax_warning_loop())
 
     async def cog_unload(self):
         if self._panel_task:
@@ -666,6 +771,12 @@ class MessageManager(commands.Cog):
             self._inbox_task.cancel()
             try:
                 await self._inbox_task
+            except asyncio.CancelledError:
+                pass
+        if self._tax_warning_task:
+            self._tax_warning_task.cancel()
+            try:
+                await self._tax_warning_task
             except asyncio.CancelledError:
                 pass
 
@@ -684,8 +795,23 @@ class MessageManager(commands.Cog):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                log.exception("MessageManager hourly inbox scan failed: %s", exc)
-            await asyncio.sleep(INBOX_SCAN_INTERVAL_SECONDS)
+                log.exception("MessageManager inbox scan failed: %s", exc)
+            await asyncio.sleep(inbox_scan_delay_seconds())
+
+    async def _tax_warning_loop(self):
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(120)
+        while True:
+            try:
+                if await self.config.tax_warning_enabled():
+                    guild = self._default_guild()
+                    if guild:
+                        await self._process_tax_warning_run(guild)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.exception("MessageManager tax warning scan failed: %s", exc)
+            await asyncio.sleep(tax_warning_scan_delay_seconds())
 
     def _cookie_manager(self):
         cookie_manager = self.bot.get_cog("CookieManager")
@@ -706,13 +832,17 @@ class MessageManager(commands.Cog):
             log.exception("Failed to check MessageManager interaction permissions")
             return False
 
+    def _default_guild(self) -> Optional[discord.Guild]:
+        guilds = list(getattr(self.bot, "guilds", []) or [])
+        return guilds[0] if guilds else None
+
     def _build_panel_embed(self) -> discord.Embed:
         embed = discord.Embed(
             title="MessageManager",
             description=(
                 "Send MissionChief messages to current alliance members and route conversations through "
                 f"forum channel `{DEFAULT_FORUM_CHANNEL_ID}`.\n\n"
-                "The inbox is checked automatically every hour. System messages are ignored."
+                "The inbox is checked automatically every 15-20 minutes. System messages are ignored."
             ),
             color=discord.Color.blue(),
         )
@@ -946,6 +1076,186 @@ class MessageManager(commands.Cog):
     async def _resolve_alliance_username(self, username: str) -> str:
         members = await self._get_alliance_members()
         return await asyncio.to_thread(resolve_alliance_member_name, username, members)
+
+    def _sanction_manager(self):
+        return self.bot.get_cog("SanctionManager")
+
+    async def _tax_warning_history(self, guild_id: int, mc_user_id: str) -> Tuple[int, Optional[int]]:
+        count = 0
+        latest_at = None
+        sanction_manager = self._sanction_manager()
+        get_member_sanctions = getattr(sanction_manager, "get_member_sanctions", None) if sanction_manager else None
+        if get_member_sanctions:
+            sanctions = get_member_sanctions(
+                guild_id=guild_id,
+                mc_user_id=str(mc_user_id),
+            )
+            for sanction in sanctions:
+                if "Warning" not in str(sanction.get("sanction_type") or ""):
+                    continue
+                if str(sanction.get("reason_detail") or "").strip() != TAX_WARNING_REASON_DETAIL:
+                    continue
+                if sanction.get("effective_status", sanction.get("status")) == "removed":
+                    continue
+                count += 1
+                created_at = sanction.get("created_at")
+                if created_at:
+                    latest_at = max(int(created_at), int(latest_at or 0))
+
+        state = await self.config.tax_warning_state()
+        state_entry = state.get(str(mc_user_id)) or {}
+        state_count = int(state_entry.get("count") or 0)
+        state_latest_at = state_entry.get("last_warning_at")
+        if state_latest_at:
+            latest_at = max(int(state_latest_at), int(latest_at or 0))
+        return max(count, state_count), latest_at
+
+    async def _tax_warning_candidates(self, guild: discord.Guild) -> List[dict]:
+        members = await self._get_alliance_members()
+        min_rate = float(await self.config.tax_warning_min_rate())
+        min_days_between = int(await self.config.tax_warning_min_days_between())
+        now = int(time.time())
+        candidates = []
+
+        for member in members:
+            if member.get("suspicious"):
+                continue
+            mc_id, username, rate = tax_warning_member_identity(member)
+            if not mc_id or not username or rate >= min_rate:
+                continue
+            warning_count, last_warning_at = await self._tax_warning_history(guild.id, mc_id)
+            next_level = tax_warning_level(warning_count)
+            due = tax_warning_is_due(
+                existing_warning_count=warning_count,
+                last_warning_at=last_warning_at,
+                now=now,
+                min_days_between=min_days_between,
+            )
+            candidates.append(
+                {
+                    "mc_user_id": mc_id,
+                    "username": username,
+                    "rate": rate,
+                    "warning_count": warning_count,
+                    "next_level": next_level,
+                    "last_warning_at": last_warning_at,
+                    "due": due,
+                }
+            )
+
+        candidates.sort(key=lambda item: (not item["due"], item["rate"], item["username"].casefold()))
+        return candidates
+
+    async def _save_tax_warning_state(self, mc_user_id: str, *, count: int, warning_at: int) -> None:
+        async with self.config.tax_warning_state() as state:
+            state[str(mc_user_id)] = {
+                "count": int(count),
+                "last_warning_at": int(warning_at),
+            }
+
+    async def _record_tax_warning_sanction(
+        self,
+        *,
+        guild: discord.Guild,
+        candidate: dict,
+        level: int,
+    ) -> Optional[int]:
+        sanction_manager = self._sanction_manager()
+        create_sanction = getattr(sanction_manager, "create_sanction_for_member", None) if sanction_manager else None
+        if not create_sanction:
+            raise RuntimeError("SanctionManager is not loaded, so the TAX warning cannot be logged.")
+
+        bot_user = getattr(self.bot, "user", None)
+        admin_user_id = int(getattr(bot_user, "id", 0) or 0)
+        return create_sanction(
+            guild_id=guild.id,
+            discord_user_id=None,
+            mc_user_id=str(candidate["mc_user_id"]),
+            mc_username=str(candidate["username"]),
+            admin_user_id=admin_user_id,
+            admin_username="MessageManager Auto Tax Warning",
+            sanction_type=TAX_WARNING_SANCTION_TYPES[level],
+            reason_category=TAX_WARNING_REASON_CATEGORY,
+            reason_detail=TAX_WARNING_REASON_DETAIL,
+            additional_notes=(
+                f"Automatic TAX warning {level}/3 sent by MessageManager. "
+                f"Contribution rate at send time: {candidate['rate']:.1f}%."
+            ),
+            status="active",
+        )
+
+    async def _send_tax_warning(self, guild: discord.Guild, candidate: dict) -> dict:
+        level = int(candidate.get("next_level") or 0)
+        if level not in TAX_WARNING_PRESETS:
+            return {"sent": False, "reason": "Maximum warning count reached."}
+        sanction_manager = self._sanction_manager()
+        if not getattr(sanction_manager, "create_sanction_for_member", None):
+            return {"sent": False, "reason": "SanctionManager is not loaded, so this warning was not sent."}
+
+        subject_template, body_template = TAX_WARNING_PRESETS[level]
+        body = body_template.format(
+            username=candidate["username"],
+            rate=float(candidate["rate"]),
+        )
+        ok, reason, resolved_username, conversation_id = await self._send_message(
+            str(candidate["username"]),
+            subject_template,
+            body,
+        )
+        if not ok:
+            return {"sent": False, "reason": reason}
+
+        await self._record_tax_warning_sanction(
+            guild=guild,
+            candidate={**candidate, "username": resolved_username},
+            level=level,
+        )
+        warning_at = int(time.time())
+        await self._save_tax_warning_state(
+            str(candidate["mc_user_id"]),
+            count=level,
+            warning_at=warning_at,
+        )
+        if conversation_id:
+            asyncio.create_task(
+                self._link_sent_message_to_forum(
+                    conversation_id=conversation_id,
+                    username=resolved_username,
+                    subject=subject_template,
+                    body=body,
+                )
+            )
+        return {"sent": True, "level": level, "conversation_id": conversation_id}
+
+    async def _process_tax_warning_run(self, guild: discord.Guild, *, limit: Optional[int] = None) -> dict:
+        candidates = await self._tax_warning_candidates(guild)
+        due_candidates = [candidate for candidate in candidates if candidate["due"] and candidate["next_level"]]
+        max_per_run = int(await self.config.tax_warning_max_per_run())
+        if limit is not None:
+            max_per_run = min(max_per_run, max(0, int(limit)))
+        send_delay = max(0, int(await self.config.tax_warning_send_delay_seconds()))
+
+        sent = 0
+        failed = 0
+        errors = []
+        for candidate in due_candidates[:max_per_run]:
+            result = await self._send_tax_warning(guild, candidate)
+            if result.get("sent"):
+                sent += 1
+            else:
+                failed += 1
+                errors.append(f"{candidate['username']}: {result.get('reason', 'unknown error')}")
+            if sent + failed < min(len(due_candidates), max_per_run) and send_delay:
+                await asyncio.sleep(send_delay)
+
+        return {
+            "candidates": len(candidates),
+            "due": len(due_candidates),
+            "sent": sent,
+            "failed": failed,
+            "skipped": max(0, len(due_candidates) - sent - failed),
+            "errors": errors[:5],
+        }
 
     async def _get_session(self):
         cookie_manager = self._cookie_manager()
@@ -1279,3 +1589,140 @@ class MessageManager(commands.Cog):
             await ctx.send(f"MissionChief message sent to `{resolved_username}`.{suffix}")
         else:
             await ctx.send(f"MissionChief message was not confirmed for `{resolved_username}`: {reason}")
+
+    @messagemanager.group(name="taxwarnings", invoke_without_command=True)
+    @commands.admin()
+    @commands.guild_only()
+    async def taxwarnings(self, ctx: commands.Context):
+        """Manage automatic TAX warning messages."""
+        await ctx.send_help()
+
+    @taxwarnings.command(name="settings")
+    @commands.admin()
+    @commands.guild_only()
+    async def taxwarnings_settings(self, ctx: commands.Context):
+        """Show TAX warning automation settings."""
+        enabled = await self.config.tax_warning_enabled()
+        min_rate = await self.config.tax_warning_min_rate()
+        min_days = await self.config.tax_warning_min_days_between()
+        delay = await self.config.tax_warning_send_delay_seconds()
+        max_per_run = await self.config.tax_warning_max_per_run()
+        await ctx.send(
+            "MessageManager TAX warning settings:\n"
+            f"- Enabled: `{enabled}`\n"
+            f"- Minimum contribution: `{float(min_rate):.1f}%`\n"
+            f"- Minimum days between warnings: `{min_days}`\n"
+            f"- Send delay between members: `{delay}` seconds\n"
+            f"- Max warnings per run: `{max_per_run}`\n"
+            "- Kick automation: `not implemented`"
+        )
+
+    @taxwarnings.command(name="enable")
+    @commands.admin()
+    @commands.guild_only()
+    async def taxwarnings_enable(self, ctx: commands.Context, enabled: bool):
+        """Enable or disable automatic TAX warning scans."""
+        await self.config.tax_warning_enabled.set(bool(enabled))
+        state = "enabled" if enabled else "disabled"
+        await ctx.send(f"Automatic TAX warning scans are now `{state}`.")
+
+    @taxwarnings.command(name="minrate")
+    @commands.admin()
+    @commands.guild_only()
+    async def taxwarnings_minrate(self, ctx: commands.Context, rate: float):
+        """Set the minimum required contribution percentage."""
+        if rate < 0 or rate > 100:
+            await ctx.send("Minimum contribution rate must be between 0 and 100.")
+            return
+        await self.config.tax_warning_min_rate.set(float(rate))
+        await ctx.send(f"TAX warning minimum contribution set to `{rate:.1f}%`.")
+
+    @taxwarnings.command(name="gap")
+    @commands.admin()
+    @commands.guild_only()
+    async def taxwarnings_gap(self, ctx: commands.Context, days: int):
+        """Set the minimum days between warning 1, 2, and 3."""
+        if days < 1:
+            await ctx.send("Minimum days between warnings must be at least 1.")
+            return
+        await self.config.tax_warning_min_days_between.set(int(days))
+        await ctx.send(f"TAX warning minimum gap set to `{days}` day(s).")
+
+    @taxwarnings.command(name="delay")
+    @commands.admin()
+    @commands.guild_only()
+    async def taxwarnings_delay(self, ctx: commands.Context, seconds: int):
+        """Set the delay between warning messages to different members."""
+        if seconds < 30:
+            await ctx.send("Delay must be at least 30 seconds to avoid message bursts.")
+            return
+        await self.config.tax_warning_send_delay_seconds.set(int(seconds))
+        await ctx.send(f"TAX warning send delay set to `{seconds}` seconds.")
+
+    @taxwarnings.command(name="maxperrun")
+    @commands.admin()
+    @commands.guild_only()
+    async def taxwarnings_maxperrun(self, ctx: commands.Context, count: int):
+        """Set the maximum TAX warnings sent per automatic run."""
+        if count < 1 or count > 25:
+            await ctx.send("Max per run must be between 1 and 25.")
+            return
+        await self.config.tax_warning_max_per_run.set(int(count))
+        await ctx.send(f"TAX warning max per run set to `{count}`.")
+
+    @taxwarnings.command(name="preview")
+    @commands.admin()
+    @commands.guild_only()
+    async def taxwarnings_preview(self, ctx: commands.Context):
+        """Preview low-TAX members and warning eligibility without sending messages."""
+        async with ctx.typing():
+            try:
+                candidates = await self._tax_warning_candidates(ctx.guild)
+            except Exception as exc:
+                await ctx.send(f"Could not build TAX warning preview: {exc}")
+                return
+
+        due = [candidate for candidate in candidates if candidate["due"] and candidate["next_level"]]
+        blocked = [candidate for candidate in candidates if not candidate["due"] or not candidate["next_level"]]
+        lines = [
+            f"Low-TAX members: `{len(candidates)}`",
+            f"Due now: `{len(due)}`",
+            "",
+        ]
+        for candidate in due[:10]:
+            lines.append(
+                f"- `{candidate['username']}` ({candidate['rate']:.1f}%) -> warning "
+                f"`{candidate['next_level']}/3`"
+            )
+        if blocked:
+            lines.append("")
+            lines.append(f"Not due yet or already at max warnings: `{len(blocked)}`")
+        if len(due) > 10:
+            lines.append(f"... and `{len(due) - 10}` more due members.")
+        await ctx.send("\n".join(lines)[:1900])
+
+    @taxwarnings.command(name="run")
+    @commands.admin()
+    @commands.guild_only()
+    async def taxwarnings_run(self, ctx: commands.Context, limit: Optional[int] = None):
+        """Send due TAX warnings with rate limiting."""
+        async with ctx.typing():
+            try:
+                result = await self._process_tax_warning_run(ctx.guild, limit=limit)
+            except Exception as exc:
+                await ctx.send(f"Could not process TAX warnings: {exc}")
+                return
+
+        lines = [
+            "TAX warning run complete.",
+            f"- Low-TAX candidates: `{result['candidates']}`",
+            f"- Due now: `{result['due']}`",
+            f"- Sent: `{result['sent']}`",
+            f"- Failed: `{result['failed']}`",
+            f"- Still queued/skipped this run: `{result['skipped']}`",
+        ]
+        if result["errors"]:
+            lines.append("")
+            lines.append("Errors:")
+            lines.extend(f"- {error}" for error in result["errors"])
+        await ctx.send("\n".join(lines)[:1900])
