@@ -1,10 +1,12 @@
 import unittest
 
 from messagemanager.message_manager import (
+    MemberResolutionError,
     build_message_payload,
     message_was_sent,
     parse_message_form,
     parse_send_spec,
+    resolve_alliance_member_name,
     safe_payload_summary,
     summarize_message_form,
 )
@@ -58,6 +60,35 @@ class MessageManagerTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             parse_send_spec("CrashTestDummy | Subject only")
+
+    def test_resolve_alliance_member_name_ignores_case(self):
+        members = [
+            {"name": "DutchFireFighter", "user_id": "88649"},
+            {"name": "CrashTestDummy", "user_id": "12345"},
+        ]
+
+        self.assertEqual(resolve_alliance_member_name("dutchfirefighter", members), "DutchFireFighter")
+        self.assertEqual(resolve_alliance_member_name("CRASHTESTDUMMY", members), "CrashTestDummy")
+
+    def test_resolve_alliance_member_name_accepts_member_id(self):
+        members = [{"name": "CrashTestDummy", "user_id": "12345"}]
+
+        self.assertEqual(resolve_alliance_member_name("12345", members), "CrashTestDummy")
+
+    def test_resolve_alliance_member_name_rejects_unknown_member(self):
+        members = [{"name": "CrashTestDummy", "user_id": "12345"}]
+
+        with self.assertRaises(MemberResolutionError):
+            resolve_alliance_member_name("NotInAlliance", members)
+
+    def test_resolve_alliance_member_name_rejects_ambiguous_member(self):
+        members = [
+            {"name": "TestUser", "user_id": "1"},
+            {"name": "testuser", "user_id": "2"},
+        ]
+
+        with self.assertRaises(MemberResolutionError):
+            resolve_alliance_member_name("TESTUSER", members)
 
     def test_build_payload_rejects_empty_visible_fields(self):
         form = parse_message_form(MESSAGE_FORM_HTML)
