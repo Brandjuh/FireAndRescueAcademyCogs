@@ -18,6 +18,7 @@ BASE_URL = "https://www.missionchief.com"
 MESSAGES_URL = f"{BASE_URL}/messages"
 NEW_MESSAGE_URL = f"{BASE_URL}/messages/new"
 SUCCESS_MARKER = "Message Sent."
+MESSAGE_MANAGER_ROLE_ID = 544117282167586836
 
 
 @dataclass
@@ -356,15 +357,25 @@ class MessageComposeModal(discord.ui.Modal, title="MissionChief Message"):
 class MessageManagerLaunchView(discord.ui.View):
     """Short-lived launcher used because text commands cannot open Discord modals directly."""
 
-    def __init__(self, manager: "MessageManager"):
+    def __init__(self, manager: "MessageManager", allowed_user_id: Optional[int] = None):
         super().__init__(timeout=300)
         self.manager = manager
+        self.allowed_user_id = allowed_user_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if await self.manager._interaction_is_admin(interaction):
+        if self.allowed_user_id is not None:
+            if interaction.user.id == self.allowed_user_id:
+                return True
+            await interaction.response.send_message(
+                "This MessageManager launcher is not for you.",
+                ephemeral=True,
+            )
+            return False
+
+        if await self.manager._interaction_can_manage_messages(interaction):
             return True
         await interaction.response.send_message(
-            "You do not have permission to use MessageManager.",
+            f"You need role `{MESSAGE_MANAGER_ROLE_ID}` to use MessageManager.",
             ephemeral=True,
         )
         return False
@@ -391,9 +402,15 @@ class MessageManager(commands.Cog):
             return None
         return cookie_manager
 
-    async def _interaction_is_admin(self, interaction: discord.Interaction) -> bool:
+    async def _member_can_manage_messages(self, user) -> bool:
+        roles = getattr(user, "roles", None)
+        if not roles:
+            return False
+        return any(getattr(role, "id", None) == MESSAGE_MANAGER_ROLE_ID for role in roles)
+
+    async def _interaction_can_manage_messages(self, interaction: discord.Interaction) -> bool:
         try:
-            return bool(await self.bot.is_admin(interaction.user))
+            return await self._member_can_manage_messages(interaction.user)
         except Exception:
             log.exception("Failed to check MessageManager interaction permissions")
             return False
@@ -458,9 +475,16 @@ class MessageManager(commands.Cog):
         )
 
     @commands.command(name="mm")
-    @commands.admin()
     async def message_manager_shortcut(self, ctx: commands.Context):
-        """Open a button launcher for the private MissionChief message form."""
+        """Send a private button launcher for the MissionChief message form."""
+        if not ctx.guild:
+            await ctx.send("Use this command in the server so your MessageManager role can be checked.")
+            return
+
+        if not await self._member_can_manage_messages(ctx.author):
+            await ctx.send(f"You need role `{MESSAGE_MANAGER_ROLE_ID}` to use MessageManager.")
+            return
+
         embed = discord.Embed(
             title="MessageManager",
             description=(
@@ -469,8 +493,20 @@ class MessageManager(commands.Cog):
             ),
             color=discord.Color.blue(),
         )
-        embed.set_footer(text="Only admins can use this launcher.")
-        await ctx.send(embed=embed, view=MessageManagerLaunchView(self))
+        embed.set_footer(text="Only you can use this launcher.")
+        try:
+            await ctx.author.send(embed=embed, view=MessageManagerLaunchView(self, allowed_user_id=ctx.author.id))
+        except discord.Forbidden:
+            await ctx.send(
+                "I could not send you a private MessageManager launcher. Enable DMs from this server and try again.",
+                delete_after=20,
+            )
+            return
+
+        try:
+            await ctx.message.delete()
+        except Exception:
+            log.debug("Could not delete MessageManager shortcut command message", exc_info=True)
 
     @commands.group(name="messagemanager", aliases=["messages"], invoke_without_command=True)
     @commands.admin()
