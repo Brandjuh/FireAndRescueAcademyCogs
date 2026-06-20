@@ -7,6 +7,7 @@ from messagemanager.message_manager import (
     build_forum_thread_title,
     build_reply_payload,
     build_message_payload,
+    discord_timestamp_from_iso,
     extract_conversation_id,
     inbox_scan_delay_seconds,
     message_was_sent,
@@ -16,6 +17,7 @@ from messagemanager.message_manager import (
     parse_send_spec,
     resolve_alliance_member_name,
     safe_payload_summary,
+    split_discord_content,
     summarize_message_form,
     tax_warning_is_due,
     tax_warning_level,
@@ -213,6 +215,20 @@ class MessageManagerTests(unittest.TestCase):
             "DutchFireFighter - koekkoek (238264)",
         )
         self.assertLessEqual(len(build_forum_thread_title("User", "x" * 200)), 100)
+
+    def test_discord_timestamp_from_iso_uses_full_timestamp_style(self):
+        self.assertEqual(
+            discord_timestamp_from_iso("2026-06-20T06:08:36-04:00"),
+            "<t:1781950116:F>",
+        )
+        self.assertEqual(discord_timestamp_from_iso("not-a-date"), "not-a-date")
+
+    def test_split_discord_content_preserves_text_with_limits(self):
+        chunks = split_discord_content("First paragraph.\n\n" + ("x" * 50), limit=30)
+
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(chunk) <= 30 for chunk in chunks))
+        self.assertEqual("".join(chunks), "First paragraph." + ("x" * 50))
 
     def test_build_payload_rejects_empty_visible_fields(self):
         form = parse_message_form(MESSAGE_FORM_HTML)
