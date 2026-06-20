@@ -40,7 +40,7 @@ __version__ = "2.2.4"
 DEFAULTS = {
     "contribution_threshold": 5.0,
     "contribution_trend_weeks": 3,
-    "auto_contribution_alert": True,
+    "auto_contribution_alert": False,
     "auto_role_drift_check": True,
     "admin_alert_channel": None,
     "modlog_channel": None,
