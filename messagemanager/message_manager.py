@@ -1767,6 +1767,31 @@ class MessageManager(commands.Cog):
             file=discord.File(data, filename="messagemanager-payload.txt"),
         )
 
+    @messagemanager.command(name="inboxstatus")
+    @commands.admin()
+    async def inbox_status(self, ctx: commands.Context):
+        """Show the MissionChief inbox checker status."""
+        enabled = await self.config.inbox_scan_enabled()
+        task_running = bool(self._inbox_task and not self._inbox_task.done())
+        await ctx.send(
+            "MessageManager inbox checker:\n"
+            f"- Enabled: `{enabled}`\n"
+            f"- Background task running: `{task_running}`\n"
+            f"- Interval: `15 minutes + 0-5 minutes jitter`\n"
+            "- BotStatus: `MessageManager`"
+        )
+
+    @messagemanager.command(name="inboxscan")
+    @commands.admin()
+    async def inbox_scan_enabled(self, ctx: commands.Context, enabled: Optional[bool] = None):
+        """Show or set whether automatic MissionChief inbox scans are enabled."""
+        if enabled is None:
+            current = await self.config.inbox_scan_enabled()
+            await ctx.send(f"Automatic MissionChief inbox scans are currently `{current}`.")
+            return
+        await self.config.inbox_scan_enabled.set(bool(enabled))
+        await ctx.send(f"Automatic MissionChief inbox scans set to `{bool(enabled)}`.")
+
     @messagemanager.command(name="send")
     @commands.admin()
     async def send_message(self, ctx: commands.Context, *, spec: str):
