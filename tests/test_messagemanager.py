@@ -1,11 +1,14 @@
 import unittest
 
 from messagemanager.message_manager import (
+    INBOX_SCAN_INTERVAL_SECONDS,
+    INBOX_SCAN_JITTER_SECONDS,
     MemberResolutionError,
     build_forum_thread_title,
     build_reply_payload,
     build_message_payload,
     extract_conversation_id,
+    inbox_scan_delay_seconds,
     message_was_sent,
     parse_conversation_messages,
     parse_inbox_messages,
@@ -14,6 +17,9 @@ from messagemanager.message_manager import (
     resolve_alliance_member_name,
     safe_payload_summary,
     summarize_message_form,
+    tax_warning_is_due,
+    tax_warning_level,
+    tax_warning_member_identity,
 )
 
 
@@ -92,6 +98,18 @@ REPLY_HTML = """
 
 
 class MessageManagerTests(unittest.TestCase):
+    def test_inbox_scan_delay_uses_15_minute_interval_with_jitter(self):
+        class FixedRng:
+            @staticmethod
+            def uniform(start, end):
+                del start
+                return end
+
+        self.assertEqual(
+            inbox_scan_delay_seconds(FixedRng),
+            INBOX_SCAN_INTERVAL_SECONDS + INBOX_SCAN_JITTER_SECONDS,
+        )
+
     def test_parse_message_form_identifies_fields(self):
         form = parse_message_form(MESSAGE_FORM_HTML)
 
@@ -215,6 +233,59 @@ class MessageManagerTests(unittest.TestCase):
         self.assertIn("authenticity_token=REDACTED", payload)
         self.assertNotIn("secret", summary)
         self.assertNotIn("secret", payload)
+
+    def test_tax_warning_level_is_capped_at_three(self):
+        self.assertEqual(tax_warning_level(0), 1)
+        self.assertEqual(tax_warning_level(2), 3)
+        self.assertIsNone(tax_warning_level(3))
+
+    def test_tax_warning_due_respects_days_between_warnings(self):
+        now = 1_000_000
+
+        self.assertTrue(
+            tax_warning_is_due(
+                existing_warning_count=0,
+                last_warning_at=None,
+                now=now,
+                min_days_between=3,
+            )
+        )
+        self.assertFalse(
+            tax_warning_is_due(
+                existing_warning_count=1,
+                last_warning_at=now - 2 * 86400,
+                now=now,
+                min_days_between=3,
+            )
+        )
+        self.assertTrue(
+            tax_warning_is_due(
+                existing_warning_count=1,
+                last_warning_at=now - 3 * 86400,
+                now=now,
+                min_days_between=3,
+            )
+        )
+        self.assertFalse(
+            tax_warning_is_due(
+                existing_warning_count=3,
+                last_warning_at=now - 10 * 86400,
+                now=now,
+                min_days_between=3,
+            )
+        )
+
+    def test_tax_warning_member_identity_reads_scraper_member_shapes(self):
+        self.assertEqual(
+            tax_warning_member_identity(
+                {
+                    "mc_user_id": 456,
+                    "name": "CrashTestDummy",
+                    "contribution_rate": "4.5",
+                }
+            ),
+            ("456", "CrashTestDummy", 4.5),
+        )
 
 
 if __name__ == "__main__":
