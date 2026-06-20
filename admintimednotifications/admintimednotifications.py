@@ -191,7 +191,10 @@ def split_due_reminders(
         scheduled_due = int(reminder.get("next_run", 0)) <= current
         snooze_until = int(reminder.get("snooze_until") or 0)
         snooze_due = bool(snooze_until and snooze_until <= current)
-        if scheduled_due or snooze_due:
+        snooze_active = bool(snooze_until and snooze_until > current)
+        if snooze_active:
+            pending.append(reminder)
+        elif scheduled_due or snooze_due:
             due.append(reminder)
         else:
             pending.append(reminder)
@@ -1207,44 +1210,35 @@ class AdminTimedNotifications(commands.Cog):
             return
 
         if action == "accepted":
-            embed = self.build_reminder_embed(
-                interaction.guild,
-                reminder,
-                status=f"Accepted by {interaction.user.mention}",
-            )
+            await interaction.response.defer(ephemeral=True)
             await self.log_timer_action(
                 interaction.guild,
                 "accepted",
                 reminder,
                 actor=interaction.user,
             )
-            await interaction.response.edit_message(
-                embed=embed,
-                view=self.disabled_reminder_view(reminder_id),
-            )
+            with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                await interaction.message.delete()
+            await interaction.followup.send("Reminder accepted and removed.", ephemeral=True)
             return
 
         if action == "ignore":
+            await interaction.response.defer(ephemeral=True)
             await self.log_timer_action(
                 interaction.guild,
                 "ignored",
                 reminder,
                 actor=interaction.user,
             )
-            await interaction.response.defer(ephemeral=True)
             with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
                 await interaction.message.delete()
             await interaction.followup.send("Reminder ignored and removed.", ephemeral=True)
             return
 
         if action == "snooze":
+            await interaction.response.defer(ephemeral=True)
             snooze_until = int((datetime.now(timezone.utc) + timedelta(hours=1)).timestamp())
             reminder = await self.set_reminder_snooze(interaction.guild, reminder_id, snooze_until)
-            embed = self.build_reminder_embed(
-                interaction.guild,
-                reminder,
-                status=f"Snoozed by {interaction.user.mention} until <t:{snooze_until}:t>",
-            )
             await self.log_timer_action(
                 interaction.guild,
                 "snoozed",
@@ -1252,9 +1246,11 @@ class AdminTimedNotifications(commands.Cog):
                 actor=interaction.user,
                 details=f"Until <t:{snooze_until}:F>",
             )
-            await interaction.response.edit_message(
-                embed=embed,
-                view=self.disabled_reminder_view(reminder_id),
+            with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                await interaction.message.delete()
+            await interaction.followup.send(
+                f"Reminder snoozed until <t:{snooze_until}:F> and removed.",
+                ephemeral=True,
             )
 
     async def run_due_reminders(self):
@@ -1266,6 +1262,9 @@ class AdminTimedNotifications(commands.Cog):
                 scheduled_due = int(reminder.get("next_run", 0)) <= current_ts
                 snooze_until = int(reminder.get("snooze_until") or 0)
                 snooze_due = bool(snooze_until and snooze_until <= current_ts)
+                snooze_active = bool(snooze_until and snooze_until > current_ts)
+                if snooze_active:
+                    continue
                 if scheduled_due or snooze_due:
                     due_items.append((reminder, scheduled_due, snooze_due))
 
