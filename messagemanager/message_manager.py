@@ -363,9 +363,12 @@ def parse_conversation_messages(html: str) -> List[ConversationMessage]:
     return messages
 
 
-def build_forum_thread_title(username: str, subject: str) -> str:
-    """Build `Username - Title name of DM` while respecting Discord forum title length."""
+def build_forum_thread_title(username: str, subject: str, conversation_id: str = "") -> str:
+    """Build `Username - Title of DM (Conversation ID)` within Discord's title length."""
     title = f"{str(username or 'Unknown').strip()} - {str(subject or 'Untitled').strip()}"
+    conversation_id = str(conversation_id or "").strip()
+    if conversation_id:
+        title = f"{title} ({conversation_id})"
     title = " ".join(title.split())
     if len(title) <= MAX_THREAD_TITLE_LENGTH:
         return title
@@ -850,7 +853,7 @@ class MessageManager(commands.Cog):
         if not forum:
             return None
 
-        title = build_forum_thread_title(username, subject)
+        title = build_forum_thread_title(username, subject, conversation_id)
         content = self._build_forum_thread_opening(
             conversation_id=conversation_id,
             username=username,
@@ -886,10 +889,9 @@ class MessageManager(commands.Cog):
             f"MissionChief conversation: `{conversation_id}`",
             f"Member: **{discord.utils.escape_markdown(str(username or 'Unknown'))}**",
             f"Title: **{discord.utils.escape_markdown(str(subject or 'Untitled'))}**",
-            f"Link: {MESSAGES_URL}/{conversation_id}",
         ]
         if preview:
-            lines.extend(["", "Latest message:", discord.utils.escape_markdown(str(preview))[:1200]])
+            lines.extend(["", discord.utils.escape_markdown(str(preview))[:1200]])
         return "\n".join(lines)[:1900]
 
     async def _post_inbound_to_forum(
@@ -921,12 +923,7 @@ class MessageManager(commands.Cog):
         if not existing_thread_id:
             return thread
 
-        content = (
-            f"New MissionChief reply from **{discord.utils.escape_markdown(str(username or 'Unknown'))}**"
-            + (f" (`{timestamp}`)" if timestamp else "")
-            + ":\n"
-            + discord.utils.escape_markdown(str(body or ""))[:1600]
-        )
+        content = discord.utils.escape_markdown(str(body or ""))[:1900]
         await thread.send(content[:1900])
         await self._save_conversation_thread(
             conversation_id,

@@ -191,8 +191,8 @@ class MessageManagerTests(unittest.TestCase):
 
     def test_build_forum_thread_title_uses_username_and_subject(self):
         self.assertEqual(
-            build_forum_thread_title("DutchFireFighter", "koekkoek"),
-            "DutchFireFighter - koekkoek",
+            build_forum_thread_title("DutchFireFighter", "koekkoek", "238264"),
+            "DutchFireFighter - koekkoek (238264)",
         )
         self.assertLessEqual(len(build_forum_thread_title("User", "x" * 200)), 100)
 
