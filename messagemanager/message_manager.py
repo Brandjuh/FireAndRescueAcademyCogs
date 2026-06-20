@@ -1,0 +1,381 @@
+from __future__ import annotations
+
+import io
+import logging
+import re
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+from urllib.parse import urljoin
+
+from bs4 import BeautifulSoup
+import discord
+from redbot.core import commands
+
+log = logging.getLogger("red.cog.messagemanager")
+
+BASE_URL = "https://www.missionchief.com"
+MESSAGES_URL = f"{BASE_URL}/messages"
+NEW_MESSAGE_URL = f"{BASE_URL}/messages/new"
+SUCCESS_MARKER = "Message Sent."
+
+
+@dataclass
+class MessageField:
+    name: str
+    tag: str
+    field_type: str = ""
+    value: str = ""
+    required: bool = False
+
+
+@dataclass
+class MessageForm:
+    action: str
+    method: str
+    fields: List[MessageField] = field(default_factory=list)
+    recipient_field: Optional[str] = None
+    subject_field: Optional[str] = None
+    body_field: Optional[str] = None
+    submit_name: Optional[str] = None
+    submit_value: Optional[str] = None
+
+
+Payload = List[Tuple[str, str]]
+
+
+def _text(element) -> str:
+    return " ".join(element.get_text(" ", strip=True).split()) if element else ""
+
+
+def _label_for_field(soup: BeautifulSoup, field) -> str:
+    field_id = field.get("id")
+    if field_id:
+        label = soup.find("label", attrs={"for": field_id})
+        if label:
+            return _text(label)
+    parent = field.find_parent("label")
+    if parent:
+        return _text(parent)
+    return ""
+
+
+def _field_identity(field: MessageField, labels: Dict[str, str]) -> str:
+    label = labels.get(field.name, "")
+    return " ".join([field.name, field.field_type, label]).lower()
+
+
+def _looks_like_recipient(field: MessageField, labels: Dict[str, str]) -> bool:
+    identity = _field_identity(field, labels)
+    return any(token in identity for token in ("recipient", "receiver", "username", "user name", "to]"))
+
+
+def _looks_like_subject(field: MessageField, labels: Dict[str, str]) -> bool:
+    return "subject" in _field_identity(field, labels)
+
+
+def _looks_like_body(field: MessageField, labels: Dict[str, str]) -> bool:
+    identity = _field_identity(field, labels)
+    return any(token in identity for token in ("body", "content", "message", "text"))
+
+
+def parse_message_form(html: str, page_url: str = NEW_MESSAGE_URL) -> MessageForm:
+    """Parse the MissionChief new-message form without assuming exact field names."""
+    soup = BeautifulSoup(html, "html.parser")
+    forms = soup.find_all("form")
+    if not forms:
+        raise ValueError("No form found on the MissionChief messages page.")
+
+    form = None
+    for candidate in forms:
+        action = str(candidate.get("action") or "")
+        if "message" in action.lower():
+            form = candidate
+            break
+    form = form or forms[0]
+
+    action = urljoin(page_url, form.get("action") or MESSAGES_URL)
+    method = (form.get("method") or "get").lower()
+    fields: List[MessageField] = []
+    labels: Dict[str, str] = {}
+    submit_name = None
+    submit_value = None
+
+    for input_el in form.find_all("input"):
+        name = input_el.get("name")
+        field_type = (input_el.get("type") or "text").lower()
+        if field_type in {"button", "image", "reset"}:
+            continue
+        if field_type == "submit":
+            if name and submit_name is None:
+                submit_name = name
+                submit_value = input_el.get("value") or ""
+            continue
+        if not name:
+            continue
+        field = MessageField(
+            name=name,
+            tag="input",
+            field_type=field_type,
+            value=input_el.get("value") or "",
+            required=input_el.has_attr("required"),
+        )
+        fields.append(field)
+        labels[name] = _label_for_field(soup, input_el)
+
+    for textarea in form.find_all("textarea"):
+        name = textarea.get("name")
+        if not name:
+            continue
+        field = MessageField(
+            name=name,
+            tag="textarea",
+            value=textarea.get_text() or "",
+            required=textarea.has_attr("required"),
+        )
+        fields.append(field)
+        labels[name] = _label_for_field(soup, textarea)
+
+    for select in form.find_all("select"):
+        name = select.get("name")
+        if not name:
+            continue
+        selected = select.find("option", selected=True) or select.find("option")
+        field = MessageField(
+            name=name,
+            tag="select",
+            value=selected.get("value") if selected else "",
+            required=select.has_attr("required"),
+        )
+        fields.append(field)
+        labels[name] = _label_for_field(soup, select)
+
+    recipient_field = next((field.name for field in fields if _looks_like_recipient(field, labels)), None)
+    subject_field = next((field.name for field in fields if _looks_like_subject(field, labels)), None)
+    body_field = next((field.name for field in fields if field.tag == "textarea" and _looks_like_body(field, labels)), None)
+    body_field = body_field or next((field.name for field in fields if field.tag == "textarea"), None)
+
+    return MessageForm(
+        action=action,
+        method=method,
+        fields=fields,
+        recipient_field=recipient_field,
+        subject_field=subject_field,
+        body_field=body_field,
+        submit_name=submit_name,
+        submit_value=submit_value,
+    )
+
+
+def build_message_payload(form: MessageForm, username: str, subject: str, body: str) -> Payload:
+    """Build the MissionChief message POST payload."""
+    missing = []
+    if not form.recipient_field:
+        missing.append("recipient/username")
+    if not form.subject_field:
+        missing.append("subject")
+    if not form.body_field:
+        missing.append("body")
+    if missing:
+        raise ValueError(f"Could not identify required message fields: {', '.join(missing)}.")
+
+    replacements = {
+        form.recipient_field: username,
+        form.subject_field: subject,
+        form.body_field: body,
+    }
+    payload: Payload = []
+    used_names = set()
+    for field_info in form.fields:
+        value = replacements.get(field_info.name, field_info.value)
+        payload.append((field_info.name, str(value or "")))
+        used_names.add(field_info.name)
+        if _visible_text_field_is_empty(field_info, value):
+            raise ValueError(f"Visible message field `{field_info.name}` is empty.")
+
+    for field_name, value in replacements.items():
+        if field_name not in used_names:
+            payload.append((field_name, value))
+
+    if form.submit_name:
+        payload.append((form.submit_name, form.submit_value or ""))
+    return payload
+
+
+def _visible_text_field_is_empty(field_info: MessageField, value: str) -> bool:
+    if field_info.tag == "textarea":
+        return not str(value or "").strip()
+    if field_info.tag != "input":
+        return False
+    if field_info.field_type in {"hidden", "submit", "button", "checkbox", "radio"}:
+        return False
+    return not str(value or "").strip()
+
+
+def parse_send_spec(spec: str) -> Tuple[str, str, str]:
+    """Parse `<username> | <subject> | <body>` without changing username casing."""
+    parts = [part.strip() for part in str(spec or "").split("|", 2)]
+    if len(parts) != 3 or not all(parts):
+        raise ValueError("Use `<username> | <subject> | <body>`.")
+    return parts[0], parts[1], parts[2]
+
+
+def _redact_value(name: str, value: str) -> str:
+    lowered = str(name or "").lower()
+    if "token" in lowered or "cookie" in lowered or lowered == "authorization":
+        return "REDACTED"
+    return str(value or "")
+
+
+def safe_payload_summary(payload: Payload) -> str:
+    if not payload:
+        return "none"
+    return "\n".join(f"{name}={_redact_value(name, value)}" for name, value in payload)
+
+
+def summarize_message_form(form: MessageForm) -> str:
+    lines = [
+        f"Action: {form.action}",
+        f"Method: {form.method.upper()}",
+        f"Fields: {len(form.fields)}",
+        f"Recipient field: {form.recipient_field or 'NOT FOUND'}",
+        f"Subject field: {form.subject_field or 'NOT FOUND'}",
+        f"Body field: {form.body_field or 'NOT FOUND'}",
+    ]
+    if form.submit_name:
+        lines.append(f"Submit: {form.submit_name}={form.submit_value or ''}")
+    for field_info in form.fields:
+        required = " required" if field_info.required else ""
+        field_type = f":{field_info.field_type}" if field_info.field_type else ""
+        value = _redact_value(field_info.name, field_info.value)
+        suffix = f" = {value}" if value else ""
+        lines.append(f"- {field_info.name} ({field_info.tag}{field_type}{required}){suffix}")
+    return "\n".join(lines)
+
+
+def message_was_sent(html: str) -> bool:
+    soup = BeautifulSoup(html or "", "html.parser")
+    text = soup.get_text(" ", strip=True)
+    return SUCCESS_MARKER.lower() in text.lower()
+
+
+def summarize_response(text: str, *, limit: int = 350) -> str:
+    text = re.sub(r"<script\b[^>]*>.*?</script>", " ", str(text or ""), flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<style\b[^>]*>.*?</style>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"authenticity_token[^\s&<>\"]+", "authenticity_token=REDACTED", text, flags=re.IGNORECASE)
+    text = " ".join(text.split())
+    return text[:limit]
+
+
+class MessageManager(commands.Cog):
+    """Admin-only MissionChief direct message manager."""
+
+    def __init__(self, bot):
+        self.bot = bot
+
+    def _cookie_manager(self):
+        cookie_manager = self.bot.get_cog("CookieManager")
+        if not cookie_manager or not hasattr(cookie_manager, "get_session"):
+            return None
+        return cookie_manager
+
+    async def _get_session(self):
+        cookie_manager = self._cookie_manager()
+        if not cookie_manager:
+            raise RuntimeError("CookieManager is not loaded.")
+        session = await cookie_manager.get_session()
+        if not session:
+            raise RuntimeError("CookieManager did not return a session.")
+        return session
+
+    async def _fetch_form(self) -> MessageForm:
+        session = await self._get_session()
+        async with session.get(NEW_MESSAGE_URL, allow_redirects=True) as response:
+            status = getattr(response, "status", None)
+            html = await response.text()
+        if status is not None and int(status) >= 400:
+            raise RuntimeError(f"MissionChief returned HTTP {status}.")
+        return parse_message_form(html, NEW_MESSAGE_URL)
+
+    async def _send_message(self, username: str, subject: str, body: str) -> Tuple[bool, str]:
+        if not username or not subject or not body:
+            raise ValueError("Username, subject, and body are required.")
+
+        form = await self._fetch_form()
+        if form.method != "post":
+            raise RuntimeError(f"Unexpected message form method `{form.method}`.")
+        payload = build_message_payload(form, username, subject, body)
+        session = await self._get_session()
+        headers = {
+            "Origin": BASE_URL,
+            "Referer": NEW_MESSAGE_URL,
+        }
+        async with session.post(form.action, data=payload, allow_redirects=True, headers=headers) as response:
+            status = getattr(response, "status", None)
+            response_text = await response.text()
+
+        if message_was_sent(response_text):
+            return True, "Message Sent."
+        response_summary = summarize_response(response_text)
+        log.warning("MessageManager send failed with HTTP %s. Response: %s", status, response_summary)
+        return False, f"MissionChief did not confirm delivery. HTTP {status}. Response: {response_summary or 'empty'}"
+
+    @commands.group(name="messagemanager", aliases=["messages"], invoke_without_command=True)
+    @commands.admin()
+    async def messagemanager(self, ctx: commands.Context):
+        """Manage MissionChief direct messages."""
+        await ctx.send_help()
+
+    @messagemanager.command(name="inspect")
+    @commands.admin()
+    async def inspect_form(self, ctx: commands.Context):
+        """Inspect the live MissionChief new-message form."""
+        try:
+            form = await self._fetch_form()
+        except Exception as exc:
+            await ctx.send(f"Could not inspect message form: {exc}")
+            return
+        data = io.BytesIO(summarize_message_form(form).encode("utf-8"))
+        await ctx.send(
+            "MissionChief message form inspection:",
+            file=discord.File(data, filename="messagemanager-form.txt"),
+        )
+
+    @messagemanager.command(name="payload")
+    @commands.admin()
+    async def debug_payload(self, ctx: commands.Context, *, spec: str):
+        """Build a safe no-submit payload for `<username> | <subject> | <body>`."""
+        try:
+            username, subject, body = parse_send_spec(spec)
+            form = await self._fetch_form()
+            payload = build_message_payload(form, username, subject, body)
+        except Exception as exc:
+            await ctx.send(f"Could not build message payload: {exc}")
+            return
+        data = io.BytesIO(safe_payload_summary(payload).encode("utf-8"))
+        await ctx.send(
+            "Safe MessageManager payload generated. No message was sent.",
+            file=discord.File(data, filename="messagemanager-payload.txt"),
+        )
+
+    @messagemanager.command(name="send")
+    @commands.admin()
+    async def send_message(self, ctx: commands.Context, *, spec: str):
+        """Send a MissionChief DM: `<username> | <subject> | <body>`."""
+        try:
+            username, subject, body = parse_send_spec(spec)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+
+        async with ctx.typing():
+            try:
+                ok, reason = await self._send_message(username, subject, body)
+            except Exception as exc:
+                await ctx.send(f"Could not send MissionChief message: {exc}")
+                return
+
+        if ok:
+            await ctx.send(f"MissionChief message sent to `{username}`.")
+        else:
+            await ctx.send(f"MissionChief message was not confirmed for `{username}`: {reason}")

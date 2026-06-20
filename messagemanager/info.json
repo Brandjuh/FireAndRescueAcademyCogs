@@ -1,0 +1,31 @@
+{
+    "author": [
+        "Brandjuh"
+    ],
+    "name": "MessageManager",
+    "description": "Admin-only MissionChief direct message manager using CookieManager sessions.",
+    "install_msg": "MessageManager installed. Use `[p]messagemanager inspect` to inspect the live MissionChief message form, then `[p]messagemanager send <username> | <subject> | <body>` to send an admin-controlled MissionChief DM.",
+    "short": "MissionChief message manager",
+    "tags": [
+        "missionchief",
+        "messages",
+        "admin",
+        "alliance"
+    ],
+    "type": "COG",
+    "required_cogs": {
+        "CookieManager": "Provides authenticated MissionChief sessions"
+    },
+    "requirements": [
+        "beautifulsoup4"
+    ],
+    "end_user_data_statement": "This cog does not persist message contents. It sends MissionChief direct messages through the configured CookieManager session and may show redacted diagnostics to admins.",
+    "min_bot_version": "3.5.0",
+    "min_python_version": [
+        3,
+        9,
+        0
+    ],
+    "hidden": false,
+    "disabled": false
+}
