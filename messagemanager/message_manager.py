@@ -1057,10 +1057,8 @@ class MessageManager(commands.Cog):
             return None
 
         title = build_forum_thread_title(username, subject, conversation_id)
-        chunks = split_discord_content(preview or "Conversation linked.")
         created = await forum.create_thread(
             name=title,
-            content=chunks[0],
             embed=self._build_conversation_embed(
                 title=opening_title,
                 conversation_id=conversation_id,
@@ -1077,11 +1075,7 @@ class MessageManager(commands.Cog):
             log.warning("MessageManager forum thread create returned unexpected result: %r", created)
             return None
 
-        for chunk in chunks[1:]:
-            await thread.send(
-                content=chunk,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+        await self._send_body_chunks(thread, preview or "Conversation linked.")
 
         await self._save_conversation_thread(
             conversation_id,
@@ -1144,6 +1138,14 @@ class MessageManager(commands.Cog):
             timestamp=timestamp,
         )
 
+    async def _send_body_chunks(self, thread: discord.Thread, body: str) -> None:
+        """Send plain message body chunks after the metadata embed."""
+        for chunk in split_discord_content(body):
+            await thread.send(
+                content=chunk,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
     async def _post_inbound_to_forum(
         self,
         *,
@@ -1175,9 +1177,7 @@ class MessageManager(commands.Cog):
         if not existing_thread_id:
             return thread
 
-        chunks = split_discord_content(body)
         await thread.send(
-            content=chunks[0],
             embed=self._build_inbound_reply_embed(
                 conversation_id=conversation_id,
                 username=username,
@@ -1186,11 +1186,7 @@ class MessageManager(commands.Cog):
             ),
             allowed_mentions=discord.AllowedMentions.none(),
         )
-        for chunk in chunks[1:]:
-            await thread.send(
-                content=chunk,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+        await self._send_body_chunks(thread, body)
         await self._save_conversation_thread(
             conversation_id,
             thread_id=thread.id,
