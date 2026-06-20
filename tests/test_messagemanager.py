@@ -2,8 +2,13 @@ import unittest
 
 from messagemanager.message_manager import (
     MemberResolutionError,
+    build_forum_thread_title,
+    build_reply_payload,
     build_message_payload,
+    extract_conversation_id,
     message_was_sent,
+    parse_conversation_messages,
+    parse_inbox_messages,
     parse_message_form,
     parse_send_spec,
     resolve_alliance_member_name,
@@ -25,6 +30,61 @@ MESSAGE_FORM_HTML = """
       <label for="message_body">Message</label>
       <textarea id="message_body" name="message[body]"></textarea>
       <input name="commit" type="submit" value="Send Message" />
+    </form>
+  </body>
+</html>
+"""
+
+
+INBOX_HTML = """
+<html>
+  <body>
+    <div class="panel-body system_messages_container">
+      <table>
+        <tr>
+          <td><div>New</div></td>
+          <td><div><a href="/messages/system_message/767">System update</a></div></td>
+        </tr>
+      </table>
+    </div>
+    <form action="/messages/trash" method="post">
+      <input id="current_box" name="current_box" type="hidden" value="inbox" />
+      <table>
+        <tbody>
+          <tr>
+            <td><input name="conversations[]" type="checkbox" value="238264" /></td>
+            <td>New</td>
+            <td><a href="/messages/238264">DutchFireFighter</a></td>
+            <td><a href="/messages/238264">koekkoek</a></td>
+          </tr>
+          <tr>
+            <td><input name="conversations[]" type="checkbox" value="235837" /></td>
+            <td></td>
+            <td><a href="/messages/235837">Spieler1259735</a></td>
+            <td><a href="/messages/235837">Game Over</a></td>
+          </tr>
+        </tbody>
+      </table>
+    </form>
+  </body>
+</html>
+"""
+
+
+REPLY_HTML = """
+<html>
+  <body>
+    <div class="well" data-message-time="2026-06-19T20:52:25-04:00">
+      <strong><a href="/profile/88649">DutchFireFighter</a></strong>
+      <span class="pull-right">19 Jun 20:52</span>
+      <p>test</p>
+    </div>
+    <form action="/messages" method="post">
+      <input name="utf8" type="hidden" value="&#x2713;" />
+      <input name="authenticity_token" type="hidden" value="secret" />
+      <input id="message_conversation_id" name="message[conversation_id]" type="hidden" value="238264" />
+      <textarea id="message_body" name="message[body]"></textarea>
+      <input id="submit_button" name="submit_button" type="submit" value="Send Message" />
     </form>
   </body>
 </html>
@@ -89,6 +149,52 @@ class MessageManagerTests(unittest.TestCase):
 
         with self.assertRaises(MemberResolutionError):
             resolve_alliance_member_name("TESTUSER", members)
+
+    def test_parse_inbox_messages_ignores_system_messages(self):
+        messages = parse_inbox_messages(INBOX_HTML)
+
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(messages[0].conversation_id, "238264")
+        self.assertEqual(messages[0].sender, "DutchFireFighter")
+        self.assertEqual(messages[0].subject, "koekkoek")
+        self.assertTrue(messages[0].is_new)
+        self.assertEqual(messages[1].conversation_id, "235837")
+        self.assertFalse(messages[1].is_new)
+        self.assertFalse(any("system_message" in message.url for message in messages))
+
+    def test_build_reply_payload_uses_conversation_id_and_body(self):
+        action, payload = build_reply_payload(
+            REPLY_HTML,
+            "Reply text",
+            "https://www.missionchief.com/messages/238264",
+        )
+
+        self.assertEqual(action, "https://www.missionchief.com/messages")
+        self.assertIn(("message[conversation_id]", "238264"), payload)
+        self.assertIn(("message[body]", "Reply text"), payload)
+        self.assertIn(("submit_button", "Send Message"), payload)
+
+    def test_extract_conversation_id_from_url_or_reply_form(self):
+        self.assertEqual(
+            extract_conversation_id("", "https://www.missionchief.com/messages/238264"),
+            "238264",
+        )
+        self.assertEqual(extract_conversation_id(REPLY_HTML), "238264")
+
+    def test_parse_conversation_messages_reads_latest_visible_message(self):
+        messages = parse_conversation_messages(REPLY_HTML)
+
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0].author, "DutchFireFighter")
+        self.assertEqual(messages[0].body, "test")
+        self.assertEqual(messages[0].timestamp, "2026-06-19T20:52:25-04:00")
+
+    def test_build_forum_thread_title_uses_username_and_subject(self):
+        self.assertEqual(
+            build_forum_thread_title("DutchFireFighter", "koekkoek"),
+            "DutchFireFighter - koekkoek",
+        )
+        self.assertLessEqual(len(build_forum_thread_title("User", "x" * 200)), 100)
 
     def test_build_payload_rejects_empty_visible_fields(self):
         form = parse_message_form(MESSAGE_FORM_HTML)
