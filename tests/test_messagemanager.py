@@ -12,6 +12,7 @@ from messagemanager.message_manager import (
     build_message_payload,
     discord_timestamp_from_iso,
     extract_conversation_id,
+    format_duration,
     inbox_scan_delay_seconds,
     message_was_sent,
     parse_conversation_messages,
@@ -219,25 +220,26 @@ class MessageManagerTests(unittest.TestCase):
         )
         self.assertLessEqual(len(build_forum_thread_title("User", "x" * 200)), 100)
 
-    def test_forum_thread_opening_omits_private_message_link_and_latest_label(self):
+    def test_conversation_embed_uses_metadata_without_private_message_link(self):
         manager = MessageManager.__new__(MessageManager)
         if not hasattr(message_manager_module.discord, "utils"):
             message_manager_module.discord.utils = types.SimpleNamespace(escape_markdown=lambda value: value)
 
-        content = manager._build_forum_thread_opening(
+        embed = manager._build_conversation_embed(
+            title="New MissionChief Reply",
             conversation_id="238294",
             username="DutchFireFighter",
             subject="Boopie",
-            preview="woopie",
+            timestamp="2026-06-20T06:08:36-04:00",
         )
 
-        self.assertIn("MissionChief conversation: `238294`", content)
-        self.assertIn("Member: **DutchFireFighter**", content)
-        self.assertIn("Title: **Boopie**", content)
-        self.assertIn("woopie", content)
-        self.assertNotIn("Link:", content)
-        self.assertNotIn("Latest message:", content)
-        self.assertNotIn("https://www.missionchief.com/messages/238294", content)
+        self.assertEqual(embed.kwargs["title"], "New MissionChief Reply")
+        values = {field["name"]: field["value"] for field in embed.fields}
+        self.assertEqual(values["Member"], "DutchFireFighter")
+        self.assertEqual(values["Conversation ID"], "`238294`")
+        self.assertEqual(values["Time"], "<t:1781950116:F>")
+        self.assertEqual(values["Title"], "Boopie")
+        self.assertNotIn("https://www.missionchief.com/messages/238294", str(values))
 
     def test_discord_timestamp_from_iso_uses_full_timestamp_style(self):
         self.assertEqual(
@@ -252,6 +254,23 @@ class MessageManagerTests(unittest.TestCase):
         self.assertGreater(len(chunks), 1)
         self.assertTrue(all(len(chunk) <= 30 for chunk in chunks))
         self.assertEqual("".join(chunks), "First paragraph." + ("x" * 50))
+
+    def test_format_duration_returns_short_operational_text(self):
+        self.assertEqual(format_duration(45), "45s")
+        self.assertEqual(format_duration(15 * 60), "15m")
+        self.assertEqual(format_duration(75 * 60), "1h 15m")
+
+    def test_format_send_result_reports_linked_forum_thread(self):
+        message = MessageManager._format_send_result(
+            {
+                "resolved_username": "DutchFireFighter",
+                "conversation_id": "238294",
+                "thread": types.SimpleNamespace(mention="#thread"),
+            }
+        )
+
+        self.assertIn("MissionChief message sent to `DutchFireFighter`.", message)
+        self.assertIn("Conversation `238294` linked to forum: #thread", message)
 
     def test_build_payload_rejects_empty_visible_fields(self):
         form = parse_message_form(MESSAGE_FORM_HTML)
