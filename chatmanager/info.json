@@ -1,0 +1,26 @@
+{
+    "author": [
+        "FireAndRescueAcademy"
+    ],
+    "description": "Synchronizes MissionChief alliance chat with a Discord channel.",
+    "install_msg": "ChatManager installed. It synchronizes MissionChief alliance chat with the configured Discord channel. Default channel: 1518029674570055720. Configure with `[p]chatmanager`.",
+    "short": "MissionChief alliance chat bridge.",
+    "name": "ChatManager",
+    "tags": [
+        "missionchief",
+        "chat",
+        "alliance",
+        "bridge"
+    ],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores channel settings, the last synchronized MissionChief chat ID, and short-lived outgoing echo suppression data. It relays chat messages between MissionChief and Discord.",
+    "min_bot_version": "3.5.0",
+    "required_cogs": {
+        "CookieManager": "https://github.com/Brandjuh/FireAndRescueAcademyCogs"
+    },
+    "requirements": [
+        "beautifulsoup4"
+    ],
+    "hidden": false,
+    "disabled": false
+}
