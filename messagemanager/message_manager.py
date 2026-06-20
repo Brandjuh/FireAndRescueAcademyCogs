@@ -7,6 +7,7 @@ import random
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urljoin
 
@@ -26,6 +27,7 @@ DEFAULT_FORUM_CHANNEL_ID = 1517694938501087342
 INBOX_SCAN_INTERVAL_SECONDS = 15 * 60
 INBOX_SCAN_JITTER_SECONDS = 5 * 60
 MAX_THREAD_TITLE_LENGTH = 100
+MAX_DISCORD_CONTENT_LENGTH = 1900
 TAX_WARNING_SCAN_INTERVAL_SECONDS = 6 * 3600
 TAX_WARNING_SCAN_JITTER_SECONDS = 10 * 60
 TAX_WARNING_MIN_RATE = 5.0
@@ -470,6 +472,43 @@ def tax_warning_member_identity(member: Dict[str, object]) -> Tuple[str, str, fl
     except (TypeError, ValueError):
         rate = 0.0
     return mc_id, username, rate
+
+
+def discord_timestamp_from_iso(value: str, style: str = "F") -> str:
+    """Convert an ISO timestamp with timezone to a Discord timestamp."""
+    raw = str(value or "").strip()
+    if not raw:
+        return "Unknown"
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw
+    return f"<t:{int(parsed.timestamp())}:{style}>"
+
+
+def split_discord_content(text: str, limit: int = MAX_DISCORD_CONTENT_LENGTH) -> List[str]:
+    """Split long message text into Discord-safe chunks, preferring paragraph and line breaks."""
+    remaining = str(text or "").strip()
+    if not remaining:
+        return ["No message body found."]
+
+    chunks = []
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+
+        window = remaining[:limit]
+        split_at = max(window.rfind("\n\n"), window.rfind("\n"), window.rfind(" "))
+        if split_at < max(1, limit // 2):
+            split_at = limit
+
+        chunk = remaining[:split_at].strip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[split_at:].strip()
+
+    return chunks
 
 
 def _visible_text_field_is_empty(field_info: MessageField, value: str) -> bool:
@@ -1024,6 +1063,41 @@ class MessageManager(commands.Cog):
             lines.extend(["", discord.utils.escape_markdown(str(preview))[:1200]])
         return "\n".join(lines)[:1900]
 
+    def _build_inbound_reply_embed(
+        self,
+        *,
+        conversation_id: str,
+        username: str,
+        subject: str,
+        timestamp: str = "",
+    ) -> discord.Embed:
+        embed = discord.Embed(
+            title="New MissionChief Reply",
+            color=discord.Color.blue(),
+        )
+        embed.add_field(
+            name="Member",
+            value=discord.utils.escape_markdown(str(username or "Unknown")),
+            inline=True,
+        )
+        embed.add_field(
+            name="Conversation ID",
+            value=f"`{conversation_id}`",
+            inline=True,
+        )
+        embed.add_field(
+            name="Time",
+            value=discord_timestamp_from_iso(timestamp),
+            inline=False,
+        )
+        if subject:
+            embed.add_field(
+                name="Title",
+                value=discord.utils.escape_markdown(str(subject))[:1024],
+                inline=False,
+            )
+        return embed
+
     async def _post_inbound_to_forum(
         self,
         *,
@@ -1053,8 +1127,22 @@ class MessageManager(commands.Cog):
         if not existing_thread_id:
             return thread
 
-        content = discord.utils.escape_markdown(str(body or ""))[:1900]
-        await thread.send(content[:1900])
+        chunks = split_discord_content(body)
+        await thread.send(
+            content=chunks[0],
+            embed=self._build_inbound_reply_embed(
+                conversation_id=conversation_id,
+                username=username,
+                subject=subject,
+                timestamp=timestamp,
+            ),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        for chunk in chunks[1:]:
+            await thread.send(
+                content=chunk,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
         await self._save_conversation_thread(
             conversation_id,
             thread_id=thread.id,
