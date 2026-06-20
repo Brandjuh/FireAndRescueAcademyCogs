@@ -1,5 +1,7 @@
+import asyncio
 import unittest
 import types
+from unittest.mock import AsyncMock
 
 import messagemanager.message_manager as message_manager_module
 from messagemanager.message_manager import (
@@ -271,6 +273,47 @@ class MessageManagerTests(unittest.TestCase):
 
         self.assertIn("MissionChief message sent to `DutchFireFighter`.", message)
         self.assertIn("Conversation `238294` linked to forum: #thread", message)
+
+    def test_inbound_reply_sends_embed_before_body_text(self):
+        manager = MessageManager.__new__(MessageManager)
+        if not hasattr(message_manager_module.discord, "utils"):
+            message_manager_module.discord.utils = types.SimpleNamespace(escape_markdown=lambda value: value)
+        if not hasattr(message_manager_module.discord, "AllowedMentions"):
+            message_manager_module.discord.AllowedMentions = types.SimpleNamespace(none=lambda: "none")
+
+        class FakeConfig:
+            async def conversation_threads(self):
+                return {"238294": {"thread_id": 123, "last_message_time": "old"}}
+
+        class FakeThread:
+            def __init__(self):
+                self.calls = []
+                self.id = 123
+
+            async def send(self, **kwargs):
+                self.calls.append(kwargs)
+
+        thread = FakeThread()
+        manager.config = FakeConfig()
+        manager._ensure_conversation_thread = AsyncMock(return_value=thread)
+        manager._save_conversation_thread = AsyncMock()
+
+        result = asyncio.run(
+            manager._post_inbound_to_forum(
+                conversation_id="238294",
+                username="DutchFireFighter",
+                subject="Boopie",
+                body="burp",
+                timestamp="2026-06-20T07:00:41-04:00",
+            )
+        )
+
+        self.assertIs(result, thread)
+        self.assertEqual(len(thread.calls), 2)
+        self.assertIn("embed", thread.calls[0])
+        self.assertNotIn("content", thread.calls[0])
+        self.assertEqual(thread.calls[1]["content"], "burp")
+        self.assertNotIn("embed", thread.calls[1])
 
     def test_build_payload_rejects_empty_visible_fields(self):
         form = parse_message_form(MESSAGE_FORM_HTML)
