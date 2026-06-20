@@ -511,6 +511,20 @@ def split_discord_content(text: str, limit: int = MAX_DISCORD_CONTENT_LENGTH) ->
     return chunks
 
 
+def format_duration(seconds: float) -> str:
+    """Format a short operational duration for status messages."""
+    total_seconds = max(0, int(seconds or 0))
+    minutes = total_seconds // 60
+    if minutes <= 0:
+        return f"{total_seconds}s"
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    if minutes:
+        return f"{hours}h {minutes}m"
+    return f"{hours}h"
+
+
 def _visible_text_field_is_empty(field_info: MessageField, value: str) -> bool:
     if field_info.tag == "textarea":
         return not str(value or "").strip()
@@ -640,7 +654,7 @@ class MessageComposeModal(discord.ui.Modal, title="MissionChief Message"):
         subject = str(self.subject.value).strip()
         body = str(self.body.value).strip()
         try:
-            ok, reason, resolved_username, conversation_id = await self.manager._send_message(username, subject, body)
+            result = await self.manager._send_message_and_link(username, subject, body)
         except MemberResolutionError as exc:
             await interaction.followup.send(str(exc), ephemeral=True)
             return
@@ -649,24 +663,11 @@ class MessageComposeModal(discord.ui.Modal, title="MissionChief Message"):
             await interaction.followup.send(f"Could not send MissionChief message: {exc}", ephemeral=True)
             return
 
-        if ok:
-            await interaction.followup.send(
-                f"MissionChief message sent to `{resolved_username}`."
-                + (" A forum thread will be linked in the background." if conversation_id else ""),
-                ephemeral=True,
-            )
-            if conversation_id:
-                asyncio.create_task(
-                    self.manager._link_sent_message_to_forum(
-                        conversation_id=conversation_id,
-                        username=resolved_username,
-                        subject=subject,
-                        body=body,
-                    )
-                )
+        if result["ok"]:
+            await interaction.followup.send(self.manager._format_send_result(result), ephemeral=True)
         else:
             await interaction.followup.send(
-                f"MissionChief message was not confirmed for `{resolved_username}`: {reason}",
+                f"MissionChief message was not confirmed for `{result['resolved_username']}`: {result['reason']}",
                 ephemeral=True,
             )
 
@@ -824,18 +825,48 @@ class MessageManager(commands.Cog):
         await asyncio.sleep(5)
         await self._ensure_panel_message()
 
+    async def _report_bot_status(self, detail: str, *, priority: int = 70, ttl_seconds: int = 300) -> None:
+        botstatus = self.bot.get_cog("BotStatus")
+        report_activity = getattr(botstatus, "report_activity", None) if botstatus else None
+        if not report_activity:
+            return
+        try:
+            await report_activity(
+                "MessageManager",
+                detail,
+                priority=priority,
+                ttl_seconds=ttl_seconds,
+            )
+        except Exception:
+            log.debug("Could not report MessageManager BotStatus activity", exc_info=True)
+
     async def _inbox_scan_loop(self):
         await self.bot.wait_until_ready()
         await asyncio.sleep(60)
         while True:
+            delay = inbox_scan_delay_seconds()
             try:
                 if await self.config.inbox_scan_enabled():
-                    await self._scan_new_inbox_messages()
+                    await self._scan_new_inbox_messages_with_status(
+                        trigger="automatic",
+                        next_delay=delay,
+                    )
+                else:
+                    await self._report_bot_status(
+                        "MissionChief DM checker is disabled",
+                        priority=40,
+                        ttl_seconds=int(delay),
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 log.exception("MessageManager inbox scan failed: %s", exc)
-            await asyncio.sleep(inbox_scan_delay_seconds())
+                await self._report_bot_status(
+                    f"MissionChief DM check failed: {exc}",
+                    priority=90,
+                    ttl_seconds=600,
+                )
+            await asyncio.sleep(delay)
 
     async def _tax_warning_loop(self):
         await self.bot.wait_until_ready()
@@ -911,7 +942,8 @@ class MessageManager(commands.Cog):
         message_id = await self.config.panel_message_id()
         if message_id:
             try:
-                await channel.fetch_message(int(message_id))
+                message = await channel.fetch_message(int(message_id))
+                await message.edit(embed=self._build_panel_embed(), view=MessageManagerPanelView(self))
                 return
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 log.info("Stored MessageManager panel message is unavailable; reposting")
@@ -989,6 +1021,8 @@ class MessageManager(commands.Cog):
         subject: str,
         preview: str = "",
         last_message_time: str = "",
+        opening_title: str = "MissionChief Conversation",
+        opening_timestamp: str = "",
     ) -> Optional[discord.Thread]:
         conversation_id = str(conversation_id or "").strip()
         if not conversation_id:
@@ -1023,19 +1057,31 @@ class MessageManager(commands.Cog):
             return None
 
         title = build_forum_thread_title(username, subject, conversation_id)
-        content = self._build_forum_thread_opening(
-            conversation_id=conversation_id,
-            username=username,
-            subject=subject,
-            preview=preview,
+        chunks = split_discord_content(preview or "Conversation linked.")
+        created = await forum.create_thread(
+            name=title,
+            content=chunks[0],
+            embed=self._build_conversation_embed(
+                title=opening_title,
+                conversation_id=conversation_id,
+                username=username,
+                subject=subject,
+                timestamp=opening_timestamp,
+            ),
+            allowed_mentions=discord.AllowedMentions.none(),
         )
-        created = await forum.create_thread(name=title, content=content)
         thread = getattr(created, "thread", created)
         if isinstance(created, tuple):
             thread = created[0]
         if not isinstance(thread, discord.Thread):
             log.warning("MessageManager forum thread create returned unexpected result: %r", created)
             return None
+
+        for chunk in chunks[1:]:
+            await thread.send(
+                content=chunk,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
         await self._save_conversation_thread(
             conversation_id,
@@ -1046,33 +1092,17 @@ class MessageManager(commands.Cog):
         )
         return thread
 
-    def _build_forum_thread_opening(
+    def _build_conversation_embed(
         self,
         *,
-        conversation_id: str,
-        username: str,
-        subject: str,
-        preview: str = "",
-    ) -> str:
-        lines = [
-            f"MissionChief conversation: `{conversation_id}`",
-            f"Member: **{discord.utils.escape_markdown(str(username or 'Unknown'))}**",
-            f"Title: **{discord.utils.escape_markdown(str(subject or 'Untitled'))}**",
-        ]
-        if preview:
-            lines.extend(["", discord.utils.escape_markdown(str(preview))[:1200]])
-        return "\n".join(lines)[:1900]
-
-    def _build_inbound_reply_embed(
-        self,
-        *,
+        title: str,
         conversation_id: str,
         username: str,
         subject: str,
         timestamp: str = "",
     ) -> discord.Embed:
         embed = discord.Embed(
-            title="New MissionChief Reply",
+            title=title,
             color=discord.Color.blue(),
         )
         embed.add_field(
@@ -1098,6 +1128,22 @@ class MessageManager(commands.Cog):
             )
         return embed
 
+    def _build_inbound_reply_embed(
+        self,
+        *,
+        conversation_id: str,
+        username: str,
+        subject: str,
+        timestamp: str = "",
+    ) -> discord.Embed:
+        return self._build_conversation_embed(
+            title="New MissionChief Reply",
+            conversation_id=conversation_id,
+            username=username,
+            subject=subject,
+            timestamp=timestamp,
+        )
+
     async def _post_inbound_to_forum(
         self,
         *,
@@ -1117,7 +1163,9 @@ class MessageManager(commands.Cog):
             username=username,
             subject=subject,
             preview=body,
-            last_message_time="" if existing_thread_id else timestamp,
+            last_message_time=timestamp,
+            opening_title="New MissionChief Reply",
+            opening_timestamp=timestamp,
         )
         if not thread:
             return None
@@ -1432,10 +1480,42 @@ class MessageManager(commands.Cog):
 
         return created, updated, skipped
 
+    async def _scan_new_inbox_messages_with_status(
+        self,
+        *,
+        trigger: str,
+        next_delay: Optional[float] = None,
+    ) -> Tuple[int, int, int]:
+        await self._report_bot_status(
+            f"Checking MissionChief DMs ({trigger})",
+            priority=80,
+            ttl_seconds=180,
+        )
+        try:
+            created, updated, skipped = await self._scan_new_inbox_messages()
+        except Exception as exc:
+            await self._report_bot_status(
+                f"MissionChief DM check failed ({trigger}): {exc}",
+                priority=90,
+                ttl_seconds=600,
+            )
+            raise
+
+        next_text = f"; next check in ~{format_duration(next_delay)}" if next_delay is not None else ""
+        await self._report_bot_status(
+            (
+                f"MissionChief DMs checked ({trigger}): "
+                f"{created} new, {updated} updated, {skipped} skipped{next_text}"
+            ),
+            priority=65,
+            ttl_seconds=int(next_delay or 900),
+        )
+        return created, updated, skipped
+
     async def _scan_inbox_and_report(self, interaction: discord.Interaction) -> None:
         try:
             created, updated, skipped = await asyncio.wait_for(
-                self._scan_new_inbox_messages(),
+                self._scan_new_inbox_messages_with_status(trigger="manual"),
                 timeout=180,
             )
             message = (
@@ -1468,6 +1548,7 @@ class MessageManager(commands.Cog):
                     username=username,
                     subject=subject,
                     preview=body,
+                    opening_title="MissionChief Message Sent",
                 ),
                 timeout=60,
             )
@@ -1505,6 +1586,36 @@ class MessageManager(commands.Cog):
             resolved_username,
             None,
         )
+
+    async def _send_message_and_link(self, username: str, subject: str, body: str) -> dict:
+        ok, reason, resolved_username, conversation_id = await self._send_message(username, subject, body)
+        thread = None
+        if ok and conversation_id:
+            thread = await self._link_sent_message_to_forum(
+                conversation_id=conversation_id,
+                username=resolved_username,
+                subject=subject,
+                body=body,
+            )
+        return {
+            "ok": ok,
+            "reason": reason,
+            "resolved_username": resolved_username,
+            "conversation_id": conversation_id,
+            "thread": thread,
+        }
+
+    @staticmethod
+    def _format_send_result(result: dict) -> str:
+        resolved_username = result.get("resolved_username") or "Unknown"
+        conversation_id = result.get("conversation_id")
+        thread = result.get("thread")
+        message = f"MissionChief message sent to `{resolved_username}`."
+        if thread:
+            return f"{message} Conversation `{conversation_id}` linked to forum: {thread.mention}"
+        if conversation_id:
+            return f"{message} Conversation `{conversation_id}` was sent, but the forum thread could not be linked."
+        return message
 
     async def _send_reply(self, conversation_id: str, body: str) -> Tuple[bool, str]:
         conversation_id = str(conversation_id or "").strip()
@@ -1656,6 +1767,31 @@ class MessageManager(commands.Cog):
             file=discord.File(data, filename="messagemanager-payload.txt"),
         )
 
+    @messagemanager.command(name="inboxstatus")
+    @commands.admin()
+    async def inbox_status(self, ctx: commands.Context):
+        """Show the MissionChief inbox checker status."""
+        enabled = await self.config.inbox_scan_enabled()
+        task_running = bool(self._inbox_task and not self._inbox_task.done())
+        await ctx.send(
+            "MessageManager inbox checker:\n"
+            f"- Enabled: `{enabled}`\n"
+            f"- Background task running: `{task_running}`\n"
+            f"- Interval: `15 minutes + 0-5 minutes jitter`\n"
+            "- BotStatus: `MessageManager`"
+        )
+
+    @messagemanager.command(name="inboxscan")
+    @commands.admin()
+    async def inbox_scan_enabled(self, ctx: commands.Context, enabled: Optional[bool] = None):
+        """Show or set whether automatic MissionChief inbox scans are enabled."""
+        if enabled is None:
+            current = await self.config.inbox_scan_enabled()
+            await ctx.send(f"Automatic MissionChief inbox scans are currently `{current}`.")
+            return
+        await self.config.inbox_scan_enabled.set(bool(enabled))
+        await ctx.send(f"Automatic MissionChief inbox scans set to `{bool(enabled)}`.")
+
     @messagemanager.command(name="send")
     @commands.admin()
     async def send_message(self, ctx: commands.Context, *, spec: str):
@@ -1668,29 +1804,17 @@ class MessageManager(commands.Cog):
 
         async with ctx.typing():
             try:
-                ok, reason, resolved_username, conversation_id = await self._send_message(username, subject, body)
+                result = await self._send_message_and_link(username, subject, body)
             except Exception as exc:
                 await ctx.send(f"Could not send MissionChief message: {exc}")
                 return
 
-        if ok:
-            thread = None
-            if conversation_id:
-                thread = await self._link_sent_message_to_forum(
-                    conversation_id=conversation_id,
-                    username=resolved_username,
-                    subject=subject,
-                    body=body,
-                )
-            if thread:
-                suffix = f" Conversation `{conversation_id}` linked to forum: {thread.mention}"
-            elif conversation_id:
-                suffix = f" Conversation `{conversation_id}` was sent, but the forum thread could not be linked."
-            else:
-                suffix = ""
-            await ctx.send(f"MissionChief message sent to `{resolved_username}`.{suffix}")
+        if result["ok"]:
+            await ctx.send(self._format_send_result(result))
         else:
-            await ctx.send(f"MissionChief message was not confirmed for `{resolved_username}`: {reason}")
+            await ctx.send(
+                f"MissionChief message was not confirmed for `{result['resolved_username']}`: {result['reason']}"
+            )
 
     @messagemanager.group(name="taxwarnings", invoke_without_command=True)
     @commands.admin()
