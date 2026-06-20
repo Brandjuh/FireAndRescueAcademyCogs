@@ -7,7 +7,7 @@ import random
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urljoin
 
@@ -1607,6 +1607,7 @@ class MessageManager(commands.Cog):
         username: str,
         subject: str,
         body: str,
+        sent_at: str = "",
     ) -> Optional[discord.Thread]:
         try:
             return await asyncio.wait_for(
@@ -1615,7 +1616,9 @@ class MessageManager(commands.Cog):
                     username=username,
                     subject=subject,
                     preview=body,
+                    last_message_time=sent_at,
                     opening_title="MissionChief Message Sent",
+                    opening_timestamp=sent_at,
                 ),
                 timeout=60,
             )
@@ -1657,12 +1660,15 @@ class MessageManager(commands.Cog):
     async def _send_message_and_link(self, username: str, subject: str, body: str) -> dict:
         ok, reason, resolved_username, conversation_id = await self._send_message(username, subject, body)
         thread = None
+        sent_at = ""
         if ok and conversation_id:
+            sent_at = datetime.now(timezone.utc).isoformat()
             thread = await self._link_sent_message_to_forum(
                 conversation_id=conversation_id,
                 username=resolved_username,
                 subject=subject,
                 body=body,
+                sent_at=sent_at,
             )
         return {
             "ok": ok,
@@ -1670,6 +1676,7 @@ class MessageManager(commands.Cog):
             "resolved_username": resolved_username,
             "conversation_id": conversation_id,
             "thread": thread,
+            "sent_at": sent_at,
         }
 
     @staticmethod
