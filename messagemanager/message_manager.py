@@ -1460,9 +1460,9 @@ class MessageManager(commands.Cog):
         username: str,
         subject: str,
         body: str,
-    ) -> None:
+    ) -> Optional[discord.Thread]:
         try:
-            await asyncio.wait_for(
+            return await asyncio.wait_for(
                 self._ensure_conversation_thread(
                     conversation_id=conversation_id,
                     username=username,
@@ -1473,6 +1473,7 @@ class MessageManager(commands.Cog):
             )
         except Exception:
             log.exception("Failed to create MessageManager forum thread for sent message")
+            return None
 
     async def _send_message(self, username: str, subject: str, body: str) -> Tuple[bool, str, str, Optional[str]]:
         if not username or not subject or not body:
@@ -1673,7 +1674,20 @@ class MessageManager(commands.Cog):
                 return
 
         if ok:
-            suffix = f" Conversation `{conversation_id}` linked to forum." if conversation_id else ""
+            thread = None
+            if conversation_id:
+                thread = await self._link_sent_message_to_forum(
+                    conversation_id=conversation_id,
+                    username=resolved_username,
+                    subject=subject,
+                    body=body,
+                )
+            if thread:
+                suffix = f" Conversation `{conversation_id}` linked to forum: {thread.mention}"
+            elif conversation_id:
+                suffix = f" Conversation `{conversation_id}` was sent, but the forum thread could not be linked."
+            else:
+                suffix = ""
             await ctx.send(f"MissionChief message sent to `{resolved_username}`.{suffix}")
         else:
             await ctx.send(f"MissionChief message was not confirmed for `{resolved_username}`: {reason}")
