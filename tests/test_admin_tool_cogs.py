@@ -225,12 +225,13 @@ def test_admin_timer_due_split_includes_snoozed_reminders():
         [
             {"id": 1, "next_run": 500, "snooze_until": 100},
             {"id": 2, "next_run": 500, "snooze_until": 600},
+            {"id": 3, "next_run": 50, "snooze_until": 600},
         ],
         now_ts=100,
     )
 
     assert [item["id"] for item in due] == [1]
-    assert [item["id"] for item in pending] == [2]
+    assert [item["id"] for item in pending] == [2, 3]
 
 
 def test_admin_timer_panel_message_detection_and_channel_display():
