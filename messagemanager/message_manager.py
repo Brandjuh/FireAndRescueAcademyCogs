@@ -36,6 +36,7 @@ TAX_WARNING_SEND_DELAY_SECONDS = 90
 TAX_WARNING_MAX_PER_RUN = 5
 TAX_WARNING_REASON_CATEGORY = "Contribution"
 TAX_WARNING_REASON_DETAIL = "4.1. 5% donation to alliance - Minimum 5% donation required."
+SANCTION_MANAGER_COG_NAMES = ("SanctionsManager", "SanctionManager")
 TAX_WARNING_SANCTION_TYPES = {
     1: "Warning - Official 1st warning",
     2: "Warning - Official 2nd warning",
@@ -499,6 +500,18 @@ def tax_warning_member_identity(member: Dict[str, object]) -> Tuple[str, str, fl
     except (TypeError, ValueError):
         rate = 0.0
     return mc_id, username, rate
+
+
+def get_sanction_manager_cog(bot):
+    """Return the loaded SanctionManager cog, accepting historic cog name variants."""
+    get_cog = getattr(bot, "get_cog", None)
+    if not get_cog:
+        return None
+    for cog_name in SANCTION_MANAGER_COG_NAMES:
+        cog = get_cog(cog_name)
+        if cog:
+            return cog
+    return None
 
 
 def discord_timestamp_from_iso(value: str, style: str = "F") -> str:
@@ -1237,7 +1250,7 @@ class MessageManager(commands.Cog):
         return await asyncio.to_thread(resolve_alliance_member_name, username, members)
 
     def _sanction_manager(self):
-        return self.bot.get_cog("SanctionManager")
+        return get_sanction_manager_cog(self.bot)
 
     async def _tax_warning_history(self, guild_id: int, mc_user_id: str) -> Tuple[int, Optional[int]]:
         count = 0

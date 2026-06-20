@@ -17,6 +17,7 @@ from messagemanager.message_manager import (
     discord_timestamp_from_iso,
     extract_conversation_id,
     format_duration,
+    get_sanction_manager_cog,
     inbox_scan_delay_seconds,
     message_was_sent,
     parse_conversation_messages,
@@ -398,6 +399,26 @@ class MessageManagerTests(unittest.TestCase):
             ),
             ("456", "CrashTestDummy", 4.5),
         )
+
+    def test_sanction_manager_lookup_accepts_loaded_cog_name(self):
+        expected_cog = object()
+
+        class FakeBot:
+            @staticmethod
+            def get_cog(name):
+                return expected_cog if name == "SanctionsManager" else None
+
+        self.assertIs(get_sanction_manager_cog(FakeBot()), expected_cog)
+
+    def test_sanction_manager_lookup_accepts_legacy_cog_name(self):
+        expected_cog = object()
+
+        class FakeBot:
+            @staticmethod
+            def get_cog(name):
+                return expected_cog if name == "SanctionManager" else None
+
+        self.assertIs(get_sanction_manager_cog(FakeBot()), expected_cog)
 
 
 if __name__ == "__main__":
