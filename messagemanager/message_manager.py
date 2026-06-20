@@ -505,13 +505,49 @@ def tax_warning_member_identity(member: Dict[str, object]) -> Tuple[str, str, fl
 def get_sanction_manager_cog(bot):
     """Return the loaded SanctionManager cog, accepting historic cog name variants."""
     get_cog = getattr(bot, "get_cog", None)
-    if not get_cog:
-        return None
-    for cog_name in SANCTION_MANAGER_COG_NAMES:
-        cog = get_cog(cog_name)
-        if cog:
-            return cog
+    if get_cog:
+        for cog_name in SANCTION_MANAGER_COG_NAMES:
+            cog = get_cog(cog_name)
+            if cog:
+                return cog
+
+    loaded_cogs = getattr(bot, "cogs", None)
+    if isinstance(loaded_cogs, dict):
+        for cog in loaded_cogs.values():
+            if hasattr(cog, "create_sanction_for_member") and hasattr(cog, "get_member_sanctions"):
+                return cog
+    elif loaded_cogs:
+        for cog in loaded_cogs:
+            if hasattr(cog, "create_sanction_for_member") and hasattr(cog, "get_member_sanctions"):
+                return cog
+
     return None
+
+
+def get_loaded_cog_names(bot) -> List[str]:
+    loaded_cogs = getattr(bot, "cogs", None)
+    if isinstance(loaded_cogs, dict):
+        return sorted(str(name) for name in loaded_cogs)
+    if loaded_cogs:
+        names = []
+        for cog in loaded_cogs:
+            name = getattr(cog, "qualified_name", None) or cog.__class__.__name__
+            names.append(str(name))
+        return sorted(names)
+    return []
+
+
+def tax_warning_sanction_manager_error(bot) -> str:
+    loaded_names = get_loaded_cog_names(bot)
+    if loaded_names:
+        preview = ", ".join(loaded_names[:20])
+        if len(loaded_names) > 20:
+            preview += f", ... +{len(loaded_names) - 20} more"
+        return (
+            "SanctionManager is not loaded, so this warning was not sent. "
+            f"Loaded cogs: {preview}"
+        )
+    return "SanctionManager is not loaded, so this warning was not sent."
 
 
 def discord_timestamp_from_iso(value: str, style: str = "F") -> str:
@@ -1335,7 +1371,7 @@ class MessageManager(commands.Cog):
         sanction_manager = self._sanction_manager()
         create_sanction = getattr(sanction_manager, "create_sanction_for_member", None) if sanction_manager else None
         if not create_sanction:
-            raise RuntimeError("SanctionManager is not loaded, so the TAX warning cannot be logged.")
+            raise RuntimeError(tax_warning_sanction_manager_error(self.bot))
 
         bot_user = getattr(self.bot, "user", None)
         admin_user_id = int(getattr(bot_user, "id", 0) or 0)
@@ -1362,7 +1398,7 @@ class MessageManager(commands.Cog):
             return {"sent": False, "reason": "Maximum warning count reached."}
         sanction_manager = self._sanction_manager()
         if not getattr(sanction_manager, "create_sanction_for_member", None):
-            return {"sent": False, "reason": "SanctionManager is not loaded, so this warning was not sent."}
+            return {"sent": False, "reason": tax_warning_sanction_manager_error(self.bot)}
 
         subject_template, body_template = TAX_WARNING_PRESETS[level]
         body = body_template.format(

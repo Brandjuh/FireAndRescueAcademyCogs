@@ -17,6 +17,7 @@ from messagemanager.message_manager import (
     discord_timestamp_from_iso,
     extract_conversation_id,
     format_duration,
+    get_loaded_cog_names,
     get_sanction_manager_cog,
     inbox_scan_delay_seconds,
     message_was_sent,
@@ -28,6 +29,7 @@ from messagemanager.message_manager import (
     safe_payload_summary,
     split_discord_content,
     summarize_message_form,
+    tax_warning_sanction_manager_error,
     tax_warning_is_due,
     tax_warning_level,
     tax_warning_member_identity,
@@ -419,6 +421,33 @@ class MessageManagerTests(unittest.TestCase):
                 return expected_cog if name == "SanctionManager" else None
 
         self.assertIs(get_sanction_manager_cog(FakeBot()), expected_cog)
+
+    def test_sanction_manager_lookup_accepts_contract_match(self):
+        class FakeSanctionsCog:
+            def create_sanction_for_member(self):
+                raise AssertionError("not called")
+
+            def get_member_sanctions(self):
+                raise AssertionError("not called")
+
+        expected_cog = FakeSanctionsCog()
+
+        class FakeBot:
+            cogs = {"UnexpectedRuntimeName": expected_cog}
+
+            @staticmethod
+            def get_cog(name):
+                del name
+                return None
+
+        self.assertIs(get_sanction_manager_cog(FakeBot()), expected_cog)
+
+    def test_loaded_cog_names_are_reported_for_missing_sanction_manager(self):
+        class FakeBot:
+            cogs = {"MessageManager": object(), "MembersScraper": object()}
+
+        self.assertEqual(get_loaded_cog_names(FakeBot()), ["MembersScraper", "MessageManager"])
+        self.assertIn("MembersScraper", tax_warning_sanction_manager_error(FakeBot()))
 
 
 if __name__ == "__main__":
