@@ -31,7 +31,7 @@ MAX_DISCORD_CONTENT_LENGTH = 1900
 TAX_WARNING_SCAN_INTERVAL_SECONDS = 6 * 3600
 TAX_WARNING_SCAN_JITTER_SECONDS = 10 * 60
 TAX_WARNING_MIN_RATE = 5.0
-TAX_WARNING_MIN_DAYS_BETWEEN = 3
+TAX_WARNING_MIN_DAYS_BETWEEN = 7
 TAX_WARNING_SEND_DELAY_SECONDS = 90
 TAX_WARNING_MAX_PER_RUN = 5
 TAX_WARNING_REASON_CATEGORY = "Contribution"
@@ -43,27 +43,54 @@ TAX_WARNING_SANCTION_TYPES = {
 }
 TAX_WARNING_PRESETS = {
     1: (
-        "Contribution warning",
+        "Reminder: Please set your alliance donation to 5%",
         "Hello {username},\n\n"
-        "Your alliance contribution is currently {rate:.1f}%. The minimum requirement is 5% tax.\n"
-        "Please increase your contribution before the next review.\n\n"
-        "Fire and Rescue Academy",
+        "This is a friendly reminder that your alliance donation is currently not set to the required minimum of 5%.\n\n"
+        "According to our Code of Conduct, rule 4.1, every member must set their alliance donation to at least 5%. "
+        "These funds are used to build hospitals, prisons, and academies that benefit all alliance members.\n\n"
+        "It is possible that you simply forgot to set this or were not sure where to find it. No problem, but please "
+        "update it as soon as possible.\n\n"
+        "How to update your alliance donation:\n\n"
+        "1. Open the menu.\n"
+        "2. Click on Show Alliance.\n"
+        "3. Go to Alliance Funds.\n"
+        "4. Set your donation percentage to at least 5%.\n\n"
+        "A higher percentage is always appreciated, but 5% is the minimum requirement.\n\n"
+        "Thank you for taking care of this.",
     ),
     2: (
-        "Second contribution warning",
+        "Warning: Alliance donation below required minimum",
         "Hello {username},\n\n"
-        "Your alliance contribution is still below the required 5% tax. "
-        "This is your second warning.\n"
-        "Please correct this before the next review.\n\n"
-        "Fire and Rescue Academy",
+        "This is an official warning regarding your alliance donation.\n\n"
+        "Your alliance donation is still not set to the required minimum of 5%, even though this is mandatory under "
+        "our Code of Conduct, rule 4.1.\n\n"
+        "All members are required to contribute at least 5% to the alliance. These contributions are important because "
+        "they allow the alliance to build hospitals, prisons, and academies that support every member.\n\n"
+        "Please update your alliance donation to at least 5% as soon as possible.\n\n"
+        "How to update your alliance donation:\n\n"
+        "1. Open the menu.\n"
+        "2. Click on Show Alliance.\n"
+        "3. Go to Alliance Funds.\n"
+        "4. Set your donation percentage to at least 5%.\n\n"
+        "Failure to correct this may result in further action.\n\n"
+        "Please make sure this is fixed.",
     ),
     3: (
-        "Final contribution warning",
+        "Final warning: Alliance donation requirement not met",
         "Hello {username},\n\n"
-        "Your alliance contribution is still below the required 5% tax. "
-        "This is your third and final warning.\n"
-        "Further action may follow if this is not corrected.\n\n"
-        "Fire and Rescue Academy",
+        "This is a final warning regarding your alliance donation.\n\n"
+        "Your alliance donation is still not set to the required minimum of 5%, despite previous reminders and "
+        "warnings. This is a direct violation of our Code of Conduct, rule 4.1.\n\n"
+        "All members are required to set their alliance donation to at least 5%. This rule exists to make sure everyone "
+        "contributes fairly to the growth and support of the alliance.\n\n"
+        "You must update your alliance donation to at least 5% immediately.\n\n"
+        "How to update your alliance donation:\n\n"
+        "1. Open the menu.\n"
+        "2. Click on Show Alliance.\n"
+        "3. Go to Alliance Funds.\n"
+        "4. Set your donation percentage to at least 5%.\n\n"
+        "If this is not corrected, sanctions will follow in accordance with the alliance rules.\n\n"
+        "This is your final opportunity to fix the issue before action is taken.",
     ),
 }
 
@@ -1327,19 +1354,18 @@ class MessageManager(commands.Cog):
         subject_template, body_template = TAX_WARNING_PRESETS[level]
         body = body_template.format(
             username=candidate["username"],
-            rate=float(candidate["rate"]),
         )
-        ok, reason, resolved_username, conversation_id = await self._send_message(
+        send_result = await self._send_message_and_link(
             str(candidate["username"]),
             subject_template,
             body,
         )
-        if not ok:
-            return {"sent": False, "reason": reason}
+        if not send_result["ok"]:
+            return {"sent": False, "reason": send_result["reason"]}
 
         await self._record_tax_warning_sanction(
             guild=guild,
-            candidate={**candidate, "username": resolved_username},
+            candidate={**candidate, "username": send_result["resolved_username"]},
             level=level,
         )
         warning_at = int(time.time())
@@ -1348,16 +1374,12 @@ class MessageManager(commands.Cog):
             count=level,
             warning_at=warning_at,
         )
-        if conversation_id:
-            asyncio.create_task(
-                self._link_sent_message_to_forum(
-                    conversation_id=conversation_id,
-                    username=resolved_username,
-                    subject=subject_template,
-                    body=body,
-                )
-            )
-        return {"sent": True, "level": level, "conversation_id": conversation_id}
+        return {
+            "sent": True,
+            "level": level,
+            "conversation_id": send_result["conversation_id"],
+            "thread": send_result["thread"],
+        }
 
     async def _process_tax_warning_run(self, guild: discord.Guild, *, limit: Optional[int] = None) -> dict:
         candidates = await self._tax_warning_candidates(guild)
