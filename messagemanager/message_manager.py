@@ -511,11 +511,20 @@ class MessageComposeModal(discord.ui.Modal, title="MissionChief Message"):
             return
 
         if ok:
-            thread_note = f" Forum thread: `{conversation_id}`." if conversation_id else " Forum thread not created: no conversation ID found."
             await interaction.followup.send(
-                f"MissionChief message sent to `{resolved_username}`.{thread_note}",
+                f"MissionChief message sent to `{resolved_username}`."
+                + (" A forum thread will be linked in the background." if conversation_id else ""),
                 ephemeral=True,
             )
+            if conversation_id:
+                asyncio.create_task(
+                    self.manager._link_sent_message_to_forum(
+                        conversation_id=conversation_id,
+                        username=resolved_username,
+                        subject=subject,
+                        body=body,
+                    )
+                )
         else:
             await interaction.followup.send(
                 f"MissionChief message was not confirmed for `{resolved_username}`: {reason}",
@@ -600,23 +609,11 @@ class MessageManagerPanelView(discord.ui.View):
         button: discord.ui.Button,
     ):
         del button
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            created, updated, skipped = await self.manager._scan_new_inbox_messages()
-        except Exception as exc:
-            log.exception("MessageManager inbox check failed")
-            await interaction.followup.send(f"Could not check MissionChief inbox: {exc}", ephemeral=True)
-            return
-
-        await interaction.followup.send(
-            (
-                "MissionChief inbox checked.\n"
-                f"New forum threads: `{created}`\n"
-                f"Updated threads: `{updated}`\n"
-                f"Already handled: `{skipped}`"
-            ),
+        await interaction.response.send_message(
+            "MissionChief inbox check started. I will post a private summary when it finishes.",
             ephemeral=True,
         )
+        asyncio.create_task(self.manager._scan_inbox_and_report(interaction))
 
     @discord.ui.button(
         label="Reply",
@@ -779,6 +776,10 @@ class MessageManager(commands.Cog):
         thread = self.bot.get_channel(int(thread_id))
         if isinstance(thread, discord.Thread):
             return thread
+        for guild in getattr(self.bot, "guilds", []):
+            guild_thread = guild.get_thread(int(thread_id))
+            if isinstance(guild_thread, discord.Thread):
+                return guild_thread
         try:
             fetched = await self.bot.fetch_channel(int(thread_id))
         except Exception:
@@ -821,6 +822,9 @@ class MessageManager(commands.Cog):
         if not conversation_id:
             return None
 
+        mapping = await self.config.conversation_threads()
+        mapped_entry = mapping.get(str(conversation_id)) or {}
+        mapped_thread_id = mapped_entry.get("thread_id")
         existing = await self._get_thread_for_conversation(conversation_id)
         if existing:
             if last_message_time:
@@ -832,6 +836,15 @@ class MessageManager(commands.Cog):
                     last_message_time=last_message_time,
                 )
             return existing
+
+        if mapped_thread_id:
+            log.warning(
+                "MessageManager conversation %s is already mapped to forum thread %s, "
+                "but the thread could not be fetched. Skipping instead of creating a duplicate.",
+                conversation_id,
+                mapped_thread_id,
+            )
+            return None
 
         forum = await self._get_forum_channel()
         if not forum:
@@ -984,8 +997,14 @@ class MessageManager(commands.Cog):
         skipped = 0
         messages = await self._fetch_new_inbox_messages()
         mapping = await self.config.conversation_threads()
+        seen_conversation_ids = set()
 
         for inbox_message in messages:
+            if inbox_message.conversation_id in seen_conversation_ids:
+                skipped += 1
+                continue
+            seen_conversation_ids.add(inbox_message.conversation_id)
+
             entry = mapping.get(str(inbox_message.conversation_id)) or {}
             latest_messages = await self._fetch_conversation_messages(inbox_message.conversation_id)
             latest = latest_messages[0] if latest_messages else None
@@ -1018,6 +1037,48 @@ class MessageManager(commands.Cog):
 
         return created, updated, skipped
 
+    async def _scan_inbox_and_report(self, interaction: discord.Interaction) -> None:
+        try:
+            created, updated, skipped = await asyncio.wait_for(
+                self._scan_new_inbox_messages(),
+                timeout=180,
+            )
+            message = (
+                "MissionChief inbox checked.\n"
+                f"New forum threads: `{created}`\n"
+                f"Updated threads: `{updated}`\n"
+                f"Already handled: `{skipped}`"
+            )
+        except Exception as exc:
+            log.exception("MessageManager inbox check failed")
+            message = f"Could not check MissionChief inbox: {exc}"
+
+        try:
+            await interaction.followup.send(message, ephemeral=True)
+        except Exception:
+            log.debug("Could not send MessageManager inbox scan follow-up", exc_info=True)
+
+    async def _link_sent_message_to_forum(
+        self,
+        *,
+        conversation_id: str,
+        username: str,
+        subject: str,
+        body: str,
+    ) -> None:
+        try:
+            await asyncio.wait_for(
+                self._ensure_conversation_thread(
+                    conversation_id=conversation_id,
+                    username=username,
+                    subject=subject,
+                    preview=body,
+                ),
+                timeout=60,
+            )
+        except Exception:
+            log.exception("Failed to create MessageManager forum thread for sent message")
+
     async def _send_message(self, username: str, subject: str, body: str) -> Tuple[bool, str, str, Optional[str]]:
         if not username or not subject or not body:
             raise ValueError("Username, subject, and body are required.")
@@ -1039,16 +1100,6 @@ class MessageManager(commands.Cog):
 
         if message_was_sent(response_text):
             conversation_id = extract_conversation_id(response_text, response_url)
-            if conversation_id:
-                try:
-                    await self._ensure_conversation_thread(
-                        conversation_id=conversation_id,
-                        username=resolved_username,
-                        subject=subject,
-                        preview=body,
-                    )
-                except Exception:
-                    log.exception("Failed to create MessageManager forum thread for sent message")
             return True, "Message Sent.", resolved_username, conversation_id
         response_summary = summarize_response(response_text)
         log.warning("MessageManager send failed with HTTP %s. Response: %s", status, response_summary)
