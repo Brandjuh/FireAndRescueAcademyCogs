@@ -279,6 +279,31 @@ class MessageManagerTests(unittest.TestCase):
         self.assertIn("MissionChief message sent to `DutchFireFighter`.", message)
         self.assertIn("Conversation `238294` linked to forum: #thread", message)
 
+    def test_sent_message_forum_thread_uses_sent_timestamp(self):
+        manager = MessageManager.__new__(MessageManager)
+        manager._ensure_conversation_thread = AsyncMock(return_value=types.SimpleNamespace(id=123))
+
+        result = asyncio.run(
+            manager._link_sent_message_to_forum(
+                conversation_id="238294",
+                username="DutchFireFighter",
+                subject="Boopie",
+                body="burp",
+                sent_at="2026-06-20T12:00:00+00:00",
+            )
+        )
+
+        self.assertEqual(result.id, 123)
+        manager._ensure_conversation_thread.assert_awaited_once_with(
+            conversation_id="238294",
+            username="DutchFireFighter",
+            subject="Boopie",
+            preview="burp",
+            last_message_time="2026-06-20T12:00:00+00:00",
+            opening_title="MissionChief Message Sent",
+            opening_timestamp="2026-06-20T12:00:00+00:00",
+        )
+
     def test_inbound_reply_sends_embed_before_body_text(self):
         manager = MessageManager.__new__(MessageManager)
         if not hasattr(message_manager_module.discord, "utils"):
