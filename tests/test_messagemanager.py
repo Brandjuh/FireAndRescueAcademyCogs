@@ -9,6 +9,8 @@ from messagemanager.message_manager import (
     INBOX_SCAN_JITTER_SECONDS,
     MemberResolutionError,
     MessageManager,
+    TAX_WARNING_MIN_DAYS_BETWEEN,
+    TAX_WARNING_PRESETS,
     build_forum_thread_title,
     build_reply_payload,
     build_message_payload,
@@ -348,23 +350,23 @@ class MessageManagerTests(unittest.TestCase):
                 existing_warning_count=0,
                 last_warning_at=None,
                 now=now,
-                min_days_between=3,
+                min_days_between=TAX_WARNING_MIN_DAYS_BETWEEN,
             )
         )
         self.assertFalse(
             tax_warning_is_due(
                 existing_warning_count=1,
-                last_warning_at=now - 2 * 86400,
+                last_warning_at=now - 6 * 86400,
                 now=now,
-                min_days_between=3,
+                min_days_between=TAX_WARNING_MIN_DAYS_BETWEEN,
             )
         )
         self.assertTrue(
             tax_warning_is_due(
                 existing_warning_count=1,
-                last_warning_at=now - 3 * 86400,
+                last_warning_at=now - 7 * 86400,
                 now=now,
-                min_days_between=3,
+                min_days_between=TAX_WARNING_MIN_DAYS_BETWEEN,
             )
         )
         self.assertFalse(
@@ -372,9 +374,18 @@ class MessageManagerTests(unittest.TestCase):
                 existing_warning_count=3,
                 last_warning_at=now - 10 * 86400,
                 now=now,
-                min_days_between=3,
+                min_days_between=TAX_WARNING_MIN_DAYS_BETWEEN,
             )
         )
+
+    def test_tax_warning_presets_use_alliance_donation_texts(self):
+        self.assertEqual(TAX_WARNING_MIN_DAYS_BETWEEN, 7)
+        self.assertEqual(TAX_WARNING_PRESETS[1][0], "Reminder: Please set your alliance donation to 5%")
+        self.assertEqual(TAX_WARNING_PRESETS[2][0], "Warning: Alliance donation below required minimum")
+        self.assertEqual(TAX_WARNING_PRESETS[3][0], "Final warning: Alliance donation requirement not met")
+        self.assertIn("Code of Conduct, rule 4.1", TAX_WARNING_PRESETS[1][1])
+        self.assertIn("This is an official warning", TAX_WARNING_PRESETS[2][1])
+        self.assertIn("This is your final opportunity", TAX_WARNING_PRESETS[3][1])
 
     def test_tax_warning_member_identity_reads_scraper_member_shapes(self):
         self.assertEqual(
