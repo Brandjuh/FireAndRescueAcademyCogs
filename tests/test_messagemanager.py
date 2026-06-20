@@ -1,9 +1,12 @@
 import unittest
+import types
 
+import messagemanager.message_manager as message_manager_module
 from messagemanager.message_manager import (
     INBOX_SCAN_INTERVAL_SECONDS,
     INBOX_SCAN_JITTER_SECONDS,
     MemberResolutionError,
+    MessageManager,
     build_forum_thread_title,
     build_reply_payload,
     build_message_payload,
@@ -215,6 +218,26 @@ class MessageManagerTests(unittest.TestCase):
             "DutchFireFighter - koekkoek (238264)",
         )
         self.assertLessEqual(len(build_forum_thread_title("User", "x" * 200)), 100)
+
+    def test_forum_thread_opening_omits_private_message_link_and_latest_label(self):
+        manager = MessageManager.__new__(MessageManager)
+        if not hasattr(message_manager_module.discord, "utils"):
+            message_manager_module.discord.utils = types.SimpleNamespace(escape_markdown=lambda value: value)
+
+        content = manager._build_forum_thread_opening(
+            conversation_id="238294",
+            username="DutchFireFighter",
+            subject="Boopie",
+            preview="woopie",
+        )
+
+        self.assertIn("MissionChief conversation: `238294`", content)
+        self.assertIn("Member: **DutchFireFighter**", content)
+        self.assertIn("Title: **Boopie**", content)
+        self.assertIn("woopie", content)
+        self.assertNotIn("Link:", content)
+        self.assertNotIn("Latest message:", content)
+        self.assertNotIn("https://www.missionchief.com/messages/238294", content)
 
     def test_discord_timestamp_from_iso_uses_full_timestamp_style(self):
         self.assertEqual(
