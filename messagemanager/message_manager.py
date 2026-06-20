@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
@@ -41,6 +42,10 @@ class MessageForm:
 
 
 Payload = List[Tuple[str, str]]
+
+
+class MemberResolutionError(ValueError):
+    """Raised when an alliance member name cannot be resolved safely."""
 
 
 def _text(element) -> str:
@@ -219,6 +224,41 @@ def parse_send_spec(spec: str) -> Tuple[str, str, str]:
     return parts[0], parts[1], parts[2]
 
 
+def _normalized_member_query(value: str) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def resolve_alliance_member_name(query: str, members: Iterable[Dict[str, object]]) -> str:
+    """Resolve a typed MissionChief member query to the exact alliance username casing."""
+    normalized_query = _normalized_member_query(query)
+    if not normalized_query:
+        raise MemberResolutionError("MissionChief username is required.")
+
+    matches = []
+    for member in members:
+        name = str(member.get("name") or member.get("username") or "").strip()
+        if not name:
+            continue
+
+        member_ids = {
+            str(member.get("user_id") or "").strip(),
+            str(member.get("mc_user_id") or "").strip(),
+            str(member.get("member_id") or "").strip(),
+            str(member.get("mc_id") or "").strip(),
+        }
+        if _normalized_member_query(name) == normalized_query or normalized_query in member_ids:
+            matches.append(name)
+
+    unique_matches = sorted(set(matches), key=str.casefold)
+    if not unique_matches:
+        raise MemberResolutionError(f"No current alliance member found for `{query}`.")
+    if len(unique_matches) > 1:
+        raise MemberResolutionError(
+            f"`{query}` matched multiple alliance members: {', '.join(unique_matches[:5])}."
+        )
+    return unique_matches[0]
+
+
 def _redact_value(name: str, value: str) -> str:
     lowered = str(name or "").lower()
     if "token" in lowered or "cookie" in lowered or lowered == "authorization":
@@ -267,6 +307,78 @@ def summarize_response(text: str, *, limit: int = 350) -> str:
     return text[:limit]
 
 
+class MessageComposeModal(discord.ui.Modal, title="MissionChief Message"):
+    username = discord.ui.TextInput(
+        label="MissionChief username",
+        placeholder="Case does not matter, but the member must be in the alliance",
+        max_length=100,
+    )
+    subject = discord.ui.TextInput(
+        label="Title",
+        placeholder="Message title",
+        max_length=120,
+    )
+    body = discord.ui.TextInput(
+        label="Body",
+        placeholder="Message body",
+        style=discord.TextStyle.paragraph,
+        max_length=1800,
+    )
+
+    def __init__(self, manager: "MessageManager"):
+        super().__init__()
+        self.manager = manager
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        username = str(self.username.value).strip()
+        subject = str(self.subject.value).strip()
+        body = str(self.body.value).strip()
+        try:
+            ok, reason, resolved_username = await self.manager._send_message(username, subject, body)
+        except MemberResolutionError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        except Exception as exc:
+            log.exception("MessageManager modal send failed")
+            await interaction.followup.send(f"Could not send MissionChief message: {exc}", ephemeral=True)
+            return
+
+        if ok:
+            await interaction.followup.send(f"MissionChief message sent to `{resolved_username}`.", ephemeral=True)
+        else:
+            await interaction.followup.send(
+                f"MissionChief message was not confirmed for `{resolved_username}`: {reason}",
+                ephemeral=True,
+            )
+
+
+class MessageManagerLaunchView(discord.ui.View):
+    """Short-lived launcher used because text commands cannot open Discord modals directly."""
+
+    def __init__(self, manager: "MessageManager"):
+        super().__init__(timeout=300)
+        self.manager = manager
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if await self.manager._interaction_is_admin(interaction):
+            return True
+        await interaction.response.send_message(
+            "You do not have permission to use MessageManager.",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(label="Open MessageManager", style=discord.ButtonStyle.primary)
+    async def open_message_form(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        del button
+        await interaction.response.send_modal(MessageComposeModal(self.manager))
+
+
 class MessageManager(commands.Cog):
     """Admin-only MissionChief direct message manager."""
 
@@ -278,6 +390,26 @@ class MessageManager(commands.Cog):
         if not cookie_manager or not hasattr(cookie_manager, "get_session"):
             return None
         return cookie_manager
+
+    async def _interaction_is_admin(self, interaction: discord.Interaction) -> bool:
+        try:
+            return bool(await self.bot.is_admin(interaction.user))
+        except Exception:
+            log.exception("Failed to check MessageManager interaction permissions")
+            return False
+
+    async def _get_alliance_members(self) -> List[Dict[str, object]]:
+        members_scraper = self.bot.get_cog("MembersScraper")
+        if not members_scraper or not hasattr(members_scraper, "get_members"):
+            raise MemberResolutionError("MembersScraper is not loaded, so alliance usernames cannot be verified.")
+        members = await members_scraper.get_members()
+        if not members:
+            raise MemberResolutionError("No current alliance members are available from MembersScraper.")
+        return members
+
+    async def _resolve_alliance_username(self, username: str) -> str:
+        members = await self._get_alliance_members()
+        return await asyncio.to_thread(resolve_alliance_member_name, username, members)
 
     async def _get_session(self):
         cookie_manager = self._cookie_manager()
@@ -297,14 +429,15 @@ class MessageManager(commands.Cog):
             raise RuntimeError(f"MissionChief returned HTTP {status}.")
         return parse_message_form(html, NEW_MESSAGE_URL)
 
-    async def _send_message(self, username: str, subject: str, body: str) -> Tuple[bool, str]:
+    async def _send_message(self, username: str, subject: str, body: str) -> Tuple[bool, str, str]:
         if not username or not subject or not body:
             raise ValueError("Username, subject, and body are required.")
 
+        resolved_username = await self._resolve_alliance_username(username)
         form = await self._fetch_form()
         if form.method != "post":
             raise RuntimeError(f"Unexpected message form method `{form.method}`.")
-        payload = build_message_payload(form, username, subject, body)
+        payload = build_message_payload(form, resolved_username, subject, body)
         session = await self._get_session()
         headers = {
             "Origin": BASE_URL,
@@ -315,10 +448,29 @@ class MessageManager(commands.Cog):
             response_text = await response.text()
 
         if message_was_sent(response_text):
-            return True, "Message Sent."
+            return True, "Message Sent.", resolved_username
         response_summary = summarize_response(response_text)
         log.warning("MessageManager send failed with HTTP %s. Response: %s", status, response_summary)
-        return False, f"MissionChief did not confirm delivery. HTTP {status}. Response: {response_summary or 'empty'}"
+        return (
+            False,
+            f"MissionChief did not confirm delivery. HTTP {status}. Response: {response_summary or 'empty'}",
+            resolved_username,
+        )
+
+    @commands.command(name="mm")
+    @commands.admin()
+    async def message_manager_shortcut(self, ctx: commands.Context):
+        """Open a button launcher for the private MissionChief message form."""
+        embed = discord.Embed(
+            title="MessageManager",
+            description=(
+                "Open a private form to send a MissionChief message to a current alliance member.\n"
+                "Usernames are checked against the alliance member list, so capitalization does not matter."
+            ),
+            color=discord.Color.blue(),
+        )
+        embed.set_footer(text="Only admins can use this launcher.")
+        await ctx.send(embed=embed, view=MessageManagerLaunchView(self))
 
     @commands.group(name="messagemanager", aliases=["messages"], invoke_without_command=True)
     @commands.admin()
@@ -347,6 +499,7 @@ class MessageManager(commands.Cog):
         """Build a safe no-submit payload for `<username> | <subject> | <body>`."""
         try:
             username, subject, body = parse_send_spec(spec)
+            username = await self._resolve_alliance_username(username)
             form = await self._fetch_form()
             payload = build_message_payload(form, username, subject, body)
         except Exception as exc:
@@ -370,12 +523,12 @@ class MessageManager(commands.Cog):
 
         async with ctx.typing():
             try:
-                ok, reason = await self._send_message(username, subject, body)
+                ok, reason, resolved_username = await self._send_message(username, subject, body)
             except Exception as exc:
                 await ctx.send(f"Could not send MissionChief message: {exc}")
                 return
 
         if ok:
-            await ctx.send(f"MissionChief message sent to `{username}`.")
+            await ctx.send(f"MissionChief message sent to `{resolved_username}`.")
         else:
-            await ctx.send(f"MissionChief message was not confirmed for `{username}`: {reason}")
+            await ctx.send(f"MissionChief message was not confirmed for `{resolved_username}`: {reason}")

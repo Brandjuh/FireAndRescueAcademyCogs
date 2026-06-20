@@ -3,8 +3,8 @@
         "Brandjuh"
     ],
     "name": "MessageManager",
-    "description": "Admin-only MissionChief direct message manager using CookieManager sessions.",
-    "install_msg": "MessageManager installed. Use `[p]messagemanager inspect` to inspect the live MissionChief message form, then `[p]messagemanager send <username> | <subject> | <body>` to send an admin-controlled MissionChief DM.",
+    "description": "Admin-only MissionChief direct message manager using CookieManager sessions and MembersScraper alliance names.",
+    "install_msg": "MessageManager installed. Use `[p]mm` to open the guided message form, `[p]messagemanager inspect` to inspect the live MissionChief message form, or `[p]messagemanager send <username> | <subject> | <body>` to send an admin-controlled MissionChief DM.",
     "short": "MissionChief message manager",
     "tags": [
         "missionchief",
@@ -14,7 +14,8 @@
     ],
     "type": "COG",
     "required_cogs": {
-        "CookieManager": "Provides authenticated MissionChief sessions"
+        "CookieManager": "Provides authenticated MissionChief sessions",
+        "MembersScraper": "Provides current alliance member names for safe case-insensitive username resolution"
     },
     "requirements": [
         "beautifulsoup4"
