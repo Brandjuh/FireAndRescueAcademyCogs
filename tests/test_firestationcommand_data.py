@@ -21,6 +21,8 @@ from FireStationCommand.fire_station_command import (
     MaintenanceView,
     RecruitmentView,
     TurnoutTakeoverView,
+    BackupVehicleSelect,
+    VehicleSelect,
     VehicleShopSelect,
     VehicleShopView,
 )
@@ -1428,6 +1430,85 @@ def test_dashboard_start_mission_handles_missing_channel_id():
     assert user_data["active_mission"]["id"] == "bin_fire"
     assert user_data["active_mission"]["channel_id"] == 0
     assert interaction.response.edited["embed"].kwargs["title"].endswith("Bin Fire")
+
+
+def test_incidents_action_dropdown_starts_mission():
+    user = type("User", (), {"id": 123})()
+    user_data = {
+        "started": True,
+        "station_level": 1,
+        "command_level": 1,
+        "xp": 0,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "vehicles": [{"id": 1, "catalog_id": "engine_basic", "crew_capacity": 6}],
+        "equipment": [],
+        "trainings": [],
+        "expansions": [],
+        "active_mission": {},
+    }
+    cog = _cog_with_game_data({})
+    cog.config = _Config(user_data, {})
+    cog.INCIDENTS = [
+        {
+            "id": "bin_fire",
+            "name": "Bin Fire",
+            "required_staff": 4,
+            "base_credits": 100,
+            "base_xp": 35,
+            "hint": "Small fire reported.",
+            "detail": "A bin is burning.",
+            "required_vehicles": [],
+            "required_equipment": [],
+            "required_expansions": [],
+            "capabilities": {},
+        }
+    ]
+    channel = _Channel()
+    guild = type("Guild", (), {"id": 456})()
+    view = FscDashboardCategoryView(cog, user, channel, guild, "Incidents", data=user_data)
+    select = next(child for child in view.children if isinstance(child, FscDashboardActionSelect))
+    select.view = view
+    select.values = ["mission"]
+    interaction = _Interaction(user, channel=channel, guild=guild)
+
+    asyncio.run(select.callback(interaction))
+
+    assert user_data["active_mission"]["id"] == "bin_fire"
+    assert user_data["active_mission"]["channel_id"] == channel.id
+    assert interaction.response.edited["embed"].kwargs["title"].endswith("Bin Fire")
+    assert isinstance(interaction.response.edited["view"], AlertChoiceView)
+
+
+def test_vehicle_select_caps_options_to_discord_limit():
+    cog = _cog_with_game_data({})
+    user = type("User", (), {"id": 123})()
+    vehicles = [
+        {"id": idx, "name": f"Engine {idx}", "crew_capacity": 4}
+        for idx in range(1, 31)
+    ]
+
+    select = VehicleSelect(cog, object(), user, vehicles)
+
+    assert len(select.options) == 25
+    assert select.max_values == 25
+    assert select.placeholder == "Select vehicles to dispatch (first 25 shown)"
+
+
+def test_backup_vehicle_select_caps_options_to_discord_limit():
+    cog = _cog_with_game_data({})
+    user = type("User", (), {"id": 123})()
+    vehicles = [
+        {"id": idx, "name": f"Backup {idx}", "crew_capacity": 2}
+        for idx in range(1, 31)
+    ]
+
+    select = BackupVehicleSelect(cog, object(), user, vehicles)
+
+    assert len(select.options) == 25
+    assert select.max_values == 25
+    assert select.placeholder == "Select backup vehicles to dispatch (first 25 shown)"
 
 
 def test_dashboard_upgrade_button_explains_locked_level():

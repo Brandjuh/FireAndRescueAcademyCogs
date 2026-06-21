@@ -5151,6 +5151,8 @@ class TurnoutTakeoverView(FscTimedView):
 
 
 class VehicleSelect(discord.ui.Select):
+    MAX_OPTIONS = 25
+
     def __init__(
         self,
         cog: FireStationCommand,
@@ -5159,14 +5161,17 @@ class VehicleSelect(discord.ui.Select):
         vehicles: List[Dict[str, Any]],
     ):
         options: List[discord.SelectOption] = []
-        for v in vehicles:
+        for v in vehicles[: self.MAX_OPTIONS]:
             label = f"{v['name']} (cap {v['crew_capacity']})"
             options.append(discord.SelectOption(label=label, value=str(v["id"])))
         if not options:
             options = [discord.SelectOption(label="No vehicles available", value="none")]
+        placeholder = "Select vehicles to dispatch"
+        if len(vehicles) > self.MAX_OPTIONS:
+            placeholder = "Select vehicles to dispatch (first 25 shown)"
 
         super().__init__(
-            placeholder="Select vehicles to dispatch",
+            placeholder=placeholder,
             min_values=1,
             max_values=len(options),
             options=options,
@@ -5195,6 +5200,8 @@ class VehicleSelectView(FscTimedView):
 
 
 class BackupVehicleSelect(discord.ui.Select):
+    MAX_OPTIONS = 25
+
     def __init__(
         self,
         cog: FireStationCommand,
@@ -5203,14 +5210,17 @@ class BackupVehicleSelect(discord.ui.Select):
         vehicles: List[Dict[str, Any]],
     ):
         options: List[discord.SelectOption] = []
-        for vehicle in vehicles:
+        for vehicle in vehicles[: self.MAX_OPTIONS]:
             label = f"{vehicle['name']} (cap {vehicle['crew_capacity']})"
             options.append(discord.SelectOption(label=label, value=str(vehicle["id"])))
         if not options:
             options = [discord.SelectOption(label="No local backup vehicles available", value="none")]
+        placeholder = "Select backup vehicles to dispatch"
+        if len(vehicles) > self.MAX_OPTIONS:
+            placeholder = "Select backup vehicles to dispatch (first 25 shown)"
 
         super().__init__(
-            placeholder="Select backup vehicles to dispatch",
+            placeholder=placeholder,
             min_values=1,
             max_values=len(options),
             options=options,
