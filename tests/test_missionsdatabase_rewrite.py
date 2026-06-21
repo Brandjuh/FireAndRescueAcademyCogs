@@ -98,6 +98,82 @@ class FakeTextChannel:
         return iterator()
 
 
+class FakeForumThread:
+    def __init__(self, thread_id, *, name, content=None, embed=None):
+        self.id = thread_id
+        self.name = name
+        self.archived = False
+        self.deleted = False
+        self.applied_tags = []
+        self.message = FakeMessage(thread_id, content=content, embed=embed)
+
+    async def fetch_message(self, message_id):
+        if message_id == self.message.id:
+            return self.message
+        raise discord.NotFound()
+
+    async def edit(self, **kwargs):
+        if "name" in kwargs:
+            self.name = kwargs["name"]
+        if "archived" in kwargs:
+            self.archived = kwargs["archived"]
+        if "applied_tags" in kwargs:
+            self.applied_tags = kwargs["applied_tags"]
+
+    async def delete(self):
+        self.deleted = True
+
+
+class FakeForumChannel:
+    id = 1518038840152031262
+    mention = "#possible-missions"
+    available_tags = []
+
+    def __init__(self, *, active_limit=1000):
+        self.threads = []
+        self.next_id = 500
+        self.active_limit = active_limit
+        self.created_kwargs = []
+
+    def add_existing_thread(self, *, name, content, embed):
+        thread = FakeForumThread(self.next_id, name=name, content=content, embed=embed)
+        self.next_id += 1
+        self.threads.append(thread)
+        return thread
+
+    async def create_thread(self, **kwargs):
+        self.created_kwargs.append(kwargs)
+        active_threads = sum(1 for thread in self.threads if not thread.archived)
+        if active_threads >= self.active_limit:
+            raise discord.HTTPException()
+
+        thread = self.add_existing_thread(
+            name=kwargs["name"],
+            content=kwargs.get("content"),
+            embed=kwargs.get("embed"),
+        )
+        return types.SimpleNamespace(thread=thread, message=thread.message)
+
+    def get_thread(self, thread_id):
+        for thread in self.threads:
+            if thread.id == thread_id:
+                return thread
+        return None
+
+    def archived_threads(self, *, limit):
+        async def iterator():
+            yielded = 0
+            for thread in list(self.threads):
+                if not thread.archived:
+                    continue
+                if limit is not None and yielded >= limit:
+                    return
+                yielded += 1
+                yield thread
+
+        return iterator()
+
+
 class FakeGuild:
     id = 123
 
@@ -334,5 +410,57 @@ def test_wipe_configured_text_channel_deletes_tracked_posts_and_clears_db(tmp_pa
         assert stats["failed"] == 0
         assert channel.messages == []
         assert db_stats["total"] == 0
+
+    asyncio.run(run())
+
+
+def test_forum_sync_archives_existing_threads_before_creating_new_posts(tmp_path):
+    async def run():
+        channel = FakeForumChannel(active_limit=2)
+        guild = FakeGuild(channel)
+        bot = types.SimpleNamespace(guilds=[guild])
+        cog = MissionsDatabase(bot)
+        cog.POST_DELAY_SECONDS = 0
+        cog.BATCH_DELAY_SECONDS = 0
+        cog.fetcher = FakeFetcher()
+        cog.db = MissionStore(tmp_path / "missions.db")
+        await cog.db.initialize()
+        await cog.db.set_config(guild.id, channel.id)
+
+        missions = MissionFetcher.normalize_missions(MISSION_PAYLOAD)
+        for mission in missions[:2]:
+            mission_key = MissionFetcher.mission_key(mission)
+            thread = channel.add_existing_thread(
+                name=MissionFormatter.thread_title(mission),
+                content=MissionFormatter.build_content(mission),
+                embed=MissionFormatter.build_embed(mission),
+            )
+            await cog.db.upsert_publication(
+                guild_id=guild.id,
+                mission_key=mission_key,
+                channel_id=channel.id,
+                target_kind="forum_thread",
+                message_id=thread.message.id,
+                thread_id=thread.id,
+                content_hash=MissionFetcher.calculate_hash(
+                    mission,
+                    format_version=MissionFormatter.FORMAT_VERSION,
+                ),
+                title=thread.name,
+                detail_url=MissionFetcher.detail_url(mission),
+            )
+
+        stats = await cog._sync_missions(
+            guild,
+            limit=3,
+            query=None,
+            force_update=False,
+        )
+
+        assert stats["skipped"] == 2
+        assert stats["created"] == 1
+        assert stats["failed"] == 0
+        assert all(thread.archived for thread in channel.threads)
+        assert channel.created_kwargs[-1]["auto_archive_duration"] == cog.FORUM_AUTO_ARCHIVE_MINUTES
 
     asyncio.run(run())
