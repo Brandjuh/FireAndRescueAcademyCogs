@@ -42,10 +42,12 @@ MISSION_PAYLOAD = {
 
 
 class FakeMessage:
-    def __init__(self, message_id, *, content=None, embed=None):
+    def __init__(self, message_id, *, content=None, embed=None, channel=None):
         self.id = message_id
         self.content = content
         self.embeds = [embed] if embed else []
+        self.channel = channel
+        self.deleted = False
         self.edit_count = 0
 
     async def edit(self, **kwargs):
@@ -54,6 +56,11 @@ class FakeMessage:
             self.content = kwargs["content"]
         if "embed" in kwargs:
             self.embeds = [kwargs["embed"]]
+
+    async def delete(self):
+        self.deleted = True
+        if self.channel and self in self.channel.messages:
+            self.channel.messages.remove(self)
 
 
 class FakeTextChannel:
@@ -65,7 +72,12 @@ class FakeTextChannel:
         self.next_id = 100
 
     async def send(self, **kwargs):
-        message = FakeMessage(self.next_id, content=kwargs.get("content"), embed=kwargs.get("embed"))
+        message = FakeMessage(
+            self.next_id,
+            content=kwargs.get("content"),
+            embed=kwargs.get("embed"),
+            channel=self,
+        )
         self.next_id += 1
         self.messages.append(message)
         return message
@@ -80,7 +92,7 @@ class FakeTextChannel:
         _ = limit
 
         async def iterator():
-            for message in reversed(self.messages):
+            for message in list(reversed(self.messages)):
                 yield message
 
         return iterator()
@@ -256,5 +268,71 @@ def test_deleted_recorded_message_is_recreated_instead_of_skipped(tmp_path):
         assert second["skipped"] == 0
         assert second["created"] == 1
         assert len(channel.messages) == 1
+
+    asyncio.run(run())
+
+
+def test_stop_request_stops_sync_after_current_message(tmp_path):
+    async def run():
+        channel = FakeTextChannel()
+        guild = FakeGuild(channel)
+        bot = types.SimpleNamespace(guilds=[guild])
+        cog = MissionsDatabase(bot)
+        cog.POST_DELAY_SECONDS = 0
+        cog.BATCH_DELAY_SECONDS = 0
+        cog.fetcher = FakeFetcher()
+        cog.db = MissionStore(tmp_path / "missions.db")
+        await cog.db.initialize()
+        await cog.db.set_config(guild.id, channel.id)
+
+        original_publish = cog._publish_mission
+
+        async def publish_and_stop(*args, **kwargs):
+            result = await original_publish(*args, **kwargs)
+            cog._request_stop()
+            return result
+
+        cog._publish_mission = publish_and_stop
+        stats = await cog._sync_missions(
+            guild,
+            limit=3,
+            query=None,
+            force_update=False,
+        )
+
+        assert stats["created"] == 1
+        assert stats["stopped"] == 1
+        assert len(channel.messages) == 1
+
+    asyncio.run(run())
+
+
+def test_wipe_configured_text_channel_deletes_tracked_posts_and_clears_db(tmp_path):
+    async def run():
+        channel = FakeTextChannel()
+        guild = FakeGuild(channel)
+        bot = types.SimpleNamespace(guilds=[guild])
+        cog = MissionsDatabase(bot)
+        cog.POST_DELAY_SECONDS = 0
+        cog.BATCH_DELAY_SECONDS = 0
+        cog.fetcher = FakeFetcher()
+        cog.db = MissionStore(tmp_path / "missions.db")
+        await cog.db.initialize()
+        await cog.db.set_config(guild.id, channel.id)
+
+        first = await cog._sync_missions(
+            guild,
+            limit=2,
+            query=None,
+            force_update=False,
+        )
+        stats = await cog._wipe_configured_posts(guild)
+        db_stats = await cog.db.get_statistics(guild.id)
+
+        assert first["created"] == 2
+        assert stats["deleted"] == 2
+        assert stats["failed"] == 0
+        assert channel.messages == []
+        assert db_stats["total"] == 0
 
     asyncio.run(run())
