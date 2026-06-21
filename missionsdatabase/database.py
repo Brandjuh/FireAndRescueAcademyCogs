@@ -210,6 +210,14 @@ class MissionsDatabase:
                 rows = await cursor.fetchall()
                 return [dict(row) for row in rows]
 
+    async def clear_publications(self, guild_id: int) -> None:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "DELETE FROM mission_publications_v2 WHERE guild_id = ?",
+                (str(guild_id),),
+            )
+            await db.commit()
+
     async def get_statistics(self, guild_id: int) -> dict[str, int]:
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
