@@ -126,6 +126,42 @@ def test_mission_formatter_builds_marker_content_and_embed_footer():
     assert embed.footer["text"] == "Mission ID: 2 | Source: MissionChief Possible Missions"
 
 
+def test_mission_formatter_includes_other_information_for_tow_overlay():
+    payload = {
+        "2a": {
+            "id": "2/a",
+            "base_mission_id": 2,
+            "additive_overlays": "a",
+            "name": "Burning car",
+            "average_credits": 670,
+            "requirements": {"firetrucks": 1},
+            "additional": {
+                "expansion_missions_ids": [26, 16, 19],
+                "possible_crashed_car_min": 1,
+                "possible_crashed_car_max": 1,
+            },
+            "prerequisites": {"main_building": 0, "fire_stations": 1, "tow_trucks": 1},
+            "mission_categories": ["fire", "urban", "tow_trucks"],
+        },
+        "16": {"id": "16", "name": "Caravan fire"},
+        "19": {"id": "19", "name": "Burning trailer"},
+        "26": {"id": "26", "name": "Garage fire"},
+    }
+    mission = next(
+        mission
+        for mission in MissionFetcher.normalize_missions(payload)
+        if MissionFetcher.mission_key(mission) == "2/a"
+    )
+
+    embed = MissionFormatter.build_embed(mission)
+    other_info = next(field["value"] for field in embed.fields if field["name"] == "Other Information")
+
+    assert "Expandable Missions: Garage fire, Caravan fire, Burning trailer" in other_info
+    assert "Minimum cars to tow: 1" in other_info
+    assert "Maximum cars to tow: 1" in other_info
+    assert "Mission Variation: Burning car" in other_info
+
+
 def test_safe_sync_creates_then_skips_existing_messages(tmp_path):
     async def run():
         channel = FakeTextChannel()
