@@ -1,243 +1,165 @@
 """
-Mission data fetcher and parser for MissionChief einsaetze.json
+MissionChief possible mission fetcher.
+
+The possible missions page is rendered from the public einsaetze.json endpoint. We use the
+JSON endpoint as source of truth and keep the page URL only for user-facing links.
 """
 
-import aiohttp
+from __future__ import annotations
+
 import hashlib
 import json
-from typing import Dict, List, Optional
+import re
+from collections.abc import Iterable
+from typing import Any
+from urllib.parse import urlencode
+
+import aiohttp
+
+
+MISSION_JSON_URL = "https://www.missionchief.com/einsaetze.json"
+MISSION_DETAIL_BASE_URL = "https://www.missionchief.com/einsaetze"
 
 
 class MissionFetcher:
-    """Fetch and parse mission data from MissionChief."""
-    
-    MISSIONS_URL = "https://www.missionchief.com/einsaetze.json"
-    
-    def __init__(self):
-        self.session: Optional[aiohttp.ClientSession] = None
-    
-    async def _ensure_session(self):
-        """Ensure aiohttp session exists."""
+    """Fetch and normalize MissionChief possible mission data."""
+
+    def __init__(self) -> None:
+        self.session: aiohttp.ClientSession | None = None
+
+    async def _ensure_session(self) -> None:
         if self.session is None or self.session.closed:
             self.session = aiohttp.ClientSession()
-    
-    async def close(self):
-        """Close the aiohttp session."""
+
+    async def close(self) -> None:
         if self.session and not self.session.closed:
             await self.session.close()
-    
-    async def fetch_missions(self) -> List[Dict]:
-        """
-        Fetch all missions from MissionChief einsaetze.json
-        
-        Returns:
-            List of mission dictionaries
-            
-        Raises:
-            aiohttp.ClientError: If the request fails
-        """
+
+    async def fetch_missions(self) -> list[dict[str, Any]]:
+        """Fetch and normalize all possible missions."""
         await self._ensure_session()
-        
-        async with self.session.get(self.MISSIONS_URL) as response:
+        assert self.session is not None
+
+        async with self.session.get(MISSION_JSON_URL) as response:
             response.raise_for_status()
-            missions = await response.json()
-            
-            # Check if it's already a list or a dict
-            if isinstance(missions, list):
-                # Already a list, just return it
-                return missions
-            elif isinstance(missions, dict):
-                # It's a dict where keys are mission IDs
-                # Convert to list with ID included
-                mission_list = []
-                for mission_id, mission_data in missions.items():
-                    mission_data['id'] = mission_id
-                    mission_list.append(mission_data)
-                return mission_list
+            payload = await response.json()
+
+        return self.normalize_missions(payload)
+
+    @staticmethod
+    def normalize_missions(payload: Any) -> list[dict[str, Any]]:
+        """Normalize MissionChief's list or dict payload into mission dictionaries."""
+        if isinstance(payload, list):
+            missions = payload
+        elif isinstance(payload, dict):
+            if isinstance(payload.get("missions"), list):
+                missions = payload["missions"]
             else:
-                # Unexpected format
-                raise ValueError(f"Unexpected JSON format: {type(missions)}")
-    
+                missions = []
+                for mission_id, mission_data in payload.items():
+                    if not isinstance(mission_data, dict):
+                        continue
+                    mission = dict(mission_data)
+                    mission.setdefault("id", str(mission_id))
+                    missions.append(mission)
+        else:
+            raise ValueError(f"Unexpected mission JSON payload: {type(payload)!r}")
+
+        normalized = []
+        for index, mission_data in enumerate(missions):
+            if not isinstance(mission_data, dict):
+                continue
+            mission = dict(mission_data)
+            mission.setdefault("id", str(index))
+            normalized.append(mission)
+
+        return sorted(normalized, key=MissionFetcher.sort_key)
+
     @staticmethod
-    def calculate_hash(mission_data: Dict) -> str:
-        """
-        Calculate a hash of mission data for change detection.
-        
-        Args:
-            mission_data: Mission dictionary
-            
-        Returns:
-            SHA256 hash of the mission data
-        """
-        # Create a stable JSON string (sorted keys)
-        mission_json = json.dumps(mission_data, sort_keys=True)
-        return hashlib.sha256(mission_json.encode()).hexdigest()
-    
-    @staticmethod
-    def parse_mission_id(mission_data: Dict) -> str:
-        """
-        Extract the mission ID from mission data.
-        Handles both simple IDs and overlay IDs (e.g., "88/a")
-        
-        Args:
-            mission_data: Mission dictionary
-            
-        Returns:
-            Mission ID as string
-        """
-        mission_id = str(mission_data.get('id', ''))
-        
-        # If there's a base_mission_id and additive_overlays, format as "base/overlay"
-        base_id = mission_data.get('base_mission_id')
-        overlay = mission_data.get('additive_overlays', '')
-        
-        if base_id is not None and overlay:
+    def mission_key(mission_data: dict[str, Any]) -> str:
+        """Return a stable mission key, including additive overlays when present."""
+        overlay = str(mission_data.get("additive_overlays") or "").strip().lower()
+        base_id = mission_data.get("base_mission_id")
+        mission_id = mission_data.get("id")
+
+        if base_id not in (None, "") and overlay:
             return f"{base_id}/{overlay}"
-        
-        return mission_id
-    
+
+        if mission_id not in (None, ""):
+            return str(mission_id)
+
+        if base_id not in (None, ""):
+            return str(base_id)
+
+        return MissionFetcher.slugify(str(mission_data.get("name") or "unknown"))
+
     @staticmethod
-    def get_mission_name(mission_data: Dict) -> str:
-        """
-        Get the mission name.
-        
-        Args:
-            mission_data: Mission dictionary
-            
-        Returns:
-            Mission name
-        """
-        return mission_data.get('name', mission_data.get('caption', 'Unknown Mission'))
-    
+    def detail_url(mission_data: dict[str, Any]) -> str:
+        """Build the MissionChief detail URL for a mission or overlay."""
+        mission_key = MissionFetcher.mission_key(mission_data)
+        if "/" not in mission_key:
+            return f"{MISSION_DETAIL_BASE_URL}/{mission_key}"
+
+        base_id, overlay = mission_key.split("/", 1)
+        return f"{MISSION_DETAIL_BASE_URL}/{base_id}?{urlencode({'additive_overlays': overlay})}"
+
     @staticmethod
-    def get_average_credits(mission_data: Dict) -> int:
-        """
-        Get average credits for the mission.
-        
-        Args:
-            mission_data: Mission dictionary
-            
-        Returns:
-            Average credits amount
-        """
-        return mission_data.get('average_credits', 0)
-    
-    @staticmethod
-    def get_locations(mission_data: Dict) -> List[str]:
-        """
-        Get mission locations.
-        
-        Args:
-            mission_data: Mission dictionary
-            
-        Returns:
-            List of location strings
-        """
-        places = mission_data.get('place_array', [])
-        if places:
-            return places
-        
-        # Fallback to single place field
-        place = mission_data.get('place', '')
-        if place:
-            return [place]
-        
-        return []
-    
-    @staticmethod
-    def get_requirements(mission_data: Dict) -> Dict:
-        """
-        Get mission requirements (vehicles and equipment).
-        
-        Args:
-            mission_data: Mission dictionary
-            
-        Returns:
-            Dictionary of requirements
-        """
-        return mission_data.get('requirements', {})
-    
-    @staticmethod
-    def get_chances(mission_data: Dict) -> Dict:
-        """
-        Get mission chances (probabilities for various events).
-        
-        Args:
-            mission_data: Mission dictionary
-            
-        Returns:
-            Dictionary of chances
-        """
-        return mission_data.get('chances', {})
-    
-    @staticmethod
-    def get_additional_info(mission_data: Dict) -> Dict:
-        """
-        Get additional mission information.
-        
-        Args:
-            mission_data: Mission dictionary
-            
-        Returns:
-            Dictionary of additional information
-        """
-        return mission_data.get('additional', {})
-    
-    @staticmethod
-    def get_prerequisites(mission_data: Dict) -> Dict:
-        """
-        Get mission prerequisites (unlock requirements).
-        
-        Args:
-            mission_data: Mission dictionary
-            
-        Returns:
-            Dictionary of prerequisites
-        """
-        return mission_data.get('prerequisites', {})
-    
-    @staticmethod
-    def get_categories(mission_data: Dict) -> List[str]:
-        """
-        Get mission categories.
-        
-        Args:
-            mission_data: Mission dictionary
-            
-        Returns:
-            List of category strings
-        """
-        return mission_data.get('mission_categories', [])
-    
-    @staticmethod
-    def get_patient_info(mission_data: Dict) -> Dict:
-        """
-        Extract patient-related information from mission data.
-        
-        Args:
-            mission_data: Mission dictionary
-            
-        Returns:
-            Dictionary with patient information
-        """
-        additional = mission_data.get('additional', {})
-        chances = mission_data.get('chances', {})
-        
-        patient_info = {
-            'possible_patients': additional.get('possible_patient', 0),
-            'transport_chance': chances.get('patient_transport', 0),
-            'specializations': [],
-            'us_codes': []
+    def calculate_hash(mission_data: dict[str, Any], *, format_version: str = "1") -> str:
+        """Calculate a stable hash that also changes when the formatter changes."""
+        payload = {
+            "format_version": format_version,
+            "mission": mission_data,
         }
-        
-        # Get specialization captions (human-readable names)
-        spec_captions = additional.get('patient_specialization_captions', [])
-        if spec_captions:
-            patient_info['specializations'] = spec_captions
-        
-        # Get US codes
-        us_codes = additional.get('patient_us_code_possible', [])
-        if us_codes:
-            patient_info['us_codes'] = us_codes
-        
-        return patient_info
+        mission_json = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+        return hashlib.sha256(mission_json.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def sort_key(mission_data: dict[str, Any]) -> tuple[int, str, str]:
+        """Sort by base numeric mission ID first, then overlay."""
+        mission_key = MissionFetcher.mission_key(mission_data)
+        base = mission_key.split("/", 1)[0]
+        try:
+            numeric = int(base)
+        except ValueError:
+            numeric = 10**9
+        return (numeric, base, mission_key)
+
+    @staticmethod
+    def mission_name(mission_data: dict[str, Any]) -> str:
+        return str(mission_data.get("name") or mission_data.get("caption") or "Unknown Mission")
+
+    @staticmethod
+    def matches_query(mission_data: dict[str, Any], query: str | None) -> bool:
+        """Match by mission key, name, category, requirement key, or detail URL."""
+        if not query:
+            return True
+
+        needle = query.casefold().strip()
+        if not needle:
+            return True
+
+        haystack: list[str] = [
+            MissionFetcher.mission_key(mission_data),
+            MissionFetcher.mission_name(mission_data),
+            MissionFetcher.detail_url(mission_data),
+        ]
+        haystack.extend(str(value) for value in mission_data.get("mission_categories", []) or [])
+        haystack.extend(MissionFetcher._flatten_keys(mission_data.get("requirements", {})))
+        haystack.extend(MissionFetcher._flatten_keys(mission_data.get("prerequisites", {})))
+
+        return any(needle in value.casefold() for value in haystack)
+
+    @staticmethod
+    def _flatten_keys(value: Any) -> Iterable[str]:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                yield str(key)
+                yield from MissionFetcher._flatten_keys(nested)
+        elif isinstance(value, list):
+            for item in value:
+                yield from MissionFetcher._flatten_keys(item)
+
+    @staticmethod
+    def slugify(value: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
+        return slug or "unknown"
