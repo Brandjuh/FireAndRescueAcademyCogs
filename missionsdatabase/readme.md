@@ -71,6 +71,8 @@ Every mission is tracked by a stable MissionChief mission key:
 
 - normal missions use their `id`
 - additive overlays use `base_mission_id/additive_overlays`, for example `2/a`
+- MissionChief hyphen variants such as `438-0` stay separate posts, but link to the
+  official detail URL with `overlay_index`, for example `/einsaetze/438?overlay_index=0`
 
 The cog stores the Discord message or forum thread ID in SQLite. On later syncs it edits the
 existing post if the mission changed, skips it if unchanged, and only creates a new post when

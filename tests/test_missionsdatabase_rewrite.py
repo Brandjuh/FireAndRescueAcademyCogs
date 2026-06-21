@@ -38,6 +38,37 @@ MISSION_PAYLOAD = {
         "prerequisites": {"main_building": 0, "fire_stations": 3},
         "mission_categories": ["fire", "tow_trucks", "urban"],
     },
+    "438": {
+        "id": "438",
+        "base_mission_id": 438,
+        "name": "Serve court order",
+        "average_credits": 150,
+        "requirements": {"police_cars": 1},
+        "additional": {},
+        "prerequisites": {"main_building": 6, "police_stations": 3},
+        "mission_categories": ["police"],
+    },
+    "438-0": {
+        "id": "438-0",
+        "base_mission_id": 438,
+        "additive_overlays": "",
+        "name": "Serve court order",
+        "average_credits": 550,
+        "requirements": {"police_cars": 2},
+        "additional": {},
+        "prerequisites": {"main_building": 6, "police_stations": 7},
+        "mission_categories": ["police"],
+    },
+    "1152": {
+        "id": "1152",
+        "base_mission_id": 1152,
+        "name": "Late numeric mission",
+        "average_credits": 1000,
+        "requirements": {"firetrucks": 1},
+        "additional": {},
+        "prerequisites": {"main_building": 0, "fire_stations": 1},
+        "mission_categories": ["fire"],
+    },
 }
 
 
@@ -198,8 +229,18 @@ def test_mission_fetcher_normalizes_dict_payload_and_overlay_keys():
     missions = MissionFetcher.normalize_missions(MISSION_PAYLOAD)
     keys = [MissionFetcher.mission_key(mission) for mission in missions]
 
-    assert keys == ["0", "2", "2/a"]
+    assert keys == ["0", "2", "2/a", "438", "438-0", "1152"]
     assert MissionFetcher.detail_url(missions[2]).endswith("/einsaetze/2?additive_overlays=a")
+
+
+def test_mission_fetcher_sorts_hyphen_variants_by_base_id_and_uses_overlay_index_url():
+    missions = MissionFetcher.normalize_missions(MISSION_PAYLOAD)
+    keys = [MissionFetcher.mission_key(mission) for mission in missions]
+    variant = next(mission for mission in missions if MissionFetcher.mission_key(mission) == "438-0")
+
+    assert keys.index("438-0") == keys.index("438") + 1
+    assert keys.index("438-0") < keys.index("1152")
+    assert MissionFetcher.detail_url(variant).endswith("/einsaetze/438?overlay_index=0")
 
 
 def test_mission_formatter_builds_marker_content_and_embed_footer():

@@ -22,7 +22,7 @@ from .mission_fetcher import MissionFetcher
 class MissionFormatter:
     """Build compact Discord output for a possible mission."""
 
-    FORMAT_VERSION = "possible-missions-v3"
+    FORMAT_VERSION = "possible-missions-v4"
     MARKER_PREFIX = "MissionChief Possible Mission"
 
     @classmethod

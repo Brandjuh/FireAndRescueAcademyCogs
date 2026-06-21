@@ -19,6 +19,7 @@ import aiohttp
 
 MISSION_JSON_URL = "https://www.missionchief.com/einsaetze.json"
 MISSION_DETAIL_BASE_URL = "https://www.missionchief.com/einsaetze"
+HYPHEN_VARIANT_RE = re.compile(r"^(\d+)-(\d+)$")
 
 
 class MissionFetcher:
@@ -124,6 +125,13 @@ class MissionFetcher:
     @staticmethod
     def detail_url(mission_data: dict[str, Any]) -> str:
         """Build the MissionChief detail URL for a mission or overlay."""
+        overlay_index = MissionFetcher.hyphen_variant_overlay_index(mission_data)
+        if overlay_index is not None:
+            return (
+                f"{MISSION_DETAIL_BASE_URL}/{MissionFetcher.base_detail_id(mission_data)}?"
+                f"{urlencode({'overlay_index': overlay_index})}"
+            )
+
         mission_key = MissionFetcher.mission_key(mission_data)
         if "/" not in mission_key:
             return f"{MISSION_DETAIL_BASE_URL}/{mission_key}"
@@ -145,12 +153,41 @@ class MissionFetcher:
     def sort_key(mission_data: dict[str, Any]) -> tuple[int, str, str]:
         """Sort by base numeric mission ID first, then overlay."""
         mission_key = MissionFetcher.mission_key(mission_data)
-        base = mission_key.split("/", 1)[0]
+        base = MissionFetcher.base_detail_id(mission_data) or mission_key.split("/", 1)[0].split("-", 1)[0]
         try:
             numeric = int(base)
         except ValueError:
             numeric = 10**9
         return (numeric, base, mission_key)
+
+    @staticmethod
+    def base_detail_id(mission_data: dict[str, Any]) -> str:
+        """Return the numeric detail page ID MissionChief uses for a mission variant."""
+        base_id = mission_data.get("base_mission_id")
+        if base_id not in (None, ""):
+            return str(base_id)
+
+        mission_id = str(mission_data.get("id") or "")
+        match = HYPHEN_VARIANT_RE.match(mission_id)
+        if match:
+            return match.group(1)
+        return mission_id
+
+    @staticmethod
+    def hyphen_variant_overlay_index(mission_data: dict[str, Any]) -> str | None:
+        """Return MissionChief's overlay_index for IDs like 644-0."""
+        if str(mission_data.get("additive_overlays") or "").strip():
+            return None
+
+        mission_id = str(mission_data.get("id") or "")
+        match = HYPHEN_VARIANT_RE.match(mission_id)
+        if not match:
+            return None
+
+        base_id = mission_data.get("base_mission_id")
+        if base_id in (None, "") or str(base_id) == match.group(1):
+            return match.group(2)
+        return None
 
     @staticmethod
     def mission_name(mission_data: dict[str, Any]) -> str:
