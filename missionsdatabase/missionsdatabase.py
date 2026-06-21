@@ -48,6 +48,7 @@ class MissionsDatabase(commands.Cog):
         self.formatter = MissionFormatter()
         self.last_sync_errors: list[str] = []
         self.sync_task: asyncio.Task | None = None
+        self.stop_generation = 0
 
         data_path = self._data_path()
         self.db = MissionStore(data_path / "missions_v2.db")
@@ -252,6 +253,42 @@ class MissionsDatabase(commands.Cog):
         await self.db.set_auto_sync(ctx.guild.id, enabled)
         await ctx.send(f"Automatic full sync {'enabled' if enabled else 'disabled'}.")
 
+    @missions.command(name="stop")
+    async def missions_stop(self, ctx: commands.Context) -> None:
+        """Stop the current mission posting run and disable automatic full sync."""
+        self._request_stop()
+        config = await self.db.get_config(ctx.guild.id)
+        if config:
+            await self.db.set_auto_sync(ctx.guild.id, False)
+
+        await ctx.send(
+            "Mission posting stop requested.\n"
+            "Automatic full sync is disabled. Existing mission posts were not deleted."
+        )
+
+    @missions.command(name="wipe")
+    async def missions_wipe(self, ctx: commands.Context, confirmation: str = "") -> None:
+        """
+        Delete mission posts from the configured channel.
+
+        Requires the exact confirmation argument CONFIRM.
+        """
+        if confirmation != FULL_SYNC_CONFIRMATION:
+            await ctx.send(
+                "Mission post wipe is intentionally locked.\n"
+                f"Run `{ctx.prefix}missions stop` first if a sync is active.\n"
+                f"When ready, run `{ctx.prefix}missions wipe {FULL_SYNC_CONFIRMATION}`."
+            )
+            return
+
+        message = await ctx.send("Deleting mission posts from the configured channel...")
+        try:
+            stats = await self._wipe_configured_posts(ctx.guild)
+            await message.edit(content=self._format_wipe_stats(stats))
+        except Exception as exc:
+            log.exception("Mission post wipe failed")
+            await message.edit(content=f"Mission post wipe failed: {exc}")
+
     @missions.command(name="errors")
     async def missions_errors(self, ctx: commands.Context) -> None:
         """Show errors from the last sync run."""
@@ -264,6 +301,26 @@ class MissionsDatabase(commands.Cog):
         )
         for page in pagify(report):
             await ctx.send(box(page))
+
+    def _request_stop(self) -> int:
+        self.stop_generation += 1
+        return self.stop_generation
+
+    async def _sleep_unless_stopped(self, seconds: float, stop_generation: int) -> bool:
+        if seconds <= 0:
+            return self.stop_generation == stop_generation
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + seconds
+        while True:
+            if self.stop_generation != stop_generation:
+                return False
+
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return True
+
+            await asyncio.sleep(min(0.5, remaining))
 
     async def _sync_missions(
         self,
@@ -281,6 +338,7 @@ class MissionsDatabase(commands.Cog):
 
         all_missions = await self.fetcher.fetch_missions()
         selected = self._select_missions(all_missions, limit=limit, query=query)
+        stop_generation = self.stop_generation
         stats = {
             "source_missions": len(all_missions),
             "selected_missions": len(selected),
@@ -289,19 +347,28 @@ class MissionsDatabase(commands.Cog):
             "recovered": 0,
             "skipped": 0,
             "failed": 0,
+            "stopped": 0,
         }
         errors: list[str] = []
 
         for index, mission in enumerate(selected, start=1):
+            if self.stop_generation != stop_generation:
+                stats["stopped"] = 1
+                break
+
             mission_key = MissionFetcher.mission_key(mission)
             try:
                 status = await self._publish_mission(guild, channel, mission, force_update=force_update)
                 stats[status] += 1
-                await asyncio.sleep(self.POST_DELAY_SECONDS)
+                if not await self._sleep_unless_stopped(self.POST_DELAY_SECONDS, stop_generation):
+                    stats["stopped"] = 1
+                    break
 
                 changed = stats["created"] + stats["updated"] + stats["recovered"]
                 if changed and changed % self.POSTS_PER_BATCH == 0:
-                    await asyncio.sleep(self.BATCH_DELAY_SECONDS)
+                    if not await self._sleep_unless_stopped(self.BATCH_DELAY_SECONDS, stop_generation):
+                        stats["stopped"] = 1
+                        break
 
                 if progress_message and index % 10 == 0:
                     await progress_message.edit(
@@ -316,9 +383,139 @@ class MissionsDatabase(commands.Cog):
                 errors.append(f"{mission_key}: {exc}")
                 log.exception("Failed to publish mission %s", mission_key)
 
-        await self.db.update_last_sync(guild.id)
+        if not stats["stopped"]:
+            await self.db.update_last_sync(guild.id)
         self.last_sync_errors = errors
         return stats
+
+    async def _wipe_configured_posts(self, guild: discord.Guild) -> dict[str, int]:
+        config = await self._get_config_or_default(guild)
+        channel = guild.get_channel(int(config["channel_id"]))
+        if channel is None:
+            raise ValueError(f"Configured channel {config['channel_id']} was not found")
+
+        if self._is_forum_channel(channel):
+            stats = await self._wipe_forum_channel(guild, channel)
+        else:
+            stats = await self._wipe_text_channel(guild, channel)
+
+        if stats["failed"] == 0:
+            await self.db.clear_publications(guild.id)
+        return stats
+
+    async def _wipe_text_channel(self, guild: discord.Guild, channel: Any) -> dict[str, int]:
+        stats = {"deleted": 0, "missing": 0, "failed": 0, "scanned": 0}
+        deleted_message_ids: set[int] = set()
+
+        records = await self.db.get_all_publications(guild.id)
+        for record in records:
+            if record.get("target_kind") != "message":
+                continue
+            if str(record.get("channel_id")) != str(channel.id):
+                continue
+
+            publication = await self._get_recorded_publication(channel, record)
+            if publication is None:
+                stats["missing"] += 1
+                continue
+
+            message = publication["message"]
+            if await self._delete_discord_object(message, stats):
+                deleted_message_ids.add(int(message.id))
+
+        history = getattr(channel, "history", None)
+        if history is None:
+            return stats
+
+        async for message in channel.history(limit=self.EXISTING_MESSAGE_SCAN_LIMIT):
+            stats["scanned"] += 1
+            if int(getattr(message, "id", 0)) in deleted_message_ids:
+                continue
+            if not self._message_has_mission_marker(message):
+                continue
+
+            if await self._delete_discord_object(message, stats):
+                deleted_message_ids.add(int(message.id))
+
+        return stats
+
+    async def _wipe_forum_channel(self, guild: discord.Guild, channel: Any) -> dict[str, int]:
+        stats = {"deleted": 0, "missing": 0, "failed": 0, "scanned": 0}
+        deleted_thread_ids: set[int] = set()
+
+        records = await self.db.get_all_publications(guild.id)
+        for record in records:
+            if record.get("target_kind") != "forum_thread":
+                continue
+            if str(record.get("channel_id")) != str(channel.id):
+                continue
+
+            thread_id = record.get("thread_id")
+            if not thread_id:
+                stats["missing"] += 1
+                continue
+
+            thread = await self._resolve_thread(channel, int(thread_id))
+            if thread is None:
+                stats["missing"] += 1
+                continue
+
+            if await self._delete_discord_object(thread, stats):
+                deleted_thread_ids.add(int(thread.id))
+
+        async for thread in self._iter_forum_threads(channel):
+            stats["scanned"] += 1
+            thread_id = int(getattr(thread, "id", 0))
+            if thread_id in deleted_thread_ids:
+                continue
+
+            if await self._delete_discord_object(thread, stats):
+                deleted_thread_ids.add(thread_id)
+
+        return stats
+
+    async def _iter_forum_threads(self, channel: Any):
+        seen: set[int] = set()
+        for thread in getattr(channel, "threads", []) or []:
+            thread_id = int(getattr(thread, "id", 0))
+            if thread_id in seen:
+                continue
+            seen.add(thread_id)
+            yield thread
+
+        archived_threads = getattr(channel, "archived_threads", None)
+        if archived_threads is None:
+            return
+
+        try:
+            archived_iterator = channel.archived_threads(limit=None)
+        except TypeError:
+            archived_iterator = channel.archived_threads(limit=100)
+
+        try:
+            async for thread in archived_iterator:
+                thread_id = int(getattr(thread, "id", 0))
+                if thread_id in seen:
+                    continue
+                seen.add(thread_id)
+                yield thread
+        except (discord.HTTPException, discord.Forbidden, AttributeError):
+            return
+
+    async def _delete_discord_object(self, target: Any, stats: dict[str, int]) -> bool:
+        try:
+            await target.delete()
+        except discord.NotFound:
+            stats["missing"] += 1
+            return False
+        except (discord.Forbidden, discord.HTTPException, AttributeError):
+            stats["failed"] += 1
+            return False
+
+        stats["deleted"] += 1
+        if self.POST_DELAY_SECONDS > 0:
+            await asyncio.sleep(self.POST_DELAY_SECONDS)
+        return True
 
     async def _publish_mission(
         self,
@@ -579,6 +776,21 @@ class MissionsDatabase(commands.Cog):
                 return True
         return False
 
+    @staticmethod
+    def _message_has_mission_marker(message: Any) -> bool:
+        content = getattr(message, "content", "") or ""
+        if MissionFormatter.MARKER_PREFIX in content:
+            return True
+
+        for embed in getattr(message, "embeds", []) or []:
+            footer = getattr(embed, "footer", None)
+            footer_text = getattr(footer, "text", None)
+            if footer_text is None and isinstance(footer, dict):
+                footer_text = footer.get("text")
+            if footer_text and "Source: MissionChief Possible Missions" in footer_text:
+                return True
+        return False
+
     async def _resolve_thread(self, forum_channel: Any, thread_id: int) -> Any | None:
         get_thread = getattr(forum_channel, "get_thread", None)
         if get_thread is not None:
@@ -687,13 +899,31 @@ class MissionsDatabase(commands.Cog):
     @staticmethod
     def _format_sync_stats(stats: dict[str, int], *, safe_mode: bool) -> str:
         mode = "safe test sync" if safe_mode else "full sync"
-        return (
+        lines = [
             f"Mission {mode} complete.\n"
-            f"Source missions: {stats['source_missions']}\n"
-            f"Selected missions: {stats['selected_missions']}\n"
-            f"Created: {stats['created']}\n"
-            f"Updated: {stats['updated']}\n"
-            f"Recovered existing posts: {stats['recovered']}\n"
-            f"Skipped unchanged: {stats['skipped']}\n"
-            f"Failed: {stats['failed']}"
-        )
+            f"Source missions: {stats['source_missions']}",
+            f"Selected missions: {stats['selected_missions']}",
+            f"Created: {stats['created']}",
+            f"Updated: {stats['updated']}",
+            f"Recovered existing posts: {stats['recovered']}",
+            f"Skipped unchanged: {stats['skipped']}",
+            f"Failed: {stats['failed']}",
+        ]
+        if stats.get("stopped"):
+            lines.append("Stopped early: Yes")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_wipe_stats(stats: dict[str, int]) -> str:
+        lines = [
+            "Mission post wipe complete.",
+            f"Deleted: {stats['deleted']}",
+            f"Missing already: {stats['missing']}",
+            f"Scanned existing posts: {stats['scanned']}",
+            f"Failed: {stats['failed']}",
+        ]
+        if stats["failed"]:
+            lines.append("Publication tracking was kept because one or more deletes failed.")
+        else:
+            lines.append("Publication tracking was cleared.")
+        return "\n".join(lines)
