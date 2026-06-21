@@ -1,261 +1,235 @@
 """
-Database operations for the missions database system.
+SQLite storage for the MissionChief possible missions publisher.
 """
 
-import aiosqlite
-import json
-from datetime import datetime
+from __future__ import annotations
+
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Any
+
+import aiosqlite
+
+
+def utc_now() -> str:
+    """Return an ISO timestamp with timezone information."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 class MissionsDatabase:
-    """Handle all database operations for mission tracking."""
-    
+    """Store guild configuration and Discord publication tracking."""
+
     def __init__(self, db_path: Path):
-        """
-        Initialize the database handler.
-        
-        Args:
-            db_path: Path to the SQLite database file
-        """
-        self.db_path = db_path
-    
-    async def initialize(self):
-        """Create database tables if they don't exist."""
+        self.db_path = Path(db_path)
+
+    async def initialize(self) -> None:
+        """Create the v2 tables without relying on the old forum-only schema."""
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.db_path) as db:
-            # Mission posts tracking table
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS mission_posts (
-                    mission_id TEXT PRIMARY KEY,
-                    thread_id TEXT NOT NULL,
-                    mission_data_hash TEXT NOT NULL,
-                    posted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    last_updated TIMESTAMP,
-                    last_check TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
-            # Configuration table
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS mission_sync_config (
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mission_config_v2 (
                     guild_id TEXT PRIMARY KEY,
-                    forum_channel_id TEXT NOT NULL,
-                    admin_alert_channel_id TEXT,
-                    auto_sync_enabled INTEGER DEFAULT 1,
-                    last_full_sync TIMESTAMP,
-                    missions_tag_name TEXT DEFAULT 'Missions'
+                    channel_id TEXT NOT NULL,
+                    auto_sync_enabled INTEGER NOT NULL DEFAULT 0,
+                    last_sync_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 )
-            """)
-            
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mission_publications_v2 (
+                    guild_id TEXT NOT NULL,
+                    mission_key TEXT NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    target_kind TEXT NOT NULL,
+                    message_id TEXT,
+                    thread_id TEXT,
+                    content_hash TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    detail_url TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, mission_key)
+                )
+                """
+            )
             await db.commit()
-    
-    async def set_config(self, guild_id: int, forum_channel_id: int, 
-                        admin_alert_channel_id: Optional[int] = None):
-        """
-        Set or update guild configuration.
-        
-        Args:
-            guild_id: Discord guild ID
-            forum_channel_id: Forum channel ID for posting missions
-            admin_alert_channel_id: Optional channel ID for admin alerts
-        """
+
+    async def set_config(self, guild_id: int, channel_id: int) -> None:
+        now = utc_now()
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                INSERT INTO mission_sync_config 
-                (guild_id, forum_channel_id, admin_alert_channel_id)
-                VALUES (?, ?, ?)
+            await db.execute(
+                """
+                INSERT INTO mission_config_v2
+                    (guild_id, channel_id, auto_sync_enabled, created_at, updated_at)
+                VALUES (?, ?, 0, ?, ?)
                 ON CONFLICT(guild_id) DO UPDATE SET
-                    forum_channel_id = excluded.forum_channel_id,
-                    admin_alert_channel_id = excluded.admin_alert_channel_id
-            """, (str(guild_id), str(forum_channel_id), 
-                  str(admin_alert_channel_id) if admin_alert_channel_id else None))
+                    channel_id = excluded.channel_id,
+                    updated_at = excluded.updated_at
+                """,
+                (str(guild_id), str(channel_id), now, now),
+            )
             await db.commit()
-    
-    async def get_config(self, guild_id: int) -> Optional[Dict]:
-        """
-        Get guild configuration.
-        
-        Args:
-            guild_id: Discord guild ID
-            
-        Returns:
-            Dictionary with config data or None if not configured
-        """
+
+    async def get_config(self, guild_id: int) -> dict[str, Any] | None:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute("""
-                SELECT * FROM mission_sync_config WHERE guild_id = ?
-            """, (str(guild_id),)) as cursor:
+            async with db.execute(
+                "SELECT * FROM mission_config_v2 WHERE guild_id = ?",
+                (str(guild_id),),
+            ) as cursor:
                 row = await cursor.fetchone()
-                if row:
-                    return dict(row)
-                return None
-    
-    async def set_auto_sync(self, guild_id: int, enabled: bool):
-        """
-        Enable or disable automatic syncing.
-        
-        Args:
-            guild_id: Discord guild ID
-            enabled: Whether auto-sync should be enabled
-        """
+                return dict(row) if row else None
+
+    async def set_auto_sync(self, guild_id: int, enabled: bool) -> None:
+        now = utc_now()
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                UPDATE mission_sync_config 
-                SET auto_sync_enabled = ?
+            await db.execute(
+                """
+                UPDATE mission_config_v2
+                SET auto_sync_enabled = ?, updated_at = ?
                 WHERE guild_id = ?
-            """, (1 if enabled else 0, str(guild_id)))
+                """,
+                (1 if enabled else 0, now, str(guild_id)),
+            )
             await db.commit()
-    
-    async def update_last_sync(self, guild_id: int):
-        """
-        Update the last full sync timestamp.
-        
-        Args:
-            guild_id: Discord guild ID
-        """
+
+    async def update_last_sync(self, guild_id: int) -> None:
+        now = utc_now()
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                UPDATE mission_sync_config 
-                SET last_full_sync = ?
+            await db.execute(
+                """
+                UPDATE mission_config_v2
+                SET last_sync_at = ?, updated_at = ?
                 WHERE guild_id = ?
-            """, (datetime.utcnow().isoformat(), str(guild_id)))
+                """,
+                (now, now, str(guild_id)),
+            )
             await db.commit()
-    
-    async def add_mission_post(self, mission_id: str, thread_id: int, 
-                              mission_data_hash: str):
-        """
-        Add a new mission post to the database.
-        
-        Args:
-            mission_id: Mission ID from the JSON
-            thread_id: Discord thread/post ID
-            mission_data_hash: Hash of the mission data for change detection
-        """
-        async with aiosqlite.connect(self.db_path) as db:
-            now = datetime.utcnow().isoformat()
-            await db.execute("""
-                INSERT INTO mission_posts 
-                (mission_id, thread_id, mission_data_hash, posted_at, last_check)
-                VALUES (?, ?, ?, ?, ?)
-            """, (mission_id, str(thread_id), mission_data_hash, now, now))
-            await db.commit()
-    
-    async def update_mission_post(self, mission_id: str, thread_id: int, 
-                                 mission_data_hash: str):
-        """
-        Update an existing mission post.
-        
-        Args:
-            mission_id: Mission ID from the JSON
-            thread_id: New Discord thread/post ID
-            mission_data_hash: New hash of the mission data
-        """
-        async with aiosqlite.connect(self.db_path) as db:
-            now = datetime.utcnow().isoformat()
-            await db.execute("""
-                UPDATE mission_posts
-                SET thread_id = ?, 
-                    mission_data_hash = ?,
-                    last_updated = ?,
-                    last_check = ?
-                WHERE mission_id = ?
-            """, (str(thread_id), mission_data_hash, now, now, mission_id))
-            await db.commit()
-    
-    async def get_mission_post(self, mission_id: str) -> Optional[Dict]:
-        """
-        Get mission post data.
-        
-        Args:
-            mission_id: Mission ID from the JSON
-            
-        Returns:
-            Dictionary with post data or None if not found
-        """
+
+    async def get_publication(self, guild_id: int, mission_key: str) -> dict[str, Any] | None:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute("""
-                SELECT * FROM mission_posts WHERE mission_id = ?
-            """, (mission_id,)) as cursor:
+            async with db.execute(
+                """
+                SELECT * FROM mission_publications_v2
+                WHERE guild_id = ? AND mission_key = ?
+                """,
+                (str(guild_id), mission_key),
+            ) as cursor:
                 row = await cursor.fetchone()
-                if row:
-                    return dict(row)
-                return None
-    
-    async def get_all_mission_posts(self) -> List[Dict]:
-        """
-        Get all mission posts.
-        
-        Returns:
-            List of dictionaries with post data
-        """
+                return dict(row) if row else None
+
+    async def upsert_publication(
+        self,
+        *,
+        guild_id: int,
+        mission_key: str,
+        channel_id: int,
+        target_kind: str,
+        message_id: int | None,
+        thread_id: int | None,
+        content_hash: str,
+        title: str,
+        detail_url: str,
+    ) -> None:
+        now = utc_now()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO mission_publications_v2 (
+                    guild_id,
+                    mission_key,
+                    channel_id,
+                    target_kind,
+                    message_id,
+                    thread_id,
+                    content_hash,
+                    title,
+                    detail_url,
+                    created_at,
+                    updated_at,
+                    last_seen_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id, mission_key) DO UPDATE SET
+                    channel_id = excluded.channel_id,
+                    target_kind = excluded.target_kind,
+                    message_id = excluded.message_id,
+                    thread_id = excluded.thread_id,
+                    content_hash = excluded.content_hash,
+                    title = excluded.title,
+                    detail_url = excluded.detail_url,
+                    updated_at = excluded.updated_at,
+                    last_seen_at = excluded.last_seen_at
+                """,
+                (
+                    str(guild_id),
+                    mission_key,
+                    str(channel_id),
+                    target_kind,
+                    str(message_id) if message_id is not None else None,
+                    str(thread_id) if thread_id is not None else None,
+                    content_hash,
+                    title,
+                    detail_url,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            await db.commit()
+
+    async def touch_publication(self, guild_id: int, mission_key: str) -> None:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE mission_publications_v2
+                SET last_seen_at = ?
+                WHERE guild_id = ? AND mission_key = ?
+                """,
+                (utc_now(), str(guild_id), mission_key),
+            )
+            await db.commit()
+
+    async def get_all_publications(self, guild_id: int) -> list[dict[str, Any]]:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute("""
-                SELECT * FROM mission_posts ORDER BY mission_id
-            """) as cursor:
+            async with db.execute(
+                """
+                SELECT * FROM mission_publications_v2
+                WHERE guild_id = ?
+                ORDER BY mission_key
+                """,
+                (str(guild_id),),
+            ) as cursor:
                 rows = await cursor.fetchall()
                 return [dict(row) for row in rows]
-    
-    async def update_last_check(self, mission_id: str):
-        """
-        Update the last check timestamp for a mission.
-        
-        Args:
-            mission_id: Mission ID from the JSON
-        """
+
+    async def get_statistics(self, guild_id: int) -> dict[str, int]:
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                UPDATE mission_posts
-                SET last_check = ?
-                WHERE mission_id = ?
-            """, (datetime.utcnow().isoformat(), mission_id))
-            await db.commit()
-    
-    async def delete_mission_post(self, mission_id: str):
-        """
-        Delete a mission post from the database.
-        
-        Args:
-            mission_id: Mission ID from the JSON
-        """
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                DELETE FROM mission_posts WHERE mission_id = ?
-            """, (mission_id,))
-            await db.commit()
-    
-    async def clear_all_missions(self):
-        """Delete all mission posts from the database."""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("DELETE FROM mission_posts")
-            await db.commit()
-    
-    async def get_statistics(self) -> Dict:
-        """
-        Get database statistics.
-        
-        Returns:
-            Dictionary with statistics
-        """
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute("""
-                SELECT COUNT(*) as total_missions FROM mission_posts
-            """) as cursor:
+            async with db.execute(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN target_kind = 'message' THEN 1 ELSE 0 END) AS messages,
+                    SUM(CASE WHEN target_kind = 'forum_thread' THEN 1 ELSE 0 END) AS threads
+                FROM mission_publications_v2
+                WHERE guild_id = ?
+                """,
+                (str(guild_id),),
+            ) as cursor:
                 row = await cursor.fetchone()
-                total_missions = row[0] if row else 0
-            
-            async with db.execute("""
-                SELECT COUNT(*) as updated_missions 
-                FROM mission_posts 
-                WHERE last_updated IS NOT NULL
-            """) as cursor:
-                row = await cursor.fetchone()
-                updated_missions = row[0] if row else 0
-            
-            return {
-                "total_missions": total_missions,
-                "updated_missions": updated_missions
-            }
+
+        if not row:
+            return {"total": 0, "messages": 0, "threads": 0}
+
+        return {
+            "total": int(row[0] or 0),
+            "messages": int(row[1] or 0),
+            "threads": int(row[2] or 0),
+        }

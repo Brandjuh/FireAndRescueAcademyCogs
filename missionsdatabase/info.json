@@ -1,7 +1,7 @@
 {
     "author": ["Brandjuh"],
-    "description": "Mission database system that fetches MissionChief missions and posts them to a Discord forum channel.",
-    "install_msg": "Thank you for installing MissionsDatabase! Use `[p]missions setup` to configure the forum channel.",
+    "description": "Mission database system that fetches MissionChief possible missions and posts or updates them in Discord without duplicate spam.",
+    "install_msg": "Thank you for installing MissionsDatabase! Use `[p]missions setup` and then `[p]missions sync 5` to run a safe test sync.",
     "short": "Mission database for MissionChief",
     "name": "MissionsDatabase",
     "tags": ["missionchief", "missions", "database", "forum"],
