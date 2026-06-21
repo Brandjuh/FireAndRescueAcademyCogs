@@ -22,7 +22,7 @@ from .mission_fetcher import MissionFetcher
 class MissionFormatter:
     """Build compact Discord output for a possible mission."""
 
-    FORMAT_VERSION = "possible-missions-v2"
+    FORMAT_VERSION = "possible-missions-v3"
     MARKER_PREFIX = "MissionChief Possible Mission"
 
     @classmethod
@@ -60,6 +60,10 @@ class MissionFormatter:
         poi = cls.poi(mission_data)
         if poi:
             embed.add_field(name="POI", value=poi, inline=False)
+
+        other_info = cls.other_information(mission_data)
+        if other_info:
+            embed.add_field(name="Other Information", value=other_info, inline=False)
 
         embed.set_footer(text=f"Mission ID: {mission_key} | Source: MissionChief Possible Missions")
         return embed
@@ -184,6 +188,30 @@ class MissionFormatter:
         if not places:
             return ""
         return MissionFormatter.truncate(", ".join(map(str, places)), 1024)
+
+    @classmethod
+    def other_information(cls, mission_data: dict[str, Any]) -> str:
+        additional = mission_data.get("additional", {}) or {}
+        lines: list[str] = []
+
+        expansion_names = additional.get("expansion_mission_names") or []
+        expansion_ids = additional.get("expansion_missions_ids") or []
+        if expansion_names:
+            lines.append(f"- Expandable Missions: {', '.join(map(str, expansion_names))}")
+        elif expansion_ids:
+            lines.append(f"- Expandable Missions: {', '.join(f'Mission {value}' for value in expansion_ids)}")
+
+        crashed_car_min = additional.get("possible_crashed_car_min")
+        crashed_car_max = additional.get("possible_crashed_car_max")
+        if crashed_car_min not in (None, ""):
+            lines.append(f"- Minimum cars to tow: {crashed_car_min}")
+        if crashed_car_max not in (None, ""):
+            lines.append(f"- Maximum cars to tow: {crashed_car_max}")
+
+        if mission_data.get("additive_overlays"):
+            lines.append(f"- Mission Variation: {MissionFetcher.mission_name(mission_data)}")
+
+        return cls.truncate_lines(lines, 1024)
 
     @staticmethod
     def prerequisite_name(key: str) -> str:
