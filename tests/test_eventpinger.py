@@ -7,6 +7,7 @@ from eventpinger.eventpinger import (
     SOURCE_CHANNEL_ID,
     extract_announcement_from_message,
     find_region_role,
+    region_from_geocode_results,
     resolve_region,
     state_from_zip,
     EventPinger,
@@ -84,6 +85,42 @@ def test_resolves_bermuda_postal_code_instead_of_florida():
     assert match.name == "Bermuda (BM)"
 
 
+def test_geocode_result_resolves_bermuda_country():
+    match = region_from_geocode_results(
+        [
+            {
+                "display_name": "Flatts, Bermuda",
+                "address": {
+                    "country": "Bermuda",
+                    "country_code": "bm",
+                },
+            }
+        ]
+    )
+
+    assert match.code == "BM"
+    assert match.source == "geocode_country"
+
+
+def test_geocode_result_resolves_us_state():
+    match = region_from_geocode_results(
+        [
+            {
+                "display_name": "Los Angeles, California, United States",
+                "address": {
+                    "city": "Los Angeles",
+                    "state": "California",
+                    "country": "United States",
+                    "country_code": "us",
+                },
+            }
+        ]
+    )
+
+    assert match.code == "CA"
+    assert match.source == "geocode_state"
+
+
 def test_uncertain_address_returns_none():
     assert resolve_region("Main Street near the park") is None
 
@@ -138,5 +175,69 @@ def test_on_message_unresolved_address_pings_notify_only():
         assert notify.mention in content
         assert "<@&2>" not in content
         assert "Unresolved" in content
+
+    asyncio.run(run())
+
+
+def test_async_geocode_resolver_uses_api_before_local_fallback():
+    async def run():
+        calls = []
+        cog = EventPinger(types.SimpleNamespace())
+
+        async def get_key():
+            return "test-key"
+
+        async def enabled():
+            return True
+
+        async def fetch(address, api_key):
+            calls.append((address, api_key))
+            return [
+                {
+                    "address": {
+                        "state": "California",
+                        "country": "United States",
+                        "country_code": "us",
+                    }
+                }
+            ]
+
+        cog._get_geocode_api_key = get_key
+        cog._geocode_enabled = enabled
+        cog._fetch_geocode_results = fetch
+
+        first = await cog.resolve_region_for_address("FL 04 Flatts")
+        second = await cog.resolve_region_for_address("FL 04 Flatts")
+
+        assert first.code == "CA"
+        assert first.source == "geocode_state"
+        assert second.code == "CA"
+        assert second.source == "geocode_state_cache"
+        assert calls == [("FL 04 Flatts", "test-key")]
+
+    asyncio.run(run())
+
+
+def test_async_geocode_failure_falls_back_to_local_resolver():
+    async def run():
+        cog = EventPinger(types.SimpleNamespace())
+
+        async def get_key():
+            return "test-key"
+
+        async def enabled():
+            return True
+
+        async def fetch(address, api_key):
+            raise RuntimeError("api unavailable")
+
+        cog._get_geocode_api_key = get_key
+        cog._geocode_enabled = enabled
+        cog._fetch_geocode_results = fetch
+
+        match = await cog.resolve_region_for_address("71 East 153rd Street, 10451 New York, The Bronx")
+
+        assert match.code == "NY"
+        assert match.source == "us_zip"
 
     asyncio.run(run())

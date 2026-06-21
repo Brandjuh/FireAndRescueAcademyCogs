@@ -13,6 +13,9 @@
         "notifications"
     ],
     "type": "COG",
+    "requirements": [
+        "aiohttp"
+    ],
     "end_user_data_statement": "This cog does not store user data. It reads MissionChief event announcement messages in one configured Discord channel and sends role pings based on the event address.",
     "min_bot_version": "3.5.0",
     "hidden": false,

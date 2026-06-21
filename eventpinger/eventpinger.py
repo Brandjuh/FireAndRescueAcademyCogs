@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
+import aiohttp
 import discord
-from redbot.core import commands
+from redbot.core import Config, commands
 
 log = logging.getLogger("red.fara.eventpinger")
 
@@ -16,6 +19,10 @@ NOTIFY_EVENT_ROLE_ID = 669496241591418890
 
 MISSION_PREFIX = "start alliance mission!"
 EVENT_PREFIX = "alliance event started!"
+GEOCODE_SEARCH_URL = "https://geocode.maps.co/search"
+GEOCODE_TIMEOUT_SECONDS = 5
+GEOCODE_CACHE_TTL_SECONDS = 90 * 24 * 60 * 60
+GEOCODE_MIN_INTERVAL_SECONDS = 1.1
 
 
 US_REGION_NAMES = {
@@ -76,6 +83,7 @@ REGION_ROLE_NAMES = {
     **{code: f"{name} ({code})" for code, name in US_REGION_NAMES.items()},
     "BM": "Bermuda (BM)",
 }
+US_STATE_NAME_TO_CODE = {name.casefold(): code for code, name in US_REGION_NAMES.items()}
 
 # ZIP prefixes are intentionally state-level only. Ambiguous or non-state US territories are omitted.
 US_ZIP3_RANGES = (
@@ -207,6 +215,10 @@ def normalize_text(value: str) -> str:
     return " ".join(str(value or "").replace("\n", " ").split())
 
 
+def cache_key_for_address(address: str) -> str:
+    return normalize_text(address).casefold()
+
+
 def extract_announcement_from_message(message: Any) -> EventAnnouncement | None:
     for title, body in iter_message_blocks(message):
         announcement = extract_announcement(title, body)
@@ -272,6 +284,43 @@ def resolve_region(address: str) -> RegionMatch | None:
         match = resolver(text)
         if match:
             return match
+    return None
+
+
+def region_from_geocode_results(results: Any) -> RegionMatch | None:
+    if not isinstance(results, list):
+        return None
+
+    for result in results[:3]:
+        match = region_from_geocode_result(result)
+        if match:
+            return match
+    return None
+
+
+def region_from_geocode_result(result: Any) -> RegionMatch | None:
+    if not isinstance(result, dict):
+        return None
+
+    address = result.get("address")
+    if not isinstance(address, dict):
+        return None
+
+    country_code = normalize_text(address.get("country_code", "")).casefold()
+    country = normalize_text(address.get("country", "")).casefold()
+    if country_code == "bm" or country == "bermuda":
+        return RegionMatch("BM", REGION_ROLE_NAMES["BM"], "geocode_country")
+
+    if country_code == "us" or country == "united states":
+        state_name = normalize_text(address.get("state", "")).casefold()
+        state_code = normalize_text(address.get("state_code", "")).upper()
+        if state_code in REGION_ROLE_NAMES:
+            return RegionMatch(state_code, REGION_ROLE_NAMES[state_code], "geocode_state_code")
+
+        resolved_code = US_STATE_NAME_TO_CODE.get(state_name)
+        if resolved_code:
+            return RegionMatch(resolved_code, REGION_ROLE_NAMES[resolved_code], "geocode_state")
+
     return None
 
 
@@ -374,6 +423,22 @@ class EventPinger(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+        self.config = None
+        if hasattr(Config, "get_conf"):
+            self.config = Config.get_conf(self, identifier=0xFA20260622, force_registration=True)
+            self.config.register_global(
+                geocode_api_key="",
+                geocode_enabled=True,
+                geocode_cache={},
+            )
+        self._session: aiohttp.ClientSession | None = None
+        self._memory_cache: dict[str, dict[str, Any]] = {}
+        self._geocode_lock = asyncio.Lock()
+        self._last_geocode_at = 0.0
+
+    async def cog_unload(self) -> None:
+        if self._session and not self._session.closed:
+            await self._session.close()
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -400,7 +465,7 @@ class EventPinger(commands.Cog):
         if guild is None or channel is None:
             return
 
-        region = resolve_region(announcement.address)
+        region = await self.resolve_region_for_address(announcement.address)
         notify_role = getattr(guild, "get_role", lambda role_id: None)(NOTIFY_EVENT_ROLE_ID)
         region_role = find_region_role(guild, region.code if region else None)
 
@@ -417,6 +482,125 @@ class EventPinger(commands.Cog):
         except (discord.Forbidden, discord.HTTPException):
             log.exception("Failed to send event notification for MissionChief announcement")
 
+    async def resolve_region_for_address(self, address: str) -> RegionMatch | None:
+        api_match = await self._resolve_region_with_geocode(address)
+        if api_match:
+            return api_match
+        return resolve_region(address)
+
+    async def _resolve_region_with_geocode(self, address: str) -> RegionMatch | None:
+        text = normalize_text(address)
+        if not text:
+            return None
+
+        api_key = await self._get_geocode_api_key()
+        if not api_key or not await self._geocode_enabled():
+            return None
+
+        cached = await self._get_cached_region(text)
+        if cached:
+            return cached
+
+        try:
+            results = await self._fetch_geocode_results(text, api_key)
+        except Exception:
+            log.exception("Geocode lookup failed for event address")
+            return None
+
+        match = region_from_geocode_results(results)
+        if match:
+            await self._set_cached_region(text, match)
+        return match
+
+    async def _get_geocode_api_key(self) -> str:
+        if self.config is None:
+            return ""
+        return str(await self.config.geocode_api_key() or "").strip()
+
+    async def _geocode_enabled(self) -> bool:
+        if self.config is None:
+            return False
+        return bool(await self.config.geocode_enabled())
+
+    async def _get_cached_region(self, address: str) -> RegionMatch | None:
+        key = cache_key_for_address(address)
+        now = int(time.time())
+        cache = await self._read_cache()
+        entry = cache.get(key)
+        if not isinstance(entry, dict):
+            return None
+
+        if int(entry.get("expires_at", 0) or 0) <= now:
+            await self._delete_cached_region(key)
+            return None
+
+        code = str(entry.get("code") or "")
+        name = str(entry.get("name") or REGION_ROLE_NAMES.get(code, ""))
+        source = str(entry.get("source") or "geocode_cache")
+        if not code or code not in REGION_ROLE_NAMES:
+            return None
+        return RegionMatch(code, name, source)
+
+    async def _set_cached_region(self, address: str, match: RegionMatch) -> None:
+        key = cache_key_for_address(address)
+        entry = {
+            "code": match.code,
+            "name": match.name,
+            "source": f"{match.source}_cache",
+            "expires_at": int(time.time()) + GEOCODE_CACHE_TTL_SECONDS,
+        }
+        if self.config is None:
+            self._memory_cache[key] = entry
+            return
+
+        async with self.config.geocode_cache() as cache:
+            cache[key] = entry
+
+    async def _delete_cached_region(self, key: str) -> None:
+        if self.config is None:
+            self._memory_cache.pop(key, None)
+            return
+
+        async with self.config.geocode_cache() as cache:
+            cache.pop(key, None)
+
+    async def _read_cache(self) -> dict[str, Any]:
+        if self.config is None:
+            return dict(self._memory_cache)
+        return dict(await self.config.geocode_cache() or {})
+
+    async def _fetch_geocode_results(self, address: str, api_key: str) -> Any:
+        async with self._geocode_lock:
+            elapsed = time.monotonic() - self._last_geocode_at
+            if elapsed < GEOCODE_MIN_INTERVAL_SECONDS:
+                await asyncio.sleep(GEOCODE_MIN_INTERVAL_SECONDS - elapsed)
+
+            session = await self._get_session()
+            params = {
+                "q": address,
+                "format": "json",
+                "addressdetails": "1",
+                "limit": "3",
+                "accept-language": "en",
+            }
+            headers = {"Authorization": f"Bearer {api_key}"}
+            timeout = aiohttp.ClientTimeout(total=GEOCODE_TIMEOUT_SECONDS)
+            async with session.get(
+                GEOCODE_SEARCH_URL,
+                params=params,
+                headers=headers,
+                timeout=timeout,
+            ) as response:
+                self._last_geocode_at = time.monotonic()
+                if int(response.status) >= 400:
+                    raise RuntimeError(f"Geocode API returned HTTP {response.status}")
+                return await response.json(content_type=None)
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
+
     @commands.group(name="eventpinger")
     @commands.guild_only()
     @commands.admin_or_permissions(administrator=True)
@@ -427,18 +611,24 @@ class EventPinger(commands.Cog):
     @eventpinger.command(name="status")
     async def eventpinger_status(self, ctx: commands.Context) -> None:
         """Show the hardcoded listener configuration."""
+        geocode_enabled = await self._geocode_enabled()
+        geocode_key = await self._get_geocode_api_key()
+        cache_size = len(await self._read_cache())
         await ctx.send(
             "eventpinger status\n"
             f"Source channel: {SOURCE_CHANNEL_ID}\n"
             f"MissionChief app ID: {MISSIONCHIEF_APP_ID}\n"
             f"Notify role: {NOTIFY_EVENT_ROLE_ID}\n"
-            f"Known region roles: {len(REGION_ROLE_NAMES)}"
+            f"Known region roles: {len(REGION_ROLE_NAMES)}\n"
+            f"Geocode enabled: {geocode_enabled}\n"
+            f"Geocode API key: {'set' if geocode_key else 'not set'}\n"
+            f"Geocode cache entries: {cache_size}"
         )
 
     @eventpinger.command(name="resolve")
     async def eventpinger_resolve(self, ctx: commands.Context, *, address: str) -> None:
         """Test address resolution without sending role pings."""
-        match = resolve_region(address)
+        match = await self.resolve_region_for_address(address)
         if not match:
             await ctx.send("No confident region match. Only Notify-Event would be used.")
             return
@@ -449,3 +639,46 @@ class EventPinger(commands.Cog):
             f"Source: {match.source}\n"
             f"Role: {getattr(role, 'mention', 'not found')}"
         )
+
+    @eventpinger.command(name="apikey")
+    @commands.is_owner()
+    async def eventpinger_apikey(self, ctx: commands.Context, api_key: str = "") -> None:
+        """Set or clear the geocode.maps.co API key. Owner only."""
+        if self.config is None:
+            await ctx.send("Config is not available in this runtime.")
+            return
+
+        try:
+            await ctx.message.delete()
+        except (discord.Forbidden, discord.HTTPException, AttributeError):
+            pass
+
+        clean_key = str(api_key or "").strip()
+        await self.config.geocode_api_key.set(clean_key)
+        await ctx.send("Geocode API key updated." if clean_key else "Geocode API key cleared.")
+
+    @eventpinger.command(name="geocode")
+    @commands.is_owner()
+    async def eventpinger_geocode(self, ctx: commands.Context, state: str = "") -> None:
+        """Enable or disable geocode fallback. Use on/off. Owner only."""
+        normalized = state.casefold().strip()
+        if normalized not in {"on", "off"}:
+            await ctx.send(f"Use `{ctx.prefix}eventpinger geocode on` or `{ctx.prefix}eventpinger geocode off`.")
+            return
+        if self.config is None:
+            await ctx.send("Config is not available in this runtime.")
+            return
+
+        enabled = normalized == "on"
+        await self.config.geocode_enabled.set(enabled)
+        await ctx.send(f"Geocode fallback {'enabled' if enabled else 'disabled'}.")
+
+    @eventpinger.command(name="clearcache")
+    @commands.is_owner()
+    async def eventpinger_clearcache(self, ctx: commands.Context) -> None:
+        """Clear cached geocode results. Owner only."""
+        if self.config is None:
+            self._memory_cache.clear()
+        else:
+            await self.config.geocode_cache.set({})
+        await ctx.send("Geocode cache cleared.")
