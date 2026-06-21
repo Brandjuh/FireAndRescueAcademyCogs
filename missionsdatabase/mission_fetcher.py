@@ -73,7 +73,35 @@ class MissionFetcher:
             mission.setdefault("id", str(index))
             normalized.append(mission)
 
+        MissionFetcher.add_related_mission_names(normalized)
         return sorted(normalized, key=MissionFetcher.sort_key)
+
+    @staticmethod
+    def add_related_mission_names(missions: list[dict[str, Any]]) -> None:
+        """Add readable names for mission IDs referenced by the JSON payload."""
+        names_by_id: dict[str, str] = {}
+        for mission in missions:
+            name = MissionFetcher.mission_name(mission)
+            mission_id = mission.get("id")
+            base_id = mission.get("base_mission_id")
+            if mission_id not in (None, ""):
+                names_by_id[str(mission_id)] = name
+            if base_id not in (None, ""):
+                names_by_id.setdefault(str(base_id), name)
+
+        for mission in missions:
+            additional = mission.get("additional")
+            if not isinstance(additional, dict):
+                continue
+
+            expansion_ids = additional.get("expansion_missions_ids") or []
+            if not isinstance(expansion_ids, list):
+                continue
+
+            additional["expansion_mission_names"] = [
+                names_by_id.get(str(mission_id), f"Mission {mission_id}")
+                for mission_id in expansion_ids
+            ]
 
     @staticmethod
     def mission_key(mission_data: dict[str, Any]) -> str:
