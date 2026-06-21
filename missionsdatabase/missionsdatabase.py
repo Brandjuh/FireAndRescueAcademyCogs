@@ -41,6 +41,7 @@ class MissionsDatabase(commands.Cog):
     BATCH_DELAY_SECONDS = 10
     POST_DELAY_SECONDS = 1
     EXISTING_MESSAGE_SCAN_LIMIT = 500
+    FORUM_AUTO_ARCHIVE_MINUTES = 60
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -296,7 +297,8 @@ class MissionsDatabase(commands.Cog):
             await ctx.send("No errors from the last mission sync.")
             return
 
-        report = "Errors from the last mission sync:\n" + "\n".join(
+        report = f"Errors from the last mission sync ({len(self.last_sync_errors)} total, first 30):\n"
+        report += "\n".join(
             f"- {error}" for error in self.last_sync_errors[:30]
         )
         for page in pagify(report):
@@ -380,7 +382,7 @@ class MissionsDatabase(commands.Cog):
                     )
             except Exception as exc:
                 stats["failed"] += 1
-                errors.append(f"{mission_key}: {exc}")
+                errors.append(f"{mission_key}: {self._format_exception(exc)}")
                 log.exception("Failed to publish mission %s", mission_key)
 
         if not stats["stopped"]:
@@ -539,6 +541,7 @@ class MissionsDatabase(commands.Cog):
         if record and record.get("content_hash") == content_hash and not force_update:
             existing = await self._get_recorded_publication(channel, record)
             if existing:
+                await self._archive_publication_if_needed(existing)
                 await self.db.touch_publication(guild.id, mission_key)
                 return "skipped"
 
@@ -623,6 +626,7 @@ class MissionsDatabase(commands.Cog):
                 starter = publication["message"]
                 await starter.edit(content=content, embed=embed)
                 await thread.edit(name=title, applied_tags=self._forum_tags_for_mission(channel, mission))
+                await self._archive_forum_thread(thread)
                 return {
                     "target_kind": "forum_thread",
                     "message_id": starter.id,
@@ -673,14 +677,21 @@ class MissionsDatabase(commands.Cog):
         title: str,
     ) -> dict[str, Any]:
         if self._is_forum_channel(channel):
-            created = await channel.create_thread(
-                name=title,
-                content=content,
-                embed=embed,
-                applied_tags=self._forum_tags_for_mission(channel, mission),
-            )
+            kwargs = {
+                "name": title,
+                "content": content,
+                "embed": embed,
+                "applied_tags": self._forum_tags_for_mission(channel, mission),
+                "auto_archive_duration": self.FORUM_AUTO_ARCHIVE_MINUTES,
+            }
+            try:
+                created = await channel.create_thread(**kwargs)
+            except TypeError:
+                kwargs.pop("auto_archive_duration", None)
+                created = await channel.create_thread(**kwargs)
             thread = getattr(created, "thread", created)
             starter_message = getattr(created, "message", None)
+            await self._archive_forum_thread(thread)
             return {
                 "target_kind": "forum_thread",
                 "thread_id": thread.id,
@@ -697,6 +708,28 @@ class MissionsDatabase(commands.Cog):
             "thread_id": None,
         }
 
+    async def _archive_publication_if_needed(self, publication: dict[str, Any]) -> None:
+        if publication.get("target_kind") != "forum_thread":
+            return
+        await self._archive_forum_thread(publication.get("thread"))
+
+    async def _archive_forum_thread(self, thread: Any) -> None:
+        if thread is None:
+            return
+
+        edit = getattr(thread, "edit", None)
+        if edit is None:
+            return
+
+        try:
+            await edit(archived=True)
+        except (discord.Forbidden, discord.HTTPException, TypeError, AttributeError):
+            log.debug(
+                "Could not archive forum thread %s after mission sync",
+                getattr(thread, "id", "unknown"),
+                exc_info=True,
+            )
+
     async def _edit_publication(
         self,
         publication: dict[str, Any],
@@ -709,6 +742,7 @@ class MissionsDatabase(commands.Cog):
             message = publication["message"]
             await message.edit(content=content, embed=embed)
             await thread.edit(name=title)
+            await self._archive_forum_thread(thread)
             return
 
         await publication["message"].edit(content=content, embed=embed)
@@ -735,17 +769,7 @@ class MissionsDatabase(commands.Cog):
 
     async def _find_existing_forum_thread(self, channel: Any, mission_key: str) -> dict[str, Any] | None:
         prefix = f"[{mission_key}]"
-        threads = list(getattr(channel, "threads", []) or [])
-
-        archived_threads = getattr(channel, "archived_threads", None)
-        if archived_threads is not None:
-            try:
-                async for thread in channel.archived_threads(limit=100):
-                    threads.append(thread)
-            except (discord.HTTPException, discord.Forbidden, AttributeError):
-                pass
-
-        for thread in threads:
+        async for thread in self._iter_forum_threads(channel):
             if not getattr(thread, "name", "").startswith(prefix):
                 continue
             try:
@@ -927,3 +951,22 @@ class MissionsDatabase(commands.Cog):
         else:
             lines.append("Publication tracking was cleared.")
         return "\n".join(lines)
+
+    @staticmethod
+    def _format_exception(exc: Exception) -> str:
+        message = str(exc).strip()
+        parts = [message] if message else [exc.__class__.__name__]
+
+        status = getattr(exc, "status", None)
+        if status:
+            parts.append(f"HTTP {status}")
+
+        code = getattr(exc, "code", None)
+        if code:
+            parts.append(f"code {code}")
+
+        text = getattr(exc, "text", None)
+        if text and text not in parts:
+            parts.append(str(text))
+
+        return " | ".join(parts)
