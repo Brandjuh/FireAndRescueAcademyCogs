@@ -1,6 +1,8 @@
 import asyncio
 import types
 
+import discord
+
 from missionsdatabase.database import MissionsDatabase as MissionStore
 from missionsdatabase.mission_fetcher import MissionFetcher
 from missionsdatabase.mission_formatter import MissionFormatter
@@ -72,7 +74,7 @@ class FakeTextChannel:
         for message in self.messages:
             if message.id == message_id:
                 return message
-        raise RuntimeError("message not found")
+        raise discord.NotFound()
 
     def history(self, *, limit):
         _ = limit
@@ -183,6 +185,40 @@ def test_missing_db_record_recovers_existing_message(tmp_path):
 
         assert stats["recovered"] == 1
         assert stats["created"] == 0
+        assert len(channel.messages) == 1
+
+    asyncio.run(run())
+
+
+def test_deleted_recorded_message_is_recreated_instead_of_skipped(tmp_path):
+    async def run():
+        channel = FakeTextChannel()
+        guild = FakeGuild(channel)
+        bot = types.SimpleNamespace(guilds=[guild])
+        cog = MissionsDatabase(bot)
+        cog.fetcher = FakeFetcher()
+        cog.db = MissionStore(tmp_path / "missions.db")
+        await cog.db.initialize()
+        await cog.db.set_config(guild.id, channel.id)
+
+        first = await cog._sync_missions(
+            guild,
+            limit=1,
+            query=None,
+            force_update=False,
+        )
+        channel.messages.clear()
+
+        second = await cog._sync_missions(
+            guild,
+            limit=1,
+            query=None,
+            force_update=False,
+        )
+
+        assert first["created"] == 1
+        assert second["skipped"] == 0
+        assert second["created"] == 1
         assert len(channel.messages) == 1
 
     asyncio.run(run())

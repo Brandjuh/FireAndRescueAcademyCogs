@@ -340,8 +340,10 @@ class MissionsDatabase(commands.Cog):
         record = await self.db.get_publication(guild.id, mission_key)
 
         if record and record.get("content_hash") == content_hash and not force_update:
-            await self.db.touch_publication(guild.id, mission_key)
-            return "skipped"
+            existing = await self._get_recorded_publication(channel, record)
+            if existing:
+                await self.db.touch_publication(guild.id, mission_key)
+                return "skipped"
 
         if record:
             updated = await self._try_update_recorded_publication(
@@ -405,12 +407,45 @@ class MissionsDatabase(commands.Cog):
         embed: discord.Embed,
         title: str,
     ) -> dict[str, Any] | None:
+        publication = await self._get_recorded_publication(channel, record)
+        if publication is None:
+            return None
+
         try:
-            if record["target_kind"] == "message" and record.get("message_id"):
-                message = await channel.fetch_message(int(record["message_id"]))
+            if publication["target_kind"] == "message":
+                message = publication["message"]
                 await message.edit(content=content, embed=embed)
                 return {
                     "target_kind": "message",
+                    "message_id": message.id,
+                    "thread_id": None,
+                }
+
+            if publication["target_kind"] == "forum_thread":
+                thread = publication["thread"]
+                starter = publication["message"]
+                await starter.edit(content=content, embed=embed)
+                await thread.edit(name=title, applied_tags=self._forum_tags_for_mission(channel, mission))
+                return {
+                    "target_kind": "forum_thread",
+                    "message_id": starter.id,
+                    "thread_id": thread.id,
+                }
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError, ValueError):
+            return None
+        return None
+
+    async def _get_recorded_publication(
+        self,
+        channel: Any,
+        record: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        try:
+            if record["target_kind"] == "message" and record.get("message_id"):
+                message = await channel.fetch_message(int(record["message_id"]))
+                return {
+                    "target_kind": "message",
+                    "message": message,
                     "message_id": message.id,
                     "thread_id": None,
                 }
@@ -421,10 +456,10 @@ class MissionsDatabase(commands.Cog):
                     return None
                 message_id = record.get("message_id") or record.get("thread_id")
                 starter = await thread.fetch_message(int(message_id))
-                await starter.edit(content=content, embed=embed)
-                await thread.edit(name=title, applied_tags=self._forum_tags_for_mission(channel, mission))
                 return {
                     "target_kind": "forum_thread",
+                    "thread": thread,
+                    "message": starter,
                     "message_id": starter.id,
                     "thread_id": thread.id,
                 }
