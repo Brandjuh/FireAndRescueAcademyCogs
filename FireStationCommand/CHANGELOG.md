@@ -61,6 +61,8 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added temporary out-of-service vehicle handling for heavily damaged units once the maintenance bay is unlocked.
 - Added categorized dashboard menus for Incidents, Staff, Station, and Vehicle actions.
 - Added developer testing mode for user ID `132620654087241729`, including `[p]fsc devmode`, `[p]fsc devmenu`, a developer dashboard category, unlock bypasses, resource grants, max station setup, and active mission clearing.
+- Added regenerated 1024px illustrated mission images for every configured mission, with category-specific fire, traffic, EMS, police, hazmat, water, wildland, aircraft, rescue, collapse, and animal scenes.
+- Added a deterministic mission image generator for keeping future mission art in the same flat illustrated style.
 
 ### Changed
 
