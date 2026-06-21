@@ -42,6 +42,8 @@ class MissionsDatabase(commands.Cog):
     POST_DELAY_SECONDS = 1
     EXISTING_MESSAGE_SCAN_LIMIT = 500
     FORUM_AUTO_ARCHIVE_MINUTES = 60
+    WIPE_PROGRESS_INTERVAL_SECONDS = 2.5
+    WIPE_PROGRESS_ITEM_INTERVAL = 10
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -282,9 +284,9 @@ class MissionsDatabase(commands.Cog):
             )
             return
 
-        message = await ctx.send("Deleting mission posts from the configured channel...")
+        message = await ctx.send("Preparing mission post wipe...")
         try:
-            stats = await self._wipe_configured_posts(ctx.guild)
+            stats = await self._wipe_configured_posts(ctx.guild, progress_message=message)
             await message.edit(content=self._format_wipe_stats(stats))
         except Exception as exc:
             log.exception("Mission post wipe failed")
@@ -390,40 +392,86 @@ class MissionsDatabase(commands.Cog):
         self.last_sync_errors = errors
         return stats
 
-    async def _wipe_configured_posts(self, guild: discord.Guild) -> dict[str, int]:
+    async def _wipe_configured_posts(
+        self,
+        guild: discord.Guild,
+        *,
+        progress_message: discord.Message | None = None,
+    ) -> dict[str, int]:
         config = await self._get_config_or_default(guild)
         channel = guild.get_channel(int(config["channel_id"]))
         if channel is None:
             raise ValueError(f"Configured channel {config['channel_id']} was not found")
 
         if self._is_forum_channel(channel):
-            stats = await self._wipe_forum_channel(guild, channel)
+            stats = await self._wipe_forum_channel(guild, channel, progress_message=progress_message)
         else:
-            stats = await self._wipe_text_channel(guild, channel)
+            stats = await self._wipe_text_channel(guild, channel, progress_message=progress_message)
 
         if stats["failed"] == 0:
+            await self._edit_wipe_progress(
+                progress_message,
+                stats,
+                phase="Clearing publication tracking",
+                force=True,
+            )
             await self.db.clear_publications(guild.id)
         return stats
 
-    async def _wipe_text_channel(self, guild: discord.Guild, channel: Any) -> dict[str, int]:
-        stats = {"deleted": 0, "missing": 0, "failed": 0, "scanned": 0}
+    async def _wipe_text_channel(
+        self,
+        guild: discord.Guild,
+        channel: Any,
+        *,
+        progress_message: discord.Message | None = None,
+    ) -> dict[str, int]:
+        records = [
+            record
+            for record in await self.db.get_all_publications(guild.id)
+            if record.get("target_kind") == "message" and str(record.get("channel_id")) == str(channel.id)
+        ]
+        stats = {
+            "deleted": 0,
+            "missing": 0,
+            "failed": 0,
+            "scanned": 0,
+            "recorded_checked": 0,
+            "recorded_total": len(records),
+        }
+        progress_state: dict[str, float | int] = {}
         deleted_message_ids: set[int] = set()
 
-        records = await self.db.get_all_publications(guild.id)
+        await self._edit_wipe_progress(
+            progress_message,
+            stats,
+            phase="Checking tracked text posts",
+            force=True,
+            state=progress_state,
+        )
+
         for record in records:
-            if record.get("target_kind") != "message":
-                continue
-            if str(record.get("channel_id")) != str(channel.id):
-                continue
+            stats["recorded_checked"] += 1
 
             publication = await self._get_recorded_publication(channel, record)
             if publication is None:
                 stats["missing"] += 1
+                await self._edit_wipe_progress(
+                    progress_message,
+                    stats,
+                    phase="Checking tracked text posts",
+                    state=progress_state,
+                )
                 continue
 
             message = publication["message"]
             if await self._delete_discord_object(message, stats):
                 deleted_message_ids.add(int(message.id))
+            await self._edit_wipe_progress(
+                progress_message,
+                stats,
+                phase="Deleting tracked text posts",
+                state=progress_state,
+            )
 
         history = getattr(channel, "history", None)
         if history is None:
@@ -434,47 +482,150 @@ class MissionsDatabase(commands.Cog):
             if int(getattr(message, "id", 0)) in deleted_message_ids:
                 continue
             if not self._message_has_mission_marker(message):
+                await self._edit_wipe_progress(
+                    progress_message,
+                    stats,
+                    phase="Scanning recent text channel history",
+                    state=progress_state,
+                )
                 continue
 
             if await self._delete_discord_object(message, stats):
                 deleted_message_ids.add(int(message.id))
+            await self._edit_wipe_progress(
+                progress_message,
+                stats,
+                phase="Deleting recovered text posts",
+                state=progress_state,
+            )
 
         return stats
 
-    async def _wipe_forum_channel(self, guild: discord.Guild, channel: Any) -> dict[str, int]:
-        stats = {"deleted": 0, "missing": 0, "failed": 0, "scanned": 0}
+    async def _wipe_forum_channel(
+        self,
+        guild: discord.Guild,
+        channel: Any,
+        *,
+        progress_message: discord.Message | None = None,
+    ) -> dict[str, int]:
+        records = [
+            record
+            for record in await self.db.get_all_publications(guild.id)
+            if record.get("target_kind") == "forum_thread" and str(record.get("channel_id")) == str(channel.id)
+        ]
+        stats = {
+            "deleted": 0,
+            "missing": 0,
+            "failed": 0,
+            "scanned": 0,
+            "recorded_checked": 0,
+            "recorded_total": len(records),
+        }
+        progress_state: dict[str, float | int] = {}
         deleted_thread_ids: set[int] = set()
 
-        records = await self.db.get_all_publications(guild.id)
+        await self._edit_wipe_progress(
+            progress_message,
+            stats,
+            phase="Checking tracked forum threads",
+            force=True,
+            state=progress_state,
+        )
+
         for record in records:
-            if record.get("target_kind") != "forum_thread":
-                continue
-            if str(record.get("channel_id")) != str(channel.id):
-                continue
+            stats["recorded_checked"] += 1
 
             thread_id = record.get("thread_id")
             if not thread_id:
                 stats["missing"] += 1
+                await self._edit_wipe_progress(
+                    progress_message,
+                    stats,
+                    phase="Checking tracked forum threads",
+                    state=progress_state,
+                )
                 continue
 
             thread = await self._resolve_thread(channel, int(thread_id))
             if thread is None:
                 stats["missing"] += 1
+                await self._edit_wipe_progress(
+                    progress_message,
+                    stats,
+                    phase="Checking tracked forum threads",
+                    state=progress_state,
+                )
                 continue
 
             if await self._delete_discord_object(thread, stats):
                 deleted_thread_ids.add(int(thread.id))
+            await self._edit_wipe_progress(
+                progress_message,
+                stats,
+                phase="Deleting tracked forum threads",
+                state=progress_state,
+            )
 
         async for thread in self._iter_forum_threads(channel):
             stats["scanned"] += 1
             thread_id = int(getattr(thread, "id", 0))
             if thread_id in deleted_thread_ids:
+                await self._edit_wipe_progress(
+                    progress_message,
+                    stats,
+                    phase="Scanning forum threads",
+                    state=progress_state,
+                )
                 continue
 
             if await self._delete_discord_object(thread, stats):
                 deleted_thread_ids.add(thread_id)
+            await self._edit_wipe_progress(
+                progress_message,
+                stats,
+                phase="Deleting recovered forum threads",
+                state=progress_state,
+            )
 
         return stats
+
+    async def _edit_wipe_progress(
+        self,
+        progress_message: discord.Message | None,
+        stats: dict[str, int],
+        *,
+        phase: str,
+        force: bool = False,
+        state: dict[str, float | int] | None = None,
+    ) -> None:
+        if progress_message is None:
+            return
+
+        state = state if state is not None else {}
+        loop_time = asyncio.get_running_loop().time()
+        progress_count = (
+            stats.get("recorded_checked", 0)
+            + stats.get("scanned", 0)
+            + stats.get("deleted", 0)
+            + stats.get("missing", 0)
+            + stats.get("failed", 0)
+        )
+        last_time = float(state.get("last_time", 0.0))
+        last_count = int(state.get("last_count", 0))
+
+        if not force:
+            enough_items = progress_count - last_count >= self.WIPE_PROGRESS_ITEM_INTERVAL
+            enough_time = loop_time - last_time >= self.WIPE_PROGRESS_INTERVAL_SECONDS
+            if not (enough_items or enough_time):
+                return
+
+        state["last_time"] = loop_time
+        state["last_count"] = progress_count
+
+        try:
+            await progress_message.edit(content=self._format_wipe_progress(stats, phase=phase))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+            return
 
     async def _iter_forum_threads(self, channel: Any):
         seen: set[int] = set()
@@ -938,9 +1089,25 @@ class MissionsDatabase(commands.Cog):
         return "\n".join(lines)
 
     @staticmethod
+    def _format_wipe_progress(stats: dict[str, int], *, phase: str) -> str:
+        lines = [
+            "Mission post wipe in progress...",
+            f"Phase: {phase}",
+            f"Tracked posts checked: {stats.get('recorded_checked', 0)}/{stats.get('recorded_total', 0)}",
+            f"Deleted: {stats['deleted']}",
+            f"Missing already: {stats['missing']}",
+            f"Scanned existing posts: {stats['scanned']}",
+            f"Failed: {stats['failed']}",
+            "",
+            "Discord deletes are rate-limited, so large forum wipes can take a while.",
+        ]
+        return "\n".join(lines)
+
+    @staticmethod
     def _format_wipe_stats(stats: dict[str, int]) -> str:
         lines = [
             "Mission post wipe complete.",
+            f"Tracked posts checked: {stats.get('recorded_checked', 0)}/{stats.get('recorded_total', 0)}",
             f"Deleted: {stats['deleted']}",
             f"Missing already: {stats['missing']}",
             f"Scanned existing posts: {stats['scanned']}",

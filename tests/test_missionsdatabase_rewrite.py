@@ -455,6 +455,37 @@ def test_wipe_configured_text_channel_deletes_tracked_posts_and_clears_db(tmp_pa
     asyncio.run(run())
 
 
+def test_wipe_configured_posts_updates_progress_message(tmp_path):
+    async def run():
+        channel = FakeTextChannel()
+        guild = FakeGuild(channel)
+        bot = types.SimpleNamespace(guilds=[guild])
+        cog = MissionsDatabase(bot)
+        cog.POST_DELAY_SECONDS = 0
+        cog.BATCH_DELAY_SECONDS = 0
+        cog.fetcher = FakeFetcher()
+        cog.db = MissionStore(tmp_path / "missions.db")
+        await cog.db.initialize()
+        await cog.db.set_config(guild.id, channel.id)
+
+        await cog._sync_missions(
+            guild,
+            limit=2,
+            query=None,
+            force_update=False,
+        )
+
+        progress = FakeMessage(999, content="Preparing mission post wipe...")
+        stats = await cog._wipe_configured_posts(guild, progress_message=progress)
+
+        assert stats["deleted"] == 2
+        assert progress.edit_count >= 1
+        assert "Mission post wipe in progress" in progress.content
+        assert "Tracked posts checked:" in progress.content
+
+    asyncio.run(run())
+
+
 def test_forum_sync_archives_existing_threads_before_creating_new_posts(tmp_path):
     async def run():
         channel = FakeForumChannel(active_limit=2)
