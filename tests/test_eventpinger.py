@@ -2,15 +2,16 @@ import asyncio
 import types
 
 from eventpinger.eventpinger import (
+    EventPinger,
     MISSIONCHIEF_APP_ID,
     NOTIFY_EVENT_ROLE_ID,
+    RegionMatch,
     SOURCE_CHANNEL_ID,
     extract_announcement_from_message,
     find_region_role,
     region_from_geocode_results,
     resolve_region,
     state_from_zip,
-    EventPinger,
 )
 
 
@@ -121,8 +122,32 @@ def test_geocode_result_resolves_us_state():
     assert match.source == "geocode_state"
 
 
+def test_geocode_result_resolves_global_country():
+    match = region_from_geocode_results(
+        [
+            {
+                "display_name": "Oberhausen, North Rhine-Westphalia, Germany",
+                "address": {
+                    "city": "Oberhausen",
+                    "country": "Germany",
+                    "country_code": "de",
+                },
+            }
+        ]
+    )
+
+    assert match.code == "COUNTRY:DE"
+    assert match.name == "Germany (DE)"
+    assert match.source == "geocode_country"
+    assert "Germany (DE)" in match.role_names
+
+
 def test_uncertain_address_returns_none():
     assert resolve_region("Main Street near the park") is None
+
+
+def test_european_postal_code_does_not_resolve_as_us_zip_without_us_context():
+    assert resolve_region("52 Bogenstra\u00dfe, 46045 Oberhausen, Altstaden") is None
 
 
 def test_finds_region_role_by_hardcoded_name():
@@ -130,6 +155,15 @@ def test_finds_region_role_by_hardcoded_name():
     guild = FakeGuild([role])
 
     assert find_region_role(guild, "NY") is role
+
+
+def test_finds_global_country_role_by_exact_name_without_state_code_confusion():
+    california = FakeRole(1, "California (CA)")
+    canada = FakeRole(2, "Canada (CA)")
+    guild = FakeGuild([california, canada])
+    match = RegionMatch("COUNTRY:CA", "Canada (CA)", "geocode_country", ("Canada (CA)", "Canada"))
+
+    assert find_region_role(guild, match) is canada
 
 
 def test_on_message_pings_notify_and_region_role():
@@ -239,5 +273,39 @@ def test_async_geocode_failure_falls_back_to_local_resolver():
 
         assert match.code == "NY"
         assert match.source == "us_zip"
+
+    asyncio.run(run())
+
+
+def test_async_geocode_country_prevents_us_zip_fallback_for_european_address():
+    async def run():
+        cog = EventPinger(types.SimpleNamespace())
+
+        async def get_key():
+            return "test-key"
+
+        async def enabled():
+            return True
+
+        async def fetch(address, api_key):
+            return [
+                {
+                    "address": {
+                        "city": "Oberhausen",
+                        "country": "Germany",
+                        "country_code": "de",
+                    }
+                }
+            ]
+
+        cog._get_geocode_api_key = get_key
+        cog._geocode_enabled = enabled
+        cog._fetch_geocode_results = fetch
+
+        match = await cog.resolve_region_for_address("52 Bogenstra\u00dfe, 46045 Oberhausen, Altstaden")
+
+        assert match.code == "COUNTRY:DE"
+        assert match.name == "Germany (DE)"
+        assert match.source == "geocode_country"
 
     asyncio.run(run())

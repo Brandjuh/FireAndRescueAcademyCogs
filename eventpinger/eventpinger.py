@@ -206,6 +206,13 @@ class RegionMatch:
     code: str
     name: str
     source: str
+    role_names: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class GeocodeOutcome:
+    match: RegionMatch | None
+    authoritative: bool = False
 
 
 Resolver = Callable[[str], RegionMatch | None]
@@ -288,14 +295,26 @@ def resolve_region(address: str) -> RegionMatch | None:
 
 
 def region_from_geocode_results(results: Any) -> RegionMatch | None:
-    if not isinstance(results, list):
-        return None
+    return geocode_outcome_from_results(results).match
 
+
+def geocode_outcome_from_results(results: Any) -> GeocodeOutcome:
+    if not isinstance(results, list):
+        return GeocodeOutcome(None, authoritative=False)
+
+    saw_non_us_country = False
     for result in results[:3]:
         match = region_from_geocode_result(result)
         if match:
-            return match
-    return None
+            return GeocodeOutcome(match, authoritative=True)
+
+        country_code = country_code_from_geocode_result(result)
+        if country_code and country_code not in {"us", "bm"}:
+            saw_non_us_country = True
+
+    if saw_non_us_country:
+        return GeocodeOutcome(None, authoritative=True)
+    return GeocodeOutcome(None, authoritative=False)
 
 
 def region_from_geocode_result(result: Any) -> RegionMatch | None:
@@ -307,7 +326,8 @@ def region_from_geocode_result(result: Any) -> RegionMatch | None:
         return None
 
     country_code = normalize_text(address.get("country_code", "")).casefold()
-    country = normalize_text(address.get("country", "")).casefold()
+    country_name = normalize_text(address.get("country", ""))
+    country = country_name.casefold()
     if country_code == "bm" or country == "bermuda":
         return RegionMatch("BM", REGION_ROLE_NAMES["BM"], "geocode_country")
 
@@ -321,7 +341,44 @@ def region_from_geocode_result(result: Any) -> RegionMatch | None:
         if resolved_code:
             return RegionMatch(resolved_code, REGION_ROLE_NAMES[resolved_code], "geocode_state")
 
+        return None
+
+    if country_code or country_name:
+        return country_region_match(country_name, country_code, "geocode_country")
+
     return None
+
+
+def country_code_from_geocode_result(result: Any) -> str:
+    if not isinstance(result, dict):
+        return ""
+
+    address = result.get("address")
+    if not isinstance(address, dict):
+        return ""
+
+    country_code = normalize_text(address.get("country_code", "")).casefold()
+    if country_code:
+        return country_code
+
+    country = normalize_text(address.get("country", "")).casefold()
+    if country == "bermuda":
+        return "bm"
+    if country == "united states":
+        return "us"
+    return country
+
+
+def country_region_match(country_name: str, country_code: str, source: str) -> RegionMatch | None:
+    clean_country = normalize_text(country_name)
+    clean_code = normalize_text(country_code).upper()
+    if not clean_country and not clean_code:
+        return None
+
+    display_name = f"{clean_country} ({clean_code})" if clean_country and clean_code else clean_country or clean_code
+    role_names = tuple(dict.fromkeys(name for name in (display_name, clean_country) if name))
+    code = f"COUNTRY:{clean_code}" if clean_code else f"COUNTRY:{display_name.casefold()}"
+    return RegionMatch(code, display_name, source, role_names)
 
 
 def resolve_bermuda(address: str) -> RegionMatch | None:
@@ -338,8 +395,9 @@ def resolve_bermuda(address: str) -> RegionMatch | None:
 
 
 def resolve_us(address: str) -> RegionMatch | None:
+    has_context = has_us_context(address)
     zip_match = ZIP_RE.search(address)
-    if zip_match:
+    if zip_match and has_context:
         state_code = state_from_zip(zip_match.group(1))
         if state_code:
             return RegionMatch(state_code, REGION_ROLE_NAMES[state_code], "us_zip")
@@ -354,6 +412,22 @@ def resolve_us(address: str) -> RegionMatch | None:
             return RegionMatch(code, REGION_ROLE_NAMES[code], "us_state_name")
 
     return None
+
+
+def has_us_context(address: str) -> bool:
+    lowered = address.casefold()
+    if re.search(r"\b(?:united states|usa|u\.s\.a\.|u\.s\.)\b", lowered):
+        return True
+
+    for alias in US_PLACE_ALIASES:
+        if re.search(rf"\b{re.escape(alias)}\b", lowered):
+            return True
+
+    for name in US_REGION_NAMES.values():
+        if re.search(rf"\b{re.escape(name.casefold())}\b", lowered):
+            return True
+
+    return False
 
 
 def state_from_zip(zip_code: str) -> str | None:
@@ -376,17 +450,33 @@ def find_role_by_name(guild: Any, expected_name: str):
     return None
 
 
-def find_region_role(guild: Any, region_code: str | None):
-    if not region_code:
+def find_region_role(guild: Any, region: RegionMatch | str | None):
+    if not region:
         return None
 
-    expected_name = REGION_ROLE_NAMES.get(region_code)
-    if not expected_name:
-        return None
+    if isinstance(region, RegionMatch):
+        region_code = region.code
+        candidates = list(region.role_names)
+        if region_code in REGION_ROLE_NAMES:
+            candidates.append(REGION_ROLE_NAMES[region_code])
+        candidates.append(region.name)
+    else:
+        region_code = region
+        candidates = [REGION_ROLE_NAMES.get(region_code, "")]
 
-    role = find_role_by_name(guild, expected_name)
-    if role:
-        return role
+    seen = set()
+    for expected_name in candidates:
+        normalized = normalize_text(expected_name)
+        if not normalized or normalized.casefold() in seen:
+            continue
+        seen.add(normalized.casefold())
+
+        role = find_role_by_name(guild, normalized)
+        if role:
+            return role
+
+    if region_code not in REGION_ROLE_NAMES:
+        return None
 
     suffix = f"({region_code})".casefold()
     for role in getattr(guild, "roles", []) or []:
@@ -467,7 +557,7 @@ class EventPinger(commands.Cog):
 
         region = await self.resolve_region_for_address(announcement.address)
         notify_role = getattr(guild, "get_role", lambda role_id: None)(NOTIFY_EVENT_ROLE_ID)
-        region_role = find_region_role(guild, region.code if region else None)
+        region_role = find_region_role(guild, region)
 
         notify_mention = getattr(notify_role, "mention", f"<@&{NOTIFY_EVENT_ROLE_ID}>")
         region_mention = getattr(region_role, "mention", None)
@@ -483,12 +573,15 @@ class EventPinger(commands.Cog):
             log.exception("Failed to send event notification for MissionChief announcement")
 
     async def resolve_region_for_address(self, address: str) -> RegionMatch | None:
-        api_match = await self._resolve_region_with_geocode(address)
-        if api_match:
-            return api_match
+        geocode_outcome = await self._resolve_region_with_geocode(address)
+        if geocode_outcome:
+            if geocode_outcome.match:
+                return geocode_outcome.match
+            if geocode_outcome.authoritative:
+                return None
         return resolve_region(address)
 
-    async def _resolve_region_with_geocode(self, address: str) -> RegionMatch | None:
+    async def _resolve_region_with_geocode(self, address: str) -> GeocodeOutcome | None:
         text = normalize_text(address)
         if not text:
             return None
@@ -497,7 +590,7 @@ class EventPinger(commands.Cog):
         if not api_key or not await self._geocode_enabled():
             return None
 
-        cached = await self._get_cached_region(text)
+        cached = await self._get_cached_geocode_outcome(text)
         if cached:
             return cached
 
@@ -507,10 +600,10 @@ class EventPinger(commands.Cog):
             log.exception("Geocode lookup failed for event address")
             return None
 
-        match = region_from_geocode_results(results)
-        if match:
-            await self._set_cached_region(text, match)
-        return match
+        outcome = geocode_outcome_from_results(results)
+        if outcome.match:
+            await self._set_cached_geocode_outcome(text, outcome)
+        return outcome
 
     async def _get_geocode_api_key(self) -> str:
         if self.config is None:
@@ -522,7 +615,7 @@ class EventPinger(commands.Cog):
             return False
         return bool(await self.config.geocode_enabled())
 
-    async def _get_cached_region(self, address: str) -> RegionMatch | None:
+    async def _get_cached_geocode_outcome(self, address: str) -> GeocodeOutcome | None:
         key = cache_key_for_address(address)
         now = int(time.time())
         cache = await self._read_cache()
@@ -537,18 +630,23 @@ class EventPinger(commands.Cog):
         code = str(entry.get("code") or "")
         name = str(entry.get("name") or REGION_ROLE_NAMES.get(code, ""))
         source = str(entry.get("source") or "geocode_cache")
-        if not code or code not in REGION_ROLE_NAMES:
+        role_names = tuple(str(name) for name in entry.get("role_names", []) or [] if str(name))
+        if not code or not name:
             return None
-        return RegionMatch(code, name, source)
+        return GeocodeOutcome(RegionMatch(code, name, source, role_names), authoritative=True)
 
-    async def _set_cached_region(self, address: str, match: RegionMatch) -> None:
+    async def _set_cached_geocode_outcome(self, address: str, outcome: GeocodeOutcome) -> None:
         key = cache_key_for_address(address)
-        entry = {
-            "code": match.code,
-            "name": match.name,
-            "source": f"{match.source}_cache",
-            "expires_at": int(time.time()) + GEOCODE_CACHE_TTL_SECONDS,
-        }
+        if outcome.match:
+            entry = {
+                "code": outcome.match.code,
+                "name": outcome.match.name,
+                "source": f"{outcome.match.source}_cache",
+                "role_names": list(outcome.match.role_names),
+                "expires_at": int(time.time()) + GEOCODE_CACHE_TTL_SECONDS,
+            }
+        else:
+            return
         if self.config is None:
             self._memory_cache[key] = entry
             return
@@ -632,7 +730,7 @@ class EventPinger(commands.Cog):
         if not match:
             await ctx.send("No confident region match. Only Notify-Event would be used.")
             return
-        role = find_region_role(ctx.guild, match.code)
+        role = find_region_role(ctx.guild, match)
         await ctx.send(
             f"Resolved: {match.name}\n"
             f"Code: {match.code}\n"
