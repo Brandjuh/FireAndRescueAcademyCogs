@@ -39,5 +39,6 @@ Stel kanalen en admin-rol in:
 - Het aantal trainees is expres niet nodig.
 - Trainingsduur is hardcoded op basis van je lijst. Pas `DISCIPLINES` aan indien nodig.
 - Board-requests gebruiken standaard gratis klassen en 1 klas per herkende opleiding.
+- Board-requests krijgen ook een reply in het MissionChief-topic als de training niet herkend wordt of niet automatisch geopend kan worden.
 - De eerste board-poll na load zet alleen een baseline op de nieuwste post, zodat oude posts niet alsnog worden geopend.
 - De board-guide wordt elk uur gesynchroniseerd in het request-topic en kan handmatig met `[p]tmset boardguide sync` worden ververst.

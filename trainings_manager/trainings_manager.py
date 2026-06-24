@@ -2482,6 +2482,18 @@ class TrainingManager(commands.Cog):
                 await self._handle_training_board_post(guild, session, thread_id, page, post)
             except Exception as exc:
                 log.exception("Training board post %s processing failed: %s", post.post_id, exc)
+                reply = self._build_training_board_error_reply(
+                    post,
+                    "An internal error occurred while processing this request. Staff has been notified.",
+                )
+                try:
+                    await self._post_training_board_reply(session, thread_id, page, reply)
+                except Exception as reply_exc:
+                    log.exception(
+                        "Could not post TrainingManager board error reply for post %s: %s",
+                        post.post_id,
+                        reply_exc,
+                    )
 
         if latest_post_id > last_seen:
             await self.config.guild(guild).board_last_seen_post_id.set(latest_post_id)
@@ -2526,6 +2538,11 @@ class TrainingManager(commands.Cog):
                     [],
                     f"No known training name found in board post `{post.post_id}`.",
                 )
+            reply = self._build_training_board_error_reply(
+                post,
+                "No known training name was found. Please use one of the training names listed in the guide posts.",
+            )
+            await self._post_training_board_reply(session, thread_id, page, reply)
             return
 
         results: List[Tuple[BoardTrainingMatch, AutoTrainingResult]] = []
@@ -2552,9 +2569,14 @@ class TrainingManager(commands.Cog):
                 post.post_id,
             )
 
-        if any(result.success for _, result in results):
-            reply = self._build_training_board_reply(post, results)
-            await self._post_training_board_reply(session, thread_id, page, reply)
+        reply = self._build_training_board_reply(post, results)
+        reply_status = await self._post_training_board_reply(session, thread_id, page, reply)
+        if reply_status is None or int(reply_status) >= 400:
+            log.warning(
+                "Training board reply for post %s returned HTTP %s",
+                post.post_id,
+                reply_status,
+            )
 
     async def _post_training_board_reply(
         self,
@@ -2605,6 +2627,15 @@ class TrainingManager(commands.Cog):
             lines.append("Could not open automatically:")
             lines.extend(failed)
         return "\n".join(lines)
+
+    def _build_training_board_error_reply(self, post: BoardTrainingPost, reason: str) -> str:
+        return "\n".join(
+            [
+                f"Training request could not be processed for {post.author_name}.",
+                "",
+                f"Reason: {reason}",
+            ]
+        )
 
     async def _send_board_training_log(
         self,
@@ -2662,11 +2693,14 @@ class TrainingManager(commands.Cog):
             self._board_guide_marker(BOARD_GUIDE_OVERVIEW_SECTION),
             "[b]Training Request Guide[/b]",
             "",
-            "This post is maintained automatically by the Fire & Rescue Academy bot.",
+            "This post is maintained automatically by the Fire & Rescue Academy.",
             f"Last updated: {updated_at}",
             "",
             "[b]Request in this topic[/b]",
             f"Thread: https://www.missionchief.com/alliance_threads/{request_thread_id}",
+            "",
+            "[b]Discord requests[/b]",
+            "Verified Discord members can also request training through Discord. Discord requests support automatic reminders when the class is expected to finish.",
             "",
             "[b]How to request[/b]",
             "- Type one or more training names from the list below.",

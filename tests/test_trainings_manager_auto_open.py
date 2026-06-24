@@ -6,6 +6,7 @@ from trainings_manager.trainings_manager import (
     AUTO_BUILDING_LIST_PATH,
     AutoTrainingResult,
     BoardTrainingPost,
+    BoardTrainingMatch,
     DEVELOPER_PANEL_CHANNEL_ID,
     MEMBER_PANEL_CHANNEL_ID,
     DeveloperTrainingPanelView,
@@ -424,6 +425,8 @@ def test_build_board_guide_content_lists_availability_and_training_names():
     assert "[b]Fire training request text[/b]" in content
     assert "Hotshot Crew Training" in content
     assert "Small typos are supported" in content
+    assert "Fire & Rescue Academy bot" not in content
+    assert "Discord requests support automatic reminders" in content
 
 
 def test_build_board_guide_contents_splits_sections_and_marks_posts():
@@ -449,6 +452,47 @@ def test_training_board_guide_posts_are_not_treated_as_requests():
     )
 
     assert manager._is_board_guide_post(post) is True
+
+
+def test_training_board_reply_reports_failed_auto_open_to_board_user():
+    manager = TrainingManager.__new__(TrainingManager)
+    post = BoardTrainingPost(
+        post_id=179134,
+        author_id="123456",
+        author_name="BoardUser",
+        created_at="June 24, 2026 15:47",
+        content="Hotshot Crew Training",
+    )
+    match = BoardTrainingMatch(
+        discipline="Fire",
+        training="Hotshot Crew Training",
+        days=3,
+        matched_text="hotshot crew training",
+        score=1.0,
+    )
+    result = AutoTrainingResult(False, "No available Fire academies found")
+
+    reply = manager._build_training_board_reply(post, [(match, result)])
+
+    assert "Training request processed for BoardUser." in reply
+    assert "Could not open automatically:" in reply
+    assert "No available Fire academies found" in reply
+
+
+def test_training_board_error_reply_explains_unrecognized_request():
+    manager = TrainingManager.__new__(TrainingManager)
+    post = BoardTrainingPost(
+        post_id=179134,
+        author_id="123456",
+        author_name="BoardUser",
+        created_at="June 24, 2026 15:47",
+        content="Can I have something?",
+    )
+
+    reply = manager._build_training_board_error_reply(post, "No known training name was found.")
+
+    assert "Training request could not be processed for BoardUser." in reply
+    assert "Reason: No known training name was found." in reply
 
 
 def test_parse_available_academies_extracts_open_training_links():
