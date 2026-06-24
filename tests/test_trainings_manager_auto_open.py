@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 from trainings_manager.trainings_manager import (
     AUTO_BUILDING_LIST_PATH,
     AutoTrainingResult,
+    BoardTrainingPost,
     DEVELOPER_PANEL_CHANNEL_ID,
     MEMBER_PANEL_CHANNEL_ID,
     DeveloperTrainingPanelView,
@@ -14,11 +15,13 @@ from trainings_manager.trainings_manager import (
     TrainingManager,
     TrainingRequest,
     DisciplineAvailability,
+    extract_board_training_matches,
     infer_academy_discipline,
     parse_academy_page,
     parse_available_academies,
     parse_available_academies_page,
     parse_profile_username,
+    parse_training_board_page,
 )
 
 
@@ -138,6 +141,39 @@ BUILDING_LIST_ALL_ACADEMIES_HTML = """
   <td>Training courses currently running</td>
 </tr>
 </table>
+"""
+
+
+TRAINING_BOARD_HTML = """
+<script>
+  user_id = 88649;
+</script>
+<ul class="pagination pagination">
+  <li><a href="/alliance_threads/5935?page=5">5</a></li>
+  <li class="active"><span>6</span></li>
+  <li class="next disabled"><span>Next</span></li>
+</ul>
+<div class="panel panel-default" id="post-on-page-1">
+  <div class="panel-body">
+    <div class="row">
+      <div class="col-md-1">
+        <strong><a href="/profile/123456">BoardUser</a></strong>
+        <br>
+        <span title="June 24, 2026 15:47">June 24, 2026 15:47</span>
+      </div>
+      <div class="col-md-11">
+        <p>Can I get hotshot crew traning and HazMat?</p>
+      </div>
+    </div>
+  </div>
+  <div class="panel-footer">
+    <a href="/alliance_posts/179134/edit">Edit</a>
+  </div>
+</div>
+<form action="/alliance_posts?alliance_thread_id=5935" id="new_alliance_post" method="post">
+  <input name="authenticity_token" type="hidden" value="token-board" />
+  <textarea name="alliance_post[content]"></textarea>
+</form>
 """
 
 
@@ -326,6 +362,29 @@ def test_parse_academy_page_extracts_form_rooms_costs_and_courses():
     ]
 
 
+def test_parse_training_board_page_extracts_last_page_post_and_reply_form():
+    page = parse_training_board_page(TRAINING_BOARD_HTML)
+
+    assert page.last_page == 6
+    assert page.current_user_id == "88649"
+    assert page.reply_action == "/alliance_posts?alliance_thread_id=5935"
+    assert page.reply_token == "token-board"
+    assert len(page.posts) == 1
+    assert page.posts[0].post_id == 179134
+    assert page.posts[0].author_id == "123456"
+    assert page.posts[0].author_name == "BoardUser"
+    assert page.posts[0].content == "Can I get hotshot crew traning and HazMat?"
+
+
+def test_extract_board_training_matches_handles_typos_and_multiple_requests():
+    matches = extract_board_training_matches("Can I get hotshot crew traning and HazMat?")
+
+    assert {(match.discipline, match.training) for match in matches} == {
+        ("Fire", "Hotshot Crew Training"),
+        ("Fire", "HazMat"),
+    }
+
+
 def test_parse_available_academies_extracts_open_training_links():
     academies = parse_available_academies(BUILDING_LIST_HTML)
 
@@ -409,6 +468,35 @@ def test_auto_open_training_posts_missionchief_education_form():
     assert kwargs["data"]["education_select"] == "hotshot:17"
     assert kwargs["data"]["alliance[duration]"] == str(AUTO_ALLIANCE_DURATION_SECONDS)
     assert kwargs["data"]["alliance[cost]"] == "100"
+
+
+def test_board_training_request_opens_without_discord_member_verification():
+    session = _Session(
+        {
+            f"https://www.missionchief.com{AUTO_BUILDING_LIST_PATH}": BUILDING_LIST_HTML,
+            "https://www.missionchief.com/buildings/100": ACADEMY_HTML.replace("4951748", "100"),
+        }
+    )
+    manager, _guild, _user, _ = _manager(session=session, contribution_rate=6.0)
+    post = BoardTrainingPost(
+        post_id=179134,
+        author_id="456",
+        author_name="BoardUser",
+        created_at="June 24, 2026 15:47",
+        content="Hotshot Crew Training",
+    )
+    req = _training_request(user_id=0, fee_per_day=0, num_classes=1)
+
+    result = asyncio.run(manager._try_auto_open_board_training(post, req))
+
+    assert result.success is True
+    assert result.mc_user_id == "456"
+    assert result.mc_username == "BoardUser"
+    assert result.contribution_rate == 6.0
+    post_url, kwargs = session.posts[0]
+    assert post_url == "https://www.missionchief.com/buildings/100/education"
+    assert kwargs["data"]["alliance[cost]"] == "0"
+    assert kwargs["data"]["building_rooms_use"] == "1"
 
 
 def test_auto_open_training_finds_dynamic_academy_with_available_rooms():

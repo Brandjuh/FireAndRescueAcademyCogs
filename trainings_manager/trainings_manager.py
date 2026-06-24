@@ -1,8 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from html.parser import HTMLParser
 import logging
 import re
@@ -137,6 +138,10 @@ AUTO_ALLIANCE_DURATION_SECONDS = 3600
 AUTO_MIN_CONTRIBUTION_RATE = 5.0
 AUTO_MAX_CLASSES = 4
 AVAILABILITY_REFRESH_SECONDS = 60 * 60
+BOARD_THREAD_ID = 5935
+BOARD_POLL_SECONDS = 5 * 60
+BOARD_DEFAULT_FEE = 0
+BOARD_MATCH_THRESHOLD = 0.78
 
 
 @dataclass
@@ -185,10 +190,292 @@ class DisciplineAvailability:
     errors: int = 0
 
 
+@dataclass
+class BoardTrainingPost:
+    post_id: int
+    author_id: Optional[str]
+    author_name: str
+    created_at: str
+    content: str
+
+
+@dataclass
+class BoardPage:
+    posts: List[BoardTrainingPost]
+    last_page: int = 1
+    current_user_id: Optional[str] = None
+    reply_action: Optional[str] = None
+    reply_token: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class TrainingCatalogEntry:
+    discipline: str
+    training: str
+    days: int
+    normalized: str
+
+
+@dataclass(frozen=True)
+class BoardTrainingMatch:
+    discipline: str
+    training: str
+    days: int
+    matched_text: str
+    score: float
+
+
 def _normalize_training_name(name: str) -> str:
     cleaned = re.sub(r"\(\s*\d+\s+days?\s*\)", "", str(name), flags=re.IGNORECASE)
     cleaned = cleaned.replace("’", "'")
     return re.sub(r"\s+", " ", cleaned).strip().casefold()
+
+
+def _normalize_training_search_text(value: str) -> str:
+    text = _normalize_training_name(value)
+    text = text.replace("&", " and ")
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _training_catalog() -> List[TrainingCatalogEntry]:
+    entries: List[TrainingCatalogEntry] = []
+    seen: set[Tuple[str, str]] = set()
+    for discipline, trainings in DISCIPLINES.items():
+        if discipline == "OTHER":
+            continue
+        for training, days in trainings:
+            key = (discipline, training)
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append(
+                TrainingCatalogEntry(
+                    discipline=discipline,
+                    training=training,
+                    days=int(days),
+                    normalized=_normalize_training_search_text(training),
+                )
+            )
+    return entries
+
+
+def extract_board_training_matches(text: str) -> List[BoardTrainingMatch]:
+    """Extract one or more training requests from free-form board text."""
+    normalized_text = _normalize_training_search_text(text)
+    if not normalized_text:
+        return []
+
+    matches: List[BoardTrainingMatch] = []
+    seen_trainings: set[Tuple[str, str]] = set()
+    catalog = _training_catalog()
+
+    for entry in catalog:
+        if entry.normalized and re.search(rf"\b{re.escape(entry.normalized)}\b", normalized_text):
+            seen_trainings.add((entry.discipline, entry.training))
+            matches.append(
+                BoardTrainingMatch(
+                    discipline=entry.discipline,
+                    training=entry.training,
+                    days=entry.days,
+                    matched_text=entry.training,
+                    score=1.0,
+                )
+            )
+
+    chunks = [
+        _normalize_training_search_text(chunk)
+        for chunk in re.split(r"[\n;,/|]+|\band\b|&|\+", str(text), flags=re.IGNORECASE)
+    ]
+    chunks = [chunk for chunk in chunks if len(chunk) >= 3]
+    for chunk in chunks:
+        best: Tuple[float, Optional[TrainingCatalogEntry]] = (0.0, None)
+        for entry in catalog:
+            key = (entry.discipline, entry.training)
+            if key in seen_trainings:
+                continue
+            if not entry.normalized:
+                continue
+            score = SequenceMatcher(None, chunk, entry.normalized).ratio()
+            if entry.normalized in chunk:
+                score = max(score, 0.88)
+            if score > best[0]:
+                best = (score, entry)
+
+        score, entry = best
+        if entry and score >= BOARD_MATCH_THRESHOLD:
+            seen_trainings.add((entry.discipline, entry.training))
+            matches.append(
+                BoardTrainingMatch(
+                    discipline=entry.discipline,
+                    training=entry.training,
+                    days=entry.days,
+                    matched_text=chunk,
+                    score=score,
+                )
+            )
+
+    return matches
+
+
+class TrainingBoardPageParser(HTMLParser):
+    """Parse MissionChief alliance board pages for training requests and reply form data."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.posts: List[BoardTrainingPost] = []
+        self.page_numbers: List[int] = []
+        self.current_user_id: Optional[str] = None
+        self.reply_action: Optional[str] = None
+        self.reply_token: Optional[str] = None
+        self._post: Optional[dict] = None
+        self._post_depth = 0
+        self._content_depth = 0
+        self._capture_author = False
+        self._capture_content = False
+        self._capture_page_number = False
+        self._capture_active_page = False
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]):
+        attr = {key: value for key, value in attrs}
+
+        if tag == "div" and str(attr.get("id") or "").startswith("post-on-page-"):
+            self._post = {
+                "post_id": None,
+                "author_id": None,
+                "author_name": "",
+                "created_at": "",
+                "content": [],
+            }
+            self._post_depth = 1
+            return
+
+        if self._post is not None and tag == "div":
+            self._post_depth += 1
+            classes = str(attr.get("class") or "")
+            if "col-md-11" in classes:
+                self._content_depth = self._post_depth
+                self._capture_content = True
+
+        if self._post is not None and tag == "a":
+            href = str(attr.get("href") or "")
+            profile_match = re.search(r"/profile/(\d+)", href)
+            if profile_match and not self._post.get("author_id"):
+                self._post["author_id"] = profile_match.group(1)
+                self._capture_author = True
+
+            post_match = re.search(r"/alliance_posts/(\d+)", href)
+            if post_match:
+                self._post["post_id"] = int(post_match.group(1))
+
+        if self._post is not None and tag == "span":
+            title = attr.get("title")
+            if title and not self._post.get("created_at"):
+                self._post["created_at"] = str(title)
+
+        if self._post is not None and self._capture_content and tag == "br":
+            self._post["content"].append("\n")
+
+        if tag == "a":
+            href = str(attr.get("href") or "")
+            page_match = re.search(r"[?&]page=(\d+)", href)
+            if page_match:
+                self.page_numbers.append(int(page_match.group(1)))
+            self._capture_page_number = bool(page_match)
+
+        if tag == "li" and "active" in str(attr.get("class") or ""):
+            self._capture_active_page = True
+
+        if tag == "form" and str(attr.get("id") or "") == "new_alliance_post":
+            self.reply_action = attr.get("action")
+
+        if tag == "input" and attr.get("name") == "authenticity_token":
+            token = attr.get("value")
+            if token:
+                self.reply_token = token
+
+    def handle_data(self, data: str):
+        if "user_id =" in data:
+            match = re.search(r"user_id\s*=\s*(\d+)", data)
+            if match:
+                self.current_user_id = match.group(1)
+
+        if self._post is not None and self._capture_author:
+            text = re.sub(r"\s+", " ", data).strip()
+            if text:
+                self._post["author_name"] = text
+
+        if self._post is not None and self._capture_content:
+            self._post["content"].append(data)
+
+        if self._capture_page_number:
+            try:
+                self.page_numbers.append(int(data.strip()))
+            except ValueError:
+                pass
+
+        if self._capture_active_page:
+            try:
+                self.page_numbers.append(int(data.strip()))
+            except ValueError:
+                pass
+
+    def handle_endtag(self, tag: str):
+        if self._capture_author and tag == "a":
+            self._capture_author = False
+
+        if self._capture_page_number and tag == "a":
+            self._capture_page_number = False
+
+        if self._capture_active_page and tag == "li":
+            self._capture_active_page = False
+
+        if self._post is not None and tag == "div":
+            if self._capture_content and self._post_depth == self._content_depth:
+                self._capture_content = False
+                self._content_depth = 0
+
+            self._post_depth -= 1
+            if self._post_depth <= 0:
+                self._finish_post()
+
+    def _finish_post(self) -> None:
+        if self._post is None:
+            return
+
+        post_id = self._post.get("post_id")
+        if post_id is None:
+            self._post = None
+            return
+
+        content = "".join(self._post.get("content") or [])
+        content = re.sub(r"\n\s*\n+", "\n", content)
+        content = re.sub(r"[ \t]+", " ", content).strip()
+        self.posts.append(
+            BoardTrainingPost(
+                post_id=int(post_id),
+                author_id=self._post.get("author_id"),
+                author_name=str(self._post.get("author_name") or "Unknown"),
+                created_at=str(self._post.get("created_at") or ""),
+                content=content,
+            )
+        )
+        self._post = None
+
+    def page(self) -> BoardPage:
+        return BoardPage(
+            posts=self.posts,
+            last_page=max(self.page_numbers or [1]),
+            current_user_id=self.current_user_id,
+            reply_action=self.reply_action,
+            reply_token=self.reply_token,
+        )
+
+
+def parse_training_board_page(html: str) -> BoardPage:
+    parser = TrainingBoardPageParser()
+    parser.feed(html or "")
+    return parser.page()
 
 
 class AcademyPageParser(HTMLParser):
@@ -1567,6 +1854,9 @@ class TrainingManager(commands.Cog):
             "availability_channel_id": MEMBER_PANEL_CHANNEL_ID,
             "availability_message_id": None,
             "availability_enabled": False,
+            "board_poll_enabled": True,
+            "board_thread_id": BOARD_THREAD_ID,
+            "board_last_seen_post_id": None,
         }
         self.config.register_guild(**default_guild)
 
@@ -1577,6 +1867,7 @@ class TrainingManager(commands.Cog):
         self._panel_task = self.bot.loop.create_task(self._ensure_member_panels())
         self._developer_panel_task = self.bot.loop.create_task(self._ensure_developer_panels())
         self._availability_task = self.bot.loop.create_task(self._availability_loop())
+        self._board_poll_task = self.bot.loop.create_task(self._board_poll_loop())
 
     def cog_unload(self):
         if self._reminder_task:
@@ -1587,6 +1878,8 @@ class TrainingManager(commands.Cog):
             self._developer_panel_task.cancel()
         if self._availability_task:
             self._availability_task.cancel()
+        if self._board_poll_task:
+            self._board_poll_task.cancel()
 
     @asynccontextmanager
     async def _bot_status(self, detail: str, *, priority: int = 70):
@@ -1878,6 +2171,52 @@ class TrainingManager(commands.Cog):
                 contribution_rate=contribution_rate,
             )
 
+        return await self._open_training_course(
+            req,
+            mc_user_id=mc_user_id,
+            mc_username=mc_username,
+            contribution_rate=contribution_rate,
+        )
+
+    async def _try_auto_open_board_training(
+        self,
+        post: BoardTrainingPost,
+        req: TrainingRequest,
+    ) -> AutoTrainingResult:
+        fallback_academy_id = AUTO_ACADEMY_BUILDINGS.get(req.discipline)
+
+        if req.num_classes < 1 or req.num_classes > AUTO_MAX_CLASSES:
+            return AutoTrainingResult(False, f"Requested class count must be between 1 and {AUTO_MAX_CLASSES}")
+
+        mc_user_id = str(post.author_id) if post.author_id else None
+        mc_username = post.author_name
+        contribution_rate = await self._get_latest_contribution_rate(mc_user_id)
+        if contribution_rate is not None and contribution_rate < AUTO_MIN_CONTRIBUTION_RATE:
+            return AutoTrainingResult(
+                False,
+                f"Latest contribution rate is {contribution_rate:.1f}%, below {AUTO_MIN_CONTRIBUTION_RATE:.1f}%",
+                academy_id=fallback_academy_id,
+                mc_user_id=mc_user_id,
+                mc_username=mc_username,
+                contribution_rate=contribution_rate,
+            )
+
+        return await self._open_training_course(
+            req,
+            mc_user_id=mc_user_id,
+            mc_username=mc_username,
+            contribution_rate=contribution_rate,
+        )
+
+    async def _open_training_course(
+        self,
+        req: TrainingRequest,
+        *,
+        mc_user_id: Optional[str],
+        mc_username: Optional[str],
+        contribution_rate: Optional[float],
+    ) -> AutoTrainingResult:
+        fallback_academy_id = AUTO_ACADEMY_BUILDINGS.get(req.discipline)
         cookie_manager = self.bot.get_cog("CookieManager")
         if not cookie_manager or not hasattr(cookie_manager, "get_session"):
             return AutoTrainingResult(
@@ -1961,7 +2300,7 @@ class TrainingManager(commands.Cog):
 
         post_url = f"https://www.missionchief.com{page.action}" if page.action.startswith("/") else page.action
         payload = {
-            "utf8": "✓",
+            "utf8": "\u2713",
             "authenticity_token": page.authenticity_token,
             "building_rooms_use": str(req.num_classes),
             "education_select": course.value,
@@ -1996,6 +2335,212 @@ class TrainingManager(commands.Cog):
             classes_opened=req.num_classes,
             status=post_status,
         )
+
+    async def _board_poll_loop(self) -> None:
+        await self.bot.wait_until_red_ready()
+        while True:
+            try:
+                for guild in self.bot.guilds:
+                    conf = await self.config.guild(guild).all()
+                    if not conf.get("board_poll_enabled"):
+                        continue
+                    async with self._bot_status(f"checking training board in {guild.name}", priority=55):
+                        await self._poll_training_board_for_guild(guild, conf)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.exception("Training board poll loop error: %s", exc)
+            await asyncio.sleep(BOARD_POLL_SECONDS)
+
+    async def _poll_training_board_for_guild(self, guild: discord.Guild, conf: dict) -> None:
+        cookie_manager = self.bot.get_cog("CookieManager")
+        if not cookie_manager or not hasattr(cookie_manager, "get_session"):
+            log.info("Training board poll skipped: CookieManager is not loaded")
+            return
+
+        thread_id = int(conf.get("board_thread_id") or BOARD_THREAD_ID)
+        session = await cookie_manager.get_session()
+        page, status = await self._fetch_training_board_latest_page(session, thread_id)
+        if status is not None and int(status) >= 400:
+            log.warning("Training board poll failed: thread %s returned HTTP %s", thread_id, status)
+            return
+
+        if not page.posts:
+            return
+
+        latest_post_id = max(post.post_id for post in page.posts)
+        last_seen_raw = conf.get("board_last_seen_post_id")
+        if not last_seen_raw:
+            await self.config.guild(guild).board_last_seen_post_id.set(latest_post_id)
+            log.info("Training board baseline set to post %s for guild %s", latest_post_id, guild.id)
+            return
+
+        try:
+            last_seen = int(last_seen_raw)
+        except (TypeError, ValueError):
+            last_seen = latest_post_id
+            await self.config.guild(guild).board_last_seen_post_id.set(latest_post_id)
+            return
+
+        new_posts = [
+            post
+            for post in sorted(page.posts, key=lambda item: item.post_id)
+            if post.post_id > last_seen and post.author_id != page.current_user_id
+        ]
+        for post in new_posts:
+            try:
+                await self._handle_training_board_post(guild, session, thread_id, page, post)
+            except Exception as exc:
+                log.exception("Training board post %s processing failed: %s", post.post_id, exc)
+
+        if latest_post_id > last_seen:
+            await self.config.guild(guild).board_last_seen_post_id.set(latest_post_id)
+
+    async def _fetch_training_board_latest_page(self, session, thread_id: int) -> Tuple[BoardPage, Optional[int]]:
+        base_url = f"https://www.missionchief.com/alliance_threads/{thread_id}"
+        async with session.get(base_url, allow_redirects=True) as response:
+            status = getattr(response, "status", None)
+            html = await response.text()
+        page = parse_training_board_page(html)
+        if status is not None and int(status) >= 400:
+            return page, status
+
+        if page.last_page > 1:
+            last_url = f"{base_url}?page={page.last_page}"
+            async with session.get(last_url, allow_redirects=True) as response:
+                status = getattr(response, "status", None)
+                html = await response.text()
+            page = parse_training_board_page(html)
+        return page, status
+
+    async def _handle_training_board_post(
+        self,
+        guild: discord.Guild,
+        session,
+        thread_id: int,
+        page: BoardPage,
+        post: BoardTrainingPost,
+    ) -> None:
+        matches = extract_board_training_matches(post.content)
+        log_channel = None
+        conf = await self.config.guild(guild).all()
+        if conf.get("log_channel_id"):
+            log_channel = guild.get_channel(int(conf["log_channel_id"]))
+
+        if not matches:
+            if log_channel:
+                await self._send_board_training_log(
+                    log_channel,
+                    post,
+                    [],
+                    f"No known training name found in board post `{post.post_id}`.",
+                )
+            return
+
+        results: List[Tuple[BoardTrainingMatch, AutoTrainingResult]] = []
+        for match in matches:
+            req = TrainingRequest(
+                user_id=0,
+                discipline=match.discipline,
+                training=match.training,
+                days=match.days,
+                fee_per_day=BOARD_DEFAULT_FEE,
+                num_classes=1,
+                references=[f"MissionChief board post #{post.post_id}"],
+                want_reminder=False,
+                request_channel_id=0,
+            )
+            result = await self._try_auto_open_board_training(post, req)
+            results.append((match, result))
+
+        if log_channel:
+            await self._send_board_training_log(log_channel, post, results, None)
+
+        if any(result.success for _, result in results):
+            reply = self._build_training_board_reply(post, results)
+            await self._post_training_board_reply(session, thread_id, page, reply)
+
+    async def _post_training_board_reply(
+        self,
+        session,
+        thread_id: int,
+        page: BoardPage,
+        content: str,
+    ) -> Optional[int]:
+        action = page.reply_action or f"/alliance_posts?alliance_thread_id={thread_id}"
+        post_url = urljoin("https://www.missionchief.com", action)
+        payload = {
+            "utf8": "\u2713",
+            "alliance_post[content]": content,
+            "commit": "Save",
+        }
+        if page.reply_token:
+            payload["authenticity_token"] = page.reply_token
+
+        async with session.post(post_url, data=payload, allow_redirects=True) as response:
+            status = getattr(response, "status", None)
+            await response.text()
+        return status
+
+    def _build_training_board_reply(
+        self,
+        post: BoardTrainingPost,
+        results: List[Tuple[BoardTrainingMatch, AutoTrainingResult]],
+    ) -> str:
+        opened = [
+            f"- {match.training}: opened {result.classes_opened or 1} class(es)"
+            + (f" in academy {result.academy_id}" if result.academy_id else "")
+            for match, result in results
+            if result.success
+        ]
+        failed = [
+            f"- {match.training}: {result.reason}"
+            for match, result in results
+            if not result.success
+        ]
+
+        lines = [f"Training request processed for {post.author_name}."]
+        if opened:
+            lines.append("")
+            lines.append("Opened:")
+            lines.extend(opened)
+        if failed:
+            lines.append("")
+            lines.append("Could not open automatically:")
+            lines.extend(failed)
+        return "\n".join(lines)
+
+    async def _send_board_training_log(
+        self,
+        log_channel: discord.abc.Messageable,
+        post: BoardTrainingPost,
+        results: List[Tuple[BoardTrainingMatch, AutoTrainingResult]],
+        note: Optional[str],
+    ) -> None:
+        embed = discord.Embed(
+            title="MissionChief board training request",
+            color=discord.Color.green() if results and any(result.success for _, result in results) else discord.Color.orange(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(
+            name="Requester",
+            value=f"{post.author_name} ({post.author_id or 'unknown ID'})",
+            inline=False,
+        )
+        embed.add_field(name="Board post", value=f"#{post.post_id}", inline=True)
+        if post.created_at:
+            embed.add_field(name="Posted at", value=post.created_at, inline=True)
+        if note:
+            embed.add_field(name="Status", value=note, inline=False)
+        if results:
+            lines = []
+            for match, result in results:
+                status = "opened" if result.success else f"failed: {result.reason}"
+                academy = f" | academy {result.academy_id}" if result.academy_id else ""
+                lines.append(f"- {match.training}: {status}{academy}")
+            embed.add_field(name="Detected trainings", value="\n".join(lines)[:1024], inline=False)
+        embed.add_field(name="Original text", value=(post.content or "-")[:1024], inline=False)
+        await log_channel.send(embed=embed)
 
     async def _send_auto_open_success(
         self,
@@ -2375,3 +2920,41 @@ class TrainingManager(commands.Cog):
         """Stop automatic refreshes for the training classroom availability overview."""
         await self.config.guild(ctx.guild).availability_enabled.set(False)
         await ctx.send("Training availability overview refresh stopped.")
+
+    @tmset.command(name="board")
+    @commands.admin()
+    async def board_polling(self, ctx: commands.Context, state: str = "status"):
+        """Manage MissionChief board training request polling. Use on/off/status/reset."""
+        normalized = str(state or "status").casefold().strip()
+        if normalized in {"on", "enable", "enabled"}:
+            await self.config.guild(ctx.guild).board_poll_enabled.set(True)
+            await ctx.send("Training board polling enabled.")
+            return
+        if normalized in {"off", "disable", "disabled"}:
+            await self.config.guild(ctx.guild).board_poll_enabled.set(False)
+            await ctx.send("Training board polling disabled.")
+            return
+        if normalized == "reset":
+            await self.config.guild(ctx.guild).board_last_seen_post_id.set(None)
+            await ctx.send("Training board baseline reset. The next poll will baseline the latest post without processing older posts.")
+            return
+
+        conf = await self.config.guild(ctx.guild).all()
+        await ctx.send(
+            "Training board polling status\n"
+            f"Enabled: {bool(conf.get('board_poll_enabled'))}\n"
+            f"Thread ID: {conf.get('board_thread_id') or BOARD_THREAD_ID}\n"
+            f"Last seen post ID: {conf.get('board_last_seen_post_id') or 'not set'}\n"
+            f"Interval: {BOARD_POLL_SECONDS // 60} minutes"
+        )
+
+    @tmset.command(name="boardthread")
+    @commands.admin()
+    async def board_thread(self, ctx: commands.Context, thread_id: int = BOARD_THREAD_ID):
+        """Set the MissionChief alliance thread ID used for board training requests."""
+        await self.config.guild(ctx.guild).board_thread_id.set(int(thread_id))
+        await self.config.guild(ctx.guild).board_last_seen_post_id.set(None)
+        await ctx.send(
+            f"Training board thread set to `{int(thread_id)}`. "
+            "The next poll will baseline the latest post without processing older posts."
+        )
