@@ -4,6 +4,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+import hashlib
 from html.parser import HTMLParser
 import logging
 import re
@@ -142,6 +143,9 @@ BOARD_THREAD_ID = 5935
 BOARD_POLL_SECONDS = 5 * 60
 BOARD_DEFAULT_FEE = 0
 BOARD_MATCH_THRESHOLD = 0.78
+BOARD_GUIDE_TITLE = "[GUIDE] Training Requests"
+BOARD_GUIDE_SYNC_SECONDS = AVAILABILITY_REFRESH_SECONDS
+AGENCY_ORDER = ("Fire", "Police", "EMS", "Coastal")
 
 
 @dataclass
@@ -223,6 +227,19 @@ class BoardTrainingMatch:
     days: int
     matched_text: str
     score: float
+
+
+@dataclass
+class MissionChiefForm:
+    action: Optional[str]
+    method: str
+    fields: Dict[str, str]
+
+
+@dataclass(frozen=True)
+class AllianceThreadLink:
+    thread_id: int
+    title: str
 
 
 def _normalize_training_name(name: str) -> str:
@@ -476,6 +493,108 @@ def parse_training_board_page(html: str) -> BoardPage:
     parser = TrainingBoardPageParser()
     parser.feed(html or "")
     return parser.page()
+
+
+class MissionChiefFormParser(HTMLParser):
+    """Small generic parser for MissionChief Rails forms."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.forms: List[MissionChiefForm] = []
+        self._form: Optional[dict] = None
+        self._textarea_name: Optional[str] = None
+        self._textarea_text: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]):
+        attr = {key: value for key, value in attrs}
+        if tag == "form":
+            self._form = {
+                "action": attr.get("action"),
+                "method": str(attr.get("method") or "get").lower(),
+                "fields": {},
+            }
+            return
+
+        if self._form is None:
+            return
+
+        if tag == "input":
+            name = attr.get("name")
+            if name:
+                self._form["fields"][name] = attr.get("value") or ""
+        elif tag == "textarea":
+            name = attr.get("name")
+            if name:
+                self._textarea_name = name
+                self._textarea_text = []
+        elif tag == "select":
+            name = attr.get("name")
+            if name and name not in self._form["fields"]:
+                self._form["fields"][name] = ""
+
+    def handle_data(self, data: str):
+        if self._form is not None and self._textarea_name:
+            self._textarea_text.append(data)
+
+    def handle_endtag(self, tag: str):
+        if self._form is None:
+            return
+        if tag == "textarea" and self._textarea_name:
+            self._form["fields"][self._textarea_name] = "".join(self._textarea_text)
+            self._textarea_name = None
+            self._textarea_text = []
+        elif tag == "form":
+            self.forms.append(
+                MissionChiefForm(
+                    action=self._form.get("action"),
+                    method=str(self._form.get("method") or "get").lower(),
+                    fields=dict(self._form.get("fields") or {}),
+                )
+            )
+            self._form = None
+
+
+def parse_missionchief_forms(html: str) -> List[MissionChiefForm]:
+    parser = MissionChiefFormParser()
+    parser.feed(html or "")
+    return parser.forms
+
+
+class AllianceThreadListParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.links: List[AllianceThreadLink] = []
+        self._thread_id: Optional[int] = None
+        self._text: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]):
+        if tag != "a":
+            return
+        attr = {key: value for key, value in attrs}
+        href = str(attr.get("href") or "")
+        match = re.fullmatch(r"/alliance_threads/(\d+)", href)
+        if match:
+            self._thread_id = int(match.group(1))
+            self._text = []
+
+    def handle_data(self, data: str):
+        if self._thread_id is not None:
+            self._text.append(data)
+
+    def handle_endtag(self, tag: str):
+        if tag != "a" or self._thread_id is None:
+            return
+        title = re.sub(r"\s+", " ", "".join(self._text)).strip()
+        if title:
+            self.links.append(AllianceThreadLink(thread_id=self._thread_id, title=title))
+        self._thread_id = None
+        self._text = []
+
+
+def parse_alliance_thread_links(html: str) -> List[AllianceThreadLink]:
+    parser = AllianceThreadListParser()
+    parser.feed(html or "")
+    return parser.links
 
 
 class AcademyPageParser(HTMLParser):
@@ -1857,6 +1976,11 @@ class TrainingManager(commands.Cog):
             "board_poll_enabled": True,
             "board_thread_id": BOARD_THREAD_ID,
             "board_last_seen_post_id": None,
+            "board_guide_enabled": True,
+            "board_guide_thread_id": None,
+            "board_guide_post_id": None,
+            "board_guide_content_hash": None,
+            "board_guide_title": BOARD_GUIDE_TITLE,
         }
         self.config.register_guild(**default_guild)
 
@@ -1868,6 +1992,7 @@ class TrainingManager(commands.Cog):
         self._developer_panel_task = self.bot.loop.create_task(self._ensure_developer_panels())
         self._availability_task = self.bot.loop.create_task(self._availability_loop())
         self._board_poll_task = self.bot.loop.create_task(self._board_poll_loop())
+        self._board_guide_task = self.bot.loop.create_task(self._board_guide_loop())
 
     def cog_unload(self):
         if self._reminder_task:
@@ -1880,6 +2005,8 @@ class TrainingManager(commands.Cog):
             self._availability_task.cancel()
         if self._board_poll_task:
             self._board_poll_task.cancel()
+        if self._board_guide_task:
+            self._board_guide_task.cancel()
 
     @asynccontextmanager
     async def _bot_status(self, detail: str, *, priority: int = 70):
@@ -2542,6 +2669,283 @@ class TrainingManager(commands.Cog):
         embed.add_field(name="Original text", value=(post.content or "-")[:1024], inline=False)
         await log_channel.send(embed=embed)
 
+    def _build_board_guide_content(
+        self,
+        availability: Dict[str, DisciplineAvailability],
+        error: Optional[str],
+        request_thread_id: int,
+    ) -> str:
+        updated_at = datetime.now(AMS).strftime("%Y-%m-%d %H:%M %Z")
+        lines = [
+            "[b]Training Request Guide[/b]",
+            "",
+            "This topic is maintained automatically by the Fire & Rescue Academy bot.",
+            f"Last updated: {updated_at}",
+            "",
+            "[b]Where to request a class[/b]",
+            f"Reply in the training request topic: https://www.missionchief.com/alliance_threads/{request_thread_id}",
+            "",
+            "[b]How to request[/b]",
+            "- Type one or more training names from the list below.",
+            "- You can request multiple classes in one post, one per line or separated by commas.",
+            "- Small typos are supported, but the exact names below work best.",
+            "- Board requests are opened as free alliance classes.",
+            "- The bot opens 1 class for each recognized training.",
+            "- If current data shows your alliance donation is below 5%, the class will not be opened automatically.",
+            "",
+            "[b]Current academy availability[/b]",
+        ]
+        if error:
+            lines.append(f"Availability could not be refreshed: {error}")
+        for discipline in AGENCY_ORDER:
+            stats = availability.get(discipline, DisciplineAvailability(discipline=discipline))
+            lines.append(f"- {discipline}: {stats.available_classrooms} classes")
+
+        lines.extend(
+            [
+                "",
+                "[b]Available training request text[/b]",
+                "Use the training name exactly as shown below when possible.",
+            ]
+        )
+        for discipline in AGENCY_ORDER:
+            trainings = DISCIPLINES.get(discipline, [])
+            if not trainings:
+                continue
+            lines.extend(["", f"[b]{discipline}[/b]"])
+            for training, days in trainings:
+                day_label = "day" if int(days) == 1 else "days"
+                lines.append(f"- {training} ({int(days)} {day_label})")
+
+        lines.extend(
+            [
+                "",
+                "[b]Examples[/b]",
+                "HazMat",
+                "Hotshot Crew Training, K-9",
+                "Coastal Air Rescue Operations",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _board_guide_hash(self, content: str) -> str:
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    def _set_form_value(
+        self,
+        payload: Dict[str, str],
+        candidates: Tuple[str, ...],
+        value: str,
+        fallback_name: str,
+    ) -> None:
+        for name in list(payload.keys()):
+            lowered = name.casefold()
+            if any(candidate in lowered for candidate in candidates):
+                payload[name] = value
+                return
+        payload[fallback_name] = value
+
+    def _select_thread_form(self, forms: List[MissionChiefForm]) -> Optional[MissionChiefForm]:
+        for form in forms:
+            action = str(form.action or "")
+            if "/alliance_threads" in action and all(part not in action for part in ("/mute", "/close", "/important")):
+                return form
+        return None
+
+    def _select_post_edit_form(self, forms: List[MissionChiefForm], post_id: int) -> Optional[MissionChiefForm]:
+        wanted = f"/alliance_posts/{post_id}"
+        for form in forms:
+            if wanted in str(form.action or ""):
+                return form
+        for form in forms:
+            if "/alliance_posts" in str(form.action or ""):
+                return form
+        return forms[0] if forms else None
+
+    async def _submit_missionchief_form(self, session, form: MissionChiefForm, payload: Dict[str, str]) -> Tuple[Optional[int], str, str]:
+        action = form.action or ""
+        url = urljoin("https://www.missionchief.com", action)
+        if form.method == "get":
+            async with session.get(url, params=payload, allow_redirects=True) as response:
+                status = getattr(response, "status", None)
+                html = await response.text()
+                final_url = str(getattr(response, "url", url))
+        else:
+            async with session.post(url, data=payload, allow_redirects=True) as response:
+                status = getattr(response, "status", None)
+                html = await response.text()
+                final_url = str(getattr(response, "url", url))
+        return status, html, final_url
+
+    async def _find_existing_board_guide_thread(self, session, title: str) -> Optional[int]:
+        base_url = "https://www.missionchief.com/alliance_threads"
+        seen_urls = set()
+        next_urls = [base_url]
+        for _ in range(5):
+            if not next_urls:
+                break
+            url = next_urls.pop(0)
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            async with session.get(url, allow_redirects=True) as response:
+                status = getattr(response, "status", None)
+                html = await response.text()
+            if status is not None and int(status) >= 400:
+                return None
+            for link in parse_alliance_thread_links(html):
+                if link.title.casefold() == title.casefold():
+                    return link.thread_id
+            page = parse_training_board_page(html)
+            for page_number in range(2, min(page.last_page, 5) + 1):
+                next_url = f"{base_url}?page={page_number}"
+                if next_url not in seen_urls:
+                    next_urls.append(next_url)
+        return None
+
+    async def _create_board_guide_thread(self, session, title: str, content: str) -> Tuple[Optional[int], Optional[int], Optional[str]]:
+        new_url = "https://www.missionchief.com/alliance_threads/new"
+        async with session.get(new_url, allow_redirects=True) as response:
+            status = getattr(response, "status", None)
+            html = await response.text()
+        if status is not None and int(status) >= 400:
+            return None, None, f"new thread form returned HTTP {status}"
+
+        form = self._select_thread_form(parse_missionchief_forms(html))
+        if not form:
+            return None, None, "new thread form not found"
+
+        payload = dict(form.fields)
+        payload.setdefault("utf8", "\u2713")
+        payload.setdefault("commit", "Save")
+        self._set_form_value(
+            payload,
+            ("[title]", "[caption]", "[subject]", "title", "caption", "subject"),
+            title,
+            "alliance_thread[caption]",
+        )
+        self._set_form_value(
+            payload,
+            ("[content]", "[text]", "[body]", "content", "text", "body"),
+            content,
+            "alliance_post[content]",
+        )
+        status, response_html, final_url = await self._submit_missionchief_form(session, form, payload)
+        if status is None or int(status) >= 400:
+            return None, None, f"create thread returned HTTP {status}"
+
+        thread_id = self._extract_thread_id(final_url) or self._extract_thread_id(response_html)
+        if not thread_id:
+            thread_id = await self._find_existing_board_guide_thread(session, title)
+        post_id = await self._find_board_guide_post_id(session, thread_id) if thread_id else None
+        return thread_id, post_id, None
+
+    def _extract_thread_id(self, value: str) -> Optional[int]:
+        match = re.search(r"/alliance_threads/(\d+)", str(value or ""))
+        return int(match.group(1)) if match else None
+
+    async def _find_board_guide_post_id(self, session, thread_id: Optional[int]) -> Optional[int]:
+        if not thread_id:
+            return None
+        url = f"https://www.missionchief.com/alliance_threads/{thread_id}"
+        async with session.get(url, allow_redirects=True) as response:
+            status = getattr(response, "status", None)
+            html = await response.text()
+        if status is not None and int(status) >= 400:
+            return None
+        page = parse_training_board_page(html)
+        if not page.posts:
+            return None
+        current_user_posts = [post for post in page.posts if post.author_id and post.author_id == page.current_user_id]
+        chosen = current_user_posts[0] if current_user_posts else page.posts[0]
+        return chosen.post_id
+
+    async def _edit_board_guide_post(self, session, post_id: int, content: str) -> Tuple[bool, str]:
+        edit_url = f"https://www.missionchief.com/alliance_posts/{post_id}/edit"
+        async with session.get(edit_url, allow_redirects=True) as response:
+            status = getattr(response, "status", None)
+            html = await response.text()
+        if status is not None and int(status) >= 400:
+            return False, f"edit form returned HTTP {status}"
+
+        form = self._select_post_edit_form(parse_missionchief_forms(html), post_id)
+        if not form:
+            return False, "edit form not found"
+
+        payload = dict(form.fields)
+        payload.setdefault("utf8", "\u2713")
+        payload.setdefault("commit", "Save")
+        if "_method" not in payload and f"/alliance_posts/{post_id}" in str(form.action or ""):
+            payload["_method"] = "patch"
+        self._set_form_value(
+            payload,
+            ("[content]", "[text]", "[body]", "content", "text", "body"),
+            content,
+            "alliance_post[content]",
+        )
+        status, _html, _final_url = await self._submit_missionchief_form(session, form, payload)
+        if status is None or int(status) >= 400:
+            return False, f"edit post returned HTTP {status}"
+        return True, "updated"
+
+    async def _sync_training_board_guide_for_guild(self, guild: discord.Guild, *, force: bool = False) -> bool:
+        conf = await self.config.guild(guild).all()
+        if not conf.get("board_guide_enabled"):
+            return False
+
+        cookie_manager = self.bot.get_cog("CookieManager")
+        if not cookie_manager or not hasattr(cookie_manager, "get_session"):
+            log.info("Training board guide skipped: CookieManager is not loaded")
+            return False
+
+        title = str(conf.get("board_guide_title") or BOARD_GUIDE_TITLE)
+        request_thread_id = int(conf.get("board_thread_id") or BOARD_THREAD_ID)
+        availability, error = await self._collect_training_availability()
+        content = self._build_board_guide_content(availability, error, request_thread_id)
+        content_hash = self._board_guide_hash(content)
+        thread_id = int(conf["board_guide_thread_id"]) if conf.get("board_guide_thread_id") else None
+        post_id = int(conf["board_guide_post_id"]) if conf.get("board_guide_post_id") else None
+        if not force and thread_id and post_id and conf.get("board_guide_content_hash") == content_hash:
+            return False
+
+        session = await cookie_manager.get_session()
+        if not thread_id:
+            thread_id = await self._find_existing_board_guide_thread(session, title)
+        if not thread_id:
+            thread_id, post_id, create_error = await self._create_board_guide_thread(session, title, content)
+            if create_error:
+                log.warning("Training board guide could not be created: %s", create_error)
+                return False
+        if not post_id:
+            post_id = await self._find_board_guide_post_id(session, thread_id)
+        if not thread_id or not post_id:
+            log.warning("Training board guide could not resolve thread/post IDs")
+            return False
+
+        if force or conf.get("board_guide_content_hash") != content_hash:
+            updated, reason = await self._edit_board_guide_post(session, post_id, content)
+            if not updated:
+                log.warning("Training board guide update failed: %s", reason)
+                return False
+
+        await self.config.guild(guild).board_guide_thread_id.set(int(thread_id))
+        await self.config.guild(guild).board_guide_post_id.set(int(post_id))
+        await self.config.guild(guild).board_guide_content_hash.set(content_hash)
+        return True
+
+    async def _board_guide_loop(self) -> None:
+        await self.bot.wait_until_red_ready()
+        while True:
+            try:
+                for guild in self.bot.guilds:
+                    async with self._bot_status(f"syncing training board guide in {guild.name}", priority=45):
+                        await self._sync_training_board_guide_for_guild(guild)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.exception("TrainingManager board guide loop error: %s", exc)
+            await asyncio.sleep(BOARD_GUIDE_SYNC_SECONDS)
+
     async def _send_auto_open_success(
         self,
         guild: discord.Guild,
@@ -2662,7 +3066,7 @@ class TrainingManager(commands.Cog):
     ) -> discord.Embed:
         description = "\n".join(
             f"**{discipline}:** {availability.get(discipline, DisciplineAvailability(discipline=discipline)).available_classrooms} classes"
-            for discipline in ("Fire", "Police", "EMS", "Coastal")
+            for discipline in AGENCY_ORDER
         )
         embed = discord.Embed(
             title="Academy Availability",
@@ -2957,4 +3361,41 @@ class TrainingManager(commands.Cog):
         await ctx.send(
             f"Training board thread set to `{int(thread_id)}`. "
             "The next poll will baseline the latest post without processing older posts."
+        )
+
+    @tmset.command(name="boardguide")
+    @commands.admin()
+    async def board_guide(self, ctx: commands.Context, state: str = "status"):
+        """Manage the MissionChief board training guide topic. Use on/off/status/reset/sync."""
+        normalized = str(state or "status").casefold().strip()
+        if normalized in {"on", "enable", "enabled"}:
+            await self.config.guild(ctx.guild).board_guide_enabled.set(True)
+            await ctx.send("Training board guide sync enabled.")
+            return
+        if normalized in {"off", "disable", "disabled"}:
+            await self.config.guild(ctx.guild).board_guide_enabled.set(False)
+            await ctx.send("Training board guide sync disabled.")
+            return
+        if normalized == "reset":
+            await self.config.guild(ctx.guild).board_guide_thread_id.set(None)
+            await self.config.guild(ctx.guild).board_guide_post_id.set(None)
+            await self.config.guild(ctx.guild).board_guide_content_hash.set(None)
+            await ctx.send("Training board guide tracking reset. The next sync will find or create the guide topic.")
+            return
+        if normalized in {"sync", "refresh", "now"}:
+            updated = await self._sync_training_board_guide_for_guild(ctx.guild, force=True)
+            await ctx.send("Training board guide synced." if updated else "Training board guide sync did not change anything.")
+            return
+
+        conf = await self.config.guild(ctx.guild).all()
+        thread_id = conf.get("board_guide_thread_id")
+        post_id = conf.get("board_guide_post_id")
+        title = conf.get("board_guide_title") or BOARD_GUIDE_TITLE
+        await ctx.send(
+            "Training board guide status\n"
+            f"Enabled: {bool(conf.get('board_guide_enabled'))}\n"
+            f"Title: {title}\n"
+            f"Thread ID: {thread_id or 'not set'}\n"
+            f"Post ID: {post_id or 'not set'}\n"
+            f"Sync interval: {BOARD_GUIDE_SYNC_SECONDS // 60} minutes"
         )

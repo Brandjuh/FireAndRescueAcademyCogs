@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 from trainings_manager.trainings_manager import (
     AUTO_BUILDING_LIST_PATH,
+    BOARD_GUIDE_TITLE,
     AutoTrainingResult,
     BoardTrainingPost,
     DEVELOPER_PANEL_CHANNEL_ID,
@@ -17,9 +18,11 @@ from trainings_manager.trainings_manager import (
     DisciplineAvailability,
     extract_board_training_matches,
     infer_academy_discipline,
+    parse_alliance_thread_links,
     parse_academy_page,
     parse_available_academies,
     parse_available_academies_page,
+    parse_missionchief_forms,
     parse_profile_username,
     parse_training_board_page,
 )
@@ -173,6 +176,25 @@ TRAINING_BOARD_HTML = """
 <form action="/alliance_posts?alliance_thread_id=5935" id="new_alliance_post" method="post">
   <input name="authenticity_token" type="hidden" value="token-board" />
   <textarea name="alliance_post[content]"></textarea>
+</form>
+"""
+
+
+THREAD_INDEX_HTML = """
+<table>
+  <tr><td><a href="/alliance_threads/5935">[REQUESTS] Training</a></td></tr>
+  <tr><td><a href="/alliance_threads/6001">[GUIDE] Training Requests</a></td></tr>
+</table>
+"""
+
+
+NEW_THREAD_FORM_HTML = """
+<form action="/alliance_threads" method="post" id="new_alliance_thread">
+  <input name="utf8" type="hidden" value="&#x2713;" />
+  <input name="authenticity_token" type="hidden" value="token-thread" />
+  <input name="alliance_thread[caption]" type="text" />
+  <textarea name="alliance_post[content]">old</textarea>
+  <input name="commit" type="submit" value="Save" />
 </form>
 """
 
@@ -383,6 +405,44 @@ def test_extract_board_training_matches_handles_typos_and_multiple_requests():
         ("Fire", "Hotshot Crew Training"),
         ("Fire", "HazMat"),
     }
+
+
+def test_parse_missionchief_forms_extracts_thread_form_fields():
+    forms = parse_missionchief_forms(NEW_THREAD_FORM_HTML)
+
+    assert len(forms) == 1
+    assert forms[0].action == "/alliance_threads"
+    assert forms[0].method == "post"
+    assert forms[0].fields["authenticity_token"] == "token-thread"
+    assert forms[0].fields["alliance_thread[caption]"] == ""
+    assert forms[0].fields["alliance_post[content]"] == "old"
+
+
+def test_parse_alliance_thread_links_extracts_training_guide_thread():
+    links = parse_alliance_thread_links(THREAD_INDEX_HTML)
+
+    assert [(link.thread_id, link.title) for link in links] == [
+        (5935, "[REQUESTS] Training"),
+        (6001, BOARD_GUIDE_TITLE),
+    ]
+
+
+def test_build_board_guide_content_lists_availability_and_training_names():
+    manager = TrainingManager.__new__(TrainingManager)
+    availability = {
+        "Fire": DisciplineAvailability(discipline="Fire", available_classrooms=3),
+        "Police": DisciplineAvailability(discipline="Police", available_classrooms=2),
+    }
+
+    content = manager._build_board_guide_content(availability, None, request_thread_id=5935)
+
+    assert "[b]Training Request Guide[/b]" in content
+    assert "https://www.missionchief.com/alliance_threads/5935" in content
+    assert "- Fire: 3 classes" in content
+    assert "- Police: 2 classes" in content
+    assert "[b]Fire[/b]" in content
+    assert "Hotshot Crew Training" in content
+    assert "Small typos are supported" in content
 
 
 def test_parse_available_academies_extracts_open_training_links():
