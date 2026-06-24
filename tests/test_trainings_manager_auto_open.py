@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock
 
 from trainings_manager.trainings_manager import (
     AUTO_BUILDING_LIST_PATH,
-    BOARD_GUIDE_TITLE,
     AutoTrainingResult,
     BoardTrainingPost,
     DEVELOPER_PANEL_CHANNEL_ID,
@@ -18,7 +17,6 @@ from trainings_manager.trainings_manager import (
     DisciplineAvailability,
     extract_board_training_matches,
     infer_academy_discipline,
-    parse_alliance_thread_links,
     parse_academy_page,
     parse_available_academies,
     parse_available_academies_page,
@@ -177,14 +175,6 @@ TRAINING_BOARD_HTML = """
   <input name="authenticity_token" type="hidden" value="token-board" />
   <textarea name="alliance_post[content]"></textarea>
 </form>
-"""
-
-
-THREAD_INDEX_HTML = """
-<table>
-  <tr><td><a href="/alliance_threads/5935">[REQUESTS] Training</a></td></tr>
-  <tr><td><a href="/alliance_threads/6001">[GUIDE] Training Requests</a></td></tr>
-</table>
 """
 
 
@@ -418,15 +408,6 @@ def test_parse_missionchief_forms_extracts_thread_form_fields():
     assert forms[0].fields["alliance_post[content]"] == "old"
 
 
-def test_parse_alliance_thread_links_extracts_training_guide_thread():
-    links = parse_alliance_thread_links(THREAD_INDEX_HTML)
-
-    assert [(link.thread_id, link.title) for link in links] == [
-        (5935, "[REQUESTS] Training"),
-        (6001, BOARD_GUIDE_TITLE),
-    ]
-
-
 def test_build_board_guide_content_lists_availability_and_training_names():
     manager = TrainingManager.__new__(TrainingManager)
     availability = {
@@ -440,9 +421,34 @@ def test_build_board_guide_content_lists_availability_and_training_names():
     assert "https://www.missionchief.com/alliance_threads/5935" in content
     assert "- Fire: 3 classes" in content
     assert "- Police: 2 classes" in content
-    assert "[b]Fire[/b]" in content
+    assert "[b]Fire training request text[/b]" in content
     assert "Hotshot Crew Training" in content
     assert "Small typos are supported" in content
+
+
+def test_build_board_guide_contents_splits_sections_and_marks_posts():
+    manager = TrainingManager.__new__(TrainingManager)
+    availability = {"Fire": DisciplineAvailability(discipline="Fire", available_classrooms=3)}
+
+    contents = manager._build_board_guide_contents(availability, None, request_thread_id=5935)
+
+    assert set(contents) == {"overview", "Fire", "Police", "EMS", "Coastal"}
+    assert contents["overview"].startswith("[TM-GUIDE:overview]")
+    assert contents["Fire"].startswith("[TM-GUIDE:Fire]")
+    assert "Hotshot Crew Training" in contents["Fire"]
+
+
+def test_training_board_guide_posts_are_not_treated_as_requests():
+    manager = TrainingManager.__new__(TrainingManager)
+    post = BoardTrainingPost(
+        post_id=1,
+        author_id="88649",
+        author_name="BotUser",
+        created_at="June 24, 2026 15:47",
+        content="[TM-GUIDE:Fire]\n- Hotshot Crew Training",
+    )
+
+    assert manager._is_board_guide_post(post) is True
 
 
 def test_parse_available_academies_extracts_open_training_links():
