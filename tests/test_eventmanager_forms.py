@@ -25,6 +25,7 @@ from eventmanager.event_manager import (
     LATITUDE_FIELD,
     LONGITUDE_FIELD,
     ADDRESS_FIELD,
+    build_browser_event_start_script,
     _ajax_get_headers,
     _ajax_submit_headers,
     _form_position_params,
@@ -491,6 +492,35 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(".submit(", BROWSER_CAPTURE_SCRIPT)
         self.assertNotIn("fetch(", BROWSER_CAPTURE_SCRIPT)
         self.assertNotIn("XMLHttpRequest", BROWSER_CAPTURE_SCRIPT)
+
+    def test_browser_event_start_script_uses_dom_and_free_button_only(self):
+        script = build_browser_event_start_script(
+            {
+                "authenticity_token": "secret",
+                "event_radio_group": "2",
+                "mission_position[mission_type_id]": "2",
+                "mission_position[latitude]": "40.729500",
+                "mission_position[longitude]": "-73.997200",
+                "mission_position[address]": "70 Washington Square South, 10012 New York, Manhattan",
+                "mission_position[size]": "2",
+                "mission_position[shape]": "circle",
+                "mission_position[amount]": "0",
+                "mission_position[coins]": "0",
+            },
+            label="storm surge",
+        )
+
+        self.assertIn("/missionAllianceEventNew", script)
+        self.assertIn("missionAllianceEventCreate", script)
+        self.assertIn("freeButton.click()", script)
+        self.assertIn('"event_radio_group": "2"', script)
+        self.assertIn('"mission_position[shape]": "circle"', script)
+        self.assertIn("70 Washington Square South", script)
+        self.assertNotIn("secret", script)
+        self.assertNotIn("authenticity_token", script)
+        self.assertNotIn("event_identifier", script)
+        self.assertNotIn("fetch(", script)
+        self.assertNotIn("XMLHttpRequest", script)
 
 
 if __name__ == "__main__":

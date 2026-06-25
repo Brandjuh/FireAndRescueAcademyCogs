@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 import re
 from contextlib import suppress
@@ -94,6 +95,111 @@ BROWSER_CAPTURE_SCRIPT = r"""
       () => console.log("EventManager capture could not be copied automatically.")
     );
   }
+})();
+""".strip()
+BROWSER_EVENT_START_SCRIPT = r"""
+(() => {
+  const config = __CONFIG__;
+  const fail = (message) => {
+    console.error(`EventManager browser start: ${message}`);
+    alert(`EventManager browser start failed:\n${message}`);
+    throw new Error(message);
+  };
+  const dispatch = (field) => {
+    for (const eventName of ["input", "change"]) {
+      field.dispatchEvent(new Event(eventName, { bubbles: true }));
+    }
+  };
+  const cssEscape = (value) => {
+    if (window.CSS && typeof CSS.escape === "function") return CSS.escape(value);
+    return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  };
+  const setValue = (name, value, required = false) => {
+    const field = document.querySelector(`[name="${cssEscape(name)}"]`);
+    if (!field) {
+      if (required) fail(`Required field not found: ${name}`);
+      return false;
+    }
+    field.value = value;
+    dispatch(field);
+    return true;
+  };
+  const visibleText = (element) => [element.value, element.textContent, element.getAttribute("title")]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!location.pathname.includes("/missionAllianceEventNew")) {
+    fail("Open https://www.missionchief.com/missionAllianceEventNew first.");
+  }
+
+  const form = document.querySelector("#new_mission_position")
+    || [...document.querySelectorAll("form")].find((item) => (item.action || "").includes("missionAllianceEventCreate"));
+  if (!form) {
+    fail("MissionChief alliance event form was not found.");
+  }
+  if (!(form.action || "").includes("missionAllianceEventCreate")) {
+    fail(`Unexpected form action: ${form.action || "unknown"}`);
+  }
+
+  const eventValue = String(config.fields["event_radio_group"] || config.fields["mission_position[mission_type_id]"] || "");
+  if (!eventValue) {
+    fail("No event type was configured.");
+  }
+
+  const radios = [...form.querySelectorAll('input[name="event_radio_group"]')];
+  const eventRadio = radios.find((radio) => {
+    const candidates = [
+      radio.value,
+      radio.dataset.eventId,
+      (radio.id || "").replace(/^event_/, ""),
+    ].filter(Boolean).map(String);
+    return candidates.includes(eventValue);
+  });
+  if (!eventRadio) {
+    fail(`Could not find event option ${eventValue} on this page.`);
+  }
+  eventRadio.checked = true;
+  eventRadio.click();
+  dispatch(eventRadio);
+
+  if (!document.querySelector('[name="mission_position[mission_type_id]"]')?.value) {
+    setValue("mission_position[mission_type_id]", eventRadio.dataset.eventId || eventValue, true);
+  }
+  for (const [name, value] of Object.entries(config.fields)) {
+    if (name === "event_radio_group" || name === "mission_position[mission_type_id]") continue;
+    setValue(name, String(value), false);
+  }
+
+  const coinValue = document.querySelector('[name="mission_position[coins]"]')?.value || "0";
+  if (!["", "0"].includes(String(coinValue))) {
+    fail(`Refusing to continue because coins is ${coinValue}.`);
+  }
+
+  const buttons = [...form.querySelectorAll('input[type="submit"], button[type="submit"], button:not([type])')];
+  const freeButton = buttons.find((button) => {
+    const text = visibleText(button).toLowerCase();
+    return !button.disabled && text.includes("free") && !text.includes("coin");
+  });
+  if (!freeButton) {
+    fail("The free Start Event button was not found or is disabled.");
+  }
+
+  const summary = [
+    `Event: ${config.label}`,
+    `Latitude: ${config.fields["mission_position[latitude]"] || "not set"}`,
+    `Longitude: ${config.fields["mission_position[longitude]"] || "not set"}`,
+    `Address: ${config.fields["mission_position[address]"] || "not set"}`,
+    `Button: ${visibleText(freeButton)}`,
+  ].join("\n");
+
+  if (!confirm(`Start this MissionChief alliance event?\n\n${summary}`)) {
+    console.log("EventManager browser start cancelled by user.");
+    return;
+  }
+
+  freeButton.click();
 })();
 """.strip()
 WEEKDAYS = {
@@ -621,6 +727,33 @@ def safe_debug_payload(payload: Payload) -> str:
     if not payload:
         return "none"
     return "\n".join(f"{name}={_redact_debug_value(name, value)}" for name, value in payload)
+
+
+def build_browser_event_start_script(fields: Dict[str, str], *, label: str = "EventManager event") -> str:
+    """Build a browser-console script that starts an event through the live MissionChief DOM."""
+    allowed_fields = {
+        EVENT_RADIO_FIELD,
+        MISSION_TYPE_FIELD,
+        LATITUDE_FIELD,
+        LONGITUDE_FIELD,
+        ADDRESS_FIELD,
+        POI_TYPE_FIELD,
+        SIZE_FIELD,
+        SHAPE_FIELD,
+        AMOUNT_FIELD,
+        COINS_FIELD,
+    }
+    safe_fields = {
+        str(name): str(value)
+        for name, value in fields.items()
+        if str(name) in allowed_fields
+    }
+    safe_fields.setdefault(COINS_FIELD, "0")
+    config = {
+        "label": str(label or "EventManager event"),
+        "fields": safe_fields,
+    }
+    return BROWSER_EVENT_START_SCRIPT.replace("__CONFIG__", json.dumps(config, ensure_ascii=False, indent=2))
 
 
 def summarize_response_for_debug(text: str, *, limit: int = 350) -> str:
@@ -1541,6 +1674,45 @@ class EventManager(commands.Cog):
         await ctx.send(
             instructions,
             file=discord.File(data, filename="eventmanager-browser-capture.js"),
+        )
+
+    @eventmanager.command(name="browsereventscript")
+    @commands.admin()
+    async def browser_event_start_script(self, ctx: commands.Context, profile_name: Optional[str] = None):
+        """Send a browser-console script that starts an alliance event through the live DOM."""
+        try:
+            form = await self._fetch_form("event")
+        except Exception as exc:
+            await ctx.send(f"Could not load the live MissionChief event form: {exc}")
+            return
+
+        label = "quick"
+        if profile_name:
+            label = profile_name.strip().lower()
+            profiles = await self.config.profiles()
+            profile = profiles.get("event", {}).get(label)
+            if not profile:
+                await ctx.send(f"Event profile `{label}` was not found.")
+                return
+        else:
+            options = field_options_for_kind(form, "event")
+            if not options:
+                await ctx.send("No MissionChief event options were found on the live form.")
+                return
+            profile = fields_for_selection("event", options[0].value, random_region="nyc_or_bermuda")
+            label = f"quick:{options[0].label}"
+
+        start_fields = _normalize_overrides(form, profile_fields_for_start(profile))
+        script = build_browser_event_start_script(start_fields, label=label)
+        instructions = (
+            "Open https://www.missionchief.com/missionAllianceEventNew in the same MissionChief account, "
+            "paste this script in the browser console, review the confirmation, and only then approve it. "
+            "This script clicks only the free Start Event button and refuses coin payloads."
+        )
+        data = io.BytesIO(script.encode("utf-8"))
+        await ctx.send(
+            instructions,
+            file=discord.File(data, filename=f"eventmanager-browser-event-{profile_name or 'quick'}.js"),
         )
 
     @eventmanager.command(name="panel")
