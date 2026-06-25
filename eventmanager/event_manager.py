@@ -7,7 +7,7 @@ import logging
 import re
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
@@ -37,6 +37,9 @@ EVENT_KINDS = {
 DEFAULT_TIMEZONE = "America/New_York"
 DEFAULT_PANEL_CHANNEL_ID = 1421256548977606827
 PANEL_TITLE = "EventManager Control Panel"
+REQUEST_PANEL_TITLE = "Event Requests"
+SCHEDULE_RETRY_SECONDS = 90
+COOLDOWN_GRACE_SECONDS = 75
 PLAYWRIGHT_SETUP_MESSAGE = (
     "Playwright browser automation is not ready. Install the EventManager requirements and run "
     "`python -m playwright install chromium` in the same Python environment as Redbot."
@@ -251,6 +254,14 @@ async (config) => {
     name: button.name || "",
     className: button.className || "",
   }));
+  const lastFreeText = () => {
+    const candidates = [
+      document.querySelector("#alliance_event_last_free_mission"),
+      ...document.querySelectorAll(".alert, .alert-info, .well"),
+    ].filter(Boolean);
+    const node = candidates.find((item) => visibleText(item).toLowerCase().includes("last free mission"));
+    return visibleText(node);
+  };
   const snapshot = () => ({
     url: location.href,
     latitude: fieldValue("mission_position[latitude]"),
@@ -260,6 +271,7 @@ async (config) => {
     eventRadio: [...document.querySelectorAll('input[name="event_radio_group"]')]
       .find((radio) => radio.checked)?.dataset?.eventId || "",
     coins: fieldValue("mission_position[coins]"),
+    lastFreeText: lastFreeText(),
     submitButtons: buttonDiagnostics(),
   });
   const fail = (reason) => ({ ok: false, reason, snapshot: snapshot() });
@@ -463,6 +475,7 @@ class EventStartResult:
     reason: str
     status: Optional[int] = None
     post_url: Optional[str] = None
+    details: Dict[str, Any] = field(default_factory=dict)
 
 
 Payload = List[Tuple[str, str]]
@@ -951,7 +964,7 @@ def summarize_browser_snapshot(snapshot: Optional[Dict[str, Any]], *, limit: int
     if not snapshot:
         return ""
     lines = []
-    for key in ["url", "missionType", "eventRadio", "latitude", "longitude", "address", "coins"]:
+    for key in ["url", "missionType", "eventRadio", "latitude", "longitude", "address", "coins", "lastFreeText"]:
         value = snapshot.get(key)
         if value:
             lines.append(f"{key}: {value}")
@@ -969,6 +982,118 @@ def summarize_browser_snapshot(snapshot: Optional[Dict[str, Any]], *, limit: int
     if len(text) > limit:
         return text[: max(0, limit - 1)] + "..."
     return text
+
+
+LAST_FREE_RE = re.compile(
+    r"Last free mission:\s*([A-Za-z]{3},\s+\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{2}:\d{2}:\d{2}\s+[+-]\d{4})",
+    re.IGNORECASE,
+)
+
+
+def parse_last_free_mission_time(value: str) -> Optional[datetime]:
+    """Parse MissionChief's visible `Last free mission` timestamp."""
+    match = LAST_FREE_RE.search(value or "")
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%a, %d %b %Y %H:%M:%S %z")
+    except ValueError:
+        return None
+
+
+def next_free_start_from_text(kind: str, value: str) -> Optional[datetime]:
+    """Return the next free start time implied by MissionChief's last-free text."""
+    last_free = parse_last_free_mission_time(value)
+    if not last_free:
+        return None
+    interval = timedelta(days=7 if normalize_kind(kind) == "event" else 1)
+    return last_free + interval + timedelta(seconds=COOLDOWN_GRACE_SECONDS)
+
+
+def parse_config_datetime(value: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO datetime from Config as an aware UTC datetime."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def config_datetime(value: datetime) -> str:
+    """Serialize a datetime for Config storage in UTC."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def schedule_run_key(kind: str, when: datetime) -> str:
+    """Return the daily/weekly run key used to prevent duplicate scheduled starts."""
+    if normalize_kind(kind) == "event":
+        return f"{when:%G-W%V}"
+    return when.strftime("%Y-%m-%d")
+
+
+def next_nominal_schedule_time(kind: str, schedule: dict, last_runs: dict, now: datetime) -> Optional[datetime]:
+    """Return the next intended scheduler attempt before cooldown retry overrides."""
+    kind = normalize_kind(kind)
+    if not schedule.get("enabled"):
+        return None
+    profile_name, _ = select_scheduled_profile(schedule)
+    if not profile_name:
+        return None
+
+    hour, minute = valid_time(schedule.get("time") or "23:55")
+    target_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    if kind == "large":
+        current_key = schedule_run_key(kind, now)
+        if now < target_today:
+            return target_today
+        if last_runs.get(kind) != current_key:
+            return now
+        return target_today + timedelta(days=1)
+
+    weekday = WEEKDAYS.get((schedule.get("weekday") or "monday").lower(), 0)
+    days_since_target = (now.weekday() - weekday) % 7
+    current_week_target = (now - timedelta(days=days_since_target)).replace(
+        hour=hour,
+        minute=minute,
+        second=0,
+        microsecond=0,
+    )
+    current_key = schedule_run_key(kind, current_week_target)
+    if now.date() == current_week_target.date():
+        if now < current_week_target:
+            return current_week_target
+        if last_runs.get(kind) != current_key:
+            return now
+    days_until_target = (weekday - now.weekday()) % 7
+    if days_until_target == 0:
+        days_until_target = 7
+    return target_today + timedelta(days=days_until_target)
+
+
+def next_schedule_attempt_time(
+    kind: str,
+    schedule: dict,
+    last_runs: dict,
+    retry_after: dict,
+    now: datetime,
+) -> Optional[datetime]:
+    """Return the next scheduler attempt, including cooldown retry throttling."""
+    nominal = next_nominal_schedule_time(kind, schedule, last_runs, now)
+    if not nominal:
+        return None
+    retry_at = parse_config_datetime(retry_after.get(kind))
+    if retry_at and retry_at > datetime.now(timezone.utc):
+        retry_local = retry_at.astimezone(now.tzinfo)
+        if retry_local > nominal:
+            return retry_local
+    return nominal
 
 
 def build_browser_event_start_script(
@@ -1049,6 +1174,39 @@ def build_browser_start_config(
         config["shape"] = config["shape"] or MISSION_POSITION_DEFAULT_OVERRIDES[SHAPE_FIELD]
         config["amount"] = config["amount"] or MISSION_POSITION_DEFAULT_OVERRIDES[AMOUNT_FIELD]
     return config
+
+
+def browser_result_details(
+    kind: str,
+    profile_name: str,
+    prepare_result: Optional[Dict[str, Any]],
+    *,
+    status: Optional[int] = None,
+    post_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build non-sensitive details from the browser start result for logs and scheduling."""
+    prepare_result = prepare_result or {}
+    snapshot = prepare_result.get("snapshot") or {}
+    last_free_text = str(snapshot.get("lastFreeText") or "")
+    next_eligible_at = next_free_start_from_text(kind, last_free_text)
+    details: Dict[str, Any] = {
+        "kind": normalize_kind(kind),
+        "profile": profile_name,
+        "status": status,
+        "post_url": post_url,
+        "button_text": prepare_result.get("buttonText"),
+        "uses_coins": prepare_result.get("usesCoins"),
+        "latitude": snapshot.get("latitude") or prepare_result.get("expectedLatitude"),
+        "longitude": snapshot.get("longitude") or prepare_result.get("expectedLongitude"),
+        "address": snapshot.get("address"),
+        "mission_type": snapshot.get("missionType"),
+        "event_radio": snapshot.get("eventRadio"),
+        "last_free_text": last_free_text,
+        "snapshot_summary": summarize_browser_snapshot(snapshot),
+    }
+    if next_eligible_at:
+        details["next_eligible_at"] = next_eligible_at
+    return {key: value for key, value in details.items() if value not in (None, "", [])}
 
 
 def normalize_optional_profile_arg(value: Optional[str]) -> Optional[str]:
@@ -1234,6 +1392,72 @@ class EventManagerPanelView(discord.ui.View):
     )
     async def large_custom(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._custom_start(interaction, "large")
+
+
+class EventRequestPanelView(discord.ui.View):
+    """Persistent member entry point for requesting an alliance event or mission."""
+
+    def __init__(self, cog: "EventManager"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(
+        label="Request Event / Mission",
+        style=discord.ButtonStyle.primary,
+        custom_id="eventmanager:request:create",
+    )
+    async def request_item(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None:
+            await interaction.response.send_message("Event requests can only be created in the server.", ephemeral=True)
+            return
+        await interaction.response.send_modal(EventRequestModal(self.cog))
+
+
+class EventRequestModal(discord.ui.Modal, title="Request Event / Mission"):
+    """Collect a lightweight member request without starting anything automatically."""
+
+    request_type = discord.ui.TextInput(
+        label="Request type",
+        placeholder="Alliance event or large scale mission",
+        required=True,
+        max_length=80,
+    )
+    preferred_type = discord.ui.TextInput(
+        label="Preferred MissionChief type",
+        placeholder="Example: Storm, Major fire, Bomb Explosion",
+        required=False,
+        max_length=100,
+    )
+    location = discord.ui.TextInput(
+        label="Location preference",
+        placeholder="Example: New York City, Bermuda, no preference",
+        required=False,
+        max_length=160,
+    )
+    notes = discord.ui.TextInput(
+        label="Reason / timing notes",
+        placeholder="Optional details for admins",
+        required=False,
+        style=discord.TextStyle.paragraph,
+        max_length=700,
+    )
+
+    def __init__(self, cog: "EventManager"):
+        super().__init__()
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction):
+        request_id = await self.cog.create_event_request(
+            interaction,
+            request_type=str(self.request_type.value or "").strip(),
+            preferred_type=str(self.preferred_type.value or "").strip(),
+            location=str(self.location.value or "").strip(),
+            notes=str(self.notes.value or "").strip(),
+        )
+        await interaction.response.send_message(
+            f"Your event request has been submitted for admin review. Reference: `{request_id}`",
+            ephemeral=True,
+        )
 
 
 class CustomTypeSelect(discord.ui.Select):
@@ -1457,9 +1681,14 @@ class EventManager(commands.Cog):
                 },
             },
             last_runs={},
+            schedule_retry_after={},
             log_channel_id=None,
             panel_channel_id=DEFAULT_PANEL_CHANNEL_ID,
             panel_message_id=None,
+            request_panel_channel_id=None,
+            request_panel_message_id=None,
+            request_log_channel_id=None,
+            event_requests=[],
         )
         self._task: Optional[asyncio.Task] = None
         self._panel_task: Optional[asyncio.Task] = None
@@ -1467,6 +1696,7 @@ class EventManager(commands.Cog):
 
     async def cog_load(self):
         self.bot.add_view(EventManagerPanelView(self))
+        self.bot.add_view(EventRequestPanelView(self))
         self._task = asyncio.create_task(self._scheduler_loop())
         self._panel_task = asyncio.create_task(self._ensure_panels_after_ready())
 
@@ -1696,12 +1926,14 @@ class EventManager(commands.Cog):
                         if not prepare_result.get("ok"):
                             snapshot = summarize_browser_snapshot(prepare_result.get("snapshot"))
                             suffix = f" Snapshot: {snapshot}" if snapshot else ""
-                            return EventStartResult(False, f"{prepare_result.get('reason')}{suffix}")
+                            details = browser_result_details(kind, profile_name, prepare_result, post_url=f"{BASE_URL}/{create_path}")
+                            return EventStartResult(False, f"{prepare_result.get('reason')}{suffix}", details=details)
 
                         async with page.expect_response(lambda response: create_path in response.url, timeout=30000) as response_info:
                             clicked = await page.evaluate(BROWSER_CLICK_START_SCRIPT, prepare_result.get("submitIndex"))
                             if not clicked:
-                                return EventStartResult(False, "Browser could not click the MissionChief start button.")
+                                details = browser_result_details(kind, profile_name, prepare_result, post_url=f"{BASE_URL}/{create_path}")
+                                return EventStartResult(False, "Browser could not click the MissionChief start button.", details=details)
                         response = await response_info.value
                         status = response.status
                         with suppress(Exception):
@@ -1711,7 +1943,8 @@ class EventManager(commands.Cog):
             except PlaywrightTimeoutError as exc:
                 snapshot = summarize_browser_snapshot(prepare_result.get("snapshot"))
                 suffix = f" Snapshot: {snapshot}" if snapshot else ""
-                return EventStartResult(False, f"MissionChief browser flow timed out: {exc}{suffix}")
+                details = browser_result_details(kind, profile_name, prepare_result, status=status, post_url=f"{BASE_URL}/{create_path}")
+                return EventStartResult(False, f"MissionChief browser flow timed out: {exc}{suffix}", status=status, post_url=f"{BASE_URL}/{create_path}", details=details)
             except Exception as exc:
                 message = str(exc)
                 if "Executable doesn't exist" in message or "playwright install" in message:
@@ -1721,15 +1954,24 @@ class EventManager(commands.Cog):
         if status is None or int(status) >= 400:
             response_debug = summarize_response_for_debug(response_text)
             response_suffix = f" Response: {response_debug}" if response_debug else ""
+            details = browser_result_details(kind, profile_name, prepare_result, status=status, post_url=f"{BASE_URL}/{create_path}")
             return EventStartResult(
                 False,
                 f"MissionChief returned HTTP {status} from browser start.{response_suffix}",
                 status=status,
                 post_url=f"{BASE_URL}/{create_path}",
+                details=details,
             )
 
-        await self._log_run(kind, profile_name, status)
-        return EventStartResult(True, "Started successfully through browser automation.", status=status, post_url=f"{BASE_URL}/{create_path}")
+        details = browser_result_details(kind, profile_name, prepare_result, status=status, post_url=f"{BASE_URL}/{create_path}")
+        await self._log_run(kind, profile_name, status, details=details)
+        return EventStartResult(
+            True,
+            "Started successfully through browser automation.",
+            status=status,
+            post_url=f"{BASE_URL}/{create_path}",
+            details=details,
+        )
 
     async def _start_profile_data_http(self, kind: str, profile_name: str, profile: dict) -> EventStartResult:
         kind = normalize_kind(kind)
@@ -1921,7 +2163,141 @@ class EventManager(commands.Cog):
         await self.config.panel_message_id.set(message.id)
         return message
 
-    async def _log_run(self, kind: str, profile_name: str, status: Optional[int]):
+    async def request_panel_channel(self, guild: discord.Guild):
+        channel_id = await self.config.request_panel_channel_id()
+        if not channel_id:
+            channel_id = await self.config.panel_channel_id() or DEFAULT_PANEL_CHANNEL_ID
+        return guild.get_channel(int(channel_id)) or self.bot.get_channel(int(channel_id))
+
+    def is_request_panel_message(self, message: discord.Message) -> bool:
+        bot_user_id = getattr(getattr(self.bot, "user", None), "id", None)
+        if bot_user_id and getattr(getattr(message, "author", None), "id", None) != bot_user_id:
+            return False
+        for embed in getattr(message, "embeds", []) or []:
+            if getattr(embed, "title", None) == REQUEST_PANEL_TITLE:
+                return True
+        return False
+
+    async def build_request_panel_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title=REQUEST_PANEL_TITLE,
+            description=(
+                "Request a large scale alliance mission or alliance event for admin review.\n\n"
+                "This does not start anything automatically. Staff will review the request first."
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(name="Privacy", value="Your request confirmation is private to you.", inline=False)
+        return embed
+
+    async def find_existing_request_panel_message(self, channel: Any):
+        history = getattr(channel, "history", None)
+        if not history:
+            return None
+        found = []
+        with suppress(discord.Forbidden, discord.HTTPException):
+            async for message in channel.history(limit=50):
+                if self.is_request_panel_message(message):
+                    found.append(message)
+        if not found:
+            return None
+        keep = found[0]
+        for duplicate in found[1:]:
+            with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                await duplicate.delete()
+        return keep
+
+    async def ensure_request_panel_message(self, guild: discord.Guild, *, create: bool = True):
+        channel = await self.request_panel_channel(guild)
+        if not channel:
+            return None
+        embed = await self.build_request_panel_embed()
+        view = EventRequestPanelView(self)
+        message_id = await self.config.request_panel_message_id()
+        if message_id and hasattr(channel, "fetch_message"):
+            with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                message = await channel.fetch_message(int(message_id))
+                await message.edit(embed=embed, view=view)
+                return message
+
+        existing = await self.find_existing_request_panel_message(channel)
+        if existing:
+            await existing.edit(embed=embed, view=view)
+            await self.config.request_panel_message_id.set(existing.id)
+            return existing
+        if not create:
+            return None
+        message = await channel.send(embed=embed, view=view)
+        await self.config.request_panel_message_id.set(message.id)
+        return message
+
+    async def create_event_request(
+        self,
+        interaction: discord.Interaction,
+        *,
+        request_type: str,
+        preferred_type: str,
+        location: str,
+        notes: str,
+    ) -> str:
+        created_at = datetime.now(timezone.utc)
+        user = interaction.user
+        request_id = f"EVT-{created_at:%Y%m%d%H%M%S}-{getattr(user, 'id', 0) % 10000:04d}"
+        record = {
+            "id": request_id,
+            "created_at": config_datetime(created_at),
+            "status": "pending",
+            "discord_user_id": getattr(user, "id", None),
+            "discord_name": str(user),
+            "display_name": getattr(user, "display_name", str(user)),
+            "request_type": request_type,
+            "preferred_type": preferred_type,
+            "location": location,
+            "notes": notes,
+        }
+        async with self.config.event_requests() as requests:
+            requests.append(record)
+        await self._log_event_request(interaction.guild, record)
+        return request_id
+
+    async def _request_log_channel(self, guild: Optional[discord.Guild]):
+        channel_id = await self.config.request_log_channel_id()
+        if not channel_id:
+            channel_id = await self.config.log_channel_id()
+        if not channel_id:
+            return None
+        if guild:
+            return guild.get_channel(int(channel_id)) or self.bot.get_channel(int(channel_id))
+        return self.bot.get_channel(int(channel_id))
+
+    async def _log_event_request(self, guild: Optional[discord.Guild], record: Dict[str, Any]):
+        channel = await self._request_log_channel(guild)
+        if not channel:
+            return
+        embed = discord.Embed(
+            title="New EventManager request",
+            color=discord.Color.blurple(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        user_id = record.get("discord_user_id")
+        requested_by = f"<@{user_id}>" if user_id else record.get("display_name") or "Unknown"
+        embed.add_field(name="Reference", value=str(record.get("id")), inline=True)
+        embed.add_field(name="Requested by", value=requested_by, inline=True)
+        embed.add_field(name="Request type", value=truncate_discord_text(record.get("request_type") or "Not specified", 1024), inline=False)
+        embed.add_field(name="Preferred type", value=truncate_discord_text(record.get("preferred_type") or "No preference", 1024), inline=False)
+        embed.add_field(name="Location", value=truncate_discord_text(record.get("location") or "No preference", 1024), inline=False)
+        if record.get("notes"):
+            embed.add_field(name="Notes", value=truncate_discord_text(record["notes"], 1024), inline=False)
+        await channel.send(embed=embed)
+
+    async def _log_run(
+        self,
+        kind: str,
+        profile_name: str,
+        status: Optional[int],
+        *,
+        details: Optional[Dict[str, Any]] = None,
+    ):
         channel_id = await self.config.log_channel_id()
         if not channel_id:
             return
@@ -1936,12 +2312,28 @@ class EventManager(commands.Cog):
         embed.add_field(name="Type", value=EVENT_KINDS[kind]["label"], inline=True)
         embed.add_field(name="Profile", value=profile_name, inline=True)
         embed.add_field(name="HTTP Status", value=str(status), inline=True)
+        details = details or {}
+        button_text = details.get("button_text")
+        if button_text:
+            embed.add_field(name="Button", value=truncate_discord_text(str(button_text), 1024), inline=False)
+        location = details.get("address") or "Unknown"
+        latitude = details.get("latitude")
+        longitude = details.get("longitude")
+        if latitude and longitude:
+            location = f"{location}\n`{latitude}, {longitude}`"
+        embed.add_field(name="Location", value=truncate_discord_text(str(location), 1024), inline=False)
+        uses_coins = details.get("uses_coins")
+        if uses_coins is not None:
+            embed.add_field(name="Used Coins", value="Yes" if uses_coins else "No", inline=True)
         await channel.send(embed=embed)
 
     async def _run_due_schedules(self):
         schedules = await self.config.schedules()
         last_runs = await self.config.last_runs()
-        changed = False
+        retry_after = await self.config.schedule_retry_after()
+        schedule_changed = False
+        last_runs_changed = False
+        retry_changed = False
 
         for kind, schedule in schedules.items():
             if not schedule.get("enabled"):
@@ -1966,17 +2358,33 @@ class EventManager(commands.Cog):
             if last_runs.get(kind) == run_key:
                 continue
 
+            retry_at = parse_config_datetime(retry_after.get(kind))
+            if retry_at and retry_at > datetime.now(timezone.utc):
+                continue
+
             result = await self._start_from_profile(kind, profile_name)
             if result.ok:
                 last_runs[kind] = run_key
                 schedule["profile"] = profile_name
                 schedule["rotation_index"] = next_rotation_index
-                changed = True
+                retry_after.pop(kind, None)
+                last_runs_changed = True
+                schedule_changed = True
+                retry_changed = True
             else:
+                next_retry = result.details.get("next_eligible_at") if result.details else None
+                if not isinstance(next_retry, datetime) or next_retry <= datetime.now(timezone.utc):
+                    next_retry = datetime.now(timezone.utc) + timedelta(seconds=SCHEDULE_RETRY_SECONDS)
+                retry_after[kind] = config_datetime(next_retry)
+                retry_changed = True
                 log.warning("Scheduled %s failed: %s", kind, result.reason)
 
-        if changed:
+        if last_runs_changed:
             await self.config.last_runs.set(last_runs)
+        if schedule_changed:
+            await self.config.schedules.set(schedules)
+        if retry_changed:
+            await self.config.schedule_retry_after.set(retry_after)
 
     @commands.group(name="eventmanager", aliases=["eventmgr"], invoke_without_command=True)
     @commands.admin()
@@ -2447,14 +2855,23 @@ class EventManager(commands.Cog):
     async def schedule(self, ctx: commands.Context):
         """Manage automatic schedules."""
         schedules = await self.config.schedules()
+        last_runs = await self.config.last_runs()
+        retry_after = await self.config.schedule_retry_after()
         lines = []
         for kind, schedule in schedules.items():
             profiles = schedule.get("profiles") or [schedule.get("profile")]
             profiles = [profile for profile in profiles if profile]
+            timezone_name = schedule.get("timezone") or DEFAULT_TIMEZONE
+            now = datetime.now(ZoneInfo(timezone_name))
+            next_attempt = next_schedule_attempt_time(kind, schedule, last_runs, retry_after, now)
+            next_attempt_text = next_attempt.isoformat() if next_attempt else "not scheduled"
+            retry_at = parse_config_datetime(retry_after.get(kind))
+            retry_text = retry_at.isoformat() if retry_at else "none"
             lines.append(
                 f"{kind}: enabled={schedule.get('enabled')} profiles={profiles or 'none'} "
                 f"time={schedule.get('time')} timezone={schedule.get('timezone')} "
-                f"weekday={schedule.get('weekday')} rotation_index={schedule.get('rotation_index', 0)}"
+                f"weekday={schedule.get('weekday')} rotation_index={schedule.get('rotation_index', 0)} "
+                f"last_run={last_runs.get(kind, 'none')} retry_after={retry_text} next_attempt={next_attempt_text}"
             )
         await ctx.send(box("\n".join(lines), lang="ini"))
 
@@ -2517,6 +2934,65 @@ class EventManager(commands.Cog):
             return
         async with self.config.schedules() as schedules:
             schedules[kind]["enabled"] = False
+        await ctx.tick()
+
+    @schedule.command(name="clearretry")
+    @commands.admin()
+    async def schedule_clear_retry(self, ctx: commands.Context, kind: str):
+        """Clear a stored cooldown retry for one automatic schedule."""
+        try:
+            kind = normalize_kind(kind)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+        async with self.config.schedule_retry_after() as retry_after:
+            retry_after.pop(kind, None)
+        await ctx.tick()
+
+    @eventmanager.group(name="request", invoke_without_command=True)
+    @commands.admin()
+    async def request(self, ctx: commands.Context):
+        """Manage member EventManager requests."""
+        requests = await self.config.event_requests()
+        pending = [item for item in requests if item.get("status") == "pending"]
+        if not pending:
+            await ctx.send("No pending EventManager requests.")
+            return
+        lines = []
+        for item in pending[-15:]:
+            lines.append(
+                "{id}: {display_name} | {request_type} | {preferred_type} | {location}".format(
+                    id=item.get("id", "unknown"),
+                    display_name=item.get("display_name") or item.get("discord_name") or "Unknown",
+                    request_type=item.get("request_type") or "not specified",
+                    preferred_type=item.get("preferred_type") or "no preference",
+                    location=item.get("location") or "no preference",
+                )
+            )
+        await ctx.send(box("\n".join(lines), lang="ini"))
+
+    @request.command(name="panel")
+    @commands.admin()
+    async def request_panel(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
+        """Post or refresh the member EventManager request panel."""
+        if channel is not None:
+            await self.config.request_panel_channel_id.set(channel.id)
+            await self.config.request_panel_message_id.set(None)
+        message = await self.ensure_request_panel_message(ctx.guild, create=True)
+        if message:
+            await ctx.send(f"EventManager request panel ready in {message.channel.mention}: {message.jump_url}")
+        else:
+            await ctx.send("Could not post the EventManager request panel. Check the configured channel and bot permissions.")
+
+    @request.command(name="logchannel")
+    @commands.admin()
+    async def request_logchannel(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
+        """Set or clear the EventManager request notification channel."""
+        if channel is None:
+            await self.config.request_log_channel_id.set(None)
+            await ctx.send("EventManager request log channel cleared.")
+            return
+        await self.config.request_log_channel_id.set(channel.id)
         await ctx.tick()
 
     @eventmanager.command(name="logchannel")
