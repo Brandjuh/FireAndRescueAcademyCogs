@@ -2911,7 +2911,7 @@ class EventManager(commands.Cog):
         self,
         ctx: commands.Context,
         daily_time: str = "07:00",
-        weekly_day: str = "monday",
+        weekly_day: str = "saturday",
         weekly_time: str = "07:00",
     ):
         """Create the fixed location rotation for daily missions and weekly events."""
