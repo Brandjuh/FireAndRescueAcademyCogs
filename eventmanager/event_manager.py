@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import logging
+import random
 import re
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -503,6 +504,8 @@ EVENT_DEFAULT_OVERRIDES = {
     AMOUNT_FIELD: "0",
 }
 RANDOM_LOCATION_KEY = "random_location"
+RANDOM_TYPE_KEY = "random_type"
+EVENT_ROUTE_PROFILE_PREFIX = "route_"
 RANDOM_LOCATION_ANCHORS = {
     "nyc": [
         (40.7295, -73.9972, "70 Washington Square South, 10012 New York, Manhattan"),
@@ -530,6 +533,70 @@ CUSTOM_LOCATION_LABELS = {
     "bermuda": "Fixed Bermuda",
     "nyc_or_bermuda": "Fixed New York City",
 }
+EVENT_ROUTE_LOCATIONS = [
+    {
+        "label": "New York City",
+        "latitude": "40.712800",
+        "longitude": "-74.006000",
+        "address": "New York City, NY, USA",
+    },
+    {
+        "label": "Portland, OR",
+        "latitude": "45.515200",
+        "longitude": "-122.678400",
+        "address": "Portland, OR, USA",
+    },
+    {
+        "label": "Los Angeles",
+        "latitude": "34.052200",
+        "longitude": "-118.243700",
+        "address": "Los Angeles, CA, USA",
+    },
+    {
+        "label": "Houma, Louisiana",
+        "input_note": "User request said Houba, Louisiana; configured as Houma, Louisiana.",
+        "latitude": "29.587614",
+        "longitude": "-90.716108",
+        "address": "Houma, LA, USA",
+    },
+    {
+        "label": "San Francisco",
+        "latitude": "37.774900",
+        "longitude": "-122.419400",
+        "address": "San Francisco, CA, USA",
+    },
+    {
+        "label": "Sacramento",
+        "latitude": "38.581600",
+        "longitude": "-121.494400",
+        "address": "Sacramento, CA, USA",
+    },
+    {
+        "label": "Bermuda Islands",
+        "latitude": "32.294800",
+        "longitude": "-64.781400",
+        "address": "Hamilton, Bermuda",
+    },
+    {
+        "label": "Glasgow, UK",
+        "input_note": "User request said Glowglow UK; configured as Glasgow, UK.",
+        "latitude": "55.864200",
+        "longitude": "-4.251800",
+        "address": "Glasgow, Scotland, UK",
+    },
+    {
+        "label": "Kobenhavn, Denmark",
+        "latitude": "55.676100",
+        "longitude": "12.568300",
+        "address": "Copenhagen, Denmark",
+    },
+    {
+        "label": "Beersheba, Israel",
+        "latitude": "31.252973",
+        "longitude": "34.791462",
+        "address": "Beersheba, Israel",
+    },
+]
 
 
 def normalize_kind(kind: str) -> str:
@@ -652,6 +719,48 @@ def fields_for_selection(
         profile["fields"][LONGITUDE_FIELD] = longitude
         profile["fields"][ADDRESS_FIELD] = address or "Custom EventManager location"
     return profile
+
+
+def route_profile_name(location: Dict[str, str]) -> str:
+    """Return a stable profile name for a configured route location."""
+    return profile_name_from_label(location.get("label", "location"), prefix=EVENT_ROUTE_PROFILE_PREFIX)
+
+
+def route_profile_for_location(kind: str, location: Dict[str, str]) -> dict:
+    """Build a saved profile that keeps location fixed and chooses MissionChief type at runtime."""
+    kind = normalize_kind(kind)
+    fields = {
+        LATITUDE_FIELD: str(location["latitude"]),
+        LONGITUDE_FIELD: str(location["longitude"]),
+        ADDRESS_FIELD: str(location["address"]),
+    }
+    if kind == "event":
+        fields.update(EVENT_DEFAULT_OVERRIDES)
+    return {
+        RANDOM_TYPE_KEY: True,
+        "location_label": str(location["label"]),
+        "fields": fields,
+    }
+
+
+def route_profile_names() -> List[str]:
+    """Return route profile names in the exact rotation order."""
+    return [route_profile_name(location) for location in EVENT_ROUTE_LOCATIONS]
+
+
+def profile_with_selected_type(kind: str, profile: dict, option: FormOption) -> dict:
+    """Return a copy of a profile with a concrete live MissionChief option selected."""
+    kind = normalize_kind(kind)
+    selected = dict(profile)
+    fields = dict(selected.get("fields", {}))
+    fields[MISSION_TYPE_FIELD] = option.value
+    if kind == "event":
+        fields[EVENT_RADIO_FIELD] = option.value
+        fields.update(EVENT_DEFAULT_OVERRIDES)
+    selected["fields"] = fields
+    selected.pop(RANDOM_TYPE_KEY, None)
+    selected["selected_type_label"] = option.label
+    return selected
 
 
 def parse_event_form(html: str, page_url: str) -> EventForm:
@@ -1863,6 +1972,17 @@ class EventManager(commands.Cog):
             playwright_cookies.append({"name": str(name), "value": str(value), "url": BASE_URL})
         return playwright_cookies
 
+    async def _resolve_profile_runtime_options(self, kind: str, profile: dict) -> dict:
+        """Resolve runtime markers like random MissionChief type before starting."""
+        kind = normalize_kind(kind)
+        if not profile.get(RANDOM_TYPE_KEY):
+            return profile
+        form = await self._fetch_form(kind)
+        options = field_options_for_kind(form, kind)
+        if not options:
+            raise RuntimeError(f"No {EVENT_KINDS[kind]['label']} options were found on the live MissionChief form.")
+        return profile_with_selected_type(kind, profile, random.choice(options))
+
     async def _start_profile_data_browser(
         self,
         kind: str,
@@ -1874,6 +1994,7 @@ class EventManager(commands.Cog):
         """Start a MissionChief item by driving the live map/form in a headless browser."""
         kind = normalize_kind(kind)
         try:
+            profile = await self._resolve_profile_runtime_options(kind, profile)
             config = build_browser_start_config(kind, profile, label=profile_name, allow_coins=allow_coins)
         except Exception as exc:
             return EventStartResult(False, str(exc))
@@ -1976,8 +2097,9 @@ class EventManager(commands.Cog):
     async def _start_profile_data_http(self, kind: str, profile_name: str, profile: dict) -> EventStartResult:
         kind = normalize_kind(kind)
         async with self._start_lock:
-            start_fields = profile_fields_for_start(profile)
             try:
+                profile = await self._resolve_profile_runtime_options(kind, profile)
+                start_fields = profile_fields_for_start(profile)
                 form = await self._fetch_form(kind, start_fields)
             except Exception as exc:
                 return EventStartResult(False, f"Could not fetch form: {exc}")
@@ -2783,6 +2905,72 @@ class EventManager(commands.Cog):
             + box(", ".join(created), lang="ini")
         )
 
+    @profile.command(name="seedrouteschedule")
+    @commands.admin()
+    async def profile_seed_route_schedule(
+        self,
+        ctx: commands.Context,
+        daily_time: str = "07:00",
+        weekly_day: str = "saturday",
+        weekly_time: str = "07:00",
+    ):
+        """Create the fixed location rotation for daily missions and weekly events."""
+        weekly_day = weekly_day.strip().lower()
+        try:
+            valid_time(daily_time)
+            valid_time(weekly_time)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+        if weekly_day not in WEEKDAYS:
+            await ctx.send(f"Weekday must be one of: {', '.join(WEEKDAYS)}")
+            return
+
+        profile_names = route_profile_names()
+        async with self.config.profiles() as profiles:
+            for kind in ("large", "event"):
+                kind_profiles = profiles.setdefault(kind, {})
+                for location in EVENT_ROUTE_LOCATIONS:
+                    kind_profiles[route_profile_name(location)] = route_profile_for_location(kind, location)
+
+        async with self.config.schedules() as schedules:
+            schedules["large"].update(
+                enabled=True,
+                profile=profile_names[0],
+                profiles=profile_names,
+                rotation_index=0,
+                time=daily_time,
+                timezone=DEFAULT_TIMEZONE,
+                weekday=None,
+            )
+            schedules["event"].update(
+                enabled=True,
+                profile=profile_names[0],
+                profiles=profile_names,
+                rotation_index=0,
+                time=weekly_time,
+                timezone=DEFAULT_TIMEZONE,
+                weekday=weekly_day,
+            )
+        async with self.config.schedule_retry_after() as retry_after:
+            retry_after.pop("large", None)
+            retry_after.pop("event", None)
+
+        notes = [location["input_note"] for location in EVENT_ROUTE_LOCATIONS if location.get("input_note")]
+        lines = [
+            "Created route profiles for both large missions and alliance events.",
+            f"Large scale mission schedule: daily at {daily_time} {DEFAULT_TIMEZONE}.",
+            f"Alliance event schedule: {weekly_day} at {weekly_time} {DEFAULT_TIMEZONE}.",
+            "Alliance event defaults: Large area, Circle, Every 30 seconds.",
+            "MissionChief type: random live option at start time.",
+            "",
+            "Rotation order:",
+            ", ".join(profile_names),
+        ]
+        if notes:
+            lines.extend(["", "Location notes:", *notes])
+        await ctx.send(box("\n".join(lines), lang="ini"))
+
     @profile.command(name="remove")
     @commands.admin()
     async def profile_remove(self, ctx: commands.Context, kind: str, profile_name: str, field_name: str):
@@ -2835,6 +3023,10 @@ class EventManager(commands.Cog):
         lines = [f"{kind}/{profile_name.strip().lower()}"]
         if profile.get(RANDOM_LOCATION_KEY):
             lines.append(f"{RANDOM_LOCATION_KEY} = {profile[RANDOM_LOCATION_KEY]}")
+        if profile.get(RANDOM_TYPE_KEY):
+            lines.append(f"{RANDOM_TYPE_KEY} = true")
+        if profile.get("location_label"):
+            lines.append(f"location_label = {profile['location_label']}")
         for field_name, value in sorted(profile.get("fields", {}).items()):
             lines.append(f"{field_name} = {value}")
         await ctx.send(box("\n".join(lines), lang="ini"))
