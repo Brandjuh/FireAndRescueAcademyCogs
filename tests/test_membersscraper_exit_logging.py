@@ -80,6 +80,43 @@ class MembersScraperExitLoggingTests(unittest.TestCase):
             ],
         )
 
+    def test_exit_notification_embed_does_not_include_rank_field(self):
+        class FakeConfig:
+            async def exit_log_channel_id(self):
+                return 123
+
+        class FakeChannel:
+            name = "exit-log"
+
+            def __init__(self):
+                self.embeds = []
+
+            async def send(self, *, embed):
+                self.embeds.append(embed)
+
+        channel = FakeChannel()
+        self.scraper.config = FakeConfig()
+        self.scraper.bot = type(
+            "FakeBot",
+            (),
+            {"get_channel": staticmethod(lambda channel_id: channel if channel_id == 123 else None)},
+        )()
+
+        exit_data = {
+            "member_id": 42,
+            "username": "Departed Member",
+            "rank": "Edit Admin rights Kick Set as Admin",
+            "earned_credits": 12345,
+            "contribution_rate": 5.0,
+        }
+
+        asyncio.run(self.scraper._send_exit_notifications([exit_data]))
+
+        self.assertEqual(len(channel.embeds), 1)
+        field_names = [field["name"] for field in channel.embeds[0].fields]
+        self.assertEqual(field_names, ["Name", "MC ID", "Last Credits", "Contribution Rate"])
+        self.assertNotIn("Rank", field_names)
+
 
 if __name__ == "__main__":
     unittest.main()
