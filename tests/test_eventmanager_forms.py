@@ -1,4 +1,6 @@
 import unittest
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from eventmanager.event_manager import (
     BROWSER_CLICK_START_SCRIPT,
@@ -11,7 +13,10 @@ from eventmanager.event_manager import (
     normalize_kind,
     normalize_optional_profile_arg,
     normalize_random_location_region,
+    next_free_start_from_text,
+    next_schedule_attempt_time,
     parse_event_form,
+    parse_last_free_mission_time,
     parse_location_or_random_region,
     parse_location_value,
     parse_profile_names,
@@ -20,6 +25,7 @@ from eventmanager.event_manager import (
     random_location_for_region,
     safe_debug_mapping,
     safe_debug_payload,
+    schedule_run_key,
     select_scheduled_profile,
     summarize_browser_snapshot,
     summarize_payload_for_debug,
@@ -469,6 +475,50 @@ class EventManagerFormTests(unittest.TestCase):
 
         self.assertEqual(profile, "bravo")
         self.assertEqual(next_index, 0)
+
+    def test_last_free_time_parses_missionchief_cooldown_text(self):
+        parsed = parse_last_free_mission_time("Last free mission: Sat, 20 Jun 2026 14:09:10 -0400")
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.astimezone(timezone.utc).isoformat(), "2026-06-20T18:09:10+00:00")
+
+    def test_next_free_start_includes_grace_period(self):
+        next_free = next_free_start_from_text("event", "Last free mission: Sat, 20 Jun 2026 14:09:10 -0400")
+
+        self.assertIsNotNone(next_free)
+        self.assertEqual(next_free.isoformat(), "2026-06-27T14:10:25-04:00")
+
+    def test_next_weekly_schedule_attempt_retries_same_week_after_cooldown(self):
+        now = datetime(2026, 6, 27, 7, 0, 30, tzinfo=ZoneInfo("America/New_York"))
+        schedule = {
+            "enabled": True,
+            "profiles": ["weekly"],
+            "rotation_index": 0,
+            "time": "07:00",
+            "timezone": "America/New_York",
+            "weekday": "saturday",
+        }
+        retry_after = {"event": "2026-06-27T11:01:15+00:00"}
+
+        next_attempt = next_schedule_attempt_time("event", schedule, {}, retry_after, now)
+
+        self.assertEqual(next_attempt.isoformat(), "2026-06-27T07:01:15-04:00")
+
+    def test_due_weekly_schedule_attempt_is_now_before_run_key_is_written(self):
+        now = datetime(2026, 6, 27, 7, 0, 30, tzinfo=ZoneInfo("America/New_York"))
+        schedule = {
+            "enabled": True,
+            "profiles": ["weekly"],
+            "rotation_index": 0,
+            "time": "07:00",
+            "timezone": "America/New_York",
+            "weekday": "saturday",
+        }
+
+        next_attempt = next_schedule_attempt_time("event", schedule, {}, {}, now)
+
+        self.assertEqual(next_attempt, now)
+        self.assertEqual(schedule_run_key("event", now), "2026-W26")
 
 
 class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
