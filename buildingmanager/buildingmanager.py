@@ -208,13 +208,12 @@ async (config) => {
     });
 
   if (candidates.length < 1) {
-    return fail("No enabled alliance Credits build button was found.");
+    return fail("No enabled alliance build button was found.");
   }
   const selected = candidates[0];
   return {
     ok: true,
     submitIndex: selected.index,
-    buttonText: selected.text,
     snapshot: {
       url: location.href,
       buildingType: fieldValue("building[building_type]"),
@@ -224,7 +223,6 @@ async (config) => {
       address: fieldValue("building[address]"),
       buildAsAlliance: fieldValue("build_as_alliance"),
       buildWithCoins: fieldValue("build_with_coins"),
-      buttonText: selected.text,
     },
   };
 }
@@ -1713,10 +1711,6 @@ class AdminDecisionView(discord.ui.View):
             emb.add_field(name="Auto Creation", value="Created in MissionChief" if create_result.ok else create_result.reason[:900], inline=False)
             if create_result.status is not None:
                 emb.add_field(name="MissionChief HTTP Status", value=str(create_result.status), inline=True)
-            details = create_result.details or {}
-            button_text = details.get("buttonText") or details.get("button_text")
-            if button_text:
-                emb.add_field(name="Button Used", value=str(button_text)[:200], inline=True)
             emb.add_field(name="Request ID", value=str(self.req.request_id), inline=True)
             await log_channel.send(embed=emb)
 
@@ -2082,7 +2076,7 @@ class BuildingManager(commands.Cog):
                             if not clicked:
                                 return BuildingCreateResult(
                                     False,
-                                    "Browser could not click the alliance Credits build button.",
+                                    "Browser could not click the alliance build button.",
                                     details=prepare_result.get("snapshot") or {},
                                 )
                         response = await response_info.value
@@ -2116,14 +2110,12 @@ class BuildingManager(commands.Cog):
                 details=prepare_result.get("snapshot") or {},
             )
 
-        details = prepare_result.get("snapshot") or {}
-        details["buttonText"] = prepare_result.get("buttonText")
         return BuildingCreateResult(
             True,
             "Alliance building created through browser automation.",
             status=status,
             post_url=f"{BASE_URL}/buildings",
-            details=details,
+            details=prepare_result.get("snapshot") or {},
         )
 
     def _request_panel_embed(self, description: Optional[str] = None) -> discord.Embed:
