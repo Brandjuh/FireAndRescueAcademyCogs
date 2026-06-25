@@ -6,6 +6,7 @@ from eventmanager.event_manager import (
     fields_for_selection,
     field_options_for_kind,
     normalize_kind,
+    normalize_optional_profile_arg,
     normalize_random_location_region,
     parse_event_form,
     parse_location_or_random_region,
@@ -412,6 +413,14 @@ class EventManagerFormTests(unittest.TestCase):
             parse_profile_names("daily, storm backup"),
             ["daily", "storm", "backup"],
         )
+
+    def test_normalize_optional_profile_arg_ignores_placeholders(self):
+        self.assertIsNone(normalize_optional_profile_arg(None))
+        self.assertIsNone(normalize_optional_profile_arg(""))
+        self.assertIsNone(normalize_optional_profile_arg("[profile]"))
+        self.assertIsNone(normalize_optional_profile_arg("<profile>"))
+        self.assertIsNone(normalize_optional_profile_arg("profile"))
+        self.assertEqual(normalize_optional_profile_arg(" Storm_Surge "), "storm_surge")
 
     def test_select_scheduled_profile_rotates_profiles(self):
         profile, next_index = select_scheduled_profile(

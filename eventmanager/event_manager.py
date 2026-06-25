@@ -756,6 +756,16 @@ def build_browser_event_start_script(fields: Dict[str, str], *, label: str = "Ev
     return BROWSER_EVENT_START_SCRIPT.replace("__CONFIG__", json.dumps(config, ensure_ascii=False, indent=2))
 
 
+def normalize_optional_profile_arg(value: Optional[str]) -> Optional[str]:
+    """Normalize optional command profile arguments and ignore documented placeholders."""
+    if not value:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"", "profile", "[profile]", "<profile>", "{profile}"}:
+        return None
+    return normalized
+
+
 def summarize_response_for_debug(text: str, *, limit: int = 350) -> str:
     """Summarize a MissionChief error response without leaking form tokens."""
     text = re.sub(r"<script\b[^>]*>.*?</script>", " ", str(text or ""), flags=re.IGNORECASE | re.DOTALL)
@@ -1687,8 +1697,9 @@ class EventManager(commands.Cog):
             return
 
         label = "quick"
-        if profile_name:
-            label = profile_name.strip().lower()
+        normalized_profile = normalize_optional_profile_arg(profile_name)
+        if normalized_profile:
+            label = normalized_profile
             profiles = await self.config.profiles()
             profile = profiles.get("event", {}).get(label)
             if not profile:
@@ -1712,7 +1723,7 @@ class EventManager(commands.Cog):
         data = io.BytesIO(script.encode("utf-8"))
         await ctx.send(
             instructions,
-            file=discord.File(data, filename=f"eventmanager-browser-event-{profile_name or 'quick'}.js"),
+            file=discord.File(data, filename=f"eventmanager-browser-event-{normalized_profile or 'quick'}.js"),
         )
 
     @eventmanager.command(name="panel")
