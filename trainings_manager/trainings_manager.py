@@ -126,6 +126,27 @@ DISCIPLINES: Dict[str, List[Tuple[str, int]]] = {
     ],
 }
 
+BOARD_DISCIPLINE_REQUEST_PREFIXES = {
+    "Fire": "Fire Station",
+    "Coastal": "Water Rescue",
+    "Police": "Police",
+    "EMS": "EMS / Rescue",
+}
+BOARD_DISCIPLINE_SEARCH_PREFIXES = {
+    "Fire": ("fire", "fire station", "fire academy", "fire school"),
+    "Coastal": ("water rescue", "coastal", "coastal rescue"),
+    "Police": ("police", "police academy"),
+    "EMS": ("ems", "rescue", "rescue academy"),
+}
+BOARD_AMBIGUOUS_HELP_SKIP_TOKENS = {
+    "academy",
+    "course",
+    "license",
+    "management",
+    "operations",
+    "training",
+}
+
 FEE_CHOICES = [0, 100, 200, 300, 400, 500]
 MEMBER_PANEL_CHANNEL_ID = 1421627971831070730
 DEVELOPER_PANEL_CHANNEL_ID = 1421242306136113254
@@ -226,6 +247,7 @@ class TrainingCatalogEntry:
     training: str
     days: int
     normalized: str
+    aliases: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -257,6 +279,66 @@ def _normalize_training_search_text(value: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _ambiguous_board_training_names() -> Dict[str, List[Tuple[str, str, int]]]:
+    grouped: Dict[str, List[Tuple[str, str, int]]] = {}
+    for discipline, trainings in DISCIPLINES.items():
+        if discipline == "OTHER":
+            continue
+        for training, days in trainings:
+            grouped.setdefault(_normalize_training_search_text(training), []).append(
+                (discipline, training, int(days))
+            )
+    return {
+        normalized: entries
+        for normalized, entries in grouped.items()
+        if len({discipline for discipline, _training, _days in entries}) > 1
+    }
+
+
+def _is_ambiguous_board_training(discipline: str, training: str) -> bool:
+    normalized = _normalize_training_search_text(training)
+    return any(
+        entry_discipline == discipline and entry_training == training
+        for entry_discipline, entry_training, _days in _ambiguous_board_training_names().get(normalized, [])
+    )
+
+
+def _board_training_request_label(discipline: str, training: str) -> str:
+    if not _is_ambiguous_board_training(discipline, training):
+        return training
+    prefix = BOARD_DISCIPLINE_REQUEST_PREFIXES.get(discipline, discipline)
+    return f"{prefix} - {training}"
+
+
+def _board_training_aliases(discipline: str, training: str) -> Tuple[str, ...]:
+    if not _is_ambiguous_board_training(discipline, training):
+        return ()
+
+    aliases = {
+        _normalize_training_search_text(_board_training_request_label(discipline, training)),
+    }
+    for prefix in BOARD_DISCIPLINE_SEARCH_PREFIXES.get(discipline, (discipline,)):
+        aliases.add(_normalize_training_search_text(f"{prefix} {training}"))
+    return tuple(sorted(alias for alias in aliases if alias))
+
+
+def _mentions_board_discipline_prefix(normalized_text: str, discipline: str) -> bool:
+    for prefix in BOARD_DISCIPLINE_SEARCH_PREFIXES.get(discipline, (discipline,)):
+        normalized_prefix = _normalize_training_search_text(prefix)
+        if normalized_prefix and re.search(rf"\b{re.escape(normalized_prefix)}\b", normalized_text):
+            return True
+    return False
+
+
+def _has_board_training_specific_tokens(normalized_text: str, training: str) -> bool:
+    tokens = [
+        token
+        for token in _normalize_training_search_text(training).split()
+        if len(token) >= 4 and token not in BOARD_AMBIGUOUS_HELP_SKIP_TOKENS
+    ]
+    return all(re.search(rf"\b{re.escape(token)}\b", normalized_text) for token in tokens)
+
+
 def _training_catalog() -> List[TrainingCatalogEntry]:
     entries: List[TrainingCatalogEntry] = []
     seen: set[Tuple[str, str]] = set()
@@ -274,6 +356,7 @@ def _training_catalog() -> List[TrainingCatalogEntry]:
                     training=training,
                     days=int(days),
                     normalized=_normalize_training_search_text(training),
+                    aliases=_board_training_aliases(discipline, training),
                 )
             )
     return entries
@@ -288,16 +371,28 @@ def extract_board_training_matches(text: str) -> List[BoardTrainingMatch]:
     matches: List[BoardTrainingMatch] = []
     seen_trainings: set[Tuple[str, str]] = set()
     catalog = _training_catalog()
+    ambiguous_names = set(_ambiguous_board_training_names())
 
     for entry in catalog:
-        if entry.normalized and re.search(rf"\b{re.escape(entry.normalized)}\b", normalized_text):
+        exact_candidates = list(entry.aliases)
+        if entry.normalized not in ambiguous_names:
+            exact_candidates.append(entry.normalized)
+        matched_candidate = next(
+            (
+                candidate
+                for candidate in exact_candidates
+                if candidate and re.search(rf"\b{re.escape(candidate)}\b", normalized_text)
+            ),
+            None,
+        )
+        if matched_candidate:
             seen_trainings.add((entry.discipline, entry.training))
             matches.append(
                 BoardTrainingMatch(
                     discipline=entry.discipline,
                     training=entry.training,
                     days=entry.days,
-                    matched_text=entry.training,
+                    matched_text=matched_candidate,
                     score=1.0,
                 )
             )
@@ -313,10 +408,19 @@ def extract_board_training_matches(text: str) -> List[BoardTrainingMatch]:
             key = (entry.discipline, entry.training)
             if key in seen_trainings:
                 continue
-            if not entry.normalized:
+            if entry.normalized in ambiguous_names:
+                if not _mentions_board_discipline_prefix(chunk, entry.discipline):
+                    continue
+                if not _has_board_training_specific_tokens(chunk, entry.training):
+                    continue
+            candidates = list(entry.aliases)
+            if entry.normalized not in ambiguous_names:
+                candidates.append(entry.normalized)
+            candidates = [candidate for candidate in candidates if candidate]
+            if not candidates:
                 continue
-            score = SequenceMatcher(None, chunk, entry.normalized).ratio()
-            if entry.normalized in chunk:
+            score = max(SequenceMatcher(None, chunk, candidate).ratio() for candidate in candidates)
+            if any(candidate in chunk for candidate in candidates):
                 score = max(score, 0.88)
             if score > best[0]:
                 best = (score, entry)
@@ -335,6 +439,40 @@ def extract_board_training_matches(text: str) -> List[BoardTrainingMatch]:
             )
 
     return matches
+
+
+def describe_ambiguous_board_training_request(text: str) -> Optional[str]:
+    normalized_text = _normalize_training_search_text(text)
+    if not normalized_text:
+        return None
+
+    exact_descriptions: List[str] = []
+    token_descriptions: List[str] = []
+    for normalized, entries in _ambiguous_board_training_names().items():
+        significant_tokens = [
+            token
+            for token in normalized.split()
+            if len(token) >= 5 and token not in BOARD_AMBIGUOUS_HELP_SKIP_TOKENS
+        ]
+        exact_match = normalized in normalized_text
+        token_match = any(token in normalized_text for token in significant_tokens)
+        if not exact_match and not token_match:
+            continue
+
+        options = ", ".join(
+            _board_training_request_label(discipline, training)
+            for discipline, training, _days in entries
+        )
+        description = f"{entries[0][1]} exists in multiple academy types. Use one of: {options}."
+        if exact_match:
+            exact_descriptions.append(description)
+        else:
+            token_descriptions.append(description)
+
+    descriptions = exact_descriptions or token_descriptions
+    if not descriptions:
+        return None
+    return " ".join(descriptions[:3])
 
 
 class TrainingBoardPageParser(HTMLParser):
@@ -2582,9 +2720,12 @@ class TrainingManager(commands.Cog):
                     [],
                     f"No known training name found in board post `{post.post_id}`.",
                 )
+            reason = describe_ambiguous_board_training_request(post.content) or (
+                "No known training name was found. Please use one of the training names listed in the guide posts."
+            )
             reply = self._build_training_board_error_reply(
                 post,
-                "No known training name was found. Please use one of the training names listed in the guide posts.",
+                reason,
             )
             _status, reply_post_id = await self._post_training_board_reply_with_id(session, thread_id, page, reply)
             await self._schedule_board_post_deletion(guild, thread_id, post.post_id, "unrecognized request")
@@ -2936,6 +3077,8 @@ class TrainingManager(commands.Cog):
             "- Type one or more training names from the list below.",
             "- You can request multiple classes in one post, one per line or separated by commas.",
             "- Small typos are supported, but the exact names below work best.",
+            "- Some trainings exist in more than one academy type. For those, use the prefixed text shown in the agency guide.",
+            "- Example: use Fire Station - Lifeguard Training or Water Rescue - Lifeguard Training, not only Lifeguard Training.",
             "- Board requests are opened as free alliance classes.",
             "- The bot opens 1 class for each recognized training.",
             "- If current data shows your alliance donation is below 5%, the class will not be opened automatically.",
@@ -2958,7 +3101,8 @@ class TrainingManager(commands.Cog):
                 "[b]Examples[/b]",
                 "HazMat",
                 "Hotshot Crew Training, K-9",
-                "Coastal Air Rescue Operations",
+                "Fire Station - Lifeguard Training",
+                "Water Rescue - Lifeguard Training",
             ]
         )
 
@@ -2977,7 +3121,11 @@ class TrainingManager(commands.Cog):
             ]
             for training, days in trainings:
                 day_label = "day" if int(days) == 1 else "days"
-                lines.append(f"- {training} ({int(days)} {day_label})")
+                request_label = _board_training_request_label(discipline, training)
+                if request_label == training:
+                    lines.append(f"- {training} ({int(days)} {day_label})")
+                else:
+                    lines.append(f"- {request_label} ({int(days)} {day_label}) - opens {training}")
             contents[discipline] = "\n".join(lines)
         return contents
 

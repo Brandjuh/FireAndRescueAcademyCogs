@@ -17,6 +17,7 @@ from trainings_manager.trainings_manager import (
     TrainingManager,
     TrainingRequest,
     DisciplineAvailability,
+    describe_ambiguous_board_training_request,
     extract_board_training_matches,
     infer_academy_discipline,
     parse_academy_page,
@@ -399,6 +400,29 @@ def test_extract_board_training_matches_handles_typos_and_multiple_requests():
     }
 
 
+def test_board_lifeguard_training_requires_explicit_academy_type():
+    assert extract_board_training_matches("Lifeguard Training") == []
+
+    fire_matches = extract_board_training_matches("Fire Station - Lifeguard Training")
+    coastal_matches = extract_board_training_matches("Water Rescue - Lifeguard Training")
+
+    assert [(match.discipline, match.training) for match in fire_matches] == [
+        ("Fire", "Lifeguard Training")
+    ]
+    assert [(match.discipline, match.training) for match in coastal_matches] == [
+        ("Coastal", "Lifeguard Training")
+    ]
+
+
+def test_ambiguous_board_training_request_explains_lifeguard_options():
+    explanation = describe_ambiguous_board_training_request("Lifeguard Training")
+
+    assert explanation is not None
+    assert "Lifeguard Training exists in multiple academy types" in explanation
+    assert "Fire Station - Lifeguard Training" in explanation
+    assert "Water Rescue - Lifeguard Training" in explanation
+
+
 def test_parse_missionchief_forms_extracts_thread_form_fields():
     forms = parse_missionchief_forms(NEW_THREAD_FORM_HTML)
 
@@ -430,6 +454,8 @@ def test_build_board_guide_content_lists_availability_and_training_names():
     assert "- Fire: 3 classes" in content
     assert "- Police: 2 classes" in content
     assert "[b]Fire training request text[/b]" in content
+    assert "Fire Station - Lifeguard Training" in content
+    assert "Water Rescue - Lifeguard Training" in content
     assert "Hotshot Crew Training" in content
     assert "Small typos are supported" in content
     assert "Fire & Rescue Academy bot" not in content
