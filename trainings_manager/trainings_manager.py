@@ -2090,6 +2090,7 @@ class TrainingManager(commands.Cog):
             "board_guide_content_hashes": {},
         }
         self.config.register_guild(**default_guild)
+        self.config.register_global(board_thread_states={})
 
         self.bot.add_view(StartView(self))
         self.bot.add_view(DeveloperTrainingPanelView(self))
@@ -2577,10 +2578,15 @@ class TrainingManager(commands.Cog):
         await self.bot.wait_until_red_ready()
         while True:
             try:
+                poll_targets: Dict[int, Tuple[discord.Guild, dict]] = {}
                 for guild in self.bot.guilds:
                     conf = await self.config.guild(guild).all()
                     if not conf.get("board_poll_enabled"):
                         continue
+                    thread_id = int(conf.get("board_thread_id") or BOARD_THREAD_ID)
+                    poll_targets.setdefault(thread_id, (guild, conf))
+
+                for guild, conf in poll_targets.values():
                     async with self._bot_status(f"checking training board in {guild.name}", priority=55):
                         await self._poll_training_board_for_guild(guild, conf)
             except asyncio.CancelledError:
@@ -2606,8 +2612,10 @@ class TrainingManager(commands.Cog):
             return
 
         latest_post_id = max(post.post_id for post in page.posts)
-        last_seen_raw = conf.get("board_last_seen_post_id")
+        thread_state = await self._get_board_thread_state(thread_id)
+        last_seen_raw = thread_state.get("last_seen_post_id") or conf.get("board_last_seen_post_id")
         if not last_seen_raw:
+            await self._set_board_thread_last_seen(thread_id, latest_post_id)
             await self.config.guild(guild).board_last_seen_post_id.set(latest_post_id)
             log.info("Training board baseline set to post %s for guild %s", latest_post_id, guild.id)
             return
@@ -2616,10 +2624,15 @@ class TrainingManager(commands.Cog):
             last_seen = int(last_seen_raw)
         except (TypeError, ValueError):
             last_seen = latest_post_id
+            await self._set_board_thread_last_seen(thread_id, latest_post_id)
             await self.config.guild(guild).board_last_seen_post_id.set(latest_post_id)
             return
 
-        processed_post_ids = self._normalize_board_post_ids(conf.get("board_processed_post_ids") or [])
+        guild_processed_post_ids = self._normalize_board_post_ids(conf.get("board_processed_post_ids") or [])
+        processed_post_ids = self._normalize_board_post_ids(thread_state.get("processed_post_ids") or [])
+        if guild_processed_post_ids:
+            await self._merge_board_thread_processed_ids(thread_id, guild_processed_post_ids)
+            processed_post_ids = list(dict.fromkeys([*processed_post_ids, *guild_processed_post_ids]))
         new_posts = [
             post
             for post in sorted(page.posts, key=lambda item: item.post_id)
@@ -2629,7 +2642,7 @@ class TrainingManager(commands.Cog):
             and not self._is_board_system_post(post)
         ]
         for post in new_posts:
-            if not await self._mark_board_post_processing(guild, post.post_id):
+            if not await self._mark_board_post_processing(thread_id, post.post_id):
                 continue
             try:
                 await self._handle_training_board_post(guild, session, thread_id, page, post)
@@ -2657,6 +2670,7 @@ class TrainingManager(commands.Cog):
                     )
 
         if latest_post_id > last_seen:
+            await self._set_board_thread_last_seen(thread_id, latest_post_id)
             await self.config.guild(guild).board_last_seen_post_id.set(latest_post_id)
 
     async def _fetch_training_board_latest_page(self, session, thread_id: int) -> Tuple[BoardPage, Optional[int]]:
@@ -2685,16 +2699,41 @@ class TrainingManager(commands.Cog):
                 continue
         return post_ids
 
-    async def _mark_board_post_processing(self, guild: discord.Guild, post_id: int) -> bool:
+    async def _get_board_thread_state(self, thread_id: int) -> dict:
+        states = await self.config.board_thread_states()
+        return dict((states or {}).get(str(int(thread_id))) or {})
+
+    async def _merge_board_thread_processed_ids(self, thread_id: int, post_ids: List[int]) -> None:
+        if not post_ids:
+            return
+        key = str(int(thread_id))
+        async with self.config.board_thread_states() as states:
+            state = dict(states.get(key) or {})
+            current = self._normalize_board_post_ids(state.get("processed_post_ids") or [])
+            merged = list(dict.fromkeys([*current, *post_ids]))
+            del merged[:-BOARD_PROCESSED_POST_ID_LIMIT]
+            state["processed_post_ids"] = merged
+            states[key] = state
+
+    async def _set_board_thread_last_seen(self, thread_id: int, post_id: int) -> None:
+        key = str(int(thread_id))
+        async with self.config.board_thread_states() as states:
+            state = dict(states.get(key) or {})
+            state["last_seen_post_id"] = int(post_id)
+            states[key] = state
+
+    async def _mark_board_post_processing(self, thread_id: int, post_id: int) -> bool:
+        key = str(int(thread_id))
         post_id = int(post_id)
-        async with self.config.guild(guild).board_processed_post_ids() as processed:
-            current = self._normalize_board_post_ids(processed)
+        async with self.config.board_thread_states() as states:
+            state = dict(states.get(key) or {})
+            current = self._normalize_board_post_ids(state.get("processed_post_ids") or [])
             if post_id in current:
                 return False
             current.append(post_id)
             del current[:-BOARD_PROCESSED_POST_ID_LIMIT]
-            processed.clear()
-            processed.extend(current)
+            state["processed_post_ids"] = current
+            states[key] = state
         return True
 
     async def _handle_training_board_post(
