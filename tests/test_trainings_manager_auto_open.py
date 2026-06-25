@@ -454,6 +454,27 @@ def test_training_board_guide_posts_are_not_treated_as_requests():
     assert manager._is_board_guide_post(post) is True
 
 
+def test_training_board_bot_replies_are_not_treated_as_requests():
+    manager = TrainingManager.__new__(TrainingManager)
+    marked = BoardTrainingPost(
+        post_id=1,
+        author_id="88649",
+        author_name="BotUser",
+        created_at="June 24, 2026 15:47",
+        content="[TM-REPLY]\nTraining request processed for BoardUser.\n\nOpened:\n- Lifeguard Training: opened 1 class(es)",
+    )
+    legacy = BoardTrainingPost(
+        post_id=2,
+        author_id="88649",
+        author_name="BotUser",
+        created_at="June 24, 2026 15:48",
+        content="Training request processed for BoardUser.\n\nOpened:\n- Lifeguard Training: opened 1 class(es)",
+    )
+
+    assert manager._is_board_system_post(marked) is True
+    assert manager._is_board_system_post(legacy) is True
+
+
 def test_training_board_reply_reports_failed_auto_open_to_board_user():
     manager = TrainingManager.__new__(TrainingManager)
     post = BoardTrainingPost(
@@ -474,6 +495,7 @@ def test_training_board_reply_reports_failed_auto_open_to_board_user():
 
     reply = manager._build_training_board_reply(post, [(match, result)])
 
+    assert reply.startswith("[TM-REPLY]")
     assert "Training request processed for BoardUser." in reply
     assert "Could not open automatically:" in reply
     assert "No free Fire classrooms are available right now" in reply
@@ -492,6 +514,7 @@ def test_training_board_error_reply_explains_unrecognized_request():
 
     reply = manager._build_training_board_error_reply(post, "No known training name was found.")
 
+    assert reply.startswith("[TM-REPLY]")
     assert "Training request could not be processed for BoardUser." in reply
     assert "Reason: No known training name was found." in reply
 

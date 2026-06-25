@@ -144,6 +144,7 @@ BOARD_POLL_SECONDS = 5 * 60
 BOARD_DEFAULT_FEE = 0
 BOARD_MATCH_THRESHOLD = 0.78
 BOARD_GUIDE_MARKER_PREFIX = "TM-GUIDE"
+BOARD_REPLY_MARKER = "[TM-REPLY]"
 BOARD_GUIDE_OVERVIEW_SECTION = "overview"
 BOARD_GUIDE_MAX_SCAN_PAGES = 25
 BOARD_GUIDE_SYNC_SECONDS = AVAILABILITY_REFRESH_SECONDS
@@ -2475,7 +2476,7 @@ class TrainingManager(commands.Cog):
             for post in sorted(page.posts, key=lambda item: item.post_id)
             if post.post_id > last_seen
             and post.author_id != page.current_user_id
-            and not self._is_board_guide_post(post)
+            and not self._is_board_system_post(post)
         ]
         for post in new_posts:
             try:
@@ -2523,7 +2524,7 @@ class TrainingManager(commands.Cog):
         page: BoardPage,
         post: BoardTrainingPost,
     ) -> None:
-        if self._is_board_guide_post(post):
+        if self._is_board_system_post(post):
             return
 
         matches = extract_board_training_matches(post.content)
@@ -2617,7 +2618,10 @@ class TrainingManager(commands.Cog):
             if not result.success
         ]
 
-        lines = [f"Training request processed for {post.author_name}."]
+        lines = [
+            BOARD_REPLY_MARKER,
+            f"Training request processed for {post.author_name}.",
+        ]
         if opened:
             lines.append("")
             lines.append("Opened:")
@@ -2651,6 +2655,7 @@ class TrainingManager(commands.Cog):
     def _build_training_board_error_reply(self, post: BoardTrainingPost, reason: str) -> str:
         return "\n".join(
             [
+                BOARD_REPLY_MARKER,
                 f"Training request could not be processed for {post.author_name}.",
                 "",
                 f"Reason: {reason}",
@@ -2779,6 +2784,20 @@ class TrainingManager(commands.Cog):
 
     def _is_board_guide_post(self, post: BoardTrainingPost) -> bool:
         return self._board_guide_section_from_text(post.content) is not None
+
+    def _is_board_system_post(self, post: BoardTrainingPost) -> bool:
+        text = str(post.content or "").strip()
+        if self._is_board_guide_post(post):
+            return True
+        if BOARD_REPLY_MARKER in text:
+            return True
+        lowered = text.casefold()
+        return (
+            lowered.startswith("training request processed for ")
+            or lowered.startswith("training request could not be processed for ")
+            or "\nopened:\n" in lowered
+            or "\ncould not open automatically:\n" in lowered
+        )
 
     async def _resolve_channel(self, guild: discord.Guild, channel_id: Optional[int]) -> Optional[discord.abc.Messageable]:
         if not channel_id:
