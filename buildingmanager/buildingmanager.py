@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import aiohttp
+import contextlib
 from io import BytesIO
 import logging
 import re
@@ -23,6 +24,10 @@ BASE_URL = "https://www.missionchief.com"
 MISSIONCHIEF_HOME_URL = BASE_URL
 MISSIONCHIEF_NEW_BUILDING_URL = f"{BASE_URL}/buildings/new"
 DEFAULT_REQUEST_PANEL_CHANNEL_ID = 1421627971831070730
+ALLIANCE_BUILDING_TYPE_IDS = {
+    "Hospital": "2",
+    "Prison": "10",
+}
 PLAYWRIGHT_SETUP_MESSAGE = (
     "Playwright browser automation is not ready. Install the BuildingManager requirements and run "
     "`python -m playwright install chromium` in the same Python environment as Redbot."
@@ -105,6 +110,134 @@ BUILDING_DIAGNOSTICS_SCRIPT = r"""
   };
 }
 """.strip()
+BUILDING_CREATE_SCRIPT = r"""
+async (config) => {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const visibleText = (element) => [element?.value, element?.textContent, element?.getAttribute?.("title"), element?.getAttribute?.("aria-label")]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const fieldByName = (name) => document.querySelector(`[name="${window.CSS.escape(name)}"]`);
+  const fieldValue = (name) => fieldByName(name)?.value || "";
+  const dispatch = (field) => {
+    if (!field) return;
+    for (const eventName of ["input", "change"]) {
+      field.dispatchEvent(new Event(eventName, { bubbles: true }));
+    }
+  };
+  const isVisible = (element) => {
+    if (!element) return false;
+    const style = window.getComputedStyle(element);
+    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+  const setField = (name, value) => {
+    const field = fieldByName(name);
+    if (!field) return false;
+    field.value = String(value);
+    dispatch(field);
+    return true;
+  };
+  const buttonDiagnostics = () => [...document.querySelectorAll('input[type="submit"], button[type="submit"], button:not([type])')]
+    .map((button, index) => ({
+      index,
+      text: visibleText(button),
+      name: button.name || "",
+      id: button.id || "",
+      disabled: Boolean(button.disabled || button.hasAttribute("disabled")),
+      visible: isVisible(button),
+      allianceContext: Boolean(allianceContext(button)),
+    }));
+  const fail = (reason) => ({
+    ok: false,
+    reason,
+    snapshot: {
+      url: location.href,
+      buildingType: fieldValue("building[building_type]"),
+      name: fieldValue("building[name]"),
+      latitude: fieldValue("building[latitude]"),
+      longitude: fieldValue("building[longitude]"),
+      address: fieldValue("building[address]"),
+      buildAsAlliance: fieldValue("build_as_alliance"),
+      buildWithCoins: fieldValue("build_with_coins"),
+      buttons: buttonDiagnostics(),
+    },
+  });
+  function allianceContext(button) {
+    for (let node = button?.parentElement; node && node !== document.body; node = node.parentElement) {
+      const text = visibleText(node).toLowerCase();
+      if (text.includes("build as alliance building")) return node;
+      if (node.matches?.("form")) return null;
+    }
+    return null;
+  }
+
+  const form = document.querySelector("#new_building") || document.querySelector('form[action*="/buildings"]');
+  if (!form) return fail("MissionChief building form was not loaded.");
+
+  const typeSelect = fieldByName("building[building_type]");
+  if (!typeSelect) return fail("MissionChief building type field was not found.");
+  typeSelect.value = String(config.buildingTypeId || "");
+  dispatch(typeSelect);
+  await sleep(300);
+
+  if (fieldValue("building[building_type]") !== String(config.buildingTypeId || "")) {
+    return fail(`MissionChief did not accept building type ${config.buildingTypeId}.`);
+  }
+  if (!setField("building[name]", config.name || "")) return fail("MissionChief building name field was not found.");
+  if (!setField("building[latitude]", config.latitude || "")) return fail("MissionChief latitude field was not found.");
+  if (!setField("building[longitude]", config.longitude || "")) return fail("MissionChief longitude field was not found.");
+  setField("building[address]", config.address || "");
+  setField("build_with_coins", "0");
+  setField("build_as_alliance", "1");
+
+  const buttons = [...document.querySelectorAll('input[type="submit"], button[type="submit"], button:not([type])')];
+  const candidates = buttons
+    .map((button, index) => ({ button, index, text: visibleText(button), context: allianceContext(button) }))
+    .filter((item) => {
+      const text = item.text.toLowerCase();
+      return item.context
+        && isVisible(item.button)
+        && !item.button.disabled
+        && !item.button.hasAttribute("disabled")
+        && text.includes("build")
+        && text.includes("credits")
+        && !text.includes("coins");
+    });
+
+  if (candidates.length < 1) {
+    return fail("No enabled alliance Credits build button was found.");
+  }
+  const selected = candidates[0];
+  return {
+    ok: true,
+    submitIndex: selected.index,
+    buttonText: selected.text,
+    snapshot: {
+      url: location.href,
+      buildingType: fieldValue("building[building_type]"),
+      name: fieldValue("building[name]"),
+      latitude: fieldValue("building[latitude]"),
+      longitude: fieldValue("building[longitude]"),
+      address: fieldValue("building[address]"),
+      buildAsAlliance: fieldValue("build_as_alliance"),
+      buildWithCoins: fieldValue("build_with_coins"),
+      buttonText: selected.text,
+    },
+  };
+}
+""".strip()
+BUILDING_CLICK_CREATE_SCRIPT = r"""
+(submitIndex) => {
+  const buttons = [...document.querySelectorAll('input[type="submit"], button[type="submit"], button:not([type])')];
+  const button = buttons[submitIndex];
+  if (!button) return false;
+  button.click();
+  return true;
+}
+""".strip()
 
 # ---------- Utilities ----------
 
@@ -134,6 +267,53 @@ def _normalize_missionchief_url(value: Optional[str]) -> str:
     if parsed.scheme in {"http", "https"} and parsed.netloc.lower() in {"missionchief.com", "www.missionchief.com"}:
         return value
     raise ValueError("Only missionchief.com URLs or relative MissionChief paths are supported.")
+
+def _building_type_id(building_type: str) -> str:
+    """Return the MissionChief building type id for supported alliance buildings."""
+    try:
+        return ALLIANCE_BUILDING_TYPE_IDS[building_type]
+    except KeyError as exc:
+        allowed = ", ".join(ALLIANCE_BUILDING_TYPE_IDS)
+        raise ValueError(f"Alliance building automation only supports: {allowed}.") from exc
+
+def _parse_coordinate_pair(value: Optional[str]) -> Tuple[str, str]:
+    """Parse a stored `lat, lon` coordinate pair."""
+    if not value:
+        raise ValueError("No coordinates are available for this request.")
+    parts = [part.strip() for part in str(value).split(",", 1)]
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError("Coordinates must be formatted as `latitude, longitude`.")
+    try:
+        latitude = float(parts[0])
+        longitude = float(parts[1])
+    except ValueError as exc:
+        raise ValueError("Coordinates must contain numeric latitude and longitude.") from exc
+    if not -90 <= latitude <= 90:
+        raise ValueError("Latitude must be between -90 and 90.")
+    if not -180 <= longitude <= 180:
+        raise ValueError("Longitude must be between -180 and 180.")
+    return f"{latitude:.7f}", f"{longitude:.7f}"
+
+def build_alliance_building_config(
+    *,
+    building_type: str,
+    building_name: str,
+    coordinates: Optional[str],
+    address: Optional[str],
+) -> Dict[str, str]:
+    """Build a browser automation config for supported alliance building creation."""
+    latitude, longitude = _parse_coordinate_pair(coordinates)
+    name = _truncate_text(building_name, 100).strip()
+    if not name:
+        raise ValueError("Building name is required.")
+    return {
+        "buildingType": building_type,
+        "buildingTypeId": _building_type_id(building_type),
+        "name": name,
+        "latitude": latitude,
+        "longitude": longitude,
+        "address": _truncate_text(address, 180),
+    }
 
 def _diagnostic_lines_for_fields(fields: Iterable[Dict[str, Any]]) -> List[str]:
     """Format no-submit browser field diagnostics."""
@@ -202,6 +382,16 @@ def build_browser_diagnostics_report(snapshot: Dict[str, Any]) -> str:
     else:
         lines.append("- No forms found.")
     return "\n".join(lines)
+
+@dataclass
+class BuildingCreateResult:
+    """Result of attempting to create an alliance building in MissionChief."""
+
+    ok: bool
+    reason: str
+    status: Optional[int] = None
+    post_url: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
 
 async def safe_update(interaction: discord.Interaction, *, content=None, embed=None, view=None):
     """Robust message updater for component/modal callbacks."""
@@ -1455,18 +1645,29 @@ class AdminDecisionView(discord.ui.View):
             await interaction.response.send_message("You don't have permission to do this.", ephemeral=True)
             return
 
+        await interaction.response.defer(ephemeral=True, thinking=True)
         guild = interaction.guild
         conf = await self.cog.config.guild(guild).all()
         log_channel = guild.get_channel(conf["log_channel_id"]) if conf.get("log_channel_id") else None
+        create_result = await self.cog._create_alliance_building_browser(self.req)
+        final_status = "created" if create_result.ok else "approved_pending_manual"
 
         # Update database
-        self.cog.db.update_request_status(self.req.request_id, "approved")
+        self.cog.db.update_request_status(self.req.request_id, final_status)
         self.cog.db.add_action(
             request_id=self.req.request_id,
             guild_id=guild.id,
             admin_user_id=interaction.user.id,
             admin_username=str(interaction.user),
             action_type="approved"
+        )
+        self.cog.db.add_action(
+            request_id=self.req.request_id,
+            guild_id=guild.id,
+            admin_user_id=interaction.user.id,
+            admin_username=str(interaction.user),
+            action_type="created" if create_result.ok else "create_failed",
+            previous_values=None if create_result.ok else create_result.reason[:900],
         )
 
         user = guild.get_member(self.requester_id) if guild else None
@@ -1494,8 +1695,8 @@ class AdminDecisionView(discord.ui.View):
 
         if log_channel:
             emb = discord.Embed(
-                title="Building request approved",
-                color=discord.Color.green(),
+                title="Building request approved and created" if create_result.ok else "Building request approved - manual creation needed",
+                color=discord.Color.green() if create_result.ok else discord.Color.orange(),
                 timestamp=datetime.now(timezone.utc),
             )
             requester = f"<@{self.requester_id}>"
@@ -1509,15 +1710,29 @@ class AdminDecisionView(discord.ui.View):
             if region_text:
                 emb.add_field(name="Country / Region", value=region_text[:200], inline=True)
             emb.add_field(name="Approved by", value=f"{interaction.user.mention} ({interaction.user.id})", inline=False)
+            emb.add_field(name="Auto Creation", value="Created in MissionChief" if create_result.ok else create_result.reason[:900], inline=False)
+            if create_result.status is not None:
+                emb.add_field(name="MissionChief HTTP Status", value=str(create_result.status), inline=True)
+            details = create_result.details or {}
+            button_text = details.get("buttonText") or details.get("button_text")
+            if button_text:
+                emb.add_field(name="Button Used", value=str(button_text)[:200], inline=True)
             emb.add_field(name="Request ID", value=str(self.req.request_id), inline=True)
             await log_channel.send(embed=emb)
 
-        try:
-            await interaction.message.delete()
-        except Exception:
-            pass
+        if create_result.ok:
+            try:
+                await interaction.message.delete()
+            except Exception:
+                pass
 
-        await interaction.response.send_message("Request approved and processed.", ephemeral=True)
+        if create_result.ok:
+            await interaction.followup.send("Request approved and alliance building created.", ephemeral=True)
+        else:
+            await interaction.followup.send(
+                f"Request approved, but automatic creation failed: {create_result.reason}",
+                ephemeral=True,
+            )
 
     @discord.ui.button(label="❌ Reject", style=discord.ButtonStyle.danger, custom_id="bm:deny")
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1721,6 +1936,7 @@ class BuildingManager(commands.Cog):
         self.db = BuildingDatabase(db_path)
 
         self._panel_task = None
+        self._browser_lock = asyncio.Lock()
         self._persistent_view_registered = False
         self._register_persistent_views()
         self._start_panel_task()
@@ -1806,6 +2022,109 @@ class BuildingManager(commands.Cog):
                 await browser.close()
 
         return build_browser_diagnostics_report(snapshot or {})
+
+    async def _create_alliance_building_browser(self, req: BuildingRequest) -> BuildingCreateResult:
+        """Create an approved Hospital or Prison as an alliance building through the live browser form."""
+        try:
+            config = build_alliance_building_config(
+                building_type=req.building_type,
+                building_name=req.building_name,
+                coordinates=req.coordinates,
+                address=req.address,
+            )
+        except ValueError as exc:
+            return BuildingCreateResult(False, str(exc))
+
+        try:
+            from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+            from playwright.async_api import async_playwright
+        except Exception:
+            return BuildingCreateResult(False, PLAYWRIGHT_SETUP_MESSAGE)
+
+        try:
+            cookies = await self._playwright_cookies()
+        except Exception as exc:
+            return BuildingCreateResult(False, f"Could not load MissionChief cookies: {exc}")
+        if not cookies:
+            return BuildingCreateResult(False, "No MissionChief cookies are available from CookieManager.")
+
+        async with self._browser_lock:
+            status: Optional[int] = None
+            response_text = ""
+            prepare_result: Dict[str, Any] = {}
+            try:
+                async with async_playwright() as playwright:
+                    browser = await playwright.chromium.launch(headless=True)
+                    try:
+                        context = await browser.new_context(viewport={"width": 1440, "height": 1000})
+                        await context.add_cookies(cookies)
+                        page = await context.new_page()
+                        page.set_default_timeout(30000)
+                        await page.goto(MISSIONCHIEF_NEW_BUILDING_URL, wait_until="domcontentloaded")
+
+                        login_fields = await page.locator("input[type='password']").count()
+                        if login_fields:
+                            return BuildingCreateResult(False, "MissionChief session is not logged in.")
+
+                        prepare_result = await page.evaluate(BUILDING_CREATE_SCRIPT, config)
+                        if not prepare_result.get("ok"):
+                            return BuildingCreateResult(
+                                False,
+                                str(prepare_result.get("reason") or "MissionChief building form could not be prepared."),
+                                details=prepare_result.get("snapshot") or {},
+                            )
+
+                        async with page.expect_response(
+                            lambda response: "/buildings" in response.url and response.request.method.upper() == "POST",
+                            timeout=30000,
+                        ) as response_info:
+                            clicked = await page.evaluate(BUILDING_CLICK_CREATE_SCRIPT, prepare_result.get("submitIndex"))
+                            if not clicked:
+                                return BuildingCreateResult(
+                                    False,
+                                    "Browser could not click the alliance Credits build button.",
+                                    details=prepare_result.get("snapshot") or {},
+                                )
+                        response = await response_info.value
+                        status = response.status
+                        with contextlib.suppress(Exception):
+                            response_text = await response.text()
+                    finally:
+                        await browser.close()
+            except PlaywrightTimeoutError as exc:
+                return BuildingCreateResult(
+                    False,
+                    f"MissionChief browser building flow timed out: {exc}",
+                    status=status,
+                    post_url=f"{BASE_URL}/buildings",
+                    details=prepare_result.get("snapshot") or {},
+                )
+            except Exception as exc:
+                message = str(exc)
+                if "Executable doesn't exist" in message or "playwright install" in message:
+                    return BuildingCreateResult(False, PLAYWRIGHT_SETUP_MESSAGE)
+                return BuildingCreateResult(False, f"MissionChief browser building flow failed: {message}")
+
+        if status is None or int(status) >= 400:
+            response_summary = _truncate_text(re.sub(r"<[^>]+>", " ", response_text), 300)
+            suffix = f" Response: {response_summary}" if response_summary else ""
+            return BuildingCreateResult(
+                False,
+                f"MissionChief returned HTTP {status} while creating the alliance building.{suffix}",
+                status=status,
+                post_url=f"{BASE_URL}/buildings",
+                details=prepare_result.get("snapshot") or {},
+            )
+
+        details = prepare_result.get("snapshot") or {}
+        details["buttonText"] = prepare_result.get("buttonText")
+        return BuildingCreateResult(
+            True,
+            "Alliance building created through browser automation.",
+            status=status,
+            post_url=f"{BASE_URL}/buildings",
+            details=details,
+        )
 
     def _request_panel_embed(self, description: Optional[str] = None) -> discord.Embed:
         """Build the persistent request panel embed."""
