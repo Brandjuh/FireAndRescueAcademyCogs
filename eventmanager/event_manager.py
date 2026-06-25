@@ -20,6 +20,7 @@ from redbot.core.utils.chat_formatting import box
 log = logging.getLogger("red.cog.eventmanager")
 
 BASE_URL = "https://www.missionchief.com"
+MISSIONCHIEF_HOME_URL = f"{BASE_URL}/"
 REVERSE_ADDRESS_URL = f"{BASE_URL}/reverse_address"
 EVENT_KINDS = {
     "large": {
@@ -36,6 +37,10 @@ EVENT_KINDS = {
 DEFAULT_TIMEZONE = "America/New_York"
 DEFAULT_PANEL_CHANNEL_ID = 1421256548977606827
 PANEL_TITLE = "EventManager Control Panel"
+PLAYWRIGHT_SETUP_MESSAGE = (
+    "Playwright browser automation is not ready. Install the EventManager requirements and run "
+    "`python -m playwright install chromium` in the same Python environment as Redbot."
+)
 BROWSER_CAPTURE_SCRIPT = r"""
 (() => {
   const form = document.querySelector("#new_mission_position")
@@ -220,6 +225,199 @@ BROWSER_EVENT_START_SCRIPT = r"""
 
   startButton.click();
 })();
+""".strip()
+BROWSER_PREPARE_START_SCRIPT = r"""
+async (config) => {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const visibleText = (element) => [element?.value, element?.textContent, element?.getAttribute?.("title")]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const fieldByName = (name) => document.querySelector(`[name="${window.CSS.escape(name)}"]`);
+  const fieldValue = (name) => fieldByName(name)?.value || "";
+  const dispatch = (field) => {
+    if (!field) return;
+    for (const eventName of ["input", "change"]) {
+      field.dispatchEvent(new Event(eventName, { bubbles: true }));
+    }
+  };
+  const buttons = () => [...document.querySelectorAll('input[type="submit"], button[type="submit"], button:not([type])')];
+  const buttonDiagnostics = () => buttons().map((button, index) => ({
+    index,
+    text: visibleText(button) || "(blank)",
+    disabled: Boolean(button.disabled || button.hasAttribute("disabled")),
+    id: button.id || "",
+    name: button.name || "",
+    className: button.className || "",
+  }));
+  const snapshot = () => ({
+    url: location.href,
+    latitude: fieldValue("mission_position[latitude]"),
+    longitude: fieldValue("mission_position[longitude]"),
+    address: fieldValue("mission_position[address]"),
+    missionType: fieldValue("mission_position[mission_type_id]"),
+    eventRadio: [...document.querySelectorAll('input[name="event_radio_group"]')]
+      .find((radio) => radio.checked)?.dataset?.eventId || "",
+    coins: fieldValue("mission_position[coins]"),
+    submitButtons: buttonDiagnostics(),
+  });
+  const fail = (reason) => ({ ok: false, reason, snapshot: snapshot() });
+  const clickIfPresent = (selector) => {
+    const element = document.querySelector(selector);
+    if (!element) return false;
+    element.click();
+    return true;
+  };
+  const setField = (name, value) => {
+    const field = fieldByName(name);
+    if (!field) return false;
+    field.value = String(value);
+    dispatch(field);
+    return true;
+  };
+
+  const form = document.querySelector("#new_mission_position");
+  if (!form) return fail("MissionChief start form was not loaded.");
+
+  if (config.kind === "event") {
+    const eventValue = String(config.eventValue || "");
+    const radios = [...form.querySelectorAll('input[name="event_radio_group"]')];
+    const radio = radios.find((item) => {
+      const candidates = [item.value, item.dataset.eventId, (item.id || "").replace(/^event_/, "")]
+        .filter(Boolean)
+        .map(String);
+      return candidates.includes(eventValue);
+    });
+    if (!radio) return fail(`Could not find event option ${eventValue}.`);
+    radio.checked = true;
+    radio.click();
+    dispatch(radio);
+    if (!fieldValue("mission_position[mission_type_id]")) {
+      setField("mission_position[mission_type_id]", radio.dataset.eventId || eventValue);
+    }
+    clickIfPresent(`.btn-event_expansion[expansion_id="${config.size || "2"}"]`);
+    clickIfPresent(`.btn-event_shape[data-shape="${config.shape || "circle"}"]`);
+    clickIfPresent(`.btn-event_amount[amount_id="${config.amount || "0"}"]`);
+    if (config.duration !== undefined && config.duration !== null && config.duration !== "") {
+      clickIfPresent(`.btn-event_duration[duration_id="${config.duration}"]`);
+    }
+  } else {
+    const missionValue = String(config.missionType || "");
+    const radios = [...form.querySelectorAll('input[name="mission_position[mission_type_id]"]')];
+    const radio = radios.find((item) => String(item.value || "") === missionValue);
+    if (!radio) return fail(`Could not find large mission option ${missionValue}.`);
+    radio.checked = true;
+    radio.click();
+    dispatch(radio);
+    if (config.amount) {
+      clickIfPresent(`.btn-event_amount[data-amount="${config.amount}"]`);
+    }
+    if (config.size) {
+      clickIfPresent(`.btn-event_expansion[expansion_id="${config.size}"]`);
+    }
+    if (config.shape) {
+      clickIfPresent(`.btn-event_shape[data-shape="${config.shape}"]`);
+    }
+  }
+
+  const latitude = Number(config.latitude);
+  const longitude = Number(config.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return fail("No valid latitude/longitude was configured.");
+  }
+
+  if (typeof mission_position_new_marker === "undefined") {
+    if (typeof isLeaflet === "function" && isLeaflet() && typeof L !== "undefined" && typeof map !== "undefined") {
+      mission_position_new_marker = L.marker([latitude, longitude], { draggable: true, zIndexOffset: 100000 }).addTo(map);
+    } else if (typeof mapkit !== "undefined" && typeof map !== "undefined") {
+      mission_position_new_marker = new mapkit.MarkerAnnotation(new mapkit.Coordinate(latitude, longitude), {
+        draggable: true,
+        color: "#000000",
+      });
+      map.addAnnotation(mission_position_new_marker);
+    } else {
+      return fail("MissionChief map marker is not available.");
+    }
+  }
+
+  if (typeof isLeaflet === "function" && isLeaflet()) {
+    if (typeof mission_position_new_marker.setLatLng !== "function") {
+      return fail("Leaflet marker cannot be moved.");
+    }
+    mission_position_new_marker.setLatLng([latitude, longitude]);
+    if (typeof map !== "undefined" && typeof map.setView === "function") {
+      map.setView([latitude, longitude], map.getZoom ? map.getZoom() : undefined);
+    }
+  } else if (typeof mapkit !== "undefined") {
+    mission_position_new_marker.coordinate = new mapkit.Coordinate(latitude, longitude);
+  }
+
+  if (typeof mission_position_new_dragend === "function") {
+    mission_position_new_dragend();
+  } else {
+    setField("mission_position[latitude]", latitude);
+    setField("mission_position[longitude]", longitude);
+    if (typeof updateAddress === "function") updateAddress();
+  }
+
+  const expectedLatitude = String(latitude);
+  const expectedLongitude = String(longitude);
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    if (fieldValue("mission_position[latitude]") && fieldValue("mission_position[longitude]")) break;
+    await sleep(100);
+  }
+  if (!fieldValue("mission_position[latitude]") || !fieldValue("mission_position[longitude]")) {
+    return fail("MissionChief did not accept the marker coordinates.");
+  }
+  if (!fieldValue("mission_position[address]") && typeof updateAddress === "function") {
+    updateAddress();
+  }
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (fieldValue("mission_position[address]")) break;
+    await sleep(100);
+  }
+  if (!fieldValue("mission_position[address]")) {
+    return fail("MissionChief did not resolve an address for the marker.");
+  }
+
+  const availableButtons = buttons();
+  const startIndex = availableButtons.findIndex((button) => {
+    const text = visibleText(button).toLowerCase();
+    if (button.disabled || button.hasAttribute("disabled")) return false;
+    if (!text.includes("start")) return false;
+    if (config.allowCoins) return text.includes("free") || text.includes("coin");
+    return text.includes("free") && !text.includes("coin");
+  });
+  if (startIndex < 0) {
+    return fail(`No enabled ${config.allowCoins ? "free or coin" : "free"} start button was found.`);
+  }
+
+  const buttonText = visibleText(availableButtons[startIndex]);
+  const usesCoins = buttonText.toLowerCase().includes("coin") || fieldValue("mission_position[coins]") !== "0";
+  if (usesCoins && !config.allowCoins) {
+    return fail(`Refusing to spend coins with button: ${buttonText}`);
+  }
+
+  return {
+    ok: true,
+    submitIndex: startIndex,
+    usesCoins,
+    buttonText,
+    expectedLatitude,
+    expectedLongitude,
+    snapshot: snapshot(),
+  };
+}
+""".strip()
+BROWSER_CLICK_START_SCRIPT = r"""
+(submitIndex) => {
+  const buttons = [...document.querySelectorAll('input[type="submit"], button[type="submit"], button:not([type])')];
+  const button = buttons[submitIndex];
+  if (!button) return false;
+  button.click();
+  return true;
+}
 """.strip()
 WEEKDAYS = {
     "monday": 0,
@@ -748,6 +946,31 @@ def safe_debug_payload(payload: Payload) -> str:
     return "\n".join(f"{name}={_redact_debug_value(name, value)}" for name, value in payload)
 
 
+def summarize_browser_snapshot(snapshot: Optional[Dict[str, Any]], *, limit: int = 900) -> str:
+    """Summarize non-sensitive browser state after a Playwright start attempt."""
+    if not snapshot:
+        return ""
+    lines = []
+    for key in ["url", "missionType", "eventRadio", "latitude", "longitude", "address", "coins"]:
+        value = snapshot.get(key)
+        if value:
+            lines.append(f"{key}: {value}")
+    buttons = snapshot.get("submitButtons") or []
+    if buttons:
+        lines.append("buttons:")
+        for button in buttons[:5]:
+            lines.append(
+                "- {text} | disabled={disabled}".format(
+                    text=button.get("text") or "(blank)",
+                    disabled=button.get("disabled"),
+                )
+            )
+    text = "; ".join(lines)
+    if len(text) > limit:
+        return text[: max(0, limit - 1)] + "..."
+    return text
+
+
 def build_browser_event_start_script(
     fields: Dict[str, str],
     *,
@@ -779,6 +1002,53 @@ def build_browser_event_start_script(
         "allowCoins": bool(allow_coins),
     }
     return BROWSER_EVENT_START_SCRIPT.replace("__CONFIG__", json.dumps(config, ensure_ascii=False, indent=2))
+
+
+def build_browser_start_config(
+    kind: str,
+    profile: dict,
+    *,
+    label: str,
+    allow_coins: bool = False,
+) -> Dict[str, Any]:
+    """Build the Playwright start configuration from an EventManager profile."""
+    kind = normalize_kind(kind)
+    fields = profile_fields_for_start(profile)
+    latitude = fields.get(LATITUDE_FIELD)
+    longitude = fields.get(LONGITUDE_FIELD)
+    if not latitude or not longitude:
+        raise ValueError("Browser starts require latitude and longitude.")
+
+    config: Dict[str, Any] = {
+        "kind": kind,
+        "label": str(label or "EventManager"),
+        "allowCoins": bool(allow_coins),
+        "latitude": str(latitude),
+        "longitude": str(longitude),
+        "address": str(fields.get(ADDRESS_FIELD) or ""),
+        "size": str(fields.get(SIZE_FIELD) or ""),
+        "shape": str(fields.get(SHAPE_FIELD) or ""),
+        "amount": str(fields.get(AMOUNT_FIELD) or ""),
+        "duration": str(fields.get("mission_position[duration]") or ""),
+    }
+    if kind == "event":
+        event_value = fields.get(EVENT_RADIO_FIELD) or fields.get(MISSION_TYPE_FIELD)
+        if not event_value:
+            raise ValueError("Browser event starts require an event type.")
+        config["eventValue"] = str(event_value)
+        config["missionType"] = str(fields.get(MISSION_TYPE_FIELD) or event_value)
+        config["size"] = config["size"] or EVENT_DEFAULT_OVERRIDES[SIZE_FIELD]
+        config["shape"] = config["shape"] or EVENT_DEFAULT_OVERRIDES[SHAPE_FIELD]
+        config["amount"] = config["amount"] or EVENT_DEFAULT_OVERRIDES[AMOUNT_FIELD]
+    else:
+        mission_type = fields.get(MISSION_TYPE_FIELD)
+        if not mission_type:
+            raise ValueError("Browser large mission starts require a mission type.")
+        config["missionType"] = str(mission_type)
+        config["size"] = config["size"] or MISSION_POSITION_DEFAULT_OVERRIDES[SIZE_FIELD]
+        config["shape"] = config["shape"] or MISSION_POSITION_DEFAULT_OVERRIDES[SHAPE_FIELD]
+        config["amount"] = config["amount"] or MISSION_POSITION_DEFAULT_OVERRIDES[AMOUNT_FIELD]
+    return config
 
 
 def normalize_optional_profile_arg(value: Optional[str]) -> Optional[str]:
@@ -1348,7 +1618,120 @@ class EventManager(commands.Cog):
         ]
         return "\n".join(lines), f"eventmanager-{kind}-diagnostics.txt"
 
-    async def _start_profile_data(self, kind: str, profile_name: str, profile: dict) -> EventStartResult:
+    async def _playwright_cookies(self) -> List[Dict[str, str]]:
+        """Copy CookieManager's aiohttp cookies into Playwright cookie format."""
+        session = await self._get_session()
+        cookie_jar = getattr(session, "cookie_jar", None)
+        if not cookie_jar:
+            return []
+        cookies = cookie_jar.filter_cookies(BASE_URL)
+        playwright_cookies = []
+        for name, morsel in cookies.items():
+            value = getattr(morsel, "value", str(morsel))
+            if not name or not value:
+                continue
+            playwright_cookies.append({"name": str(name), "value": str(value), "url": BASE_URL})
+        return playwright_cookies
+
+    async def _start_profile_data_browser(
+        self,
+        kind: str,
+        profile_name: str,
+        profile: dict,
+        *,
+        allow_coins: bool = False,
+    ) -> EventStartResult:
+        """Start a MissionChief item by driving the live map/form in a headless browser."""
+        kind = normalize_kind(kind)
+        try:
+            config = build_browser_start_config(kind, profile, label=profile_name, allow_coins=allow_coins)
+        except Exception as exc:
+            return EventStartResult(False, str(exc))
+
+        try:
+            from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+            from playwright.async_api import async_playwright
+        except Exception:
+            return EventStartResult(False, PLAYWRIGHT_SETUP_MESSAGE)
+
+        async with self._start_lock:
+            try:
+                cookies = await self._playwright_cookies()
+            except Exception as exc:
+                return EventStartResult(False, f"Could not load MissionChief cookies: {exc}")
+            if not cookies:
+                return EventStartResult(False, "No MissionChief cookies are available from CookieManager.")
+
+            open_selector = "#btn-alliance-new-event" if kind == "event" else "#btn-alliance-new-mission"
+            create_path = "missionAllianceEventCreate" if kind == "event" else "missionAllianceCreate"
+            status: Optional[int] = None
+            response_text = ""
+            prepare_result: Dict[str, Any] = {}
+            try:
+                async with async_playwright() as playwright:
+                    browser = await playwright.chromium.launch(headless=True)
+                    try:
+                        context = await browser.new_context(viewport={"width": 1440, "height": 1000})
+                        await context.add_cookies(cookies)
+                        page = await context.new_page()
+                        page.set_default_timeout(30000)
+                        await page.goto(MISSIONCHIEF_HOME_URL, wait_until="domcontentloaded")
+
+                        open_button = page.locator(open_selector)
+                        if await open_button.count() == 0:
+                            login_fields = await page.locator("input[type='password']").count()
+                            if login_fields:
+                                return EventStartResult(False, "MissionChief session is not logged in.")
+                            return EventStartResult(False, f"MissionChief start button `{open_selector}` was not found.")
+
+                        await open_button.nth(0).click()
+                        await page.wait_for_selector("#new_mission_position", state="attached")
+                        with suppress(Exception):
+                            await page.wait_for_function(
+                                "typeof mission_position_new_marker !== 'undefined' || typeof map !== 'undefined'",
+                                timeout=15000,
+                            )
+
+                        prepare_result = await page.evaluate(BROWSER_PREPARE_START_SCRIPT, config)
+                        if not prepare_result.get("ok"):
+                            snapshot = summarize_browser_snapshot(prepare_result.get("snapshot"))
+                            suffix = f" Snapshot: {snapshot}" if snapshot else ""
+                            return EventStartResult(False, f"{prepare_result.get('reason')}{suffix}")
+
+                        async with page.expect_response(lambda response: create_path in response.url, timeout=30000) as response_info:
+                            clicked = await page.evaluate(BROWSER_CLICK_START_SCRIPT, prepare_result.get("submitIndex"))
+                            if not clicked:
+                                return EventStartResult(False, "Browser could not click the MissionChief start button.")
+                        response = await response_info.value
+                        status = response.status
+                        with suppress(Exception):
+                            response_text = await response.text()
+                    finally:
+                        await browser.close()
+            except PlaywrightTimeoutError as exc:
+                snapshot = summarize_browser_snapshot(prepare_result.get("snapshot"))
+                suffix = f" Snapshot: {snapshot}" if snapshot else ""
+                return EventStartResult(False, f"MissionChief browser flow timed out: {exc}{suffix}")
+            except Exception as exc:
+                message = str(exc)
+                if "Executable doesn't exist" in message or "playwright install" in message:
+                    return EventStartResult(False, PLAYWRIGHT_SETUP_MESSAGE)
+                return EventStartResult(False, f"MissionChief browser flow failed: {message}")
+
+        if status is None or int(status) >= 400:
+            response_debug = summarize_response_for_debug(response_text)
+            response_suffix = f" Response: {response_debug}" if response_debug else ""
+            return EventStartResult(
+                False,
+                f"MissionChief returned HTTP {status} from browser start.{response_suffix}",
+                status=status,
+                post_url=f"{BASE_URL}/{create_path}",
+            )
+
+        await self._log_run(kind, profile_name, status)
+        return EventStartResult(True, "Started successfully through browser automation.", status=status, post_url=f"{BASE_URL}/{create_path}")
+
+    async def _start_profile_data_http(self, kind: str, profile_name: str, profile: dict) -> EventStartResult:
         kind = normalize_kind(kind)
         async with self._start_lock:
             start_fields = profile_fields_for_start(profile)
@@ -1400,13 +1783,18 @@ class EventManager(commands.Cog):
         await self._log_run(kind, profile_name, status)
         return EventStartResult(True, "Started successfully.", status=status, post_url=form.action)
 
-    async def _start_from_profile(self, kind: str, profile_name: str) -> EventStartResult:
+    async def _start_profile_data(self, kind: str, profile_name: str, profile: dict) -> EventStartResult:
+        return await self._start_profile_data_browser(kind, profile_name, profile)
+
+    async def _start_from_profile(self, kind: str, profile_name: str, *, allow_coins: bool = False) -> EventStartResult:
         kind = normalize_kind(kind)
         profile_name = profile_name.strip().lower()
         profiles = await self.config.profiles()
         profile = profiles.get(kind, {}).get(profile_name)
         if not profile:
             return EventStartResult(False, f"Profile `{profile_name}` was not found.")
+        if allow_coins:
+            return await self._start_profile_data_browser(kind, profile_name, profile, allow_coins=True)
         return await self._start_profile_data(kind, profile_name, profile)
 
     async def start_one_off(self, kind: str, profile: dict, label: str) -> EventStartResult:
@@ -1482,13 +1870,13 @@ class EventManager(commands.Cog):
         embed = discord.Embed(
             title=PANEL_TITLE,
             description=(
-                "Start free MissionChief alliance missions and events.\n\n"
+                "Start MissionChief alliance missions and events through the live map.\n\n"
                 "Quick uses configured/default settings. Custom lets admins choose the live MissionChief option "
                 "and location before starting."
             ),
             color=discord.Color.orange(),
         )
-        embed.add_field(name="Safety", value="Free starts only. Coin actions are refused.", inline=False)
+        embed.add_field(name="Safety", value="Default starts use the browser backend and refuse coin actions.", inline=False)
         embed.add_field(name="Visibility", value="Button actions are private to the admin using them.", inline=False)
         return embed
 
@@ -1775,6 +2163,30 @@ class EventManager(commands.Cog):
         """Send a browser-console script that may start an alliance event with coins."""
         await self._send_browser_event_start_script(ctx, profile_name, allow_coins=True)
 
+    @eventmanager.command(name="browsercheck")
+    @commands.admin()
+    async def browser_backend_check(self, ctx: commands.Context):
+        """Check whether Playwright browser automation is installed and launchable."""
+        try:
+            from playwright.async_api import async_playwright
+        except Exception:
+            await ctx.send(PLAYWRIGHT_SETUP_MESSAGE)
+            return
+
+        try:
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(headless=True)
+                await browser.close()
+        except Exception as exc:
+            message = str(exc)
+            if "Executable doesn't exist" in message or "playwright install" in message:
+                await ctx.send(PLAYWRIGHT_SETUP_MESSAGE)
+                return
+            await ctx.send(f"Playwright is installed, but Chromium could not launch: {message}")
+            return
+
+        await ctx.send("EventManager browser backend is ready.")
+
     @eventmanager.command(name="panel")
     @commands.admin()
     @commands.guild_only()
@@ -1801,6 +2213,24 @@ class EventManager(commands.Cog):
         result = await self._start_from_profile(kind, profile_name)
         if result.ok:
             await ctx.send(f"Started {EVENT_KINDS[kind]['label']} with profile `{profile_name}`.")
+        else:
+            await ctx.send(f"Could not start {EVENT_KINDS[kind]['label']}: {result.reason}")
+
+    @eventmanager.command(name="startcoins")
+    @commands.admin()
+    async def start_profile_with_coins(self, ctx: commands.Context, kind: str, profile_name: str):
+        """Start a saved profile and explicitly allow MissionChief coin actions."""
+        try:
+            kind = normalize_kind(kind)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+        await ctx.send(
+            "Coin start requested. EventManager will only continue if MissionChief shows an enabled start button."
+        )
+        result = await self._start_from_profile(kind, profile_name, allow_coins=True)
+        if result.ok:
+            await ctx.send(f"Started {EVENT_KINDS[kind]['label']} with profile `{profile_name}` using the browser backend.")
         else:
             await ctx.send(f"Could not start {EVENT_KINDS[kind]['label']}: {result.reason}")
 

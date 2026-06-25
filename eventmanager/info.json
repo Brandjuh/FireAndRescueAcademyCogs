@@ -4,7 +4,7 @@
     ],
     "name": "EventManager",
     "description": "Schedules and starts MissionChief alliance large missions and alliance events through CookieManager.",
-    "install_msg": "EventManager installed.\n\nUse `[p]eventmanager inspect large` and `[p]eventmanager inspect event` first to inspect the live MissionChief forms. Then configure presets with `[p]eventmanager profile set` before starting or scheduling events.",
+    "install_msg": "EventManager installed.\n\nEventManager uses Playwright for live MissionChief map automation. After installing the cog requirements, run `python -m playwright install chromium` in the same Python environment as Redbot, then use `[p]eventmanager browsercheck`.\n\nUse `[p]eventmanager inspect large` and `[p]eventmanager inspect event` first to inspect the live MissionChief forms. Then configure presets with `[p]eventmanager profile set` before starting or scheduling events.",
     "short": "MissionChief alliance mission and event scheduler",
     "tags": [
         "missionchief",
@@ -18,7 +18,8 @@
         "CookieManager": "Provides authenticated MissionChief sessions"
     },
     "requirements": [
-        "beautifulsoup4"
+        "beautifulsoup4",
+        "playwright"
     ],
     "end_user_data_statement": "This cog stores configured event presets, schedule settings, and run timestamps. It does not store member data.",
     "min_bot_version": "3.5.0",

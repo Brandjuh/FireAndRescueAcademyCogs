@@ -1,7 +1,10 @@
 import unittest
 
 from eventmanager.event_manager import (
+    BROWSER_CLICK_START_SCRIPT,
     BROWSER_CAPTURE_SCRIPT,
+    BROWSER_PREPARE_START_SCRIPT,
+    build_browser_start_config,
     build_payload,
     fields_for_selection,
     field_options_for_kind,
@@ -18,6 +21,7 @@ from eventmanager.event_manager import (
     safe_debug_mapping,
     safe_debug_payload,
     select_scheduled_profile,
+    summarize_browser_snapshot,
     summarize_payload_for_debug,
     summarize_response_for_debug,
     summarize_form,
@@ -338,6 +342,42 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertEqual(profile["fields"]["mission_position[shape]"], "circle")
         self.assertEqual(profile["fields"]["mission_position[amount]"], "0")
 
+    def test_build_browser_start_config_resolves_event_profile(self):
+        profile = fields_for_selection("event", "1", random_region="nyc_or_bermuda")
+
+        config = build_browser_start_config("event", profile, label="weekly", allow_coins=False)
+
+        self.assertEqual(config["kind"], "event")
+        self.assertEqual(config["label"], "weekly")
+        self.assertFalse(config["allowCoins"])
+        self.assertEqual(config["eventValue"], "1")
+        self.assertEqual(config["missionType"], "1")
+        self.assertEqual(config["latitude"], "40.729500")
+        self.assertEqual(config["longitude"], "-73.997200")
+        self.assertEqual(config["size"], "2")
+        self.assertEqual(config["shape"], "circle")
+        self.assertEqual(config["amount"], "0")
+
+    def test_build_browser_start_config_resolves_large_profile(self):
+        profile = fields_for_selection("large", "41", random_region="nyc")
+
+        config = build_browser_start_config("large", profile, label="daily", allow_coins=True)
+
+        self.assertEqual(config["kind"], "large")
+        self.assertTrue(config["allowCoins"])
+        self.assertEqual(config["missionType"], "41")
+        self.assertEqual(config["latitude"], "40.729500")
+        self.assertEqual(config["longitude"], "-73.997200")
+        self.assertEqual(config["amount"], "1")
+
+    def test_build_browser_start_config_requires_coordinates(self):
+        with self.assertRaises(ValueError):
+            build_browser_start_config(
+                "event",
+                {"fields": {"event_radio_group": "1", "mission_position[mission_type_id]": "1"}},
+                label="broken",
+            )
+
     def test_fields_for_selection_accepts_manual_large_coordinates_and_address(self):
         profile = fields_for_selection("large", "41", latitude="40.1", longitude="-73.9", address="Manual NYC")
 
@@ -550,6 +590,37 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("startButton.click()", script)
         self.assertNotIn("fetch(", script)
         self.assertNotIn("XMLHttpRequest", script)
+
+    def test_playwright_prepare_script_moves_missionchief_marker(self):
+        self.assertIn("mission_position_new_marker", BROWSER_PREPARE_START_SCRIPT)
+        self.assertIn("mission_position_new_dragend", BROWSER_PREPARE_START_SCRIPT)
+        self.assertIn("updateAddress", BROWSER_PREPARE_START_SCRIPT)
+        self.assertIn("No enabled", BROWSER_PREPARE_START_SCRIPT)
+        self.assertNotIn("fetch(", BROWSER_PREPARE_START_SCRIPT)
+        self.assertNotIn("XMLHttpRequest", BROWSER_PREPARE_START_SCRIPT)
+
+    def test_playwright_click_script_only_clicks_selected_submit_button(self):
+        self.assertIn("submitIndex", BROWSER_CLICK_START_SCRIPT)
+        self.assertIn("button.click()", BROWSER_CLICK_START_SCRIPT)
+        self.assertNotIn("fetch(", BROWSER_CLICK_START_SCRIPT)
+        self.assertNotIn("XMLHttpRequest", BROWSER_CLICK_START_SCRIPT)
+
+    def test_summarize_browser_snapshot_includes_buttons_without_tokens(self):
+        summary = summarize_browser_snapshot(
+            {
+                "url": "https://www.missionchief.com/",
+                "missionType": "41",
+                "latitude": "40.1",
+                "longitude": "-73.9",
+                "address": "NYC",
+                "coins": "0",
+                "submitButtons": [{"text": "Start Event ( Free )", "disabled": True}],
+            }
+        )
+
+        self.assertIn("missionType: 41", summary)
+        self.assertIn("Start Event", summary)
+        self.assertNotIn("authenticity_token", summary)
 
 
 if __name__ == "__main__":
