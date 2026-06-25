@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import aiohttp
+from io import BytesIO
 import logging
 import re
 import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import discord
@@ -18,8 +19,91 @@ from redbot.core.utils.chat_formatting import box
 
 log = logging.getLogger("red.cog.building_manager")
 
+BASE_URL = "https://www.missionchief.com"
+MISSIONCHIEF_HOME_URL = BASE_URL
 DEFAULT_REQUEST_PANEL_CHANNEL_ID = 1421627971831070730
+PLAYWRIGHT_SETUP_MESSAGE = (
+    "Playwright browser automation is not ready. Install the BuildingManager requirements and run "
+    "`python -m playwright install chromium` in the same Python environment as Redbot."
+)
 REQUEST_PANEL_TITLE = "🏢 Building Request System"
+
+BUILDING_DIAGNOSTICS_SCRIPT = r"""
+() => {
+  const visibleText = (element) => [element?.value, element?.textContent, element?.getAttribute?.("title"), element?.getAttribute?.("aria-label")]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const truncate = (value, limit = 180) => {
+    const text = String(value || "").replace(/\s+/g, " ").trim();
+    return text.length > limit ? `${text.slice(0, limit)}...` : text;
+  };
+  const redactedValue = (field) => {
+    const name = String(field?.name || field?.id || "").toLowerCase();
+    const type = String(field?.type || "").toLowerCase();
+    if (name.includes("token") || name.includes("authenticity") || type === "password") return "REDACTED";
+    return truncate(field?.value || "");
+  };
+  const keywords = /(alliance|verband|building|build|hospital|prison|jail|correction|detention|gebouw|gevangen|ziekenhuis)/i;
+  const elementInfo = (element, index) => ({
+    index,
+    tag: element.tagName?.toLowerCase() || "",
+    text: truncate(visibleText(element)),
+    href: element.href || element.getAttribute?.("href") || "",
+    id: element.id || "",
+    name: element.name || "",
+    type: element.type || "",
+    className: String(element.className || ""),
+    disabled: Boolean(element.disabled || element.hasAttribute?.("disabled")),
+  });
+  const candidateElements = [...document.querySelectorAll("a, button, input[type='button'], input[type='submit']")]
+    .map(elementInfo)
+    .filter((item) => keywords.test([item.text, item.href, item.id, item.name, item.className].join(" ")))
+    .slice(0, 100);
+  const forms = [...document.querySelectorAll("form")].slice(0, 20).map((form, formIndex) => {
+    const fields = [...form.querySelectorAll("input, select, textarea, button")].slice(0, 140).map((field, fieldIndex) => ({
+      index: fieldIndex,
+      tag: field.tagName?.toLowerCase() || "",
+      type: field.type || "",
+      name: field.name || "",
+      id: field.id || "",
+      value: redactedValue(field),
+      placeholder: truncate(field.placeholder || ""),
+      text: truncate(visibleText(field)),
+      checked: Boolean(field.checked),
+      disabled: Boolean(field.disabled || field.hasAttribute?.("disabled")),
+      options: field.tagName?.toLowerCase() === "select"
+        ? [...field.options].slice(0, 30).map((option) => ({
+            value: truncate(option.value, 80),
+            text: truncate(option.textContent, 120),
+            selected: Boolean(option.selected),
+          }))
+        : [],
+    }));
+    return {
+      index: formIndex,
+      id: form.id || "",
+      action: form.action || form.getAttribute("action") || "",
+      method: form.method || form.getAttribute("method") || "",
+      className: String(form.className || ""),
+      text: truncate(visibleText(form), 300),
+      fields,
+    };
+  });
+  const headings = [...document.querySelectorAll("h1, h2, h3, .page-header, .headline, .panel-heading")]
+    .map((element) => truncate(visibleText(element), 160))
+    .filter(Boolean)
+    .slice(0, 30);
+  return {
+    url: location.href,
+    title: document.title || "",
+    headings,
+    candidates: candidateElements,
+    forms,
+  };
+}
+""".strip()
 
 # ---------- Utilities ----------
 
@@ -30,6 +114,93 @@ def ts() -> int:
 def fmt_dt(timestamp: int) -> str:
     """Format unix timestamp to Discord timestamp."""
     return f"<t:{timestamp}:F>"
+
+def _truncate_text(value: Any, limit: int = 180) -> str:
+    """Return a compact one-line text value for diagnostics."""
+    text = " ".join(str(value or "").split())
+    if len(text) > limit:
+        return f"{text[:limit]}..."
+    return text
+
+def _normalize_missionchief_url(value: Optional[str]) -> str:
+    """Normalize a user-supplied MissionChief URL or path."""
+    if not value:
+        return MISSIONCHIEF_HOME_URL
+    value = value.strip()
+    if value.startswith("/"):
+        return f"{BASE_URL}{value}"
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https"} and parsed.netloc.lower() in {"missionchief.com", "www.missionchief.com"}:
+        return value
+    raise ValueError("Only missionchief.com URLs or relative MissionChief paths are supported.")
+
+def _diagnostic_lines_for_fields(fields: Iterable[Dict[str, Any]]) -> List[str]:
+    """Format no-submit browser field diagnostics."""
+    lines = []
+    for field in fields:
+        name = field.get("name") or field.get("id") or "(unnamed)"
+        field_type = field.get("type") or field.get("tag") or "field"
+        flags = []
+        if field.get("checked"):
+            flags.append("checked")
+        if field.get("disabled"):
+            flags.append("disabled")
+        flag_text = f" [{' '.join(flags)}]" if flags else ""
+        value = field.get("value") or field.get("text") or ""
+        value_text = f" = {_truncate_text(value, 140)}" if value else ""
+        lines.append(f"- {name} ({field_type}){flag_text}{value_text}")
+        for option in field.get("options") or []:
+            selected = "*" if option.get("selected") else ""
+            lines.append(f"  option: {selected}{_truncate_text(option.get('value'), 80)} - {_truncate_text(option.get('text'), 100)}")
+    return lines
+
+def build_browser_diagnostics_report(snapshot: Dict[str, Any]) -> str:
+    """Build an admin-facing no-submit report from the live MissionChief page."""
+    lines = [
+        "BuildingManager Browser Diagnostics",
+        "NO FORM WAS SUBMITTED. NO BUILDING WAS CREATED.",
+        "",
+        f"URL: {snapshot.get('url') or ''}",
+        f"Title: {snapshot.get('title') or ''}",
+    ]
+    headings = [heading for heading in snapshot.get("headings") or [] if heading]
+    if headings:
+        lines.extend(["", "[Headings]"])
+        lines.extend(f"- {_truncate_text(heading, 180)}" for heading in headings)
+
+    candidates = snapshot.get("candidates") or []
+    lines.extend(["", f"[Building-related links/buttons: {len(candidates)}]"])
+    if candidates:
+        for item in candidates:
+            disabled = " disabled" if item.get("disabled") else ""
+            target = item.get("href") or item.get("id") or item.get("name") or item.get("className") or ""
+            lines.append(
+                f"- #{item.get('index')} {item.get('tag')} {item.get('type') or ''}{disabled}: "
+                f"{_truncate_text(item.get('text'), 140)} | {_truncate_text(target, 220)}"
+            )
+    else:
+        lines.append("- No obvious building/alliance/hospital/prison controls found on this page.")
+
+    forms = snapshot.get("forms") or []
+    lines.extend(["", f"[Forms: {len(forms)}]"])
+    if forms:
+        for form in forms:
+            lines.extend(
+                [
+                    "",
+                    f"Form #{form.get('index')}",
+                    f"Action: {form.get('action') or ''}",
+                    f"Method: {form.get('method') or ''}",
+                    f"ID/Class: {_truncate_text(form.get('id'), 80)} / {_truncate_text(form.get('className'), 120)}",
+                    f"Text: {_truncate_text(form.get('text'), 260)}",
+                    "Fields:",
+                ]
+            )
+            field_lines = _diagnostic_lines_for_fields(form.get("fields") or [])
+            lines.extend(field_lines or ["- No fields found."])
+    else:
+        lines.append("- No forms found.")
+    return "\n".join(lines)
 
 async def safe_update(interaction: discord.Interaction, *, content=None, embed=None, view=None):
     """Robust message updater for component/modal callbacks."""
@@ -1575,6 +1746,66 @@ class BuildingManager(commands.Cog):
             return
         self._panel_task = self.bot.loop.create_task(self._ensure_default_request_panel())
 
+    def _cookie_manager(self):
+        """Return the CookieManager cog when it exposes a MissionChief session."""
+        cookie_manager = self.bot.get_cog("CookieManager")
+        if not cookie_manager or not hasattr(cookie_manager, "get_session"):
+            return None
+        return cookie_manager
+
+    async def _get_session(self):
+        """Return the MissionChief aiohttp session from CookieManager."""
+        cookie_manager = self._cookie_manager()
+        if not cookie_manager:
+            raise RuntimeError("CookieManager is not loaded.")
+        session = await cookie_manager.get_session()
+        if not session:
+            raise RuntimeError("CookieManager did not return a session.")
+        return session
+
+    async def _playwright_cookies(self) -> List[Dict[str, str]]:
+        """Copy CookieManager's aiohttp cookies into Playwright cookie format."""
+        session = await self._get_session()
+        cookie_jar = getattr(session, "cookie_jar", None)
+        if not cookie_jar:
+            return []
+        cookies = cookie_jar.filter_cookies(BASE_URL)
+        playwright_cookies = []
+        for name, morsel in cookies.items():
+            value = getattr(morsel, "value", str(morsel))
+            if not name or not value:
+                continue
+            playwright_cookies.append({"name": str(name), "value": str(value), "url": BASE_URL})
+        return playwright_cookies
+
+    async def _browser_diagnostics(self, target_url: str) -> str:
+        """Inspect a MissionChief page in a logged-in browser without submitting anything."""
+        try:
+            from playwright.async_api import async_playwright
+        except Exception:
+            raise RuntimeError(PLAYWRIGHT_SETUP_MESSAGE)
+
+        cookies = await self._playwright_cookies()
+        if not cookies:
+            raise RuntimeError("No MissionChief cookies are available from CookieManager.")
+
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            try:
+                context = await browser.new_context(viewport={"width": 1440, "height": 1000})
+                await context.add_cookies(cookies)
+                page = await context.new_page()
+                page.set_default_timeout(30000)
+                await page.goto(target_url, wait_until="domcontentloaded")
+                login_fields = await page.locator("input[type='password']").count()
+                if login_fields:
+                    raise RuntimeError("MissionChief session is not logged in.")
+                snapshot = await page.evaluate(BUILDING_DIAGNOSTICS_SCRIPT)
+            finally:
+                await browser.close()
+
+        return build_browser_diagnostics_report(snapshot or {})
+
     def _request_panel_embed(self, description: Optional[str] = None) -> discord.Embed:
         """Build the persistent request panel embed."""
         if description is None:
@@ -1717,6 +1948,52 @@ class BuildingManager(commands.Cog):
         emb = self._request_panel_embed(description)
         await ch.send(embed=emb, view=StartView(self))
         await ctx.tick()
+
+    @buildset.command(name="browsercheck")
+    @commands.admin()
+    @commands.guild_only()
+    async def browsercheck(self, ctx: commands.Context):
+        """Check whether BuildingManager browser automation is ready."""
+        try:
+            from playwright.async_api import async_playwright
+        except Exception:
+            await ctx.send(PLAYWRIGHT_SETUP_MESSAGE)
+            return
+
+        try:
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(headless=True)
+                await browser.close()
+        except Exception as exc:
+            await ctx.send(f"BuildingManager browser backend is not ready: {exc}")
+            return
+
+        await ctx.send("BuildingManager browser backend is ready.")
+
+    @buildset.command(name="browserinspect")
+    @commands.admin()
+    @commands.guild_only()
+    async def browserinspect(self, ctx: commands.Context, *, url: Optional[str] = None):
+        """Inspect a MissionChief page for building forms without submitting anything."""
+        try:
+            target_url = _normalize_missionchief_url(url)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+
+        async with ctx.typing():
+            try:
+                report = await self._browser_diagnostics(target_url)
+            except Exception as exc:
+                await ctx.send(f"BuildingManager browser diagnostics failed: {exc}")
+                return
+
+        data = BytesIO(report.encode("utf-8"))
+        data.seek(0)
+        await ctx.send(
+            "Safe BuildingManager diagnostics generated. No building was created.",
+            file=discord.File(data, filename="buildingmanager-browser-diagnostics.txt"),
+        )
 
     @commands.hybrid_group(name="buildstats", invoke_without_command=True)
     @commands.guild_only()
