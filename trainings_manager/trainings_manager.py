@@ -1370,8 +1370,8 @@ class ReminderOnlySummaryView(discord.ui.View):
             )
             return
 
-        log_channel = guild.get_channel(log_channel_id)
-        request_channel = guild.get_channel(request_channel_id)
+        log_channel = await self.cog._resolve_channel(guild, log_channel_id)
+        request_channel = await self.cog._resolve_channel(guild, request_channel_id)
 
         if not log_channel or not request_channel:
             await interaction.response.send_message("One or more configured channels could not be found.", ephemeral=True)
@@ -1527,9 +1527,9 @@ class SubmitButton(discord.ui.Button):
             )
             return
 
-        admin_channel = guild.get_channel(admin_channel_id)
-        log_channel = guild.get_channel(log_channel_id)
-        request_channel = guild.get_channel(request_channel_id)
+        admin_channel = await cog._resolve_channel(guild, admin_channel_id)
+        log_channel = await cog._resolve_channel(guild, log_channel_id)
+        request_channel = await cog._resolve_channel(guild, request_channel_id)
 
         if not admin_channel or not log_channel or not request_channel:
             self.parent_view.processing = False
@@ -1899,7 +1899,7 @@ class ApproveModal(discord.ui.Modal, title="Approve training request"):
             return
             
         conf = await self.cog.config.guild(guild).all()
-        log_channel = guild.get_channel(conf["log_channel_id"]) if conf.get("log_channel_id") else None
+        log_channel = await self.cog._get_training_log_channel(guild, conf)
 
         user = guild.get_member(self.requester_id) if guild else None
         end_at = datetime.now(AMS) + timedelta(days=self.req.days)
@@ -2012,7 +2012,7 @@ class RejectModal(discord.ui.Modal, title="Rejection reason"):
             await interaction.response.send_message("Internal error: no guild.", ephemeral=True)
             return
         conf = await self.cog.config.guild(guild).all()
-        log_channel = guild.get_channel(conf["log_channel_id"]) if conf.get("log_channel_id") else None
+        log_channel = await self.cog._get_training_log_channel(guild, conf)
 
         user = guild.get_member(self.requester_id)
         
@@ -2648,6 +2648,7 @@ class TrainingManager(commands.Cog):
                 await self._handle_training_board_post(guild, session, thread_id, page, post)
             except Exception as exc:
                 log.exception("Training board post %s processing failed: %s", post.post_id, exc)
+                await self._send_board_processing_error_log(guild, conf, post, exc)
                 reply = self._build_training_board_error_reply(
                     post,
                     "An internal error occurred while processing this request. Staff has been notified.",
@@ -2807,6 +2808,37 @@ class TrainingManager(commands.Cog):
         await self._schedule_board_post_deletion(guild, thread_id, post.post_id, "processed request")
         if reply_post_id:
             await self._schedule_board_post_deletion(guild, thread_id, reply_post_id, "processed reply")
+
+    async def _send_board_processing_error_log(
+        self,
+        guild: discord.Guild,
+        conf: dict,
+        post: BoardTrainingPost,
+        error: Exception,
+    ) -> None:
+        log_channel = await self._get_training_log_channel(guild, conf)
+        if not log_channel:
+            return
+
+        embed = discord.Embed(
+            title="MissionChief board training request failed",
+            color=discord.Color.red(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(
+            name="Requester",
+            value=f"{post.author_name} ({post.author_id or 'unknown ID'})",
+            inline=False,
+        )
+        embed.add_field(name="Board post", value=f"#{post.post_id}", inline=True)
+        if post.created_at:
+            embed.add_field(name="Posted at", value=post.created_at, inline=True)
+        embed.add_field(name="Error", value=str(error)[:1024], inline=False)
+        embed.add_field(name="Original text", value=(post.content or "-")[:1024], inline=False)
+        try:
+            await log_channel.send(embed=embed)
+        except Exception as exc:
+            log.exception("Could not send TrainingManager board error log for post %s: %s", post.post_id, exc)
 
     async def _post_training_board_reply(
         self,
@@ -3484,7 +3516,10 @@ class TrainingManager(commands.Cog):
         embed.add_field(name="Expected end time", value=fmt_dt(end_at), inline=False)
         embed.set_footer(text=f"Course value: {result.course_value} • HTTP {result.status}")
 
-        await log_channel.send(embed=embed)
+        try:
+            await log_channel.send(embed=embed)
+        except Exception as exc:
+            log.exception("Could not send TrainingManager automatic-open log: %s", exc)
 
         if req.want_reminder:
             ref_text = ""
@@ -3784,6 +3819,31 @@ class TrainingManager(commands.Cog):
     async def logchannel(self, ctx: commands.Context, channel: discord.TextChannel):
         """Set the channel where all actions are logged."""
         await self.config.guild(ctx.guild).log_channel_id.set(channel.id)
+        await ctx.tick()
+
+    @tmset.command(name="logtest")
+    @commands.admin()
+    async def logtest(self, ctx: commands.Context):
+        """Send a test message to the configured TrainingManager log channel."""
+        conf = await self.config.guild(ctx.guild).all()
+        log_channel = await self._get_training_log_channel(ctx.guild, conf)
+        if not log_channel:
+            await ctx.send("TrainingManager log channel is not configured or could not be reached.")
+            return
+
+        embed = discord.Embed(
+            title="TrainingManager log test",
+            description="If you can see this message, TrainingManager log posting is working.",
+            color=discord.Color.green(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="Requested by", value=f"{ctx.author.mention} ({ctx.author.id})", inline=False)
+        try:
+            await log_channel.send(embed=embed)
+        except Exception as exc:
+            log.exception("TrainingManager log test failed: %s", exc)
+            await ctx.send(f"TrainingManager log test failed: {exc}")
+            return
         await ctx.tick()
 
     @tmset.command()

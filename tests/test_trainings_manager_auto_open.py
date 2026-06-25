@@ -627,6 +627,29 @@ def test_training_board_error_reply_explains_unrecognized_request():
     assert "Reason: No known training name was found." in reply
 
 
+def test_training_board_processing_error_is_logged_to_discord():
+    log_channel = types.SimpleNamespace(send=AsyncMock())
+    manager = TrainingManager.__new__(TrainingManager)
+    manager._get_training_log_channel = AsyncMock(return_value=log_channel)
+    guild = types.SimpleNamespace()
+    post = BoardTrainingPost(
+        post_id=179134,
+        author_id="123456",
+        author_name="BoardUser",
+        created_at="June 25, 2026 18:54",
+        content="Hotshot Crew Training",
+    )
+
+    asyncio.run(manager._send_board_processing_error_log(guild, {"log_channel_id": 12}, post, RuntimeError("boom")))
+
+    log_channel.send.assert_awaited_once()
+    embed = log_channel.send.await_args.kwargs["embed"]
+    assert embed.kwargs["title"] == "MissionChief board training request failed"
+    fields = {field["name"]: field["value"] for field in embed.fields}
+    assert fields["Board post"] == "#179134"
+    assert "boom" in fields["Error"]
+
+
 def test_parse_available_academies_extracts_open_training_links():
     academies = parse_available_academies(BUILDING_LIST_HTML)
 
