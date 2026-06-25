@@ -172,26 +172,35 @@ BROWSER_EVENT_START_SCRIPT = r"""
     setValue(name, String(value), false);
   }
 
+  const allowCoins = config.allowCoins === true;
   const coinValue = document.querySelector('[name="mission_position[coins]"]')?.value || "0";
-  if (!["", "0"].includes(String(coinValue))) {
+  if (!allowCoins && !["", "0"].includes(String(coinValue))) {
     fail(`Refusing to continue because coins is ${coinValue}.`);
   }
 
   const buttons = [...form.querySelectorAll('input[type="submit"], button[type="submit"], button:not([type])')];
-  const freeButton = buttons.find((button) => {
+  const startButton = buttons.find((button) => {
     const text = visibleText(button).toLowerCase();
-    return !button.disabled && text.includes("free") && !text.includes("coin");
+    if (button.disabled) return false;
+    if (allowCoins) return text.includes("start") && text.includes("event") && (text.includes("free") || text.includes("coin"));
+    return text.includes("free") && !text.includes("coin");
   });
-  if (!freeButton) {
-    fail("The free Start Event button was not found or is disabled.");
+  if (!startButton) {
+    const wanted = allowCoins ? "free or coin Start Event" : "free Start Event";
+    fail(`The enabled ${wanted} button was not found.`);
   }
 
+  const buttonText = visibleText(startButton);
+  const usesCoins = buttonText.toLowerCase().includes("coin") || !["", "0"].includes(String(coinValue));
+  if (usesCoins && !allowCoins) {
+    fail(`Refusing to click coin action: ${buttonText}.`);
+  }
   const summary = [
     `Event: ${config.label}`,
     `Latitude: ${config.fields["mission_position[latitude]"] || "not set"}`,
     `Longitude: ${config.fields["mission_position[longitude]"] || "not set"}`,
     `Address: ${config.fields["mission_position[address]"] || "not set"}`,
-    `Button: ${visibleText(freeButton)}`,
+    `Button: ${buttonText}`,
   ].join("\n");
 
   if (!confirm(`Start this MissionChief alliance event?\n\n${summary}`)) {
@@ -199,7 +208,17 @@ BROWSER_EVENT_START_SCRIPT = r"""
     return;
   }
 
-  freeButton.click();
+  if (usesCoins) {
+    const confirmation = prompt(
+      `This action can spend MissionChief coins.\n\n${summary}\n\nType SPEND COINS to continue.`
+    );
+    if (confirmation !== "SPEND COINS") {
+      console.log("EventManager browser start cancelled before spending coins.");
+      return;
+    }
+  }
+
+  startButton.click();
 })();
 """.strip()
 WEEKDAYS = {
@@ -729,7 +748,12 @@ def safe_debug_payload(payload: Payload) -> str:
     return "\n".join(f"{name}={_redact_debug_value(name, value)}" for name, value in payload)
 
 
-def build_browser_event_start_script(fields: Dict[str, str], *, label: str = "EventManager event") -> str:
+def build_browser_event_start_script(
+    fields: Dict[str, str],
+    *,
+    label: str = "EventManager event",
+    allow_coins: bool = False,
+) -> str:
     """Build a browser-console script that starts an event through the live MissionChief DOM."""
     allowed_fields = {
         EVENT_RADIO_FIELD,
@@ -752,6 +776,7 @@ def build_browser_event_start_script(fields: Dict[str, str], *, label: str = "Ev
     config = {
         "label": str(label or "EventManager event"),
         "fields": safe_fields,
+        "allowCoins": bool(allow_coins),
     }
     return BROWSER_EVENT_START_SCRIPT.replace("__CONFIG__", json.dumps(config, ensure_ascii=False, indent=2))
 
@@ -1686,10 +1711,13 @@ class EventManager(commands.Cog):
             file=discord.File(data, filename="eventmanager-browser-capture.js"),
         )
 
-    @eventmanager.command(name="browsereventscript")
-    @commands.admin()
-    async def browser_event_start_script(self, ctx: commands.Context, profile_name: Optional[str] = None):
-        """Send a browser-console script that starts an alliance event through the live DOM."""
+    async def _send_browser_event_start_script(
+        self,
+        ctx: commands.Context,
+        profile_name: Optional[str],
+        *,
+        allow_coins: bool,
+    ):
         try:
             form = await self._fetch_form("event")
         except Exception as exc:
@@ -1714,17 +1742,38 @@ class EventManager(commands.Cog):
             label = f"quick:{options[0].label}"
 
         start_fields = _normalize_overrides(form, profile_fields_for_start(profile))
-        script = build_browser_event_start_script(start_fields, label=label)
-        instructions = (
-            "Open https://www.missionchief.com/missionAllianceEventNew in the same MissionChief account, "
-            "paste this script in the browser console, review the confirmation, and only then approve it. "
-            "This script clicks only the free Start Event button and refuses coin payloads."
-        )
+        script = build_browser_event_start_script(start_fields, label=label, allow_coins=allow_coins)
+        if allow_coins:
+            instructions = (
+                "Open https://www.missionchief.com/missionAllianceEventNew in the same MissionChief account, "
+                "paste this script in the browser console, and review every confirmation. "
+                "This script may click an enabled coin Start Event button, but only after you type SPEND COINS."
+            )
+            filename_suffix = f"{normalized_profile or 'quick'}-coins"
+        else:
+            instructions = (
+                "Open https://www.missionchief.com/missionAllianceEventNew in the same MissionChief account, "
+                "paste this script in the browser console, review the confirmation, and only then approve it. "
+                "This script clicks only the free Start Event button and refuses coin payloads."
+            )
+            filename_suffix = normalized_profile or "quick"
         data = io.BytesIO(script.encode("utf-8"))
         await ctx.send(
             instructions,
-            file=discord.File(data, filename=f"eventmanager-browser-event-{normalized_profile or 'quick'}.js"),
+            file=discord.File(data, filename=f"eventmanager-browser-event-{filename_suffix}.js"),
         )
+
+    @eventmanager.command(name="browsereventscript")
+    @commands.admin()
+    async def browser_event_start_script(self, ctx: commands.Context, profile_name: Optional[str] = None):
+        """Send a browser-console script that starts an alliance event through the live DOM."""
+        await self._send_browser_event_start_script(ctx, profile_name, allow_coins=False)
+
+    @eventmanager.command(name="browsereventcoinscript")
+    @commands.admin()
+    async def browser_event_coin_start_script(self, ctx: commands.Context, profile_name: Optional[str] = None):
+        """Send a browser-console script that may start an alliance event with coins."""
+        await self._send_browser_event_start_script(ctx, profile_name, allow_coins=True)
 
     @eventmanager.command(name="panel")
     @commands.admin()

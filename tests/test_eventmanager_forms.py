@@ -521,13 +521,33 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("/missionAllianceEventNew", script)
         self.assertIn("missionAllianceEventCreate", script)
-        self.assertIn("freeButton.click()", script)
+        self.assertIn('"allowCoins": false', script)
+        self.assertIn("startButton.click()", script)
+        self.assertIn("Refusing to click coin action", script)
         self.assertIn('"event_radio_group": "2"', script)
         self.assertIn('"mission_position[shape]": "circle"', script)
         self.assertIn("70 Washington Square South", script)
         self.assertNotIn("secret", script)
         self.assertNotIn("authenticity_token", script)
         self.assertNotIn("event_identifier", script)
+        self.assertNotIn("fetch(", script)
+        self.assertNotIn("XMLHttpRequest", script)
+
+    def test_browser_event_start_script_can_explicitly_allow_coins(self):
+        script = build_browser_event_start_script(
+            {
+                "event_radio_group": "2",
+                "mission_position[mission_type_id]": "2",
+                "mission_position[coins]": "20",
+            },
+            label="storm surge",
+            allow_coins=True,
+        )
+
+        self.assertIn('"allowCoins": true', script)
+        self.assertIn('"mission_position[coins]": "20"', script)
+        self.assertIn("SPEND COINS", script)
+        self.assertIn("startButton.click()", script)
         self.assertNotIn("fetch(", script)
         self.assertNotIn("XMLHttpRequest", script)
 
