@@ -8,8 +8,12 @@ from eventmanager.event_manager import (
     BROWSER_PREPARE_START_SCRIPT,
     build_browser_start_config,
     build_payload,
+    EVENT_DEFAULT_OVERRIDES,
+    EVENT_ROUTE_LOCATIONS,
+    EVENT_RADIO_FIELD,
     fields_for_selection,
     field_options_for_kind,
+    MISSION_TYPE_FIELD,
     normalize_kind,
     normalize_optional_profile_arg,
     normalize_random_location_region,
@@ -22,7 +26,11 @@ from eventmanager.event_manager import (
     parse_profile_names,
     profile_fields_for_start,
     profile_name_from_label,
+    profile_with_selected_type,
     random_location_for_region,
+    RANDOM_TYPE_KEY,
+    route_profile_for_location,
+    route_profile_names,
     safe_debug_mapping,
     safe_debug_payload,
     schedule_run_key,
@@ -363,6 +371,35 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertEqual(config["size"], "2")
         self.assertEqual(config["shape"], "circle")
         self.assertEqual(config["amount"], "0")
+
+    def test_route_profiles_use_fixed_locations_and_random_live_types(self):
+        names = route_profile_names()
+
+        self.assertEqual(len(names), 10)
+        self.assertEqual(names[0], "route_new_york_city")
+        self.assertEqual(names[-1], "route_beersheba_israel")
+
+        large_profile = route_profile_for_location("large", EVENT_ROUTE_LOCATIONS[0])
+        event_profile = route_profile_for_location("event", EVENT_ROUTE_LOCATIONS[0])
+
+        self.assertTrue(large_profile[RANDOM_TYPE_KEY])
+        self.assertTrue(event_profile[RANDOM_TYPE_KEY])
+        self.assertEqual(large_profile["fields"]["mission_position[latitude]"], "40.712800")
+        self.assertEqual(event_profile["fields"]["mission_position[size]"], EVENT_DEFAULT_OVERRIDES["mission_position[size]"])
+        self.assertEqual(event_profile["fields"]["mission_position[shape]"], "circle")
+        self.assertEqual(event_profile["fields"]["mission_position[amount]"], "0")
+
+    def test_profile_with_selected_type_resolves_random_event_type(self):
+        profile = route_profile_for_location("event", EVENT_ROUTE_LOCATIONS[0])
+        form = parse_event_form(MISSIONCHIEF_EVENT_HTML, "https://www.missionchief.com/missionAllianceEventNew")
+        option = next(option for option in field_options_for_kind(form, "event") if option.label == "Civil Unrest")
+
+        resolved = profile_with_selected_type("event", profile, option)
+
+        self.assertNotIn(RANDOM_TYPE_KEY, resolved)
+        self.assertEqual(resolved["fields"][EVENT_RADIO_FIELD], "1")
+        self.assertEqual(resolved["fields"][MISSION_TYPE_FIELD], "1")
+        self.assertEqual(resolved["selected_type_label"], "Civil Unrest")
 
     def test_build_browser_start_config_resolves_large_profile(self):
         profile = fields_for_selection("large", "41", random_region="nyc")
