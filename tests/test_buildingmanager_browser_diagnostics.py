@@ -7,8 +7,8 @@ from buildingmanager.buildingmanager import (
 
 
 class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
-    def test_normalize_missionchief_url_defaults_to_home(self):
-        self.assertEqual(_normalize_missionchief_url(None), "https://www.missionchief.com")
+    def test_normalize_missionchief_url_defaults_to_new_building_page(self):
+        self.assertEqual(_normalize_missionchief_url(None), "https://www.missionchief.com/buildings/new")
 
     def test_normalize_missionchief_url_accepts_relative_path(self):
         self.assertEqual(
