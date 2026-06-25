@@ -21,6 +21,7 @@ log = logging.getLogger("red.cog.building_manager")
 
 BASE_URL = "https://www.missionchief.com"
 MISSIONCHIEF_HOME_URL = BASE_URL
+MISSIONCHIEF_NEW_BUILDING_URL = f"{BASE_URL}/buildings/new"
 DEFAULT_REQUEST_PANEL_CHANNEL_ID = 1421627971831070730
 PLAYWRIGHT_SETUP_MESSAGE = (
     "Playwright browser automation is not ready. Install the BuildingManager requirements and run "
@@ -125,7 +126,7 @@ def _truncate_text(value: Any, limit: int = 180) -> str:
 def _normalize_missionchief_url(value: Optional[str]) -> str:
     """Normalize a user-supplied MissionChief URL or path."""
     if not value:
-        return MISSIONCHIEF_HOME_URL
+        return MISSIONCHIEF_NEW_BUILDING_URL
     value = value.strip()
     if value.startswith("/"):
         return f"{BASE_URL}{value}"
@@ -1974,7 +1975,7 @@ class BuildingManager(commands.Cog):
     @commands.admin()
     @commands.guild_only()
     async def browserinspect(self, ctx: commands.Context, *, url: Optional[str] = None):
-        """Inspect a MissionChief page for building forms without submitting anything."""
+        """Inspect a MissionChief building page without submitting anything."""
         try:
             target_url = _normalize_missionchief_url(url)
         except ValueError as exc:
