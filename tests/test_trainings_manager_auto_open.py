@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 import types
 from unittest.mock import AsyncMock
 
@@ -416,10 +417,16 @@ def test_build_board_guide_content_lists_availability_and_training_names():
         "Police": DisciplineAvailability(discipline="Police", available_classrooms=2),
     }
 
-    content = manager._build_board_guide_content(availability, None, request_thread_id=5935)
+    content = manager._build_board_guide_content(
+        availability,
+        None,
+        request_thread_id=5935,
+        refreshed_at=datetime(2026, 6, 25, 10, 0, tzinfo=timezone.utc),
+    )
 
     assert "[b]Training Request Guide[/b]" in content
     assert "https://www.missionchief.com/alliance_threads/5935" in content
+    assert "[b]Current academy availability[/b]\nLast updated: 2026-06-25 12:00 CEST" in content
     assert "- Fire: 3 classes" in content
     assert "- Police: 2 classes" in content
     assert "[b]Fire training request text[/b]" in content
@@ -433,7 +440,12 @@ def test_build_board_guide_contents_splits_sections_and_marks_posts():
     manager = TrainingManager.__new__(TrainingManager)
     availability = {"Fire": DisciplineAvailability(discipline="Fire", available_classrooms=3)}
 
-    contents = manager._build_board_guide_contents(availability, None, request_thread_id=5935)
+    contents = manager._build_board_guide_contents(
+        availability,
+        None,
+        request_thread_id=5935,
+        refreshed_at=datetime(2026, 6, 25, 10, 0, tzinfo=timezone.utc),
+    )
 
     assert set(contents) == {"overview", "Fire", "Police", "EMS", "Coastal"}
     assert contents["overview"].startswith("[TM-GUIDE:overview]")
@@ -473,6 +485,76 @@ def test_training_board_bot_replies_are_not_treated_as_requests():
 
     assert manager._is_board_system_post(marked) is True
     assert manager._is_board_system_post(legacy) is True
+
+
+def test_training_board_post_ids_are_normalized_for_duplicate_protection():
+    manager = TrainingManager.__new__(TrainingManager)
+
+    assert manager._normalize_board_post_ids(["10", 11, None, "bad", "12"]) == [10, 11, 12]
+
+
+def test_training_board_reply_with_id_returns_new_bot_reply_post_id():
+    manager = TrainingManager.__new__(TrainingManager)
+    reply_page_html = TRAINING_BOARD_HTML.replace(
+        "</form>",
+        """
+<div class="panel panel-default" id="post-on-page-2">
+  <div class="panel-body">
+    <div class="row">
+      <div class="col-md-1">
+        <strong>FireAndRescueAcademy</strong>
+        <br>
+        <span title="June 24, 2026 15:48">June 24, 2026 15:48</span>
+      </div>
+      <div class="col-md-11">
+        <p>[TM-REPLY]<br>Training request processed for BoardUser.</p>
+      </div>
+    </div>
+  </div>
+  <div class="panel-footer">
+    <a href="/alliance_posts/179135/edit">Edit</a>
+  </div>
+</div>
+</form>
+""",
+    )
+    session = _Session(
+        {
+            "https://www.missionchief.com/alliance_threads/5935": TRAINING_BOARD_HTML,
+            "https://www.missionchief.com/alliance_threads/5935?page=6": reply_page_html,
+        }
+    )
+    page = parse_training_board_page(TRAINING_BOARD_HTML)
+
+    status, post_id = asyncio.run(
+        manager._post_training_board_reply_with_id(
+            session,
+            5935,
+            page,
+            "[TM-REPLY]\nTraining request processed for BoardUser.",
+        )
+    )
+
+    assert status == 200
+    assert post_id == 179135
+
+
+def test_delete_board_post_submits_delete_method_with_reply_token():
+    manager = TrainingManager.__new__(TrainingManager)
+    session = _Session(
+        {
+            "https://www.missionchief.com/alliance_threads/5935": TRAINING_BOARD_HTML,
+            "https://www.missionchief.com/alliance_threads/5935?page=6": TRAINING_BOARD_HTML,
+        }
+    )
+
+    deleted, reason = asyncio.run(manager._delete_board_post(session, 5935, 179134))
+
+    assert deleted is True
+    assert reason == "deleted"
+    assert session.posts[-1][0] == "https://www.missionchief.com/alliance_posts/179134"
+    assert session.posts[-1][1]["data"]["_method"] == "delete"
+    assert session.posts[-1][1]["data"]["authenticity_token"] == "token-board"
 
 
 def test_training_board_reply_reports_failed_auto_open_to_board_user():
@@ -749,7 +831,8 @@ def test_training_availability_embed_uses_simple_class_counts():
         "Coastal": DisciplineAvailability(discipline="Coastal", available_classrooms=1, academies_checked=1),
     }
 
-    embed = manager._build_availability_embed(availability)
+    refreshed_at = datetime(2026, 6, 25, 10, 0, tzinfo=timezone.utc)
+    embed = manager._build_availability_embed(availability, refreshed_at=refreshed_at)
 
     assert embed.kwargs["title"] == "Academy Availability"
     assert embed.kwargs["description"] == "\n".join(
@@ -758,8 +841,11 @@ def test_training_availability_embed_uses_simple_class_counts():
             "**Police:** 4 classes",
             "**EMS:** 0 classes",
             "**Coastal:** 1 classes",
+            "",
+            "Last updated: 2026-06-25 12:00 CEST",
         ]
     )
+    assert embed.kwargs["timestamp"] == refreshed_at
     assert not embed.fields
 
 

@@ -148,6 +148,10 @@ BOARD_REPLY_MARKER = "[TM-REPLY]"
 BOARD_GUIDE_OVERVIEW_SECTION = "overview"
 BOARD_GUIDE_MAX_SCAN_PAGES = 25
 BOARD_GUIDE_SYNC_SECONDS = AVAILABILITY_REFRESH_SECONDS
+BOARD_POST_DELETE_AFTER_SECONDS = 12 * 60 * 60
+BOARD_CLEANUP_SECONDS = 10 * 60
+BOARD_PROCESSED_POST_ID_LIMIT = 1000
+BOARD_PENDING_DELETE_LIMIT = 1000
 AGENCY_ORDER = ("Fire", "Police", "EMS", "Coastal")
 BOARD_GUIDE_SECTIONS = (BOARD_GUIDE_OVERVIEW_SECTION, *AGENCY_ORDER)
 
@@ -1934,9 +1938,12 @@ class TrainingManager(commands.Cog):
             "availability_channel_id": MEMBER_PANEL_CHANNEL_ID,
             "availability_message_id": None,
             "availability_enabled": False,
+            "availability_last_refreshed_at": None,
             "board_poll_enabled": True,
             "board_thread_id": BOARD_THREAD_ID,
             "board_last_seen_post_id": None,
+            "board_processed_post_ids": [],
+            "board_pending_deletions": [],
             "board_guide_enabled": True,
             "board_guide_thread_id": None,
             "board_guide_post_id": None,
@@ -1955,6 +1962,7 @@ class TrainingManager(commands.Cog):
         self._availability_task = self.bot.loop.create_task(self._availability_loop())
         self._board_poll_task = self.bot.loop.create_task(self._board_poll_loop())
         self._board_guide_task = self.bot.loop.create_task(self._board_guide_loop())
+        self._board_cleanup_task = self.bot.loop.create_task(self._board_cleanup_loop())
 
     def cog_unload(self):
         if self._reminder_task:
@@ -1969,6 +1977,8 @@ class TrainingManager(commands.Cog):
             self._board_poll_task.cancel()
         if self._board_guide_task:
             self._board_guide_task.cancel()
+        if self._board_cleanup_task:
+            self._board_cleanup_task.cancel()
 
     @asynccontextmanager
     async def _bot_status(self, detail: str, *, priority: int = 70):
@@ -2471,14 +2481,18 @@ class TrainingManager(commands.Cog):
             await self.config.guild(guild).board_last_seen_post_id.set(latest_post_id)
             return
 
+        processed_post_ids = self._normalize_board_post_ids(conf.get("board_processed_post_ids") or [])
         new_posts = [
             post
             for post in sorted(page.posts, key=lambda item: item.post_id)
             if post.post_id > last_seen
+            and post.post_id not in processed_post_ids
             and post.author_id != page.current_user_id
             and not self._is_board_system_post(post)
         ]
         for post in new_posts:
+            if not await self._mark_board_post_processing(guild, post.post_id):
+                continue
             try:
                 await self._handle_training_board_post(guild, session, thread_id, page, post)
             except Exception as exc:
@@ -2488,7 +2502,15 @@ class TrainingManager(commands.Cog):
                     "An internal error occurred while processing this request. Staff has been notified.",
                 )
                 try:
-                    await self._post_training_board_reply(session, thread_id, page, reply)
+                    _status, reply_post_id = await self._post_training_board_reply_with_id(
+                        session,
+                        thread_id,
+                        page,
+                        reply,
+                    )
+                    await self._schedule_board_post_deletion(guild, thread_id, post.post_id, "failed request")
+                    if reply_post_id:
+                        await self._schedule_board_post_deletion(guild, thread_id, reply_post_id, "failure reply")
                 except Exception as reply_exc:
                     log.exception(
                         "Could not post TrainingManager board error reply for post %s: %s",
@@ -2515,6 +2537,27 @@ class TrainingManager(commands.Cog):
                 html = await response.text()
             page = parse_training_board_page(html)
         return page, status
+
+    def _normalize_board_post_ids(self, values) -> List[int]:
+        post_ids: List[int] = []
+        for value in values or []:
+            try:
+                post_ids.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        return post_ids
+
+    async def _mark_board_post_processing(self, guild: discord.Guild, post_id: int) -> bool:
+        post_id = int(post_id)
+        async with self.config.guild(guild).board_processed_post_ids() as processed:
+            current = self._normalize_board_post_ids(processed)
+            if post_id in current:
+                return False
+            current.append(post_id)
+            del current[:-BOARD_PROCESSED_POST_ID_LIMIT]
+            processed.clear()
+            processed.extend(current)
+        return True
 
     async def _handle_training_board_post(
         self,
@@ -2543,7 +2586,10 @@ class TrainingManager(commands.Cog):
                 post,
                 "No known training name was found. Please use one of the training names listed in the guide posts.",
             )
-            await self._post_training_board_reply(session, thread_id, page, reply)
+            _status, reply_post_id = await self._post_training_board_reply_with_id(session, thread_id, page, reply)
+            await self._schedule_board_post_deletion(guild, thread_id, post.post_id, "unrecognized request")
+            if reply_post_id:
+                await self._schedule_board_post_deletion(guild, thread_id, reply_post_id, "unrecognized reply")
             return
 
         results: List[Tuple[BoardTrainingMatch, AutoTrainingResult]] = []
@@ -2571,13 +2617,16 @@ class TrainingManager(commands.Cog):
             )
 
         reply = self._build_training_board_reply(post, results)
-        reply_status = await self._post_training_board_reply(session, thread_id, page, reply)
+        reply_status, reply_post_id = await self._post_training_board_reply_with_id(session, thread_id, page, reply)
         if reply_status is None or int(reply_status) >= 400:
             log.warning(
                 "Training board reply for post %s returned HTTP %s",
                 post.post_id,
                 reply_status,
             )
+        await self._schedule_board_post_deletion(guild, thread_id, post.post_id, "processed request")
+        if reply_post_id:
+            await self._schedule_board_post_deletion(guild, thread_id, reply_post_id, "processed reply")
 
     async def _post_training_board_reply(
         self,
@@ -2600,6 +2649,161 @@ class TrainingManager(commands.Cog):
             status = getattr(response, "status", None)
             await response.text()
         return status
+
+    async def _post_training_board_reply_with_id(
+        self,
+        session,
+        thread_id: int,
+        page: BoardPage,
+        content: str,
+    ) -> Tuple[Optional[int], Optional[int]]:
+        status = await self._post_training_board_reply(session, thread_id, page, content)
+        if status is None or int(status) >= 400:
+            return status, None
+
+        refreshed_page, refreshed_status = await self._fetch_training_board_latest_page(session, thread_id)
+        if refreshed_status is not None and int(refreshed_status) >= 400:
+            return status, None
+
+        for post in sorted(refreshed_page.posts, key=lambda item: item.post_id, reverse=True):
+            if BOARD_REPLY_MARKER not in str(post.content or ""):
+                continue
+            if refreshed_page.current_user_id and post.author_id and post.author_id != refreshed_page.current_user_id:
+                continue
+            return status, int(post.post_id)
+        return status, None
+
+    async def _schedule_board_post_deletion(
+        self,
+        guild: discord.Guild,
+        thread_id: int,
+        post_id: int,
+        reason: str,
+    ) -> None:
+        due_ts = int(datetime.now(timezone.utc).timestamp()) + BOARD_POST_DELETE_AFTER_SECONDS
+        post_id = int(post_id)
+        thread_id = int(thread_id)
+        async with self.config.guild(guild).board_pending_deletions() as pending:
+            normalized = []
+            exists = False
+            for item in pending or []:
+                try:
+                    item_thread_id = int(item.get("thread_id"))
+                    item_post_id = int(item.get("post_id"))
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                if item_thread_id == thread_id and item_post_id == post_id:
+                    exists = True
+                    item = dict(item)
+                    item["due_ts"] = min(int(item.get("due_ts") or due_ts), due_ts)
+                    item["reason"] = str(item.get("reason") or reason)
+                normalized.append(item)
+
+            if not exists:
+                normalized.append(
+                    {
+                        "thread_id": thread_id,
+                        "post_id": post_id,
+                        "due_ts": due_ts,
+                        "reason": str(reason),
+                        "attempts": 0,
+                    }
+                )
+
+            normalized = sorted(normalized, key=lambda item: int(item.get("due_ts") or 0))
+            del normalized[:-BOARD_PENDING_DELETE_LIMIT]
+            pending.clear()
+            pending.extend(normalized)
+
+    async def _board_cleanup_loop(self) -> None:
+        await self.bot.wait_until_red_ready()
+        while True:
+            try:
+                for guild in self.bot.guilds:
+                    await self._cleanup_board_deletions_for_guild(guild)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.exception("TrainingManager board cleanup loop error: %s", exc)
+            await asyncio.sleep(BOARD_CLEANUP_SECONDS)
+
+    async def _cleanup_board_deletions_for_guild(self, guild: discord.Guild) -> None:
+        conf = await self.config.guild(guild).all()
+        pending = list(conf.get("board_pending_deletions") or [])
+        if not pending:
+            return
+
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        due_items = []
+        remaining = []
+        for item in pending:
+            try:
+                due_ts = int(item.get("due_ts") or 0)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if due_ts <= now_ts:
+                due_items.append(dict(item))
+            else:
+                remaining.append(dict(item))
+
+        if not due_items:
+            return
+
+        cookie_manager = self.bot.get_cog("CookieManager")
+        if not cookie_manager or not hasattr(cookie_manager, "get_session"):
+            log.info("Training board cleanup skipped: CookieManager is not loaded")
+            return
+
+        session = await cookie_manager.get_session()
+        for item in due_items:
+            try:
+                thread_id = int(item.get("thread_id"))
+                post_id = int(item.get("post_id"))
+            except (TypeError, ValueError):
+                continue
+
+            deleted, reason = await self._delete_board_post(session, thread_id, post_id)
+            if deleted:
+                await asyncio.sleep(1)
+                continue
+
+            attempts = int(item.get("attempts") or 0) + 1
+            if attempts < 6:
+                item["attempts"] = attempts
+                item["last_error"] = reason[:200]
+                item["due_ts"] = now_ts + min(BOARD_CLEANUP_SECONDS * attempts, 60 * 60)
+                remaining.append(item)
+            else:
+                log.warning("Dropping board post cleanup for %s after %s attempts: %s", post_id, attempts, reason)
+
+        remaining = sorted(remaining, key=lambda item: int(item.get("due_ts") or 0))
+        del remaining[:-BOARD_PENDING_DELETE_LIMIT]
+        await self.config.guild(guild).board_pending_deletions.set(remaining)
+
+    async def _delete_board_post(self, session, thread_id: int, post_id: int) -> Tuple[bool, str]:
+        page, status = await self._fetch_training_board_latest_page(session, int(thread_id))
+        if status is not None and int(status) >= 400:
+            return False, f"thread returned HTTP {status}"
+
+        payload = {
+            "utf8": "\u2713",
+            "_method": "delete",
+            "commit": "Delete",
+        }
+        if page.reply_token:
+            payload["authenticity_token"] = page.reply_token
+
+        url = f"https://www.missionchief.com/alliance_posts/{int(post_id)}"
+        async with session.post(url, data=payload, allow_redirects=True) as response:
+            delete_status = getattr(response, "status", None)
+            await response.text()
+        if delete_status is None:
+            return False, "delete returned no HTTP status"
+        if int(delete_status) in {404, 410}:
+            return True, "already deleted"
+        if int(delete_status) >= 400:
+            return False, f"delete returned HTTP {delete_status}"
+        return True, "deleted"
 
     def _build_training_board_reply(
         self,
@@ -2702,9 +2906,10 @@ class TrainingManager(commands.Cog):
         availability: Dict[str, DisciplineAvailability],
         error: Optional[str],
         request_thread_id: int,
+        refreshed_at: Optional[datetime] = None,
     ) -> str:
         return "\n\n".join(
-            self._build_board_guide_contents(availability, error, request_thread_id).values()
+            self._build_board_guide_contents(availability, error, request_thread_id, refreshed_at).values()
         )
 
     def _build_board_guide_contents(
@@ -2712,14 +2917,14 @@ class TrainingManager(commands.Cog):
         availability: Dict[str, DisciplineAvailability],
         error: Optional[str],
         request_thread_id: int,
+        refreshed_at: Optional[datetime] = None,
     ) -> Dict[str, str]:
-        updated_at = datetime.now(AMS).strftime("%Y-%m-%d %H:%M %Z")
+        updated_at = self._format_availability_last_updated(refreshed_at)
         overview_lines = [
             self._board_guide_marker(BOARD_GUIDE_OVERVIEW_SECTION),
             "[b]Training Request Guide[/b]",
             "",
             "This post is maintained automatically by the Fire & Rescue Academy.",
-            f"Last updated: {updated_at}",
             "",
             "[b]Request in this topic[/b]",
             f"Thread: https://www.missionchief.com/alliance_threads/{request_thread_id}",
@@ -2736,6 +2941,7 @@ class TrainingManager(commands.Cog):
             "- If current data shows your alliance donation is below 5%, the class will not be opened automatically.",
             "",
             "[b]Current academy availability[/b]",
+            f"Last updated: {updated_at}",
         ]
         if error:
             overview_lines.append(f"Availability could not be refreshed: {error}")
@@ -2798,6 +3004,13 @@ class TrainingManager(commands.Cog):
             or "\nopened:\n" in lowered
             or "\ncould not open automatically:\n" in lowered
         )
+
+    def _format_availability_last_updated(self, refreshed_at: Optional[datetime] = None) -> str:
+        if refreshed_at is None:
+            refreshed_at = datetime.now(timezone.utc)
+        if refreshed_at.tzinfo is None:
+            refreshed_at = refreshed_at.replace(tzinfo=timezone.utc)
+        return refreshed_at.astimezone(AMS).strftime("%Y-%m-%d %H:%M %Z")
 
     async def _resolve_channel(self, guild: discord.Guild, channel_id: Optional[int]) -> Optional[discord.abc.Messageable]:
         if not channel_id:
@@ -2942,7 +3155,15 @@ class TrainingManager(commands.Cog):
             return False, f"edit post returned HTTP {status}"
         return True, "updated"
 
-    async def _sync_training_board_guide_for_guild(self, guild: discord.Guild, *, force: bool = False) -> bool:
+    async def _sync_training_board_guide_for_guild(
+        self,
+        guild: discord.Guild,
+        *,
+        force: bool = False,
+        availability: Optional[Dict[str, DisciplineAvailability]] = None,
+        error: Optional[str] = None,
+        refreshed_at: Optional[datetime] = None,
+    ) -> bool:
         conf = await self.config.guild(guild).all()
         if not conf.get("board_guide_enabled"):
             return False
@@ -2953,8 +3174,11 @@ class TrainingManager(commands.Cog):
             return False
 
         request_thread_id = int(conf.get("board_thread_id") or BOARD_THREAD_ID)
-        availability, error = await self._collect_training_availability()
-        contents = self._build_board_guide_contents(availability, error, request_thread_id)
+        if availability is None:
+            availability, error = await self._collect_training_availability()
+        if refreshed_at is None:
+            refreshed_at = datetime.now(timezone.utc)
+        contents = self._build_board_guide_contents(availability, error, request_thread_id, refreshed_at)
         content_hashes = {
             section: self._board_guide_hash(content)
             for section, content in contents.items()
@@ -3027,6 +3251,9 @@ class TrainingManager(commands.Cog):
         while True:
             try:
                 for guild in self.bot.guilds:
+                    conf = await self.config.guild(guild).all()
+                    if conf.get("availability_enabled"):
+                        continue
                     async with self._bot_status(f"syncing training board guide in {guild.name}", priority=45):
                         await self._sync_training_board_guide_for_guild(guild)
             except asyncio.CancelledError:
@@ -3152,16 +3379,27 @@ class TrainingManager(commands.Cog):
         self,
         availability: Dict[str, DisciplineAvailability],
         error: Optional[str] = None,
+        refreshed_at: Optional[datetime] = None,
     ) -> discord.Embed:
-        description = "\n".join(
+        refreshed_at = refreshed_at or datetime.now(timezone.utc)
+        if refreshed_at.tzinfo is None:
+            refreshed_at = refreshed_at.replace(tzinfo=timezone.utc)
+        class_lines = [
             f"**{discipline}:** {availability.get(discipline, DisciplineAvailability(discipline=discipline)).available_classrooms} classes"
             for discipline in AGENCY_ORDER
+        ]
+        description = "\n".join(
+            [
+                *class_lines,
+                "",
+                f"Last updated: {self._format_availability_last_updated(refreshed_at)}",
+            ]
         )
         embed = discord.Embed(
             title="Academy Availability",
             description=description,
             color=discord.Color.blurple() if not error else discord.Color.orange(),
-            timestamp=datetime.now(timezone.utc),
+            timestamp=refreshed_at,
         )
         if error:
             embed.add_field(name="Status", value=f"Could not refresh automatically: {error}", inline=False)
@@ -3179,13 +3417,22 @@ class TrainingManager(commands.Cog):
             log.warning("TrainingManager availability channel not found: %s", channel_id)
             return None
 
+        refreshed_at = datetime.now(timezone.utc)
         availability, error = await self._collect_training_availability()
-        embed = self._build_availability_embed(availability, error)
+        embed = self._build_availability_embed(availability, error, refreshed_at)
         message_id = conf.get("availability_message_id")
         if message_id:
             try:
                 message = await channel.fetch_message(int(message_id))
                 await message.edit(embed=embed)
+                await self.config.guild(guild).availability_last_refreshed_at.set(int(refreshed_at.timestamp()))
+                await self._sync_training_board_guide_for_guild(
+                    guild,
+                    force=True,
+                    availability=availability,
+                    error=error,
+                    refreshed_at=refreshed_at,
+                )
                 return message
             except Exception as exc:
                 log.info("TrainingManager availability message missing; reposting: %s", exc)
@@ -3194,6 +3441,14 @@ class TrainingManager(commands.Cog):
         await self.config.guild(guild).availability_message_id.set(message.id)
         await self.config.guild(guild).availability_channel_id.set(channel.id)
         await self.config.guild(guild).availability_enabled.set(True)
+        await self.config.guild(guild).availability_last_refreshed_at.set(int(refreshed_at.timestamp()))
+        await self._sync_training_board_guide_for_guild(
+            guild,
+            force=True,
+            availability=availability,
+            error=error,
+            refreshed_at=refreshed_at,
+        )
         return message
 
     async def _availability_loop(self) -> None:
