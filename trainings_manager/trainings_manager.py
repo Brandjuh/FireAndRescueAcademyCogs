@@ -2612,7 +2612,7 @@ class TrainingManager(commands.Cog):
             if result.success
         ]
         failed = [
-            f"- {match.training}: {result.reason}"
+            f"- {match.training}: {self._format_board_failure_reason(match, result)}"
             for match, result in results
             if not result.success
         ]
@@ -2627,6 +2627,26 @@ class TrainingManager(commands.Cog):
             lines.append("Could not open automatically:")
             lines.extend(failed)
         return "\n".join(lines)
+
+    def _format_board_failure_reason(
+        self,
+        match: BoardTrainingMatch,
+        result: AutoTrainingResult,
+    ) -> str:
+        reason = str(result.reason or "Unknown error")
+        if reason.startswith(f"No available {match.discipline} academies found"):
+            return (
+                f"No free {match.discipline} classrooms are available right now. "
+                "The current classes are likely full. Please try again later."
+            )
+        room_match = re.search(r"has only (\d+) classroom\(s\), request needs (\d+)", reason)
+        if room_match:
+            return (
+                f"Not enough free classrooms are available right now "
+                f"({room_match.group(1)} available, {room_match.group(2)} needed). "
+                "Please try again later."
+            )
+        return reason
 
     def _build_training_board_error_reply(self, post: BoardTrainingPost, reason: str) -> str:
         return "\n".join(

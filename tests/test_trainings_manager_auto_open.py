@@ -470,13 +470,14 @@ def test_training_board_reply_reports_failed_auto_open_to_board_user():
         matched_text="hotshot crew training",
         score=1.0,
     )
-    result = AutoTrainingResult(False, "No available Fire academies found")
+    result = AutoTrainingResult(False, "No available Fire academies found on the alliance building list")
 
     reply = manager._build_training_board_reply(post, [(match, result)])
 
     assert "Training request processed for BoardUser." in reply
     assert "Could not open automatically:" in reply
-    assert "No available Fire academies found" in reply
+    assert "No free Fire classrooms are available right now" in reply
+    assert "Please try again later" in reply
 
 
 def test_training_board_error_reply_explains_unrecognized_request():
