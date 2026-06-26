@@ -414,6 +414,25 @@ def test_board_lifeguard_training_requires_explicit_academy_type():
     ]
 
 
+def test_board_wildland_mobile_command_does_not_open_mobile_command_too():
+    matches = extract_board_training_matches("Wildland Mobile Command Center")
+
+    assert [(match.discipline, match.training) for match in matches] == [
+        ("Fire", "Wildland Mobile Command Center Training")
+    ]
+
+
+def test_board_fire_wildland_mobile_command_typo_matches_wildland_training():
+    matches = extract_board_training_matches("Requesting please FIRE Wildland Mobile Comand Center 1 class")
+
+    assert [(match.discipline, match.training) for match in matches] == [
+        ("Fire", "Wildland Mobile Command Center Training")
+    ]
+    assert describe_ambiguous_board_training_request(
+        "Requesting please FIRE Wildland Mobile Comand Center 1 class"
+    ) is None
+
+
 def test_ambiguous_board_training_request_explains_lifeguard_options():
     explanation = describe_ambiguous_board_training_request("Lifeguard Training")
 

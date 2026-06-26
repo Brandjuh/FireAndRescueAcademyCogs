@@ -312,13 +312,14 @@ def _board_training_request_label(discipline: str, training: str) -> str:
 
 def _board_training_aliases(discipline: str, training: str) -> Tuple[str, ...]:
     if not _is_ambiguous_board_training(discipline, training):
-        return ()
+        return _training_name_alias_variants(training)
 
     aliases = {
         _normalize_training_search_text(_board_training_request_label(discipline, training)),
     }
-    for prefix in BOARD_DISCIPLINE_SEARCH_PREFIXES.get(discipline, (discipline,)):
-        aliases.add(_normalize_training_search_text(f"{prefix} {training}"))
+    for training_alias in _training_name_alias_variants(training):
+        for prefix in BOARD_DISCIPLINE_SEARCH_PREFIXES.get(discipline, (discipline,)):
+            aliases.add(_normalize_training_search_text(f"{prefix} {training_alias}"))
     return tuple(sorted(alias for alias in aliases if alias))
 
 
@@ -337,6 +338,77 @@ def _has_board_training_specific_tokens(normalized_text: str, training: str) -> 
         if len(token) >= 4 and token not in BOARD_AMBIGUOUS_HELP_SKIP_TOKENS
     ]
     return all(re.search(rf"\b{re.escape(token)}\b", normalized_text) for token in tokens)
+
+
+def _training_name_alias_variants(training: str) -> Tuple[str, ...]:
+    """Return searchable variants for a training name without changing its display label."""
+    normalized = _normalize_training_search_text(training)
+    aliases = {normalized}
+    for suffix in (" training", " course", " certification", " certificate"):
+        if normalized.endswith(suffix):
+            aliases.add(normalized[: -len(suffix)].strip())
+    return tuple(sorted(alias for alias in aliases if alias))
+
+
+def _candidate_training_score(chunk: str, candidate: str) -> float:
+    """Score a free-form chunk against one training candidate."""
+    normalized_chunk = _normalize_training_search_text(chunk)
+    normalized_candidate = _normalize_training_search_text(candidate)
+    if not normalized_chunk or not normalized_candidate:
+        return 0.0
+
+    score = SequenceMatcher(None, normalized_chunk, normalized_candidate).ratio()
+    candidate_tokens = [
+        token
+        for token in normalized_candidate.split()
+        if token not in BOARD_AMBIGUOUS_HELP_SKIP_TOKENS
+    ]
+    chunk_tokens = normalized_chunk.split()
+    if len(candidate_tokens) >= 2 and chunk_tokens:
+        token_scores = [
+            max(SequenceMatcher(None, candidate_token, chunk_token).ratio() for chunk_token in chunk_tokens)
+            for candidate_token in candidate_tokens
+        ]
+        token_score = sum(token_scores) / len(token_scores)
+        if token_score >= 0.86:
+            score = max(score, token_score)
+    return score
+
+
+def _training_match_tokens(training: str) -> set[str]:
+    """Return significant tokens used to identify overlapping training names."""
+    return {
+        token
+        for token in _normalize_training_search_text(training).split()
+        if len(token) >= 4 and token not in BOARD_AMBIGUOUS_HELP_SKIP_TOKENS
+    }
+
+
+def _prune_contained_board_training_matches(matches: List[BoardTrainingMatch]) -> List[BoardTrainingMatch]:
+    """Remove accidental short matches contained in a longer training name."""
+    if len(matches) <= 1:
+        return matches
+
+    keep: List[BoardTrainingMatch] = []
+    token_cache = {index: _training_match_tokens(match.training) for index, match in enumerate(matches)}
+    for index, match in enumerate(matches):
+        tokens = token_cache[index]
+        remove = False
+        if len(tokens) >= 2:
+            for other_index, other in enumerate(matches):
+                if index == other_index:
+                    continue
+                other_tokens = token_cache[other_index]
+                if len(other_tokens) <= len(tokens):
+                    continue
+                if not tokens.issubset(other_tokens):
+                    continue
+                if other.score >= 0.90 or other.score >= match.score - 0.05:
+                    remove = True
+                    break
+        if not remove:
+            keep.append(match)
+    return keep
 
 
 def _training_catalog() -> List[TrainingCatalogEntry]:
@@ -374,13 +446,13 @@ def extract_board_training_matches(text: str) -> List[BoardTrainingMatch]:
     ambiguous_names = set(_ambiguous_board_training_names())
 
     for entry in catalog:
-        exact_candidates = list(entry.aliases)
+        exact_candidates = set(entry.aliases)
         if entry.normalized not in ambiguous_names:
-            exact_candidates.append(entry.normalized)
+            exact_candidates.add(entry.normalized)
         matched_candidate = next(
             (
                 candidate
-                for candidate in exact_candidates
+                for candidate in sorted(exact_candidates, key=len, reverse=True)
                 if candidate and re.search(rf"\b{re.escape(candidate)}\b", normalized_text)
             ),
             None,
@@ -419,7 +491,7 @@ def extract_board_training_matches(text: str) -> List[BoardTrainingMatch]:
             candidates = [candidate for candidate in candidates if candidate]
             if not candidates:
                 continue
-            score = max(SequenceMatcher(None, chunk, candidate).ratio() for candidate in candidates)
+            score = max(_candidate_training_score(chunk, candidate) for candidate in candidates)
             if any(candidate in chunk for candidate in candidates):
                 score = max(score, 0.88)
             if score > best[0]:
@@ -438,7 +510,7 @@ def extract_board_training_matches(text: str) -> List[BoardTrainingMatch]:
                 )
             )
 
-    return matches
+    return _prune_contained_board_training_matches(matches)
 
 
 def describe_ambiguous_board_training_request(text: str) -> Optional[str]:
@@ -454,8 +526,11 @@ def describe_ambiguous_board_training_request(text: str) -> Optional[str]:
             for token in normalized.split()
             if len(token) >= 5 and token not in BOARD_AMBIGUOUS_HELP_SKIP_TOKENS
         ]
-        exact_match = normalized in normalized_text
-        token_match = any(token in normalized_text for token in significant_tokens)
+        exact_match = re.search(rf"\b{re.escape(normalized)}\b", normalized_text) is not None
+        token_match = (
+            len(significant_tokens) == 1
+            and re.search(rf"\b{re.escape(significant_tokens[0])}\b", normalized_text) is not None
+        )
         if not exact_match and not token_match:
             continue
 
