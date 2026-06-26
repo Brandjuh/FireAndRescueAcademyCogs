@@ -410,7 +410,7 @@ class EventManagerFormTests(unittest.TestCase):
         summary = profile_start_summary("event", profile)
 
         self.assertIn("Location: Portland, OR, USA", summary)
-        self.assertIn("Type: Random live Alliance event type", summary)
+        self.assertIn("Type: Surprise Alliance event type", summary)
 
     def test_profile_type_summary_shows_resolved_event_type_label(self):
         profile = route_profile_for_location("event", EVENT_ROUTE_LOCATIONS[0])
@@ -614,7 +614,7 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         summary = await EventManager._next_scheduled_profile_summary(fake, "event", "route_new_york_city")
 
         self.assertIn("Location: Portland, OR, USA", summary)
-        self.assertIn("Type: Random live Alliance event type", summary)
+        self.assertIn("Type: Surprise Alliance event type", summary)
 
     async def test_reverse_address_replaces_payload_address(self):
         session = FakeSession(FakeResponse("MissionChief Address"))
