@@ -190,6 +190,39 @@ def test_on_message_pings_notify_and_region_role():
     asyncio.run(run())
 
 
+def test_on_message_includes_eventmanager_next_location_summary():
+    async def run():
+        notify = FakeRole(NOTIFY_EVENT_ROLE_ID, "Notify-Event")
+        state = FakeRole(2, "New York (NY)")
+        guild = FakeGuild([notify, state])
+        channel = FakeChannel()
+        message = fake_message(
+            title="Start alliance mission! Major fire",
+            description="260 Broadway, 10000 New York, Manhattan",
+            channel=channel,
+            guild=guild,
+        )
+
+        class FakeEventManager:
+            async def get_next_notification_summary(self, kind):
+                assert kind == "large"
+                return "Location: Portland, OR, USA\nType: Surprise Large scale alliance mission type"
+
+        bot = types.SimpleNamespace(
+            get_cog=lambda name: FakeEventManager() if name == "EventManager" else None
+        )
+        cog = EventPinger(bot)
+
+        await cog.on_message(message)
+
+        content, _ = channel.sent[0]
+        assert "Next scheduled alliance mission:" in content
+        assert "Location: Portland, OR, USA" in content
+        assert "Type: Surprise Large scale alliance mission type" in content
+
+    asyncio.run(run())
+
+
 def test_on_message_unresolved_address_pings_notify_only():
     async def run():
         notify = FakeRole(NOTIFY_EVENT_ROLE_ID, "Notify-Event")

@@ -6,6 +6,7 @@ import json
 import logging
 import random
 import re
+import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -506,6 +507,7 @@ EVENT_DEFAULT_OVERRIDES = {
 RANDOM_LOCATION_KEY = "random_location"
 RANDOM_TYPE_KEY = "random_type"
 EVENT_ROUTE_PROFILE_PREFIX = "route_"
+EVENT_NOTIFICATION_CONTEXT_TTL_SECONDS = 10 * 60
 RANDOM_LOCATION_ANCHORS = {
     "nyc": [
         (40.7295, -73.9972, "70 Washington Square South, 10012 New York, Manhattan"),
@@ -1848,6 +1850,7 @@ class EventManager(commands.Cog):
         self._task: Optional[asyncio.Task] = None
         self._panel_task: Optional[asyncio.Task] = None
         self._start_lock = asyncio.Lock()
+        self._notification_contexts: Dict[str, Dict[str, Any]] = {}
 
     async def cog_load(self):
         self.bot.add_view(EventManagerPanelView(self))
@@ -2096,9 +2099,11 @@ class EventManager(commands.Cog):
                             details = browser_result_details(kind, profile_name, prepare_result, post_url=f"{BASE_URL}/{create_path}")
                             return EventStartResult(False, f"{prepare_result.get('reason')}{suffix}", details=details)
 
+                        await self._remember_notification_context(kind, profile_name, profile)
                         async with page.expect_response(lambda response: create_path in response.url, timeout=30000) as response_info:
                             clicked = await page.evaluate(BROWSER_CLICK_START_SCRIPT, prepare_result.get("submitIndex"))
                             if not clicked:
+                                self._clear_notification_context(kind)
                                 details = browser_result_details(kind, profile_name, prepare_result, post_url=f"{BASE_URL}/{create_path}")
                                 return EventStartResult(False, "Browser could not click the MissionChief start button.", details=details)
                         response = await response_info.value
@@ -2108,17 +2113,20 @@ class EventManager(commands.Cog):
                     finally:
                         await browser.close()
             except PlaywrightTimeoutError as exc:
+                self._clear_notification_context(kind)
                 snapshot = summarize_browser_snapshot(prepare_result.get("snapshot"))
                 suffix = f" Snapshot: {snapshot}" if snapshot else ""
                 details = browser_result_details(kind, profile_name, prepare_result, status=status, post_url=f"{BASE_URL}/{create_path}")
                 return EventStartResult(False, f"MissionChief browser flow timed out: {exc}{suffix}", status=status, post_url=f"{BASE_URL}/{create_path}", details=details)
             except Exception as exc:
+                self._clear_notification_context(kind)
                 message = str(exc)
                 if "Executable doesn't exist" in message or "playwright install" in message:
                     return EventStartResult(False, PLAYWRIGHT_SETUP_MESSAGE)
                 return EventStartResult(False, f"MissionChief browser flow failed: {message}")
 
         if status is None or int(status) >= 400:
+            self._clear_notification_context(kind)
             response_debug = summarize_response_for_debug(response_text)
             response_suffix = f" Response: {response_debug}" if response_debug else ""
             details = browser_result_details(kind, profile_name, prepare_result, status=status, post_url=f"{BASE_URL}/{create_path}")
@@ -2459,6 +2467,56 @@ class EventManager(commands.Cog):
         if record.get("notes"):
             embed.add_field(name="Notes", value=truncate_discord_text(record["notes"], 1024), inline=False)
         await channel.send(embed=embed)
+
+    async def _remember_notification_context(self, kind: str, profile_name: str, profile: dict) -> None:
+        """Remember the next scheduled profile for the MissionChief announcement ping."""
+        summary = await self._next_scheduled_profile_summary(kind, profile_name)
+        if not summary:
+            self._clear_notification_context(kind)
+            return
+        self._notification_contexts[normalize_kind(kind)] = {
+            "next_summary": summary,
+            "current_profile": str(profile_name or ""),
+            "current_location": profile_location_summary(profile),
+            "current_type": profile_type_summary(kind, profile),
+            "expires_at": time.monotonic() + EVENT_NOTIFICATION_CONTEXT_TTL_SECONDS,
+        }
+
+    def _clear_notification_context(self, kind: str) -> None:
+        """Clear stale notification context after a failed start."""
+        with suppress(Exception):
+            self._notification_contexts.pop(normalize_kind(kind), None)
+
+    async def get_next_notification_summary(self, kind: str) -> Optional[str]:
+        """Return the next scheduled location/type for EventPinger notifications."""
+        kind = normalize_kind(kind)
+        context = self._notification_contexts.get(kind)
+        if context:
+            if float(context.get("expires_at") or 0) > time.monotonic():
+                summary = str(context.get("next_summary") or "").strip()
+                if summary:
+                    return summary
+            self._notification_contexts.pop(kind, None)
+
+        schedules = await self.config.schedules()
+        schedule = schedules.get(kind, {})
+        if not schedule.get("enabled"):
+            return None
+
+        profile_names = schedule.get("profiles") or []
+        if not profile_names and schedule.get("profile"):
+            profile_names = [schedule["profile"]]
+        profile_names = [str(profile).strip().lower() for profile in profile_names if str(profile).strip()]
+        if not profile_names:
+            return None
+
+        index = int(schedule.get("rotation_index") or 0) % len(profile_names)
+        next_profile_name = profile_names[index]
+        profiles = await self.config.profiles()
+        profile = profiles.get(kind, {}).get(next_profile_name)
+        if not profile:
+            return f"Profile `{next_profile_name}` is configured next, but its profile data was not found."
+        return profile_start_summary(kind, profile)
 
     async def _next_scheduled_profile_summary(self, kind: str, current_profile_name: str) -> Optional[str]:
         """Return the next scheduled profile summary after the profile that just ran."""
