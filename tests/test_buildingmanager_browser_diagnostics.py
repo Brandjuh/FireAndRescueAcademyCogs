@@ -22,6 +22,7 @@ from buildingmanager.buildingmanager import (
     extract_missionchief_building_id,
     find_created_alliance_building_id,
     find_created_alliance_building_id_from_list,
+    find_new_created_alliance_building_id_from_list,
     parse_alliance_funds_from_html,
 )
 
@@ -332,6 +333,54 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         ]
 
         self.assertEqual(find_created_alliance_building_id_from_list(candidates, config), 311)
+
+    def test_find_new_created_building_id_from_alliance_list_uses_snapshot_diff(self):
+        config = build_alliance_building_config(
+            building_type="Hospital",
+            building_name="hôpital de Bastia",
+            coordinates="42.7, 9.4",
+            address=None,
+        )
+        before = [
+            {
+                "id": 400,
+                "rowText": "Existing Hospital",
+                "imageSources": ["/images/building_hospital.png"],
+            }
+        ]
+        after = [
+            *before,
+            {
+                "id": 401,
+                "rowText": "h%C3%B4pital%20de%20Bastia",
+                "imageSources": ["/images/building_hospital.png"],
+            },
+        ]
+
+        self.assertEqual(find_new_created_alliance_building_id_from_list(before, after, config), 401)
+
+    def test_find_new_created_building_id_from_alliance_list_prefers_requested_type(self):
+        config = build_alliance_building_config(
+            building_type="Prison",
+            building_name="County Facility",
+            coordinates="40.1, -73.9",
+            address=None,
+        )
+        before = []
+        after = [
+            {
+                "id": 500,
+                "rowText": "County Facility Medical",
+                "imageSources": ["/images/building_hospital.png"],
+            },
+            {
+                "id": 501,
+                "rowText": "County Facility",
+                "imageSources": ["/images/building_prison.png"],
+            },
+        ]
+
+        self.assertEqual(find_new_created_alliance_building_id_from_list(before, after, config), 501)
 
     def test_automation_script_refuses_coins_and_excludes_large_buildings(self):
         self.assertIn("coin|coins", BUILDING_AUTOMATION_PREPARE_SCRIPT)

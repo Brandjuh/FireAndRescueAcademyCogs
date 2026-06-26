@@ -3784,6 +3784,48 @@ class TrainingManager(commands.Cog):
         await self.config.guild(guild).panel_message_id.set(message.id)
         return message
 
+    async def _refresh_or_send_member_panel(
+        self,
+        guild: discord.Guild,
+        channel: discord.TextChannel,
+        *,
+        allow_send: bool = True,
+    ) -> Tuple[Optional[discord.Message], str]:
+        """Update an existing member panel when possible, otherwise post a new one."""
+        embed = await self._build_member_panel_embed(guild)
+        panel_message_id = await self.config.guild(guild).panel_message_id()
+        if panel_message_id:
+            try:
+                message = await channel.fetch_message(int(panel_message_id))
+                await message.edit(embed=embed, view=StartView(self))
+                await self.config.guild(guild).panel_message_id.set(message.id)
+                return message, "updated"
+            except discord.NotFound:
+                await self.config.guild(guild).panel_message_id.set(None)
+            except Exception as exc:
+                log.info("TrainingManager stored member panel could not be refreshed; scanning channel: %s", exc)
+
+        history = getattr(channel, "history", None)
+        bot_user_id = getattr(getattr(self.bot, "user", None), "id", None)
+        if callable(history):
+            try:
+                async for message in channel.history(limit=50):
+                    if bot_user_id and getattr(getattr(message, "author", None), "id", None) != bot_user_id:
+                        continue
+                    if any(getattr(existing, "title", None) == "Training Request System" for existing in getattr(message, "embeds", [])):
+                        await message.edit(embed=embed, view=StartView(self))
+                        await self.config.guild(guild).panel_message_id.set(message.id)
+                        return message, "refreshed"
+            except Exception as exc:
+                log.info("TrainingManager member panel history scan failed; posting new panel: %s", exc)
+
+        if not allow_send:
+            return None, "missing"
+
+        message = await channel.send(embed=embed, view=StartView(self))
+        await self.config.guild(guild).panel_message_id.set(message.id)
+        return message, "posted"
+
     async def _ensure_member_panel_for_guild(self, guild: discord.Guild) -> None:
         conf = await self.config.guild(guild).all()
         configured_channel_id = int(conf.get("request_channel_id") or MEMBER_PANEL_CHANNEL_ID)
@@ -3795,6 +3837,10 @@ class TrainingManager(commands.Cog):
 
         if configured_channel_id != MEMBER_PANEL_CHANNEL_ID:
             await self.config.guild(guild).request_channel_id.set(MEMBER_PANEL_CHANNEL_ID)
+
+        _message, action = await self._refresh_or_send_member_panel(guild, channel, allow_send=False)
+        if action != "missing":
+            return
 
         now = datetime.now(timezone.utc)
         last_post = conf.get("panel_last_auto_post_at")
@@ -3808,7 +3854,9 @@ class TrainingManager(commands.Cog):
             except ValueError:
                 pass
 
-        await self._send_member_panel(guild, channel)
+        _message, action = await self._refresh_or_send_member_panel(guild, channel, allow_send=True)
+        if action != "posted":
+            return
         await self.config.guild(guild).panel_last_auto_post_at.set(now.isoformat())
 
     async def _ensure_member_panels(self) -> None:
@@ -3956,8 +4004,8 @@ class TrainingManager(commands.Cog):
             await ctx.send("The configured request channel was not found.")
             return
         
-        await self._send_member_panel(ctx.guild, ch)
-        await ctx.send(f"TrainingManager panel posted in {ch.mention}.")
+        _message, action = await self._refresh_or_send_member_panel(ctx.guild, ch)
+        await ctx.send(f"TrainingManager panel {action} in {ch.mention}.")
 
     @tmset.command(name="devpost")
     @commands.admin()

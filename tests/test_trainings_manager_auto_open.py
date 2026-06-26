@@ -1081,10 +1081,12 @@ def test_member_panel_auto_repost_uses_member_channel_and_updates_config():
         send=AsyncMock(side_effect=lambda **kwargs: sent_messages.append(kwargs) or types.SimpleNamespace(id=987)),
     )
     guild = types.SimpleNamespace(id=1, get_channel=lambda channel_id: channel if channel_id == MEMBER_PANEL_CHANNEL_ID else None)
-    panel_id_set = AsyncMock()
+    panel_message_id = AsyncMock(return_value=456)
+    panel_message_id.set = AsyncMock()
     request_channel_set = AsyncMock()
     last_auto_post_set = AsyncMock()
     manager = TrainingManager.__new__(TrainingManager)
+    manager.bot = types.SimpleNamespace(user=types.SimpleNamespace(id=999))
     manager.config = types.SimpleNamespace(
         guild=lambda guild: types.SimpleNamespace(
             all=AsyncMock(
@@ -1096,7 +1098,7 @@ def test_member_panel_auto_repost_uses_member_channel_and_updates_config():
                 }
             ),
             request_channel_id=types.SimpleNamespace(set=request_channel_set),
-            panel_message_id=types.SimpleNamespace(set=panel_id_set),
+            panel_message_id=panel_message_id,
             panel_last_auto_post_at=types.SimpleNamespace(set=last_auto_post_set),
             button_message=AsyncMock(return_value=None),
         )
@@ -1106,5 +1108,33 @@ def test_member_panel_auto_repost_uses_member_channel_and_updates_config():
 
     request_channel_set.assert_awaited_once_with(MEMBER_PANEL_CHANNEL_ID)
     channel.send.assert_awaited_once()
-    panel_id_set.assert_awaited_once_with(987)
+    panel_message_id.set.assert_awaited_once_with(987)
     last_auto_post_set.assert_awaited_once()
+
+
+def test_member_panel_refresh_updates_existing_message_before_posting_new_one():
+    existing_message = types.SimpleNamespace(id=456, edit=AsyncMock())
+    channel = types.SimpleNamespace(
+        id=MEMBER_PANEL_CHANNEL_ID,
+        fetch_message=AsyncMock(return_value=existing_message),
+        send=AsyncMock(),
+    )
+    guild = types.SimpleNamespace(id=1)
+    panel_message_id = AsyncMock(return_value=456)
+    panel_message_id.set = AsyncMock()
+    manager = TrainingManager.__new__(TrainingManager)
+    manager.bot = types.SimpleNamespace(user=types.SimpleNamespace(id=999))
+    manager.config = types.SimpleNamespace(
+        guild=lambda guild: types.SimpleNamespace(
+            panel_message_id=panel_message_id,
+            button_message=AsyncMock(return_value=None),
+        )
+    )
+
+    _message, action = asyncio.run(manager._refresh_or_send_member_panel(guild, channel))
+
+    assert action == "updated"
+    channel.fetch_message.assert_awaited_once_with(456)
+    existing_message.edit.assert_awaited_once()
+    channel.send.assert_not_awaited()
+    panel_message_id.set.assert_awaited_once_with(456)
