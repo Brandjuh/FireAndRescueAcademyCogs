@@ -868,6 +868,31 @@ def _truncate_text(value: Any, limit: int = 180) -> str:
         return f"{text[:limit]}..."
     return text
 
+def _truncate_discord_text(value: Any, limit: int = 1024) -> str:
+    """Return text that fits within Discord content or embed field limits."""
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text or "N/A"
+    if limit <= 3:
+        return text[:limit]
+    return f"{text[: limit - 3]}..."
+
+async def safe_ephemeral_complete(interaction: discord.Interaction, content: str):
+    """Finish an interaction, including a deferred thinking response."""
+    message = _truncate_discord_text(content, 1900)
+    try:
+        if interaction.response.is_done():
+            try:
+                await interaction.edit_original_response(content=message, embed=None, view=None)
+                return
+            except Exception as exc:
+                log.debug("safe_ephemeral_complete: edit_original_response failed: %r", exc)
+            await interaction.followup.send(message, ephemeral=True)
+            return
+        await interaction.response.send_message(message, ephemeral=True)
+    except Exception as exc:
+        log.exception("safe_ephemeral_complete failed: %r", exc)
+
 def _decode_url_text(value: Any) -> str:
     """Decode URL-encoded text, including values encoded more than once."""
     text = str(value or "")
@@ -2879,6 +2904,24 @@ class AdminDecisionView(discord.ui.View):
         role = guild.get_role(role_id)
         return role in interaction.user.roles if role else False
 
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        item: discord.ui.Item,
+    ) -> None:
+        log.error(
+            "BuildingManager admin decision view failed for request %s on item %s",
+            getattr(self.req, "request_id", "unknown"),
+            getattr(item, "custom_id", type(item).__name__),
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        await safe_ephemeral_complete(
+            interaction,
+            "This BuildingManager action hit an internal error. "
+            f"Check the bot logs. Error: {_truncate_discord_text(error, 300)}",
+        )
+
     @discord.ui.button(label="✅ Approve", style=discord.ButtonStyle.success, custom_id="bm:approve")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._is_admin(interaction):
@@ -2904,7 +2947,7 @@ class AdminDecisionView(discord.ui.View):
             )
             with contextlib.suppress(Exception):
                 await interaction.message.delete()
-            await interaction.followup.send(queue_message, ephemeral=True)
+            await safe_ephemeral_complete(interaction, queue_message)
             return
 
         create_result = await self.cog._create_alliance_building_browser(self.req)
@@ -2967,10 +3010,8 @@ class AdminDecisionView(discord.ui.View):
             ok_text += f"\nNotes: {self.req.notes}"
 
         if user:
-            try:
-                await user.send(ok_text)
-            except discord.Forbidden:
-                pass
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                await user.send(_truncate_discord_text(ok_text, 1900))
 
         if log_channel:
             emb = discord.Embed(
@@ -2980,18 +3021,30 @@ class AdminDecisionView(discord.ui.View):
             )
             requester = f"<@{self.requester_id}>"
             emb.add_field(name="Requester", value=requester, inline=False)
-            emb.add_field(name="Building", value=f"{self.req.building_type} - {self.req.building_name}", inline=False)
+            emb.add_field(
+                name="Building",
+                value=_truncate_discord_text(f"{self.req.building_type} - {self.req.building_name}"),
+                inline=False,
+            )
             if self.req.coordinates:
-                emb.add_field(name="Coordinates", value=self.req.coordinates, inline=True)
+                emb.add_field(name="Coordinates", value=_truncate_discord_text(self.req.coordinates, 200), inline=True)
             if self.req.maps_url:
-                emb.add_field(name="Maps", value=f"[Open]({self.req.maps_url})", inline=True)
+                emb.add_field(name="Maps", value=_truncate_discord_text(f"[Open]({self.req.maps_url})"), inline=True)
             region_text = ", ".join(part for part in (self.req.region, self.req.country) if part)
             if region_text:
-                emb.add_field(name="Country / Region", value=region_text[:200], inline=True)
+                emb.add_field(name="Country / Region", value=_truncate_discord_text(region_text, 200), inline=True)
             emb.add_field(name="Approved by", value=f"{interaction.user.mention} ({interaction.user.id})", inline=False)
-            emb.add_field(name="Auto Creation", value="Created in MissionChief" if create_result.ok else create_result.reason[:900], inline=False)
+            emb.add_field(
+                name="Auto Creation",
+                value=_truncate_discord_text("Created in MissionChief" if create_result.ok else create_result.reason, 900),
+                inline=False,
+            )
             if automation_message:
-                emb.add_field(name="Post-Creation Automation", value=automation_message[:900], inline=False)
+                emb.add_field(
+                    name="Post-Creation Automation",
+                    value=_truncate_discord_text(automation_message, 900),
+                    inline=False,
+                )
             if create_result.status is not None:
                 emb.add_field(name="MissionChief HTTP Status", value=str(create_result.status), inline=True)
             emb.add_field(name="Request ID", value=str(self.req.request_id), inline=True)
@@ -3005,16 +3058,16 @@ class AdminDecisionView(discord.ui.View):
 
         if create_result.ok:
             if automation_message:
-                await interaction.followup.send(
+                await safe_ephemeral_complete(
+                    interaction,
                     f"Request approved and alliance building created. {automation_message}",
-                    ephemeral=True,
                 )
             else:
-                await interaction.followup.send("Request approved and alliance building created.", ephemeral=True)
+                await safe_ephemeral_complete(interaction, "Request approved and alliance building created.")
         else:
-            await interaction.followup.send(
+            await safe_ephemeral_complete(
+                interaction,
                 f"Request approved, but automatic creation failed: {create_result.reason}",
-                ephemeral=True,
             )
 
     @discord.ui.button(label="❌ Reject", style=discord.ButtonStyle.danger, custom_id="bm:deny")
@@ -3478,8 +3531,11 @@ class BuildingManager(commands.Cog):
         if user:
             with contextlib.suppress(discord.Forbidden, discord.HTTPException):
                 await user.send(
-                    "Your building request has been approved, but it is waiting for enough alliance funds "
-                    f"before it is built automatically.\n\n{req.building_type}: {req.building_name}"
+                    _truncate_discord_text(
+                        "Your building request has been approved, but it is waiting for enough alliance funds "
+                        f"before it is built automatically.\n\n{req.building_type}: {req.building_name}",
+                        1900,
+                    )
                 )
 
         if log_channel:
@@ -3489,7 +3545,11 @@ class BuildingManager(commands.Cog):
                 timestamp=datetime.now(timezone.utc),
             )
             embed.add_field(name="Requester", value=f"<@{requester_id}>", inline=False)
-            embed.add_field(name="Building", value=f"{req.building_type} - {req.building_name}", inline=False)
+            embed.add_field(
+                name="Building",
+                value=_truncate_discord_text(f"{req.building_type} - {req.building_name}"),
+                inline=False,
+            )
             embed.add_field(name="Current Funds", value=current, inline=True)
             embed.add_field(name="Required Minimum", value=f"{minimum:,} credits", inline=True)
             embed.add_field(name="Funds Source", value=source, inline=True)
