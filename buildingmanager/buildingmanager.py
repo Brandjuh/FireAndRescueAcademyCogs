@@ -24,6 +24,7 @@ log = logging.getLogger("red.cog.building_manager")
 BASE_URL = "https://www.missionchief.com"
 MISSIONCHIEF_HOME_URL = BASE_URL
 MISSIONCHIEF_NEW_BUILDING_URL = f"{BASE_URL}/buildings/new"
+MISSIONCHIEF_ALLIANCE_BUILDINGS_URL = f"{BASE_URL}/verband/gebauede"
 DEFAULT_REQUEST_PANEL_CHANNEL_ID = 1421627971831070730
 ALLIANCE_BUILDING_TYPE_IDS = {
     "Hospital": "2",
@@ -268,6 +269,78 @@ async () => {
   }
   const buildings = await response.json();
   return { ok: true, status, buildings };
+}
+""".strip()
+BUILDING_FETCH_ALLIANCE_LIST_SCRIPT = r"""
+async (config) => {
+  const maxPages = Number(config.maxPages || 6);
+  const startPath = "/verband/gebauede";
+  const seenPages = new Set();
+  const seenIds = new Set();
+  const candidates = [];
+  const textOf = (element) => String(element?.textContent || "").replace(/\s+/g, " ").trim();
+  const absolutePath = (href) => {
+    try {
+      const url = new URL(href, location.origin);
+      return `${url.pathname}${url.search || ""}`;
+    } catch (_) {
+      return "";
+    }
+  };
+  const collectCandidate = (id, source, element, pagePath) => {
+    if (!id || seenIds.has(`${id}:${pagePath}:${source}`)) return;
+    seenIds.add(`${id}:${pagePath}:${source}`);
+    const row = element?.closest?.("tr, .panel, .well, .building-list-entry, li, div") || element;
+    const imageSources = [...(row?.querySelectorAll?.("img") || [])].map((img) => img.src || img.getAttribute("src") || "");
+    candidates.push({
+      id: Number(id),
+      pagePath,
+      source,
+      text: textOf(element),
+      rowText: textOf(row),
+      searchAttribute: row?.getAttribute?.("search_attribute") || "",
+      imageSources,
+    });
+  };
+  const parsePage = (html, pagePath) => {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    for (const img of doc.querySelectorAll("[building_id]")) {
+      const id = img.getAttribute("building_id");
+      collectCandidate(id, "building_id", img, pagePath);
+    }
+    for (const link of doc.querySelectorAll('a[href*="/buildings/"]')) {
+      const match = String(link.getAttribute("href") || "").match(/\/buildings\/(\d+)/);
+      if (match) collectCandidate(match[1], "link", link, pagePath);
+    }
+    const next = [...doc.querySelectorAll("a[href]")]
+      .find((link) => {
+        const label = textOf(link).toLowerCase();
+        const className = String(link.getAttribute("class") || "").toLowerCase();
+        const rel = String(link.getAttribute("rel") || "").toLowerCase();
+        const href = String(link.getAttribute("href") || "");
+        return href.includes("/verband/gebauede")
+          && (label.includes("next") || label.includes(">") || className.includes("next") || rel.includes("next"));
+      });
+    return next ? absolutePath(next.getAttribute("href")) : "";
+  };
+
+  let pagePath = startPath;
+  let lastStatus = null;
+  for (let pageIndex = 0; pageIndex < maxPages && pagePath && !seenPages.has(pagePath); pageIndex += 1) {
+    seenPages.add(pagePath);
+    const response = await fetch(pagePath, { credentials: "same-origin", headers: { "Accept": "text/html" } });
+    lastStatus = response.status;
+    if (!response.ok) {
+      let text = "";
+      try {
+        text = await response.text();
+      } catch (_) {}
+      return { ok: false, status: response.status, pages: [...seenPages], candidates, text: String(text || "").slice(0, 500) };
+    }
+    const html = await response.text();
+    pagePath = parsePage(html, pagePath);
+  }
+  return { ok: true, status: lastStatus, pages: [...seenPages], candidates };
 }
 """.strip()
 BUILDING_AUTOMATION_PREPARE_SCRIPT = r"""
@@ -639,6 +712,91 @@ def find_created_alliance_building_id(
         return None
     candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
     return candidates[0][1]
+
+def _alliance_list_candidate_text(record: Dict[str, Any]) -> str:
+    """Return searchable text from one MissionChief alliance building list candidate."""
+    image_sources = " ".join(str(item or "") for item in record.get("imageSources") or [])
+    return _normalize_match_text(
+        " ".join(
+            str(record.get(key) or "")
+            for key in ("text", "rowText", "searchAttribute", "pagePath", "source")
+        )
+        + " "
+        + image_sources
+    )
+
+def _alliance_list_type_score(record: Dict[str, Any], building_type: str) -> int:
+    """Score whether a list candidate looks like the requested alliance building type."""
+    text = _alliance_list_candidate_text(record)
+    requested = _normalize_match_text(building_type)
+    hospital_tokens = (
+        "hospital",
+        "ziekenhuis",
+        "medical",
+        "health",
+        "clinic",
+        "building_hospital",
+        "building_rettung",
+    )
+    prison_tokens = (
+        "prison",
+        "jail",
+        "detention",
+        "correction",
+        "gevangen",
+        "polizeigefaengnis",
+        "building_prison",
+    )
+    if requested == "hospital":
+        if any(token in text for token in prison_tokens):
+            return -100
+        return 20 if any(token in text for token in hospital_tokens) else 0
+    if requested == "prison":
+        if any(token in text for token in hospital_tokens):
+            return -100
+        return 20 if any(token in text for token in prison_tokens) else 0
+    return 0
+
+def find_created_alliance_building_id_from_list(
+    candidates: Iterable[Dict[str, Any]],
+    config: Dict[str, str],
+) -> Optional[int]:
+    """Find a created alliance building from `/verband/gebauede` list data.
+
+    The alliance list does not expose coordinates, so this fallback only trusts
+    candidates whose visible/search text contains the requested building name.
+    When multiple exact matches exist, the newest/highest id is preferred.
+    """
+    target_name = _normalize_match_text(config.get("name"))
+    if not target_name:
+        return None
+
+    matches: List[Tuple[int, int]] = []
+    for record in candidates or []:
+        if not isinstance(record, dict):
+            continue
+        building_id = _coerce_int(record.get("id"))
+        if building_id is None:
+            continue
+        candidate_text = _alliance_list_candidate_text(record)
+        if not candidate_text or target_name not in candidate_text:
+            continue
+
+        score = 100
+        if _normalize_match_text(record.get("text")) == target_name:
+            score += 40
+        if _normalize_match_text(record.get("searchAttribute")) == target_name:
+            score += 30
+        type_score = _alliance_list_type_score(record, str(config.get("buildingType") or ""))
+        if type_score < 0:
+            continue
+        score += type_score
+        matches.append((score, building_id))
+
+    if not matches:
+        return None
+    matches.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return matches[0][1]
 
 def _diagnostic_lines_for_fields(fields: Iterable[Dict[str, Any]]) -> List[str]:
     """Format no-submit browser field diagnostics."""
@@ -1419,6 +1577,24 @@ class BuildingDatabase:
         
         conn.commit()
         conn.close()
+
+    def get_request_by_id(self, request_id: int) -> Optional[Dict[str, Any]]:
+        """Return one stored building request by id."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT *
+            FROM building_requests
+            WHERE request_id = ?
+            LIMIT 1
+            ''',
+            (int(request_id),),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
     
     def add_action(self, request_id: int, guild_id: int, admin_user_id: Optional[int],
                   admin_username: Optional[str], action_type: str, denial_reason: Optional[str] = None,
@@ -2688,6 +2864,7 @@ class BuildingManager(commands.Cog):
             response_url = ""
             final_url = ""
             api_lookup: Dict[str, Any] = {}
+            alliance_list_lookup: Dict[str, Any] = {}
             try:
                 async with async_playwright() as playwright:
                     browser = await playwright.chromium.launch(headless=True)
@@ -2744,11 +2921,34 @@ class BuildingManager(commands.Cog):
                                         "count": len(api_lookup.get("buildings") or []),
                                         "matchedBuildingId": detected_id,
                                     }
+                        if not detected_id and status is not None and int(status) < 400:
+                            with contextlib.suppress(Exception):
+                                alliance_list_lookup = await page.evaluate(
+                                    BUILDING_FETCH_ALLIANCE_LIST_SCRIPT,
+                                    {"maxPages": 8},
+                                )
+                                if alliance_list_lookup.get("ok"):
+                                    candidates = alliance_list_lookup.get("candidates") or []
+                                    detected_id = find_created_alliance_building_id_from_list(candidates, config)
+                                    alliance_list_lookup = {
+                                        "ok": True,
+                                        "status": alliance_list_lookup.get("status"),
+                                        "pages": alliance_list_lookup.get("pages") or [],
+                                        "count": len(candidates),
+                                        "matchedBuildingId": detected_id,
+                                    }
                     finally:
                         await browser.close()
             except PlaywrightTimeoutError as exc:
                 details = dict(prepare_result.get("snapshot") or {})
-                details.update({"responseUrl": response_url, "finalUrl": final_url, "apiLookup": api_lookup})
+                details.update(
+                    {
+                        "responseUrl": response_url,
+                        "finalUrl": final_url,
+                        "apiLookup": api_lookup,
+                        "allianceListLookup": alliance_list_lookup,
+                    }
+                )
                 return BuildingCreateResult(
                     False,
                     f"MissionChief browser building flow timed out: {exc}",
@@ -2766,11 +2966,14 @@ class BuildingManager(commands.Cog):
         building_id = extract_missionchief_building_id(response_url, final_url, response_text)
         if not building_id:
             building_id = _coerce_int(api_lookup.get("matchedBuildingId"))
+        if not building_id:
+            building_id = _coerce_int(alliance_list_lookup.get("matchedBuildingId"))
         details.update(
             {
                 "responseUrl": response_url,
                 "finalUrl": final_url,
                 "apiLookup": api_lookup,
+                "allianceListLookup": alliance_list_lookup,
                 "buildingId": building_id,
             }
         )
@@ -3273,6 +3476,64 @@ class BuildingManager(commands.Cog):
                 f"next: {fmt_dt(job.next_run_at)})"
             )
         await ctx.send(box("\n".join(lines), lang="text"))
+
+    @buildset.command(name="automationqueue")
+    @commands.admin()
+    @commands.guild_only()
+    async def automationqueue(self, ctx: commands.Context, request_id: int, building_id: int):
+        """Queue automation for an already-created MissionChief alliance building."""
+        request = self.db.get_request_by_id(int(request_id))
+        if not request:
+            await ctx.send("No building request was found with that request id.")
+            return
+        if int(request["guild_id"]) != ctx.guild.id:
+            await ctx.send("That building request belongs to a different guild.")
+            return
+        if request["building_type"] not in ALLIANCE_BUILDING_TYPE_IDS:
+            allowed = ", ".join(ALLIANCE_BUILDING_TYPE_IDS)
+            await ctx.send(f"Post-creation automation only supports: {allowed}.")
+            return
+
+        job_id = self.db.add_or_update_automation_job(
+            request_id=int(request["request_id"]),
+            guild_id=ctx.guild.id,
+            building_id=int(building_id),
+            building_type=str(request["building_type"]),
+            building_name=str(request["building_name"]),
+        )
+        self.db.update_request_status(int(request["request_id"]), "created")
+        self.db.add_action(
+            request_id=int(request["request_id"]),
+            guild_id=ctx.guild.id,
+            admin_user_id=ctx.author.id,
+            admin_username=str(ctx.author),
+            action_type="automation_queued",
+            previous_values=f"MissionChief building {int(building_id)}",
+        )
+
+        async with ctx.typing():
+            result = await self._process_building_automation_job(job_id)
+
+        if result is None:
+            await ctx.send("Automation was queued, but no runnable job was found.")
+            return
+
+        action_text = "\n".join(f"- {action}" for action in result.actions) if result.actions else "- No actions were started."
+        status = "completed" if result.completed else "waiting" if result.wait else "queued"
+        await ctx.send(
+            box(
+                "\n".join(
+                    [
+                        f"Queued automation for request {int(request['request_id'])} / building {int(building_id)}",
+                        f"Result: {'OK' if result.ok else 'FAILED'} ({status})",
+                        f"Reason: {result.reason}",
+                        "Actions:",
+                        action_text,
+                    ]
+                ),
+                lang="text",
+            )
+        )
 
     @buildset.command(name="automationrun")
     @commands.admin()
