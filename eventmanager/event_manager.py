@@ -763,6 +763,52 @@ def profile_with_selected_type(kind: str, profile: dict, option: FormOption) -> 
     return selected
 
 
+def profile_location_summary(profile: dict) -> str:
+    """Return a compact human-readable location summary for a profile."""
+    fields = profile_fields_for_start(profile)
+    address = str(fields.get(ADDRESS_FIELD) or "").strip()
+    label = str(profile.get("location_label") or "").strip()
+    if address:
+        if label and label.casefold() not in address.casefold():
+            return f"{label} ({address})"
+        return address
+    return label or "Unknown location"
+
+
+def profile_type_summary(kind: str, profile: dict) -> str:
+    """Return the configured MissionChief type summary for a profile."""
+    kind = normalize_kind(kind)
+    selected_label = str(profile.get("selected_type_label") or "").strip()
+    if selected_label:
+        return selected_label
+    if profile.get(RANDOM_TYPE_KEY):
+        return f"Random live {EVENT_KINDS[kind]['label']} type"
+    fields = dict(profile.get("fields", {}))
+    type_value = fields.get(EVENT_RADIO_FIELD) if kind == "event" else fields.get(MISSION_TYPE_FIELD)
+    type_value = type_value or fields.get(MISSION_TYPE_FIELD)
+    if type_value:
+        return f"MissionChief type ID {type_value}"
+    return "Unknown type"
+
+
+def profile_start_summary(kind: str, profile: dict) -> str:
+    """Return a two-line summary of where and what a profile will start."""
+    return "\n".join(
+        [
+            f"Location: {profile_location_summary(profile)}",
+            f"Type: {profile_type_summary(kind, profile)}",
+        ]
+    )
+
+
+def profile_run_details(kind: str, profile: dict) -> Dict[str, str]:
+    """Return non-sensitive profile details for run logs."""
+    return {
+        "configured_location": profile_location_summary(profile),
+        "configured_type": profile_type_summary(kind, profile),
+    }
+
+
 def parse_event_form(html: str, page_url: str) -> EventForm:
     """Parse the MissionChief alliance mission/event form."""
     soup = BeautifulSoup(html, "html.parser")
@@ -2085,6 +2131,7 @@ class EventManager(commands.Cog):
             )
 
         details = browser_result_details(kind, profile_name, prepare_result, status=status, post_url=f"{BASE_URL}/{create_path}")
+        details.update(profile_run_details(kind, profile))
         await self._log_run(kind, profile_name, status, details=details)
         return EventStartResult(
             True,
@@ -2144,8 +2191,9 @@ class EventManager(commands.Cog):
                 post_url=form.action,
             )
 
-        await self._log_run(kind, profile_name, status)
-        return EventStartResult(True, "Started successfully.", status=status, post_url=form.action)
+        details = profile_run_details(kind, profile)
+        await self._log_run(kind, profile_name, status, details=details)
+        return EventStartResult(True, "Started successfully.", status=status, post_url=form.action, details=details)
 
     async def _start_profile_data(self, kind: str, profile_name: str, profile: dict) -> EventStartResult:
         return await self._start_profile_data_browser(kind, profile_name, profile)
@@ -2412,6 +2460,33 @@ class EventManager(commands.Cog):
             embed.add_field(name="Notes", value=truncate_discord_text(record["notes"], 1024), inline=False)
         await channel.send(embed=embed)
 
+    async def _next_scheduled_profile_summary(self, kind: str, current_profile_name: str) -> Optional[str]:
+        """Return the next scheduled profile summary after the profile that just ran."""
+        kind = normalize_kind(kind)
+        schedules = await self.config.schedules()
+        schedule = schedules.get(kind, {})
+        if not schedule.get("enabled"):
+            return None
+
+        profile_names = schedule.get("profiles") or []
+        if not profile_names and schedule.get("profile"):
+            profile_names = [schedule["profile"]]
+        profile_names = [str(profile).strip().lower() for profile in profile_names if str(profile).strip()]
+        if not profile_names:
+            return None
+
+        current_profile_name = str(current_profile_name or "").strip().lower()
+        if current_profile_name not in profile_names:
+            return None
+
+        next_index = (profile_names.index(current_profile_name) + 1) % len(profile_names)
+        next_profile_name = profile_names[next_index]
+        profiles = await self.config.profiles()
+        profile = profiles.get(kind, {}).get(next_profile_name)
+        if not profile:
+            return f"Profile `{next_profile_name}` is configured next, but its profile data was not found."
+        return profile_start_summary(kind, profile)
+
     async def _log_run(
         self,
         kind: str,
@@ -2435,10 +2510,13 @@ class EventManager(commands.Cog):
         embed.add_field(name="Profile", value=profile_name, inline=True)
         embed.add_field(name="HTTP Status", value=str(status), inline=True)
         details = details or {}
+        configured_type = details.get("configured_type")
+        if configured_type:
+            embed.add_field(name="MissionChief Type", value=truncate_discord_text(str(configured_type), 1024), inline=False)
         button_text = details.get("button_text")
         if button_text:
             embed.add_field(name="Button", value=truncate_discord_text(str(button_text), 1024), inline=False)
-        location = details.get("address") or "Unknown"
+        location = details.get("configured_location") or details.get("address") or "Unknown"
         latitude = details.get("latitude")
         longitude = details.get("longitude")
         if latitude and longitude:
@@ -2447,6 +2525,13 @@ class EventManager(commands.Cog):
         uses_coins = details.get("uses_coins")
         if uses_coins is not None:
             embed.add_field(name="Used Coins", value="Yes" if uses_coins else "No", inline=True)
+        next_summary = await self._next_scheduled_profile_summary(kind, profile_name)
+        if next_summary:
+            embed.add_field(
+                name=f"Next {EVENT_KINDS[kind]['label']}",
+                value=truncate_discord_text(next_summary, 1024),
+                inline=False,
+            )
         await channel.send(embed=embed)
 
     async def _run_due_schedules(self):

@@ -26,6 +26,9 @@ from eventmanager.event_manager import (
     parse_profile_names,
     profile_fields_for_start,
     profile_name_from_label,
+    profile_location_summary,
+    profile_start_summary,
+    profile_type_summary,
     profile_with_selected_type,
     random_location_for_region,
     RANDOM_TYPE_KEY,
@@ -167,6 +170,18 @@ class FakeSession:
     def get(self, url, **kwargs):
         self.requests.append((url, kwargs))
         return self.response
+
+
+class FakeEventManagerConfig:
+    def __init__(self, schedules, profiles):
+        self._schedules = schedules
+        self._profiles = profiles
+
+    async def schedules(self):
+        return self._schedules
+
+    async def profiles(self):
+        return self._profiles
 
 
 class EventManagerFormTests(unittest.TestCase):
@@ -389,6 +404,24 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertEqual(event_profile["fields"]["mission_position[shape]"], "circle")
         self.assertEqual(event_profile["fields"]["mission_position[amount]"], "0")
 
+    def test_profile_start_summary_shows_next_route_location_and_random_type(self):
+        profile = route_profile_for_location("event", EVENT_ROUTE_LOCATIONS[1])
+
+        summary = profile_start_summary("event", profile)
+
+        self.assertIn("Location: Portland, OR, USA", summary)
+        self.assertIn("Type: Random live Alliance event type", summary)
+
+    def test_profile_type_summary_shows_resolved_event_type_label(self):
+        profile = route_profile_for_location("event", EVENT_ROUTE_LOCATIONS[0])
+        form = parse_event_form(MISSIONCHIEF_EVENT_HTML, "https://www.missionchief.com/missionAllianceEventNew")
+        option = next(option for option in field_options_for_kind(form, "event") if option.label == "Civil Unrest")
+
+        resolved = profile_with_selected_type("event", profile, option)
+
+        self.assertEqual(profile_type_summary("event", resolved), "Civil Unrest")
+        self.assertEqual(profile_location_summary(resolved), "New York City, NY, USA")
+
     def test_profile_with_selected_type_resolves_random_event_type(self):
         profile = route_profile_for_location("event", EVENT_ROUTE_LOCATIONS[0])
         form = parse_event_form(MISSIONCHIEF_EVENT_HTML, "https://www.missionchief.com/missionAllianceEventNew")
@@ -559,6 +592,30 @@ class EventManagerFormTests(unittest.TestCase):
 
 
 class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
+    async def test_next_scheduled_profile_summary_uses_profile_after_current(self):
+        profile_names = route_profile_names()
+        fake = type("FakeEventManager", (), {})()
+        fake.config = FakeEventManagerConfig(
+            schedules={
+                "event": {
+                    "enabled": True,
+                    "profiles": profile_names,
+                    "rotation_index": 0,
+                }
+            },
+            profiles={
+                "event": {
+                    route_profile_names()[index]: route_profile_for_location("event", location)
+                    for index, location in enumerate(EVENT_ROUTE_LOCATIONS)
+                }
+            },
+        )
+
+        summary = await EventManager._next_scheduled_profile_summary(fake, "event", "route_new_york_city")
+
+        self.assertIn("Location: Portland, OR, USA", summary)
+        self.assertIn("Type: Random live Alliance event type", summary)
+
     async def test_reverse_address_replaces_payload_address(self):
         session = FakeSession(FakeResponse("MissionChief Address"))
         payload = [
