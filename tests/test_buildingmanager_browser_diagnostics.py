@@ -196,6 +196,16 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         interaction.edit_original_response.assert_awaited_once_with(content="Done", embed=None, view=None)
         interaction.followup.send.assert_not_awaited()
 
+    def test_summary_submit_uses_background_processing_without_thinking_defer(self):
+        source = Path("buildingmanager/buildingmanager.py").read_text(encoding="utf-8")
+        start = source.index('custom_id="bm:submit"')
+        end = source.index('custom_id="bm:cancel"', start)
+        submit_source = source[start:end]
+
+        self.assertNotIn("thinking=True", submit_source)
+        self.assertIn("processing it in the background", submit_source)
+        self.assertIn("_schedule_background_submission", submit_source)
+
     def test_building_request_cleans_encoded_names(self):
         request = BuildingRequest(
             user_id=1,
@@ -349,6 +359,40 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertIn("MC ID 456", source)
         member_sync.get_link_for_discord.assert_awaited_once_with(123)
         members_scraper.get_member_snapshot.assert_awaited_once_with("456")
+
+    def test_discord_panel_request_unknown_tax_goes_to_admin_review(self):
+        class FakeGuildConfig:
+            async def all(self):
+                return {"admin_channel_id": 10, "log_channel_id": 20}
+
+        class FakeConfig:
+            def guild(self, _guild):
+                return FakeGuildConfig()
+
+        guild = types.SimpleNamespace(id=1)
+        requester = types.SimpleNamespace(id=123)
+        request = BuildingRequest(
+            user_id=123,
+            username="DiscordUser",
+            building_type="Hospital",
+            building_name="Example Hospital",
+            location_input="https://maps.app.goo.gl/example",
+        )
+        manager = BuildingManager.__new__(BuildingManager)
+        manager.config = FakeConfig()
+        manager._resolve_channel = AsyncMock(side_effect=[object(), object()])
+        manager._get_discord_request_contribution_rate = AsyncMock(return_value=(None, "no snapshot"))
+        manager._submit_building_request_to_admins = AsyncMock(return_value=900)
+
+        message = asyncio.run(manager._process_discord_building_panel_request(guild, request, requester))
+
+        self.assertIn("submitted to admins", message)
+        self.assertIn("contribution rate unknown", request.notes)
+        manager._submit_building_request_to_admins.assert_awaited_once_with(
+            guild,
+            request,
+            source="Discord request - contribution unknown",
+        )
 
     def test_discord_request_low_tax_is_rejected_without_admin_review(self):
         class FakeDb:

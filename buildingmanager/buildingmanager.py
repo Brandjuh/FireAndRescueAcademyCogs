@@ -3610,6 +3610,13 @@ class SummaryView(discord.ui.View):
         super().__init__(timeout=600)
         self.cog = cog
         self.req = req
+        self.submitted = False
+
+    def _disable_actions(self) -> None:
+        """Prevent duplicate submit/cancel clicks after processing starts."""
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
 
     async def send_summary(self, interaction: discord.Interaction):
         """Display the summary embed."""
@@ -3683,143 +3690,86 @@ class SummaryView(discord.ui.View):
             await interaction.response.send_message("This only works inside a server.", ephemeral=True)
             return
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
-
-        conf = await self.cog.config.guild(guild).all()
-        admin_channel_id = conf.get("admin_channel_id")
-        log_channel_id = conf.get("log_channel_id")
-
-        if not admin_channel_id or not log_channel_id:
-            await send_ephemeral_followup(
-                interaction,
-                "Admin/Log channels are not configured yet. Ask an admin to use [p]buildset.",
+        if self.submitted:
+            await interaction.response.send_message(
+                "This request is already being processed in the background.",
+                ephemeral=True,
             )
             return
 
-        admin_channel = guild.get_channel(admin_channel_id)
-        log_channel = guild.get_channel(log_channel_id)
+        self.submitted = True
+        self._disable_actions()
+        await interaction.response.send_message(
+            "Request received. BuildingManager is processing it in the background. "
+            "You can dismiss this message.",
+            ephemeral=True,
+        )
 
-        if not admin_channel or not log_channel:
-            await send_ephemeral_followup(interaction, "One or more configured channels could not be found.")
-            return
-
-        contribution_rate, contribution_source = await self.cog._get_discord_request_contribution_rate(interaction.user)
-        if contribution_rate is None:
-            self.req.notes = (
-                f"{self.req.notes or ''}\n"
-                f"Auto-accept skipped: contribution rate unknown ({contribution_source})."
-            ).strip()
-            request_id = await self.cog._submit_building_request_to_admins(
-                guild,
-                self.req,
-                source="Discord request - contribution unknown",
-            )
-            result_message = (
-                "Your request was submitted to admins for review because your latest alliance "
-                f"donation could not be verified. Request ID: {request_id}."
-            )
-        elif contribution_rate < BUILDING_BOARD_MIN_AUTO_ACCEPT_TAX:
-            result_message = await self.cog._reject_discord_request_for_low_tax(
-                guild,
-                self.req,
-                interaction.user,
-                contribution_rate=contribution_rate,
-                log_channel=log_channel,
-            )
-        else:
-            result_message = await self.cog._auto_accept_discord_building_request(
-                guild,
-                self.req,
-                interaction.user,
-                contribution_rate=contribution_rate,
-                log_channel=log_channel,
-            )
-
+        removed_review = False
         with contextlib.suppress(Exception):
             await interaction.message.delete()
-        await send_ephemeral_followup(interaction, result_message)
+            removed_review = True
+        if not removed_review:
+            with contextlib.suppress(Exception):
+                await interaction.message.edit(
+                    content="Request received. Processing in the background.",
+                    embed=None,
+                    view=None,
+                )
+
+        self._schedule_background_submission(interaction, guild, interaction.user)
         return
 
-        # Save to database
-        request_id = self.cog.db.add_request(
-            guild_id=guild.id,
-            user_id=self.req.user_id,
-            username=self.req.username,
-            building_type=self.req.building_type,
-            building_name=self.req.building_name,
-            location_input=self.req.location_input,
-            coordinates=self.req.coordinates,
-            address=self.req.address,
-            notes=self.req.notes
-        )
-        
-        self.req.request_id = request_id
-
-        # Send to admin channel
-        emoji_map = {"Hospital": "🏥", "Prison": "🔒"}
-        emoji = emoji_map.get(self.req.building_type, "🏢")
-        
-        emb = discord.Embed(
-            title=f"{emoji} New Building Request",
-            color=discord.Color.yellow(),
-            timestamp=datetime.now(timezone.utc),
-        )
-        
-        user = interaction.user
-        emb.add_field(name="Requester", value=f"{user.mention} ({user.id})", inline=False)
-        emb.add_field(name="Building Type", value=self.req.building_type, inline=True)
-        emb.add_field(name="Building Name", value=self.req.building_name, inline=True)
-        emb.add_field(name="Location Input", value=self.req.location_input[:100], inline=False)
-        
-        if self.req.coordinates:
-            emb.add_field(name="📍 Coordinates", value=self.req.coordinates, inline=True)
-        else:
-            emb.add_field(name="📍 Coordinates", value="Not detected", inline=True)
-
-        self._add_location_details(emb, warning_title="Facility Check Warning")
-        
-        if self.req.notes:
-            emb.add_field(name="Notes", value=self.req.notes[:200], inline=False)
-        
-        emb.set_footer(text=f"Request ID: {request_id}")
-
-        view = AdminDecisionView(self.cog, requester_id=user.id, req=self.req)
-        await admin_channel.send(embed=emb, view=view)
-
-        # Log to log channel
-        log_emb = discord.Embed(
-            title="Request submitted",
-            description=f"By {user.mention}",
-            color=discord.Color.green(),
-            timestamp=datetime.now(timezone.utc),
-        )
-        log_emb.add_field(name="Building", value=f"{self.req.building_type} - {self.req.building_name}", inline=False)
-        if self.req.coordinates:
-            log_emb.add_field(name="Coordinates", value=self.req.coordinates, inline=True)
-        if self.req.maps_url:
-            log_emb.add_field(name="Maps", value=f"[Open]({self.req.maps_url})", inline=True)
-        log_emb.add_field(name="Request ID", value=str(request_id), inline=True)
-        await log_channel.send(embed=log_emb)
-
-        # Disable all buttons
-        for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                child.disabled = True
-
-        await safe_update(interaction, content="✅ Request submitted to Admin. You'll be notified of any updates.", embed=None, view=self)
-
-    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary, custom_id="bm:cancel")
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, custom_id="bm:cancel")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.submitted:
+            await interaction.response.send_message(
+                "This request has already been submitted and cannot be cancelled from this panel.",
+                ephemeral=True,
+            )
+            return
+        self._disable_actions()
         with contextlib.suppress(Exception):
             await interaction.message.delete()
         await send_ephemeral_followup(interaction, "Request cancelled.")
         return
 
-        for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                child.disabled = True
-        
-        await safe_update(interaction, content="❌ Request cancelled.", embed=None, view=self)
+    def _schedule_background_submission(
+        self,
+        interaction: discord.Interaction,
+        guild: discord.Guild,
+        requester: discord.abc.User,
+    ) -> None:
+        """Run the slow MissionChief work outside the interaction callback."""
+        coroutine = self._finish_background_submission(interaction, guild, requester)
+        loop = getattr(getattr(self.cog, "bot", None), "loop", None)
+        if loop and loop.is_running():
+            loop.create_task(coroutine)
+        else:
+            asyncio.create_task(coroutine)
+
+    async def _finish_background_submission(
+        self,
+        interaction: discord.Interaction,
+        guild: discord.Guild,
+        requester: discord.abc.User,
+    ) -> None:
+        """Complete a submitted request and update the private response when possible."""
+        try:
+            result_message = await self.cog._process_discord_building_panel_request(
+                guild,
+                self.req,
+                requester,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.exception("BuildingManager background Discord request processing failed: %s", exc)
+            result_message = (
+                "Your building request hit an internal error while processing. "
+                "Staff have been notified through the bot logs."
+            )
+        await send_ephemeral_followup(interaction, result_message)
 
 # ---------- Admin Decision ----------
 
@@ -4939,6 +4889,58 @@ class BuildingManager(commands.Cog):
                 inline=False,
             )
         await log_channel.send(embed=embed)
+
+    async def _process_discord_building_panel_request(
+        self,
+        guild: discord.Guild,
+        req: BuildingRequest,
+        requester: discord.abc.User,
+    ) -> str:
+        """Process a Discord panel request after the interaction is acknowledged."""
+        conf = await self.config.guild(guild).all()
+        admin_channel_id = conf.get("admin_channel_id")
+        log_channel_id = conf.get("log_channel_id")
+
+        if not admin_channel_id or not log_channel_id:
+            return "Admin/Log channels are not configured yet. Ask an admin to use [p]buildset."
+
+        admin_channel = await self._resolve_channel(guild, admin_channel_id)
+        log_channel = await self._resolve_channel(guild, log_channel_id)
+        if not admin_channel or not log_channel:
+            return "One or more configured BuildingManager channels could not be found."
+
+        contribution_rate, contribution_source = await self._get_discord_request_contribution_rate(requester)
+        if contribution_rate is None:
+            req.notes = (
+                f"{req.notes or ''}\n"
+                f"Auto-accept skipped: contribution rate unknown ({contribution_source})."
+            ).strip()
+            request_id = await self._submit_building_request_to_admins(
+                guild,
+                req,
+                source="Discord request - contribution unknown",
+            )
+            return (
+                "Your request was submitted to admins for review because your latest alliance "
+                f"donation could not be verified. Request ID: {request_id}."
+            )
+
+        if contribution_rate < BUILDING_BOARD_MIN_AUTO_ACCEPT_TAX:
+            return await self._reject_discord_request_for_low_tax(
+                guild,
+                req,
+                requester,
+                contribution_rate=contribution_rate,
+                log_channel=log_channel,
+            )
+
+        return await self._auto_accept_discord_building_request(
+            guild,
+            req,
+            requester,
+            contribution_rate=contribution_rate,
+            log_channel=log_channel,
+        )
 
     async def _reject_discord_request_for_low_tax(
         self,
