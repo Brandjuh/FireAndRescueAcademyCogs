@@ -122,8 +122,18 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertEqual(parse_alliance_funds_from_html(html), 16935312)
         self.assertIsNone(parse_alliance_funds_from_html("<div>1,000 Credits</div>"))
 
+    def test_parse_alliance_funds_from_html_allows_dom_order_variation(self):
+        html = """
+        <div>16,935,312 Credits</div>
+        <h2>Alliance Funds</h2>
+        <div>Your contribution to the alliance</div>
+        """
+
+        self.assertEqual(parse_alliance_funds_from_html(html), 16935312)
+
     def test_alliance_funds_allow_auto_build_requires_live_funds_over_threshold(self):
         self.assertTrue(alliance_funds_allow_auto_build(2_000_000, "live MissionChief"))
+        self.assertTrue(alliance_funds_allow_auto_build(2_000_000, "live MissionChief browser"))
         self.assertFalse(alliance_funds_allow_auto_build(1_999_999, "live MissionChief"))
         self.assertFalse(alliance_funds_allow_auto_build(10_000_000, "income_v2.db"))
         self.assertFalse(alliance_funds_allow_auto_build(None, "live MissionChief"))
