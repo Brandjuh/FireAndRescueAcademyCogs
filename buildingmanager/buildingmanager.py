@@ -1155,13 +1155,23 @@ def parse_alliance_funds_from_html(html: str) -> Optional[int]:
         return None
 
     lowered = text.casefold()
-    marker = lowered.find("alliance funds")
+    marker = -1
+    for marker_text in (
+        "alliance funds",
+        "alliance fund",
+        "alliance treasury",
+        "verband funds",
+    ):
+        marker = lowered.find(marker_text)
+        if marker >= 0:
+            break
     if marker < 0:
         return None
 
-    window = text[max(0, marker - 160) : marker + 600]
+    window = text[max(0, marker - 500) : marker + 1000]
     for pattern in (
         r"Alliance\s+Funds\s+(\d[\d,\.\s]*)\s+Credits",
+        r"Alliance\s+Treasury\s+(\d[\d,\.\s]*)\s+Credits",
         r"(\d[\d,\.\s]*)\s+Credits",
     ):
         match = re.search(pattern, window, re.IGNORECASE)
@@ -4837,8 +4847,9 @@ class BuildingManager(commands.Cog):
                 source=funds_source,
                 minimum=minimum_funds,
                 log_channel=log_channel,
+                record_approval=False,
             )
-            return f"Building request approved and queued for automatic build. {message}"
+            return message
 
         create_result, automation_message = await self._create_and_queue_approved_building(guild, req)
         final_status = "created" if create_result.ok else "approved_pending_manual"
@@ -5781,14 +5792,18 @@ class BuildingManager(commands.Cog):
 
     async def _get_current_alliance_funds(self) -> Tuple[Optional[int], str]:
         """Return current alliance funds and the source used."""
+        errors = []
         for source, fetcher in (
             ("live MissionChief", self._fetch_live_alliance_funds),
             ("live MissionChief browser", self._fetch_live_alliance_funds_browser),
         ):
-            with contextlib.suppress(Exception):
+            try:
                 funds = await fetcher()
                 if funds is not None:
                     return funds, source
+                errors.append(f"{source}: no alliance funds amount found")
+            except Exception as exc:
+                errors.append(f"{source}: {type(exc).__name__}: {_truncate_discord_text(exc, 180)}")
 
         funds = await self._get_alliance_funds_from_contract()
         if funds is not None:
@@ -5798,6 +5813,8 @@ class BuildingManager(commands.Cog):
         if funds is not None:
             return funds, "income_v2.db"
 
+        if errors:
+            return None, _truncate_discord_text("unavailable; " + "; ".join(errors), 900)
         return None, "unavailable"
 
     async def _playwright_cookies(self) -> List[Dict[str, str]]:
@@ -5854,16 +5871,18 @@ class BuildingManager(commands.Cog):
         source: str,
         minimum: int,
         log_channel: Optional[discord.abc.Messageable],
+        record_approval: bool = True,
     ):
         """Mark an approved request as waiting until alliance funds are high enough."""
         self.db.update_request_status(int(req.request_id), "awaiting_funds")
-        self.db.add_action(
-            request_id=int(req.request_id),
-            guild_id=guild.id,
-            admin_user_id=getattr(admin_user, "id", None),
-            admin_username=str(admin_user) if admin_user else "BuildingManager",
-            action_type="approved",
-        )
+        if record_approval:
+            self.db.add_action(
+                request_id=int(req.request_id),
+                guild_id=guild.id,
+                admin_user_id=getattr(admin_user, "id", None),
+                admin_username=str(admin_user) if admin_user else "BuildingManager",
+                action_type="approved",
+            )
         self.db.add_action(
             request_id=int(req.request_id),
             guild_id=guild.id,
@@ -5877,7 +5896,7 @@ class BuildingManager(commands.Cog):
 
         current = f"{funds:,} credits" if funds is not None else "unknown"
         message = (
-            f"Approved and queued. Current alliance funds are {current}; "
+            f"Queued for automatic build. No building was created yet. Current alliance funds are {current}; "
             f"minimum required before auto-building is {minimum:,} credits."
         )
         user = guild.get_member(requester_id) if requester_id else None
@@ -5885,27 +5904,28 @@ class BuildingManager(commands.Cog):
             with contextlib.suppress(discord.Forbidden, discord.HTTPException):
                 await user.send(
                     _truncate_discord_text(
-                        "Your building request has been approved, but it is waiting for enough alliance funds "
-                        f"before it is built automatically.\n\n{req.building_type}: {req.building_name}",
+                        "Your building request is queued, but no building has been created yet. "
+                        "It is waiting until alliance funds can be verified above the configured minimum.\n\n"
+                        f"{req.building_type}: {req.building_name}",
                         1900,
                     )
                 )
 
         await self._send_building_request_game_update(
             req,
-            subject="Building request approved",
+            subject="Building request queued",
             body=self._build_game_approval_message(
                 req,
                 status=(
-                    "Your building request has been approved, but it is waiting for enough alliance funds "
-                    "before it is built automatically."
+                    "Your building request is queued, but no building has been created yet. "
+                    "It is waiting until alliance funds can be verified above the configured minimum."
                 ),
             ),
         )
 
         if log_channel:
             embed = discord.Embed(
-                title="Building request approved - waiting for alliance funds",
+                title="Building request queued - waiting for alliance funds",
                 color=discord.Color.orange(),
                 timestamp=datetime.now(timezone.utc),
             )
@@ -5917,9 +5937,14 @@ class BuildingManager(commands.Cog):
             )
             embed.add_field(name="Current Funds", value=current, inline=True)
             embed.add_field(name="Required Minimum", value=f"{minimum:,} credits", inline=True)
-            embed.add_field(name="Funds Source", value=source, inline=True)
+            embed.add_field(name="Funds Source", value=_truncate_discord_text(source, 900), inline=False)
             if admin_user:
-                embed.add_field(name="Approved by", value=f"{admin_user.mention} ({admin_user.id})", inline=False)
+                embed.add_field(name="Queued by", value=f"{admin_user.mention} ({admin_user.id})", inline=False)
+            embed.add_field(
+                name="Auto Creation",
+                value="Not started. Waiting until alliance funds can be verified above the required minimum.",
+                inline=False,
+            )
             embed.add_field(name="Request ID", value=str(req.request_id), inline=True)
             await log_channel.send(embed=embed)
 
