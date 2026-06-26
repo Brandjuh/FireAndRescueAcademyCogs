@@ -9,6 +9,7 @@ from buildingmanager.buildingmanager import (
     BUILDING_FETCH_ALLIANCE_LIST_SCRIPT,
     BuildingAutomationResult,
     BuildingDatabase,
+    BuildingRequest,
     LocationParser,
     _clean_building_name,
     _normalize_missionchief_url,
@@ -67,6 +68,21 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
 
     def test_clean_building_name_decodes_repeated_encoding(self):
         self.assertEqual(_clean_building_name("h%25C3%25B4pital de Bastia"), "hôpital de Bastia")
+        self.assertEqual(
+            _clean_building_name("OSPEDALE %22San Giuseppe%22 di Isili"),
+            'OSPEDALE "San Giuseppe" di Isili',
+        )
+
+    def test_building_request_cleans_encoded_names(self):
+        request = BuildingRequest(
+            user_id=1,
+            username="Requester",
+            building_type="Hospital",
+            building_name="OSPEDALE %22San Giuseppe%22 di Isili",
+            location_input="Location",
+        )
+
+        self.assertEqual(request.building_name, 'OSPEDALE "San Giuseppe" di Isili')
 
     def test_build_alliance_building_config_allows_prison(self):
         config = build_alliance_building_config(
@@ -130,6 +146,8 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertIn("[building_id]", BUILDING_FETCH_ALLIANCE_LIST_SCRIPT)
         self.assertIn('/buildings/', BUILDING_FETCH_ALLIANCE_LIST_SCRIPT)
         self.assertIn("targetName", BUILDING_FETCH_ALLIANCE_LIST_SCRIPT)
+        self.assertIn("decodeURIComponent", BUILDING_FETCH_ALLIANCE_LIST_SCRIPT)
+        self.assertIn("?page=", BUILDING_FETCH_ALLIANCE_LIST_SCRIPT)
         self.assertIn('credentials: "same-origin"', BUILDING_FETCH_ALLIANCE_LIST_SCRIPT)
 
     def test_extract_building_id_from_urls_and_snapshots(self):
@@ -140,6 +158,10 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertEqual(
             extract_missionchief_building_id({"finalUrl": "https://www.missionchief.com/buildings/987"}),
             987,
+        )
+        self.assertEqual(
+            extract_missionchief_building_id({"Location": "/buildings/654321"}),
+            654321,
         )
         self.assertIsNone(extract_missionchief_building_id("https://www.missionchief.com/buildings"))
 
@@ -215,6 +237,25 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         ]
 
         self.assertEqual(find_created_alliance_building_id_from_list(candidates, config), 301)
+
+    def test_find_created_building_id_from_alliance_list_decodes_encoded_candidate_names(self):
+        config = build_alliance_building_config(
+            building_type="Hospital",
+            building_name='OSPEDALE "San Giuseppe" di Isili',
+            coordinates="39.7426879, 9.1101257",
+            address=None,
+        )
+        candidates = [
+            {
+                "id": 304,
+                "text": "OSPEDALE %22San Giuseppe%22 di Isili",
+                "rowText": "Hospital OSPEDALE %22San Giuseppe%22 di Isili",
+                "searchAttribute": "OSPEDALE %22San Giuseppe%22 di Isili",
+                "imageSources": ["/images/building_hospital.png"],
+            }
+        ]
+
+        self.assertEqual(find_created_alliance_building_id_from_list(candidates, config), 304)
 
     def test_find_created_building_id_from_alliance_list_rejects_missing_name(self):
         config = build_alliance_building_config(
