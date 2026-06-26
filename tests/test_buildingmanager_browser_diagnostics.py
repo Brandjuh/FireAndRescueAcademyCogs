@@ -962,10 +962,24 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertEqual(targets[6165][0], configured_guild)
 
     def test_board_post_with_maps_link_is_forwarded_to_discord_admin_approval(self):
+        class FakeGuildConfig:
+            async def all(self):
+                return {
+                    "board_auto_accept_enabled": False,
+                    "admin_channel_id": None,
+                    "log_channel_id": None,
+                }
+
+        class FakeConfig:
+            def guild(self, _guild):
+                return FakeGuildConfig()
+
         manager = BuildingManager.__new__(BuildingManager)
+        manager.config = FakeConfig()
         manager._submit_building_request_to_admins = AsyncMock(return_value=321)
         manager._post_building_board_reply_with_id = AsyncMock(return_value=(200, 200002))
         manager._schedule_board_post_deletion = AsyncMock()
+        manager.bot = types.SimpleNamespace(fetch_channel=AsyncMock(return_value=None))
         guild = types.SimpleNamespace(id=1)
         page = BoardPage(posts=[], reply_action="/alliance_posts?alliance_thread_id=6165", reply_token="token")
         post = BoardBuildingPost(
@@ -977,7 +991,7 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         )
         original_resolve_location = LocationParser.resolve_location
 
-        async def fake_resolve_location(cls, location_input):
+        async def fake_resolve_location(cls, location_input, **_kwargs):
             self.assertEqual(location_input, "https://maps.app.goo.gl/mPcFakXaRgMU99fm6")
             return LocationDetails(
                 original_input=location_input,
@@ -1011,6 +1025,141 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         manager._post_building_board_reply_with_id.assert_awaited_once()
         reply_content = manager._post_building_board_reply_with_id.await_args.args[3]
         self.assertIn("Request ID: 321", reply_content)
+
+    def test_board_post_with_unknown_tax_is_forwarded_to_admin_review(self):
+        class FakeGuildConfig:
+            async def all(self):
+                return {
+                    "board_auto_accept_enabled": True,
+                    "admin_channel_id": None,
+                    "log_channel_id": None,
+                }
+
+        class FakeConfig:
+            def guild(self, _guild):
+                return FakeGuildConfig()
+
+        manager = BuildingManager.__new__(BuildingManager)
+        manager.config = FakeConfig()
+        manager.bot = types.SimpleNamespace(fetch_channel=AsyncMock(return_value=None))
+        manager._resolve_building_location = AsyncMock(
+            return_value=LocationDetails(
+                original_input="https://maps.app.goo.gl/example",
+                resolved_input="https://maps.app.goo.gl/example",
+                place_name="Example Hospital",
+                coordinates="40.1, -73.9",
+                detected_facility_type="hospital",
+            )
+        )
+        manager._get_board_request_contribution_rate = AsyncMock(return_value=(None, "no snapshot"))
+        manager._submit_building_request_to_admins = AsyncMock(return_value=654)
+        manager._post_building_board_reply_with_id = AsyncMock(return_value=(200, 200004))
+        manager._schedule_board_post_deletion = AsyncMock()
+        page = BoardPage(posts=[], reply_action="/alliance_posts?alliance_thread_id=6165", reply_token="token")
+        post = BoardBuildingPost(200003, "123", "BoardUser", "now", "https://maps.app.goo.gl/example")
+
+        asyncio.run(manager._handle_building_board_post(types.SimpleNamespace(id=1), object(), 6165, page, post))
+
+        manager._submit_building_request_to_admins.assert_awaited_once()
+        request = manager._submit_building_request_to_admins.await_args.args[1]
+        self.assertIn("Auto-accept skipped", request.notes)
+        reply_content = manager._post_building_board_reply_with_id.await_args.args[3]
+        self.assertIn("contribution rate is unknown", reply_content)
+
+    def test_board_post_with_low_tax_is_rejected_without_admin_approval(self):
+        class FakeGuildConfig:
+            async def all(self):
+                return {
+                    "board_auto_accept_enabled": True,
+                    "admin_channel_id": None,
+                    "log_channel_id": None,
+                }
+
+        class FakeConfig:
+            def guild(self, _guild):
+                return FakeGuildConfig()
+
+        class FakeDb:
+            def __init__(self):
+                self.status = None
+                self.actions = []
+
+            def add_request(self, **_kwargs):
+                return 777
+
+            def update_request_status(self, request_id, status):
+                self.status = (request_id, status)
+
+            def add_action(self, **kwargs):
+                self.actions.append(kwargs)
+
+        manager = BuildingManager.__new__(BuildingManager)
+        manager.config = FakeConfig()
+        manager.db = FakeDb()
+        manager.bot = types.SimpleNamespace(get_cog=lambda _name: None, fetch_channel=AsyncMock(return_value=None))
+        manager._resolve_building_location = AsyncMock(
+            return_value=LocationDetails(
+                original_input="https://maps.app.goo.gl/example",
+                resolved_input="https://maps.app.goo.gl/example",
+                place_name="Example Prison",
+                coordinates="40.1, -73.9",
+                detected_facility_type="prison",
+            )
+        )
+        manager._get_board_request_contribution_rate = AsyncMock(return_value=(4.9, "test"))
+        manager._submit_building_request_to_admins = AsyncMock()
+        manager._post_building_board_reply_with_id = AsyncMock(return_value=(200, 200004))
+        manager._schedule_board_post_deletion = AsyncMock()
+        page = BoardPage(posts=[], reply_action="/alliance_posts?alliance_thread_id=6165", reply_token="token")
+        post = BoardBuildingPost(200003, "123", "BoardUser", "now", "https://maps.app.goo.gl/example")
+
+        asyncio.run(manager._handle_building_board_post(types.SimpleNamespace(id=1), object(), 6165, page, post))
+
+        manager._submit_building_request_to_admins.assert_not_awaited()
+        self.assertEqual(manager.db.status, (777, "denied"))
+        self.assertEqual(manager.db.actions[0]["action_type"], "auto_denied_low_tax")
+        reply_content = manager._post_building_board_reply_with_id.await_args.args[3]
+        self.assertIn("below the required", reply_content)
+
+    def test_board_post_with_valid_tax_uses_auto_accept(self):
+        class FakeGuildConfig:
+            async def all(self):
+                return {
+                    "board_auto_accept_enabled": True,
+                    "admin_channel_id": None,
+                    "log_channel_id": None,
+                }
+
+        class FakeConfig:
+            def guild(self, _guild):
+                return FakeGuildConfig()
+
+        manager = BuildingManager.__new__(BuildingManager)
+        manager.config = FakeConfig()
+        manager.bot = types.SimpleNamespace(fetch_channel=AsyncMock(return_value=None))
+        manager._resolve_building_location = AsyncMock(
+            return_value=LocationDetails(
+                original_input="https://maps.app.goo.gl/example",
+                resolved_input="https://maps.app.goo.gl/example",
+                place_name="Example Hospital",
+                coordinates="40.1, -73.9",
+                detected_facility_type="hospital",
+            )
+        )
+        manager._get_board_request_contribution_rate = AsyncMock(return_value=(5.0, "test"))
+        manager._auto_accept_board_building_request = AsyncMock(return_value="Auto-built.")
+        manager._submit_building_request_to_admins = AsyncMock()
+        manager._post_building_board_reply_with_id = AsyncMock(return_value=(200, 200004))
+        manager._schedule_board_post_deletion = AsyncMock()
+        page = BoardPage(posts=[], reply_action="/alliance_posts?alliance_thread_id=6165", reply_token="token")
+        post = BoardBuildingPost(200003, "123", "BoardUser", "now", "https://maps.app.goo.gl/example")
+
+        asyncio.run(manager._handle_building_board_post(types.SimpleNamespace(id=1), object(), 6165, page, post))
+
+        manager._submit_building_request_to_admins.assert_not_awaited()
+        manager._auto_accept_board_building_request.assert_awaited_once()
+        reply_content = manager._post_building_board_reply_with_id.await_args.args[3]
+        self.assertIn("Auto-built.", reply_content)
 
     def test_building_request_game_update_sends_message_for_board_requester(self):
         message_manager = types.SimpleNamespace(
