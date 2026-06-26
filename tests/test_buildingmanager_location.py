@@ -30,6 +30,7 @@ class BuildingManagerLocationTests(unittest.TestCase):
         details = LocationDetails(
             original_input="input",
             resolved_input="https://www.google.nl/maps/place/M%C3%A1xima+MC+Eindhoven/@51,5",
+            detected_facility_type="hospital",
         )
 
         self.assertIsNone(
@@ -45,8 +46,73 @@ class BuildingManagerLocationTests(unittest.TestCase):
 
         self.assertEqual(
             LocationParser.facility_warning("Prison", "Random Park", details),
-            "This location does not clearly look like a justice or correctional facility.",
+            "This location does not clearly look like a real hospital or prison/jail.",
         )
+
+    def test_detect_supported_building_type_accepts_real_hospital(self):
+        details = LocationDetails(
+            original_input="input",
+            resolved_input="https://www.google.com/maps/place/Example+Hospital",
+            place_name="Example Regional Hospital",
+            detected_facility_type="hospital health",
+        )
+
+        building_type, reason = LocationParser.detect_supported_building_type(details)
+
+        self.assertEqual(building_type, "Hospital")
+        self.assertIn("hospital", reason)
+
+    def test_detect_supported_building_type_rejects_clinic(self):
+        details = LocationDetails(
+            original_input="input",
+            resolved_input="https://www.google.com/maps/place/Example+Clinic",
+            place_name="Example Medical Clinic",
+            detected_facility_type="clinic health",
+        )
+
+        building_type, reason = LocationParser.detect_supported_building_type(details)
+
+        self.assertIsNone(building_type)
+        self.assertIn("clinic", reason)
+
+    def test_detect_supported_building_type_accepts_prison(self):
+        details = LocationDetails(
+            original_input="input",
+            resolved_input="https://www.google.com/maps/place/Example+Correctional+Facility",
+            place_name="Example Correctional Facility",
+            detected_facility_type="amenity prison",
+        )
+
+        building_type, reason = LocationParser.detect_supported_building_type(details)
+
+        self.assertEqual(building_type, "Prison")
+        self.assertIn("prison", reason)
+
+    def test_detect_supported_building_type_rejects_historic_jail_museum(self):
+        details = LocationDetails(
+            original_input="input",
+            resolved_input="https://www.google.com/maps/place/Old+Jail+Museum",
+            place_name="Old Jail Museum",
+            detected_facility_type="tourism museum",
+        )
+
+        building_type, reason = LocationParser.detect_supported_building_type(details)
+
+        self.assertIsNone(building_type)
+        self.assertIn("museum", reason)
+
+    def test_detect_supported_building_type_rejects_courthouse(self):
+        details = LocationDetails(
+            original_input="input",
+            resolved_input="https://www.google.com/maps/place/County+Courthouse",
+            place_name="County Courthouse",
+            detected_facility_type="amenity courthouse",
+        )
+
+        building_type, reason = LocationParser.detect_supported_building_type(details)
+
+        self.assertIsNone(building_type)
+        self.assertIn("courthouse", reason)
 
     def test_google_result_details_include_country_region_and_coordinates(self):
         result = {

@@ -805,19 +805,21 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(spec.building_type, "Prison")
 
-    def test_extract_building_board_request_rejects_missing_type(self):
+    def test_extract_building_board_request_accepts_link_only(self):
         spec, error = extract_building_board_request("https://www.google.com/maps/place/Example")
 
-        self.assertIsNone(spec)
-        self.assertIn("No supported building type", error)
+        self.assertIsNone(error)
+        self.assertIsNotNone(spec)
+        self.assertIsNone(spec.building_type)
+        self.assertEqual(spec.location_input, "https://www.google.com/maps/place/Example")
 
     def test_building_board_guide_content_explains_format_and_cleanup(self):
         content = build_building_board_guide_content(6165)
 
         self.assertIn("[BM-GUIDE:overview]", content)
-        self.assertIn("Hospital: <Google Maps link>", content)
-        self.assertIn("Prison: <Google Maps link>", content)
-        self.assertIn("A colon is optional", content)
+        self.assertIn("<Google Maps link>", content)
+        self.assertIn("The bot detects the type", content)
+        self.assertIn("Clinics, doctor offices, museums", content)
         self.assertIn("removed after 12 hours", content)
         self.assertNotIn("This post is maintained automatically by the Fire & Rescue Academy bot", content)
 
@@ -971,7 +973,7 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
             author_id="88649",
             author_name="DutchFireFighter",
             created_at="June 26, 2026 11:58",
-            content="Prison 🔗 https://maps.app.goo.gl/mPcFakXaRgMU99fm6",
+            content="https://maps.app.goo.gl/mPcFakXaRgMU99fm6",
         )
         original_resolve_location = LocationParser.resolve_location
 
