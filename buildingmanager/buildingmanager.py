@@ -4,6 +4,7 @@ import asyncio
 import aiohttp
 import contextlib
 from io import BytesIO
+import json
 import logging
 import re
 import sqlite3
@@ -27,6 +28,15 @@ DEFAULT_REQUEST_PANEL_CHANNEL_ID = 1421627971831070730
 ALLIANCE_BUILDING_TYPE_IDS = {
     "Hospital": "2",
     "Prison": "10",
+}
+ALLIANCE_BUILDING_TARGET_TAX = 20
+BUILDING_AUTOMATION_RETRY_SECONDS = 6 * 60 * 60
+BUILDING_AUTOMATION_LOOP_SECONDS = 15 * 60
+BUILDING_AUTOMATION_MAX_ACTIONS_PER_RUN = 24
+BUILDING_AUTOMATION_MAX_EXTENSION_STARTS_PER_RUN = 3
+BUILDING_AUTOMATION_EXCLUDED_EXTENSIONS = {
+    "large hospital",
+    "large prison",
 }
 PLAYWRIGHT_SETUP_MESSAGE = (
     "Playwright browser automation is not ready. Install the BuildingManager requirements and run "
@@ -236,6 +246,206 @@ BUILDING_CLICK_CREATE_SCRIPT = r"""
   return true;
 }
 """.strip()
+BUILDING_AUTOMATION_PREPARE_SCRIPT = r"""
+(config) => {
+  const targetTax = String(config.targetTax || "20");
+  const maxExtensionStarts = Number(config.maxExtensionStarts || 3);
+  const extensionsStartedThisRun = Number(config.extensionsStartedThisRun || 0);
+  const excludedLabels = (config.excludedLabels || []).map((item) => String(item || "").toLowerCase());
+  const visibleText = (element) => [element?.value, element?.textContent, element?.getAttribute?.("title"), element?.getAttribute?.("aria-label")]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const normalized = (value) => String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+  const isVisible = (element) => {
+    if (!element) return false;
+    const style = window.getComputedStyle(element);
+    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+  const isEnabled = (element) => element
+    && !element.disabled
+    && !element.hasAttribute("disabled")
+    && !String(element.className || "").toLowerCase().includes("disabled")
+    && String(element.getAttribute("aria-disabled") || "").toLowerCase() !== "true";
+  const textFor = (element) => normalized([
+    visibleText(element),
+    element?.href || "",
+    element?.name || "",
+    element?.id || "",
+    element?.className || "",
+    element?.getAttribute?.("data-method") || "",
+  ].join(" "));
+  const isDangerous = (text) => /(coin|coins|delete|remove|demolish|sell|cancel|back|abort)/i.test(text);
+  const isExcludedLarge = (text) => excludedLabels.some((label) => label && text.includes(label));
+  const tagAction = (element) => {
+    const token = `bm-action-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    element.setAttribute("data-bm-action", token);
+    return `[data-bm-action="${token}"]`;
+  };
+  const fieldLabel = (field) => {
+    const id = field?.id ? document.querySelector(`label[for="${window.CSS.escape(field.id)}"]`) : null;
+    const wrappingLabel = field?.closest?.("label");
+    const fieldGroup = field?.closest?.(".form-group, .control-group, .field, .row, p, td, tr");
+    return normalized([
+      field?.name || "",
+      field?.id || "",
+      visibleText(id),
+      visibleText(wrappingLabel),
+      visibleText(fieldGroup),
+    ].join(" "));
+  };
+  const safeSubmitInForm = (form) => {
+    if (!form) return null;
+    return [...form.querySelectorAll('input[type="submit"], button[type="submit"], button:not([type])')]
+      .find((button) => {
+        const text = textFor(button);
+        return isVisible(button) && isEnabled(button) && !isDangerous(text);
+      }) || null;
+  };
+  const setTaxField = (field) => {
+    const tag = normalized(field.tagName);
+    if (tag === "select") {
+      const option = [...field.options].find((item) => String(item.value || "") === targetTax)
+        || [...field.options].find((item) => normalized(item.textContent).includes(`${targetTax}%`));
+      if (!option) return false;
+      if (String(field.value || "") === String(option.value || "")) return "already";
+      field.value = option.value;
+    } else {
+      const type = normalized(field.type);
+      if (!["number", "text", "range"].includes(type)) return false;
+      if (String(field.value || "") === targetTax) return "already";
+      field.value = targetTax;
+    }
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    field.dispatchEvent(new Event("change", { bubbles: true }));
+    return true;
+  };
+  const taxKeywords = /(tax|fee|percentage|percent|share|alliance|patient|prisoner|charge|abgabe|steuer|beitrag)/i;
+  const taxFields = [...document.querySelectorAll("select, input")]
+    .filter((field) => !["hidden", "submit", "button", "checkbox", "radio"].includes(normalized(field.type)))
+    .map((field) => ({ field, label: fieldLabel(field) }))
+    .filter((item) => taxKeywords.test(item.label));
+  if (!config.taxComplete) {
+    for (const item of taxFields) {
+      const state = setTaxField(item.field);
+      if (state === "already") {
+        return {
+          ok: true,
+          action: "tax_already_set",
+          completed: false,
+          label: `Tax already set to ${targetTax}%`,
+          taxState: "already_target",
+          snapshot: { url: location.href, taxField: item.label },
+        };
+      }
+      if (state === true) {
+        const submit = safeSubmitInForm(item.field.closest("form"));
+        if (!submit) {
+          return {
+            ok: false,
+            action: null,
+            completed: false,
+            reason: "Tax field was found, but no safe submit button was available.",
+            taxState: "submit_missing",
+            snapshot: { url: location.href, taxField: item.label },
+          };
+        }
+        return {
+          ok: true,
+          action: "set_tax",
+          selector: tagAction(submit),
+          label: `Set tax to ${targetTax}%`,
+          taxState: "updating",
+          completed: false,
+          snapshot: { url: location.href, taxField: item.label },
+        };
+      }
+    }
+  }
+
+  const actionElements = [...document.querySelectorAll('a, input[type="submit"], button[type="submit"], button:not([type])')]
+    .map((element) => ({
+      element,
+      text: textFor(element),
+      label: visibleText(element) || element.href || element.name || element.id || "MissionChief action",
+      visible: isVisible(element),
+      enabled: isEnabled(element),
+    }))
+    .filter((item) => item.visible && !isDangerous(item.text) && !isExcludedLarge(item.text));
+  const levelCandidates = actionElements.filter((item) =>
+    /(level|upgrade|expand|capacity|bed|cell)/i.test(item.text)
+    && !/(extension|department|large hospital|large prison)/i.test(item.text)
+  );
+  const extensionCandidates = actionElements.filter((item) =>
+    /(extension|department|ward|clinic|surgery|icu|intensive|psychiatry|cell|detention)/i.test(item.text)
+    && !/(large hospital|large prison)/i.test(item.text)
+  );
+
+  const nextEnabled = (items) => items.find((item) => item.enabled);
+  const level = nextEnabled(levelCandidates);
+  if (!config.levelComplete && level) {
+    return {
+      ok: true,
+      action: "start_level_upgrade",
+      selector: tagAction(level.element),
+      label: level.label,
+      completed: false,
+      snapshot: { url: location.href },
+    };
+  }
+
+  if (extensionsStartedThisRun >= maxExtensionStarts) {
+    return {
+      ok: true,
+      action: null,
+      completed: false,
+      reason: `Started ${extensionsStartedThisRun} extension(s) this run; waiting before starting more.`,
+      wait: true,
+      snapshot: { url: location.href },
+    };
+  }
+
+  const extension = nextEnabled(extensionCandidates);
+  if (!config.extensionsComplete && extension) {
+    return {
+      ok: true,
+      action: "start_extension",
+      selector: tagAction(extension.element),
+      label: extension.label,
+      completed: false,
+      snapshot: { url: location.href },
+    };
+  }
+
+  const blockedTargets = [...levelCandidates, ...extensionCandidates]
+    .filter((item) => !item.enabled)
+    .map((item) => item.label)
+    .slice(0, 10);
+  const taxState = config.taxComplete ? "complete" : taxFields.length ? "unhandled" : "not_found";
+  const fallbackReason = taxState === "unhandled"
+    ? `Tax field was found, but no safe ${targetTax}% update action was available.`
+    : "No remaining eligible upgrade or extension actions were found.";
+  return {
+    ok: true,
+    action: null,
+    completed: blockedTargets.length === 0 && taxState !== "unhandled" && taxState !== "not_found",
+    wait: blockedTargets.length > 0 || taxState === "unhandled" || taxState === "not_found",
+    reason: blockedTargets.length
+      ? "MissionChief shows upgrade/extension targets, but they are not available yet."
+      : fallbackReason,
+    taxState,
+    snapshot: {
+      url: location.href,
+      blockedTargets,
+      excludedLabels,
+      taxFields: taxFields.map((item) => item.label).slice(0, 5),
+    },
+  };
+}
+""".strip()
 
 # ---------- Utilities ----------
 
@@ -313,6 +523,30 @@ def build_alliance_building_config(
         "address": _truncate_text(address, 180),
     }
 
+def extract_missionchief_building_id(*values: Any) -> Optional[int]:
+    """Extract a MissionChief building id from URLs, response text, or snapshots."""
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            nested_values = []
+            for key in ("buildingId", "building_id", "url", "responseUrl", "finalUrl", "postUrl"):
+                nested_values.append(value.get(key))
+            found = extract_missionchief_building_id(*nested_values)
+            if found:
+                return found
+            continue
+        text = str(value)
+        for pattern in (
+            r"/buildings/(\d+)(?:\D|$)",
+            r"buildings%2F(\d+)(?:\D|$)",
+            r"building[_-]?id[\"'\s:=]+(\d+)",
+        ):
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+    return None
+
 def _diagnostic_lines_for_fields(fields: Iterable[Dict[str, Any]]) -> List[str]:
     """Format no-submit browser field diagnostics."""
     lines = []
@@ -389,6 +623,48 @@ class BuildingCreateResult:
     reason: str
     status: Optional[int] = None
     post_url: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
+
+    @property
+    def building_id(self) -> Optional[int]:
+        return extract_missionchief_building_id(self.details or {}, self.post_url)
+
+
+@dataclass
+class BuildingAutomationJob:
+    """Stored post-creation automation job for an alliance building."""
+
+    job_id: int
+    request_id: int
+    guild_id: int
+    building_id: int
+    building_type: str
+    building_name: str
+    status: str
+    target_tax: int
+    tax_complete: bool
+    level_complete: bool
+    extensions_complete: bool
+    extensions_started: int
+    attempts: int
+    next_run_at: int
+    last_result: Optional[str] = None
+
+
+@dataclass
+class BuildingAutomationResult:
+    """Result of one post-creation automation pass."""
+
+    ok: bool
+    completed: bool
+    wait: bool
+    reason: str
+    actions: List[str]
+    tax_complete: bool = False
+    level_complete: bool = False
+    extensions_complete: bool = False
+    extensions_started: int = 0
+    status: Optional[int] = None
     details: Optional[Dict[str, Any]] = None
 
 async def safe_update(interaction: discord.Interaction, *, content=None, embed=None, view=None):
@@ -988,6 +1264,29 @@ class BuildingDatabase:
                 UNIQUE(guild_id, type_name)
             )
         ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS building_automation_jobs (
+                job_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_id INTEGER NOT NULL UNIQUE,
+                guild_id INTEGER NOT NULL,
+                building_id INTEGER NOT NULL,
+                building_type TEXT NOT NULL,
+                building_name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                target_tax INTEGER NOT NULL DEFAULT 20,
+                tax_complete INTEGER NOT NULL DEFAULT 0,
+                level_complete INTEGER NOT NULL DEFAULT 0,
+                extensions_complete INTEGER NOT NULL DEFAULT 0,
+                extensions_started INTEGER NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_run_at INTEGER NOT NULL,
+                last_result TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                completed_at INTEGER
+            )
+        ''')
         
         conn.commit()
         conn.close()
@@ -1073,6 +1372,213 @@ class BuildingDatabase:
             VALUES (?, ?, ?, ?, ?)
         ''', (location_input, coordinates, address, provider, ts()))
         
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def _automation_row_to_job(row: sqlite3.Row) -> BuildingAutomationJob:
+        """Convert an automation job row to a typed model."""
+        return BuildingAutomationJob(
+            job_id=int(row["job_id"]),
+            request_id=int(row["request_id"]),
+            guild_id=int(row["guild_id"]),
+            building_id=int(row["building_id"]),
+            building_type=str(row["building_type"]),
+            building_name=str(row["building_name"]),
+            status=str(row["status"]),
+            target_tax=int(row["target_tax"]),
+            tax_complete=bool(row["tax_complete"]),
+            level_complete=bool(row["level_complete"]),
+            extensions_complete=bool(row["extensions_complete"]),
+            extensions_started=int(row["extensions_started"]),
+            attempts=int(row["attempts"]),
+            next_run_at=int(row["next_run_at"]),
+            last_result=row["last_result"],
+        )
+
+    def add_or_update_automation_job(
+        self,
+        *,
+        request_id: int,
+        guild_id: int,
+        building_id: int,
+        building_type: str,
+        building_name: str,
+        target_tax: int = ALLIANCE_BUILDING_TARGET_TAX,
+        next_run_at: Optional[int] = None,
+    ) -> int:
+        """Queue post-creation automation for a MissionChief alliance building."""
+        now = ts()
+        if next_run_at is None:
+            next_run_at = now
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            INSERT INTO building_automation_jobs
+            (request_id, guild_id, building_id, building_type, building_name, status,
+             target_tax, next_run_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
+            ON CONFLICT(request_id) DO UPDATE SET
+                building_id = excluded.building_id,
+                building_type = excluded.building_type,
+                building_name = excluded.building_name,
+                status = CASE
+                    WHEN building_automation_jobs.status = 'completed' THEN 'completed'
+                    ELSE 'queued'
+                END,
+                target_tax = excluded.target_tax,
+                next_run_at = excluded.next_run_at,
+                updated_at = excluded.updated_at
+            ''',
+            (
+                int(request_id),
+                int(guild_id),
+                int(building_id),
+                str(building_type),
+                str(building_name),
+                int(target_tax),
+                int(next_run_at),
+                now,
+                now,
+            ),
+        )
+        cursor.execute("SELECT job_id FROM building_automation_jobs WHERE request_id = ?", (int(request_id),))
+        job_id = int(cursor.fetchone()[0])
+        conn.commit()
+        conn.close()
+        return job_id
+
+    def get_automation_job(self, job_id: int) -> Optional[BuildingAutomationJob]:
+        """Return one automation job by internal job id."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM building_automation_jobs WHERE job_id = ?", (int(job_id),))
+        row = cursor.fetchone()
+        conn.close()
+        return self._automation_row_to_job(row) if row else None
+
+    def get_automation_job_by_request_or_building(self, identifier: int) -> Optional[BuildingAutomationJob]:
+        """Return one automation job by request id or MissionChief building id."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT * FROM building_automation_jobs
+            WHERE request_id = ? OR building_id = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            ''',
+            (int(identifier), int(identifier)),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return self._automation_row_to_job(row) if row else None
+
+    def get_due_automation_jobs(self, *, now_ts: Optional[int] = None, limit: int = 5) -> List[BuildingAutomationJob]:
+        """Return queued automation jobs that are ready to run."""
+        if now_ts is None:
+            now_ts = ts()
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT * FROM building_automation_jobs
+            WHERE status IN ('queued', 'waiting', 'failed')
+              AND next_run_at <= ?
+            ORDER BY next_run_at ASC, job_id ASC
+            LIMIT ?
+            ''',
+            (int(now_ts), int(limit)),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [self._automation_row_to_job(row) for row in rows]
+
+    def get_recent_automation_jobs(self, guild_id: int, *, limit: int = 10) -> List[BuildingAutomationJob]:
+        """Return recent automation jobs for admin status output."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT * FROM building_automation_jobs
+            WHERE guild_id = ?
+            ORDER BY updated_at DESC
+            LIMIT ?
+            ''',
+            (int(guild_id), int(limit)),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [self._automation_row_to_job(row) for row in rows]
+
+    def update_automation_job(self, job_id: int, result: BuildingAutomationResult):
+        """Persist the latest automation result."""
+        now = ts()
+        if result.completed:
+            status = "completed"
+            next_run_at = now
+            completed_at = now
+        elif result.ok and result.wait:
+            status = "waiting"
+            next_run_at = now + BUILDING_AUTOMATION_RETRY_SECONDS
+            completed_at = None
+        elif result.ok:
+            status = "queued"
+            next_run_at = now + BUILDING_AUTOMATION_LOOP_SECONDS
+            completed_at = None
+        else:
+            status = "failed"
+            next_run_at = now + BUILDING_AUTOMATION_RETRY_SECONDS
+            completed_at = None
+
+        last_result = _truncate_text(
+            json.dumps(
+                {
+                    "reason": result.reason,
+                    "actions": result.actions,
+                    "details": result.details or {},
+                },
+                ensure_ascii=True,
+                default=str,
+            ),
+            1800,
+        )
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            UPDATE building_automation_jobs
+            SET status = ?,
+                tax_complete = CASE WHEN ? THEN 1 ELSE tax_complete END,
+                level_complete = CASE WHEN ? THEN 1 ELSE level_complete END,
+                extensions_complete = CASE WHEN ? THEN 1 ELSE extensions_complete END,
+                extensions_started = extensions_started + ?,
+                attempts = attempts + 1,
+                next_run_at = ?,
+                last_result = ?,
+                updated_at = ?,
+                completed_at = COALESCE(?, completed_at)
+            WHERE job_id = ?
+            ''',
+            (
+                status,
+                bool(result.tax_complete),
+                bool(result.level_complete),
+                bool(result.extensions_complete),
+                int(result.extensions_started),
+                int(next_run_at),
+                last_result,
+                now,
+                completed_at,
+                int(job_id),
+            ),
+        )
         conn.commit()
         conn.close()
     
@@ -1649,6 +2155,27 @@ class AdminDecisionView(discord.ui.View):
         log_channel = guild.get_channel(conf["log_channel_id"]) if conf.get("log_channel_id") else None
         create_result = await self.cog._create_alliance_building_browser(self.req)
         final_status = "created" if create_result.ok else "approved_pending_manual"
+        automation_message = None
+        if create_result.ok:
+            building_id = create_result.building_id
+            if building_id:
+                job_id = self.cog.db.add_or_update_automation_job(
+                    request_id=self.req.request_id,
+                    guild_id=guild.id,
+                    building_id=building_id,
+                    building_type=self.req.building_type,
+                    building_name=self.req.building_name,
+                )
+                automation_message = (
+                    f"Queued post-creation automation for MissionChief building `{building_id}`: "
+                    f"tax {ALLIANCE_BUILDING_TARGET_TAX}%, max level, and allowed extensions."
+                )
+                self.cog.bot.loop.create_task(self.cog._process_building_automation_job(job_id))
+            else:
+                automation_message = (
+                    "Created in MissionChief, but the building ID was not detected. "
+                    "Post-creation automation was not queued."
+                )
 
         # Update database
         self.cog.db.update_request_status(self.req.request_id, final_status)
@@ -1709,6 +2236,8 @@ class AdminDecisionView(discord.ui.View):
                 emb.add_field(name="Country / Region", value=region_text[:200], inline=True)
             emb.add_field(name="Approved by", value=f"{interaction.user.mention} ({interaction.user.id})", inline=False)
             emb.add_field(name="Auto Creation", value="Created in MissionChief" if create_result.ok else create_result.reason[:900], inline=False)
+            if automation_message:
+                emb.add_field(name="Post-Creation Automation", value=automation_message[:900], inline=False)
             if create_result.status is not None:
                 emb.add_field(name="MissionChief HTTP Status", value=str(create_result.status), inline=True)
             emb.add_field(name="Request ID", value=str(self.req.request_id), inline=True)
@@ -1721,7 +2250,13 @@ class AdminDecisionView(discord.ui.View):
                 pass
 
         if create_result.ok:
-            await interaction.followup.send("Request approved and alliance building created.", ephemeral=True)
+            if automation_message:
+                await interaction.followup.send(
+                    f"Request approved and alliance building created. {automation_message}",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send("Request approved and alliance building created.", ephemeral=True)
         else:
             await interaction.followup.send(
                 f"Request approved, but automatic creation failed: {create_result.reason}",
@@ -1930,19 +2465,24 @@ class BuildingManager(commands.Cog):
         self.db = BuildingDatabase(db_path)
 
         self._panel_task = None
+        self._automation_task = None
         self._browser_lock = asyncio.Lock()
         self._persistent_view_registered = False
         self._register_persistent_views()
         self._start_panel_task()
+        self._start_automation_task()
 
     def cog_unload(self):  # <-- Let op: 4 spaties inspringing, zelfde niveau als __init__
         if getattr(self, "_panel_task", None):
             self._panel_task.cancel()
+        if getattr(self, "_automation_task", None):
+            self._automation_task.cancel()
 
     async def cog_load(self):
         """Register persistent views and ensure the default request panel exists."""
         self._register_persistent_views()
         self._start_panel_task()
+        self._start_automation_task()
 
     def _register_persistent_views(self):
         """Register persistent component views once per cog instance."""
@@ -1956,6 +2496,12 @@ class BuildingManager(commands.Cog):
         if self._panel_task and not self._panel_task.done():
             return
         self._panel_task = self.bot.loop.create_task(self._ensure_default_request_panel())
+
+    def _start_automation_task(self):
+        """Start the post-creation automation worker if it is not already running."""
+        if self._automation_task and not self._automation_task.done():
+            return
+        self._automation_task = self.bot.loop.create_task(self._building_automation_loop())
 
     def _cookie_manager(self):
         """Return the CookieManager cog when it exposes a MissionChief session."""
@@ -2046,6 +2592,8 @@ class BuildingManager(commands.Cog):
             status: Optional[int] = None
             response_text = ""
             prepare_result: Dict[str, Any] = {}
+            response_url = ""
+            final_url = ""
             try:
                 async with async_playwright() as playwright:
                     browser = await playwright.chromium.launch(headless=True)
@@ -2081,23 +2629,38 @@ class BuildingManager(commands.Cog):
                                 )
                         response = await response_info.value
                         status = response.status
+                        response_url = str(response.url or "")
                         with contextlib.suppress(Exception):
                             response_text = await response.text()
+                        with contextlib.suppress(Exception):
+                            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                        final_url = str(page.url or "")
                     finally:
                         await browser.close()
             except PlaywrightTimeoutError as exc:
+                details = dict(prepare_result.get("snapshot") or {})
+                details.update({"responseUrl": response_url, "finalUrl": final_url})
                 return BuildingCreateResult(
                     False,
                     f"MissionChief browser building flow timed out: {exc}",
                     status=status,
                     post_url=f"{BASE_URL}/buildings",
-                    details=prepare_result.get("snapshot") or {},
+                    details=details,
                 )
             except Exception as exc:
                 message = str(exc)
                 if "Executable doesn't exist" in message or "playwright install" in message:
                     return BuildingCreateResult(False, PLAYWRIGHT_SETUP_MESSAGE)
                 return BuildingCreateResult(False, f"MissionChief browser building flow failed: {message}")
+
+        details = dict(prepare_result.get("snapshot") or {})
+        details.update(
+            {
+                "responseUrl": response_url,
+                "finalUrl": final_url,
+                "buildingId": extract_missionchief_building_id(response_url, final_url, response_text),
+            }
+        )
 
         if status is None or int(status) >= 400:
             response_summary = _truncate_text(re.sub(r"<[^>]+>", " ", response_text), 300)
@@ -2107,16 +2670,284 @@ class BuildingManager(commands.Cog):
                 f"MissionChief returned HTTP {status} while creating the alliance building.{suffix}",
                 status=status,
                 post_url=f"{BASE_URL}/buildings",
-                details=prepare_result.get("snapshot") or {},
+                details=details,
             )
 
         return BuildingCreateResult(
             True,
             "Alliance building created through browser automation.",
             status=status,
-            post_url=f"{BASE_URL}/buildings",
-            details=prepare_result.get("snapshot") or {},
+            post_url=final_url or response_url or f"{BASE_URL}/buildings",
+            details=details,
         )
+
+    async def _building_automation_loop(self):
+        """Process post-creation automation jobs for alliance buildings."""
+        try:
+            await self.bot.wait_until_ready()
+            await asyncio.sleep(30)
+            while True:
+                try:
+                    due_jobs = self.db.get_due_automation_jobs(limit=5)
+                    for job in due_jobs:
+                        await self._process_building_automation_job(job.job_id)
+                        await asyncio.sleep(5)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("BuildingManager post-creation automation loop failed")
+                await asyncio.sleep(BUILDING_AUTOMATION_LOOP_SECONDS)
+        except asyncio.CancelledError:
+            raise
+
+    async def _process_building_automation_job(self, job_id: int) -> Optional[BuildingAutomationResult]:
+        """Run and persist one post-creation automation job."""
+        job = self.db.get_automation_job(job_id)
+        if not job or job.status == "completed":
+            return None
+
+        result = await self._upgrade_alliance_building_browser(job)
+        self.db.update_automation_job(job.job_id, result)
+        action_type = "automation_completed" if result.completed else "automation_waiting" if result.wait else "automation_run"
+        if not result.ok:
+            action_type = "automation_failed"
+        self.db.add_action(
+            request_id=job.request_id,
+            guild_id=job.guild_id,
+            admin_user_id=None,
+            admin_username="BuildingManager",
+            action_type=action_type,
+            previous_values=_truncate_text(result.reason, 900),
+        )
+        await self._log_building_automation_result(job, result)
+        return result
+
+    async def _upgrade_alliance_building_browser(self, job: BuildingAutomationJob) -> BuildingAutomationResult:
+        """Set alliance building tax, level, and extensions through the live browser page."""
+        if job.building_type not in ALLIANCE_BUILDING_TYPE_IDS:
+            return BuildingAutomationResult(
+                ok=False,
+                completed=False,
+                wait=False,
+                reason=f"Unsupported automation building type: {job.building_type}",
+                actions=[],
+            )
+
+        try:
+            from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+            from playwright.async_api import async_playwright
+        except Exception:
+            return BuildingAutomationResult(False, False, True, PLAYWRIGHT_SETUP_MESSAGE, [])
+
+        try:
+            cookies = await self._playwright_cookies()
+        except Exception as exc:
+            return BuildingAutomationResult(False, False, True, f"Could not load MissionChief cookies: {exc}", [])
+        if not cookies:
+            return BuildingAutomationResult(False, False, True, "No MissionChief cookies are available from CookieManager.", [])
+
+        building_url = f"{BASE_URL}/buildings/{job.building_id}"
+        actions: List[str] = []
+        details: Dict[str, Any] = {"building_url": building_url}
+        tax_complete = job.tax_complete
+        level_complete = job.level_complete
+        extensions_complete = job.extensions_complete
+        extensions_started_this_run = 0
+        last_status: Optional[int] = None
+        last_prepare: Dict[str, Any] = {}
+
+        async with self._browser_lock:
+            try:
+                async with async_playwright() as playwright:
+                    browser = await playwright.chromium.launch(headless=True)
+                    try:
+                        context = await browser.new_context(viewport={"width": 1440, "height": 1000})
+                        await context.add_cookies(cookies)
+                        page = await context.new_page()
+                        page.set_default_timeout(30000)
+
+                        def _accept_dialog(dialog):
+                            self.bot.loop.create_task(dialog.accept())
+
+                        page.on("dialog", _accept_dialog)
+
+                        await page.goto(building_url, wait_until="domcontentloaded")
+                        login_fields = await page.locator("input[type='password']").count()
+                        if login_fields:
+                            return BuildingAutomationResult(
+                                False,
+                                False,
+                                True,
+                                "MissionChief session is not logged in.",
+                                actions,
+                                details=details,
+                            )
+
+                        for _ in range(BUILDING_AUTOMATION_MAX_ACTIONS_PER_RUN):
+                            prepare_config = {
+                                "targetTax": str(job.target_tax),
+                                "taxComplete": bool(tax_complete),
+                                "levelComplete": bool(level_complete),
+                                "extensionsComplete": bool(extensions_complete),
+                                "extensionsStartedThisRun": extensions_started_this_run,
+                                "maxExtensionStarts": BUILDING_AUTOMATION_MAX_EXTENSION_STARTS_PER_RUN,
+                                "excludedLabels": sorted(BUILDING_AUTOMATION_EXCLUDED_EXTENSIONS),
+                            }
+                            last_prepare = await page.evaluate(BUILDING_AUTOMATION_PREPARE_SCRIPT, prepare_config)
+                            details["last_prepare"] = last_prepare
+                            if not last_prepare.get("ok"):
+                                return BuildingAutomationResult(
+                                    False,
+                                    False,
+                                    True,
+                                    str(last_prepare.get("reason") or "MissionChief building automation could not prepare an action."),
+                                    actions,
+                                    details=details,
+                                )
+
+                            action = str(last_prepare.get("action") or "")
+                            label = _truncate_text(last_prepare.get("label") or action or "MissionChief action", 160)
+                            if action == "tax_already_set":
+                                tax_complete = True
+                                if label not in actions:
+                                    actions.append(label)
+                                continue
+
+                            if not action:
+                                completed = bool(last_prepare.get("completed")) and tax_complete
+                                wait = bool(last_prepare.get("wait")) or not completed
+                                reason = str(last_prepare.get("reason") or "No remaining eligible actions were found.")
+                                if not tax_complete and last_prepare.get("taxState") == "not_found":
+                                    reason = "Tax field was not found on the MissionChief building page; retrying later."
+                                if completed:
+                                    level_complete = True
+                                    extensions_complete = True
+                                return BuildingAutomationResult(
+                                    True,
+                                    completed,
+                                    wait,
+                                    reason,
+                                    actions,
+                                    tax_complete=tax_complete,
+                                    level_complete=level_complete,
+                                    extensions_complete=extensions_complete,
+                                    extensions_started=extensions_started_this_run,
+                                    status=last_status,
+                                    details=details,
+                                )
+
+                            selector = last_prepare.get("selector")
+                            if not selector:
+                                return BuildingAutomationResult(
+                                    False,
+                                    False,
+                                    True,
+                                    f"MissionChief action `{action}` did not expose a safe selector.",
+                                    actions,
+                                    details=details,
+                                )
+
+                            try:
+                                await page.locator(str(selector)).click(timeout=15000)
+                                with contextlib.suppress(PlaywrightTimeoutError):
+                                    await page.wait_for_load_state("domcontentloaded", timeout=5000)
+                                await page.wait_for_timeout(1200)
+                                with contextlib.suppress(Exception):
+                                    response = await page.goto(building_url, wait_until="domcontentloaded", timeout=30000)
+                                    if response:
+                                        last_status = response.status
+                            except PlaywrightTimeoutError as exc:
+                                return BuildingAutomationResult(
+                                    False,
+                                    False,
+                                    True,
+                                    f"MissionChief building automation timed out while running `{label}`: {exc}",
+                                    actions,
+                                    status=last_status,
+                                    details=details,
+                                )
+
+                            actions.append(label)
+                            if action == "set_tax":
+                                tax_complete = True
+                            elif action == "start_extension":
+                                extensions_started_this_run += 1
+
+                        return BuildingAutomationResult(
+                            True,
+                            False,
+                            True,
+                            "Action limit reached for this run; queued for the next pass.",
+                            actions,
+                            tax_complete=tax_complete,
+                            level_complete=level_complete,
+                            extensions_complete=extensions_complete,
+                            extensions_started=extensions_started_this_run,
+                            status=last_status,
+                            details=details,
+                        )
+                    finally:
+                        await browser.close()
+            except PlaywrightTimeoutError as exc:
+                return BuildingAutomationResult(
+                    False,
+                    False,
+                    True,
+                    f"MissionChief building automation timed out: {exc}",
+                    actions,
+                    status=last_status,
+                    details=details,
+                )
+            except Exception as exc:
+                message = str(exc)
+                if "Executable doesn't exist" in message or "playwright install" in message:
+                    return BuildingAutomationResult(False, False, True, PLAYWRIGHT_SETUP_MESSAGE, actions, details=details)
+                return BuildingAutomationResult(
+                    False,
+                    False,
+                    True,
+                    f"MissionChief building automation failed: {message}",
+                    actions,
+                    status=last_status,
+                    details=details,
+                )
+
+    async def _log_building_automation_result(self, job: BuildingAutomationJob, result: BuildingAutomationResult):
+        """Send a compact admin log for one automation pass when useful."""
+        if not result.actions and result.ok and result.wait:
+            return
+        guild = self.bot.get_guild(job.guild_id)
+        if guild is None:
+            return
+        conf = await self.config.guild(guild).all()
+        log_channel = guild.get_channel(conf["log_channel_id"]) if conf.get("log_channel_id") else None
+        if log_channel is None:
+            return
+
+        if result.completed:
+            color = discord.Color.green()
+            title = "Alliance building automation completed"
+        elif result.ok:
+            color = discord.Color.blue()
+            title = "Alliance building automation updated"
+        else:
+            color = discord.Color.orange()
+            title = "Alliance building automation needs attention"
+
+        embed = discord.Embed(title=title, color=color, timestamp=datetime.now(timezone.utc))
+        embed.add_field(name="Building", value=f"{job.building_type} - {job.building_name}", inline=False)
+        embed.add_field(name="MissionChief", value=f"[Open]({BASE_URL}/buildings/{job.building_id})", inline=True)
+        embed.add_field(name="Request ID", value=str(job.request_id), inline=True)
+        if result.actions:
+            embed.add_field(name="Actions", value="\n".join(f"- {action}" for action in result.actions)[:1000], inline=False)
+        embed.add_field(name="Status", value=result.reason[:900], inline=False)
+        if result.wait and not result.completed:
+            embed.add_field(
+                name="Next check",
+                value=fmt_dt(ts() + BUILDING_AUTOMATION_RETRY_SECONDS),
+                inline=True,
+            )
+        await log_channel.send(embed=embed)
 
     def _request_panel_embed(self, description: Optional[str] = None) -> discord.Embed:
         """Build the persistent request panel embed."""
@@ -2305,6 +3136,65 @@ class BuildingManager(commands.Cog):
         await ctx.send(
             "Safe BuildingManager diagnostics generated. No building was created.",
             file=discord.File(data, filename="buildingmanager-browser-diagnostics.txt"),
+        )
+
+    @buildset.command(name="automationstatus")
+    @commands.admin()
+    @commands.guild_only()
+    async def automationstatus(self, ctx: commands.Context):
+        """Show recent post-creation building automation jobs."""
+        jobs = self.db.get_recent_automation_jobs(ctx.guild.id, limit=10)
+        if not jobs:
+            await ctx.send("No BuildingManager post-creation automation jobs are stored.")
+            return
+
+        lines = ["BuildingManager post-creation automation:"]
+        for job in jobs:
+            flags = []
+            flags.append("tax" if job.tax_complete else "tax pending")
+            flags.append("level" if job.level_complete else "level pending")
+            flags.append("extensions" if job.extensions_complete else "extensions pending")
+            lines.append(
+                f"- Request {job.request_id} / Building {job.building_id}: {job.status} "
+                f"({', '.join(flags)}; extensions started by bot: {job.extensions_started}; "
+                f"next: {fmt_dt(job.next_run_at)})"
+            )
+        await ctx.send(box("\n".join(lines), lang="text"))
+
+    @buildset.command(name="automationrun")
+    @commands.admin()
+    @commands.guild_only()
+    async def automationrun(self, ctx: commands.Context, request_or_building_id: int):
+        """Run post-creation automation now for a request id or MissionChief building id."""
+        job = self.db.get_automation_job_by_request_or_building(int(request_or_building_id))
+        if not job:
+            await ctx.send("No automation job was found for that request/building id.")
+            return
+        if job.guild_id != ctx.guild.id:
+            await ctx.send("That automation job belongs to a different guild.")
+            return
+
+        async with ctx.typing():
+            result = await self._process_building_automation_job(job.job_id)
+        if result is None:
+            await ctx.send("That automation job is already completed or no longer exists.")
+            return
+
+        action_text = "\n".join(f"- {action}" for action in result.actions) if result.actions else "- No actions were started."
+        status = "completed" if result.completed else "waiting" if result.wait else "queued"
+        await ctx.send(
+            box(
+                "\n".join(
+                    [
+                        f"Automation run for request {job.request_id} / building {job.building_id}",
+                        f"Result: {'OK' if result.ok else 'FAILED'} ({status})",
+                        f"Reason: {result.reason}",
+                        "Actions:",
+                        action_text,
+                    ]
+                ),
+                lang="text",
+            )
         )
 
     @commands.hybrid_group(name="buildstats", invoke_without_command=True)
