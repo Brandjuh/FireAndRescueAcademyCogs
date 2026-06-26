@@ -3659,6 +3659,19 @@ class AdminDecisionView(discord.ui.View):
             with contextlib.suppress(discord.Forbidden, discord.HTTPException):
                 await user.send(_truncate_discord_text(ok_text, 1900))
 
+        await self.cog._send_building_request_game_update(
+            self.req,
+            subject="Building request approved",
+            body=self.cog._build_game_approval_message(
+                self.req,
+                status=(
+                    "Your building has been created in MissionChief."
+                    if create_result.ok
+                    else "Your request was approved, but staff need to complete the build manually."
+                ),
+            ),
+        )
+
         if log_channel:
             emb = discord.Embed(
                 title="Building request approved and created" if create_result.ok else "Building request approved - manual creation needed",
@@ -3791,6 +3804,12 @@ class DenialReasonSelect(discord.ui.Select):
             except discord.Forbidden:
                 pass
 
+        await self.cog._send_building_request_game_update(
+            self.req,
+            subject="Building request rejected",
+            body=self.cog._build_game_rejection_message(self.req, reason=reason),
+        )
+
         if log_channel:
             emb = discord.Embed(
                 title="Building request denied",
@@ -3862,6 +3881,12 @@ class CustomDenialModal(discord.ui.Modal, title="Custom Denial Reason"):
                 await user.send(text)
             except discord.Forbidden:
                 pass
+
+        await self.cog._send_building_request_game_update(
+            self.req,
+            subject="Building request rejected",
+            body=self.cog._build_game_rejection_message(self.req, reason=reason_text),
+        )
 
         if log_channel:
             emb = discord.Embed(
@@ -4008,6 +4033,102 @@ class BuildingManager(commands.Cog):
         if not session:
             raise RuntimeError("CookieManager did not return a session.")
         return session
+
+    def _message_manager(self):
+        """Return MessageManager when it exposes the MissionChief send contract."""
+        message_manager = self.bot.get_cog("MessageManager")
+        if not message_manager or not hasattr(message_manager, "_send_message_and_link"):
+            return None
+        return message_manager
+
+    def _missionchief_board_request_username(self, req: BuildingRequest) -> Optional[str]:
+        """Return the MissionChief username for board requests, avoiding Discord-name guesses."""
+        try:
+            user_id = int(req.user_id or 0)
+        except (TypeError, ValueError):
+            user_id = 0
+        if user_id:
+            return None
+        username = str(req.username or "").strip()
+        if not username or username.casefold() == "unknown":
+            return None
+        return username
+
+    def _build_game_approval_message(self, req: BuildingRequest, *, status: str) -> str:
+        """Build a MissionChief DM body for approved building requests."""
+        lines = [
+            f"Hello {req.username},",
+            "",
+            "Your building request has been approved.",
+            "",
+            f"Building: {req.building_type} - {req.building_name}",
+            f"Status: {status}",
+        ]
+        if req.coordinates:
+            lines.append(f"Coordinates: {req.coordinates}")
+        if req.address:
+            lines.append(f"Address: {req.address}")
+        if req.request_id:
+            lines.append(f"Request ID: {req.request_id}")
+        lines.extend(
+            [
+                "",
+                "Thank you for helping improve the alliance infrastructure.",
+                "",
+                "Fire & Rescue Academy",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _build_game_rejection_message(self, req: BuildingRequest, *, reason: str) -> str:
+        """Build a MissionChief DM body for rejected building requests."""
+        lines = [
+            f"Hello {req.username},",
+            "",
+            "Your building request has been rejected.",
+            "",
+            f"Building: {req.building_type} - {req.building_name}",
+            f"Reason: {reason}",
+        ]
+        if req.request_id:
+            lines.append(f"Request ID: {req.request_id}")
+        lines.extend(
+            [
+                "",
+                "You can submit a new request with a corrected Google Maps link if needed.",
+                "",
+                "Fire & Rescue Academy",
+            ]
+        )
+        return "\n".join(lines)
+
+    async def _send_building_request_game_update(
+        self,
+        req: BuildingRequest,
+        *,
+        subject: str,
+        body: str,
+    ) -> Optional[dict]:
+        """Send a MissionChief DM for board requests without breaking the admin flow."""
+        username = self._missionchief_board_request_username(req)
+        if not username:
+            return None
+        message_manager = self._message_manager()
+        if not message_manager:
+            log.info("BuildingManager skipped MissionChief DM for %s: MessageManager is not loaded", username)
+            return None
+        try:
+            result = await message_manager._send_message_and_link(username, subject, body)
+        except Exception as exc:
+            log.warning("BuildingManager could not send MissionChief DM to %s: %s", username, exc, exc_info=True)
+            return None
+        if not result.get("ok"):
+            log.warning(
+                "BuildingManager MissionChief DM to %s was not confirmed: %s",
+                username,
+                result.get("reason"),
+            )
+        return result
 
     def _requester_label(self, guild: Optional[discord.Guild], user_id: Optional[int], username: str) -> str:
         """Return a human requester label for Discord and MissionChief board users."""
@@ -5043,6 +5164,18 @@ class BuildingManager(commands.Cog):
                     )
                 )
 
+        await self._send_building_request_game_update(
+            req,
+            subject="Building request approved",
+            body=self._build_game_approval_message(
+                req,
+                status=(
+                    "Your building request has been approved, but it is waiting for enough alliance funds "
+                    "before it is built automatically."
+                ),
+            ),
+        )
+
         if log_channel:
             embed = discord.Embed(
                 title="Building request approved - waiting for alliance funds",
@@ -5521,6 +5654,19 @@ class BuildingManager(commands.Cog):
                     "Your approved building request has now been built automatically because alliance funds "
                     f"are above {minimum_funds:,} credits.\n\n{req.building_type}: {req.building_name}"
                 )
+
+        if create_result.ok:
+            await self._send_building_request_game_update(
+                req,
+                subject="Approved building request created",
+                body=self._build_game_approval_message(
+                    req,
+                    status=(
+                        "Your approved building request has now been built automatically because alliance funds "
+                        f"are above {minimum_funds:,} credits."
+                    ),
+                ),
+            )
 
         if log_channel:
             embed = discord.Embed(

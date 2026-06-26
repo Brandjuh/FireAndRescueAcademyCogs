@@ -1010,6 +1010,76 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         reply_content = manager._post_building_board_reply_with_id.await_args.args[3]
         self.assertIn("Request ID: 321", reply_content)
 
+    def test_building_request_game_update_sends_message_for_board_requester(self):
+        message_manager = types.SimpleNamespace(
+            _send_message_and_link=AsyncMock(
+                return_value={
+                    "ok": True,
+                    "reason": "Message Sent.",
+                    "resolved_username": "BoardUser",
+                    "conversation_id": "12345",
+                    "thread": None,
+                }
+            )
+        )
+        manager = BuildingManager.__new__(BuildingManager)
+        manager.bot = types.SimpleNamespace(
+            get_cog=lambda name: message_manager if name == "MessageManager" else None
+        )
+        request = BuildingRequest(
+            user_id=0,
+            username="BoardUser",
+            building_type="Prison",
+            building_name="Example Prison",
+            location_input="https://maps.app.goo.gl/example",
+            coordinates="40.1, -73.9",
+            address="Example Address",
+            request_id=123,
+        )
+
+        body = manager._build_game_approval_message(request, status="Your building has been created in MissionChief.")
+        result = asyncio.run(
+            manager._send_building_request_game_update(
+                request,
+                subject="Building request approved",
+                body=body,
+            )
+        )
+
+        self.assertTrue(result["ok"])
+        message_manager._send_message_and_link.assert_awaited_once_with(
+            "BoardUser",
+            "Building request approved",
+            body,
+        )
+        self.assertIn("Request ID: 123", body)
+        self.assertIn("Example Prison", body)
+
+    def test_building_request_game_update_skips_discord_requester(self):
+        message_manager = types.SimpleNamespace(_send_message_and_link=AsyncMock())
+        manager = BuildingManager.__new__(BuildingManager)
+        manager.bot = types.SimpleNamespace(
+            get_cog=lambda name: message_manager if name == "MessageManager" else None
+        )
+        request = BuildingRequest(
+            user_id=555,
+            username="DiscordUser",
+            building_type="Hospital",
+            building_name="Example Hospital",
+            location_input="https://maps.app.goo.gl/example",
+        )
+
+        result = asyncio.run(
+            manager._send_building_request_game_update(
+                request,
+                subject="Building request approved",
+                body="Approved",
+            )
+        )
+
+        self.assertIsNone(result)
+        message_manager._send_message_and_link.assert_not_awaited()
+
     def test_board_request_submission_posts_admin_approval_with_location_fields(self):
         class FakeGuildConfig:
             async def all(self):
