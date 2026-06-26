@@ -758,7 +758,7 @@ def parse_alliance_funds_from_html(html: str) -> Optional[int]:
     if marker < 0:
         return None
 
-    window = text[marker : marker + 400]
+    window = text[max(0, marker - 160) : marker + 600]
     for pattern in (
         r"Alliance\s+Funds\s+(\d[\d,\.\s]*)\s+Credits",
         r"(\d[\d,\.\s]*)\s+Credits",
@@ -774,7 +774,7 @@ def alliance_funds_allow_auto_build(
     minimum: int = ALLIANCE_BUILDING_MIN_FUNDS,
 ) -> bool:
     """Return whether automatic building is allowed by the funds safety rule."""
-    return funds is not None and funds >= int(minimum) and source == "live MissionChief"
+    return funds is not None and funds >= int(minimum) and source.startswith("live MissionChief")
 
 def _api_value(record: Dict[str, Any], *keys: str) -> Any:
     """Read the first present value from a MissionChief API record."""
@@ -3022,12 +3022,48 @@ class BuildingManager(commands.Cog):
             html = await response.text()
         return parse_alliance_funds_from_html(html)
 
+    async def _fetch_live_alliance_funds_browser(self) -> Optional[int]:
+        """Fetch the live MissionChief alliance funds page through a logged-in browser."""
+        try:
+            from playwright.async_api import async_playwright
+        except Exception:
+            raise RuntimeError(PLAYWRIGHT_SETUP_MESSAGE)
+
+        cookies = await self._playwright_cookies()
+        if not cookies:
+            raise RuntimeError("No MissionChief cookies are available from CookieManager.")
+
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            try:
+                context = await browser.new_context(viewport={"width": 1440, "height": 1000})
+                await context.add_cookies(cookies)
+                page = await context.new_page()
+                page.set_default_timeout(30000)
+                await page.goto(MISSIONCHIEF_ALLIANCE_FUNDS_URL, wait_until="domcontentloaded")
+                login_fields = await page.locator("input[type='password']").count()
+                if login_fields:
+                    raise RuntimeError("MissionChief session is not logged in.")
+
+                html_funds = parse_alliance_funds_from_html(await page.content())
+                if html_funds is not None:
+                    return html_funds
+
+                body_text = await page.locator("body").inner_text(timeout=5000)
+                return parse_alliance_funds_from_html(body_text)
+            finally:
+                await browser.close()
+
     async def _get_current_alliance_funds(self) -> Tuple[Optional[int], str]:
         """Return current alliance funds and the source used."""
-        with contextlib.suppress(Exception):
-            funds = await self._fetch_live_alliance_funds()
-            if funds is not None:
-                return funds, "live MissionChief"
+        for source, fetcher in (
+            ("live MissionChief", self._fetch_live_alliance_funds),
+            ("live MissionChief browser", self._fetch_live_alliance_funds_browser),
+        ):
+            with contextlib.suppress(Exception):
+                funds = await fetcher()
+                if funds is not None:
+                    return funds, source
 
         funds = await self._get_alliance_funds_from_contract()
         if funds is not None:
@@ -3359,9 +3395,11 @@ class BuildingManager(commands.Cog):
         except asyncio.CancelledError:
             raise
 
-    async def _process_waiting_for_funds_queue(self) -> bool:
+    async def _process_waiting_for_funds_queue(self, guild_id: Optional[int] = None) -> bool:
         """Process at most one approved request waiting for sufficient funds."""
-        rows = self.db.get_requests_by_status("awaiting_funds", limit=1)
+        rows = self.db.get_requests_by_status("awaiting_funds", limit=20)
+        if guild_id is not None:
+            rows = [row for row in rows if int(row["guild_id"]) == int(guild_id)]
         if not rows:
             return False
 
@@ -3896,6 +3934,43 @@ class BuildingManager(commands.Cog):
                 f"(requested by {row['username']})"
             )
         await ctx.send(box("\n".join(lines), lang="text"))
+
+    @buildset.command(name="fundsrun")
+    @commands.admin()
+    @commands.guild_only()
+    async def fundsrun(self, ctx: commands.Context):
+        """Try to process one approved request waiting for alliance funds now."""
+        async with ctx.typing():
+            processed = await self._process_waiting_for_funds_queue(ctx.guild.id)
+            minimum = await self._get_min_alliance_funds(ctx.guild)
+            funds, source = await self._get_current_alliance_funds()
+
+        if processed:
+            await ctx.send("Processed one approved building request from the alliance funds queue.")
+            return
+
+        rows = [
+            row
+            for row in self.db.get_requests_by_status("awaiting_funds", limit=10)
+            if int(row["guild_id"]) == ctx.guild.id
+        ]
+        allowed = alliance_funds_allow_auto_build(funds, source, minimum)
+        funds_text = f"{funds:,} credits" if funds is not None else "unknown"
+        await ctx.send(
+            box(
+                "\n".join(
+                    [
+                        "No building request was processed from the alliance funds queue.",
+                        f"Queued requests in this guild: {len(rows)}",
+                        f"Current alliance funds: {funds_text}",
+                        f"Source: {source}",
+                        f"Required minimum: {minimum:,} credits",
+                        f"Auto-build allowed: {'yes' if allowed else 'no'}",
+                    ]
+                ),
+                lang="text",
+            )
+        )
 
     @buildset.command(name="buttonmessage")
     @commands.admin()
