@@ -988,6 +988,17 @@ async def safe_ephemeral_complete(interaction: discord.Interaction, content: str
     except Exception as exc:
         log.exception("safe_ephemeral_complete failed: %r", exc)
 
+async def send_ephemeral_followup(interaction: discord.Interaction, content: str):
+    """Send a private result without editing the component message."""
+    message = _truncate_discord_text(content, 1900)
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+            return
+        await interaction.response.send_message(message, ephemeral=True)
+    except Exception as exc:
+        log.exception("send_ephemeral_followup failed: %r", exc)
+
 def _decode_url_text(value: Any) -> str:
     """Decode URL-encoded text, including values encoded more than once."""
     text = str(value or "")
@@ -3667,14 +3678,16 @@ class SummaryView(discord.ui.View):
             await interaction.response.send_message("This only works inside a server.", ephemeral=True)
             return
 
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
         conf = await self.cog.config.guild(guild).all()
         admin_channel_id = conf.get("admin_channel_id")
         log_channel_id = conf.get("log_channel_id")
 
         if not admin_channel_id or not log_channel_id:
-            await interaction.response.send_message(
+            await send_ephemeral_followup(
+                interaction,
                 "Admin/Log channels are not configured yet. Ask an admin to use [p]buildset.",
-                ephemeral=True,
             )
             return
 
@@ -3682,8 +3695,45 @@ class SummaryView(discord.ui.View):
         log_channel = guild.get_channel(log_channel_id)
 
         if not admin_channel or not log_channel:
-            await interaction.response.send_message("One or more configured channels could not be found.", ephemeral=True)
+            await send_ephemeral_followup(interaction, "One or more configured channels could not be found.")
             return
+
+        contribution_rate, contribution_source = await self.cog._get_discord_request_contribution_rate(interaction.user)
+        if contribution_rate is None:
+            self.req.notes = (
+                f"{self.req.notes or ''}\n"
+                f"Auto-accept skipped: contribution rate unknown ({contribution_source})."
+            ).strip()
+            request_id = await self.cog._submit_building_request_to_admins(
+                guild,
+                self.req,
+                source="Discord request - contribution unknown",
+            )
+            result_message = (
+                "Your request was submitted to admins for review because your latest alliance "
+                f"donation could not be verified. Request ID: {request_id}."
+            )
+        elif contribution_rate < BUILDING_BOARD_MIN_AUTO_ACCEPT_TAX:
+            result_message = await self.cog._reject_discord_request_for_low_tax(
+                guild,
+                self.req,
+                interaction.user,
+                contribution_rate=contribution_rate,
+                log_channel=log_channel,
+            )
+        else:
+            result_message = await self.cog._auto_accept_discord_building_request(
+                guild,
+                self.req,
+                interaction.user,
+                contribution_rate=contribution_rate,
+                log_channel=log_channel,
+            )
+
+        with contextlib.suppress(Exception):
+            await interaction.message.delete()
+        await send_ephemeral_followup(interaction, result_message)
+        return
 
         # Save to database
         request_id = self.cog.db.add_request(
@@ -3755,6 +3805,11 @@ class SummaryView(discord.ui.View):
 
     @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary, custom_id="bm:cancel")
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        with contextlib.suppress(Exception):
+            await interaction.message.delete()
+        await send_ephemeral_followup(interaction, "Request cancelled.")
+        return
+
         for child in self.children:
             if isinstance(child, discord.ui.Button):
                 child.disabled = True
@@ -4433,6 +4488,64 @@ class BuildingManager(commands.Cog):
 
         return None, "MembersScraper has no usable contribution snapshot"
 
+    async def _get_discord_request_contribution_rate(
+        self,
+        user: discord.abc.User,
+    ) -> Tuple[Optional[float], str]:
+        """Return the latest known alliance contribution rate for a Discord requester."""
+        get_cog = getattr(self.bot, "get_cog", None)
+        if not callable(get_cog):
+            return None, "Bot cog registry is unavailable"
+
+        member_sync = get_cog("MemberSync") or get_cog("membersync")
+        members_scraper = get_cog("MembersScraper") or get_cog("membersscraper")
+        if not member_sync:
+            return None, "MemberSync is not loaded"
+        if not members_scraper:
+            return None, "MembersScraper is not loaded"
+
+        link = None
+        method = getattr(member_sync, "get_link_for_discord", None)
+        if callable(method):
+            try:
+                link = method(int(user.id))
+                if asyncio.iscoroutine(link):
+                    link = await link
+            except Exception:
+                link = None
+        if not link:
+            return None, "No approved MemberSync link for this Discord user"
+
+        mc_user_id = str(link.get("mc_user_id") or link.get("user_id") or "").strip()
+        if not mc_user_id:
+            return None, "MemberSync link has no MissionChief ID"
+
+        if hasattr(members_scraper, "get_member_snapshot"):
+            try:
+                snapshot = await members_scraper.get_member_snapshot(mc_user_id)
+            except Exception:
+                snapshot = None
+            rate = self._extract_contribution_rate(snapshot)
+            if rate is not None:
+                return rate, f"MembersScraper snapshot for MC ID {mc_user_id}"
+
+        if hasattr(members_scraper, "get_members"):
+            try:
+                members = await members_scraper.get_members()
+            except Exception:
+                members = []
+            for member in members or []:
+                ids = {
+                    str(member.get(key) or "").strip()
+                    for key in ("member_id", "mc_user_id", "user_id", "id")
+                }
+                if mc_user_id in ids:
+                    rate = self._extract_contribution_rate(member)
+                    if rate is not None:
+                        return rate, "MembersScraper current members"
+
+        return None, f"MembersScraper has no contribution snapshot for MC ID {mc_user_id}"
+
     async def _board_auto_accept_enabled(self, guild: discord.Guild) -> bool:
         """Return whether MissionChief board requests may auto-build."""
         try:
@@ -4770,6 +4883,167 @@ class BuildingManager(commands.Cog):
                 inline=False,
             )
         await log_channel.send(embed=embed)
+
+    async def _send_discord_auto_build_log(
+        self,
+        guild: discord.Guild,
+        log_channel: Optional[discord.abc.Messageable],
+        req: BuildingRequest,
+        requester: discord.abc.User,
+        *,
+        contribution_rate: Optional[float],
+        create_result: Optional[BuildingCreateResult] = None,
+        automation_message: Optional[str] = None,
+        status: str,
+        color: discord.Color,
+    ) -> None:
+        """Log one automatic Discord request decision to Discord."""
+        if not log_channel:
+            return
+        embed = discord.Embed(
+            title=status,
+            color=color,
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="Requester", value=self._requester_label(guild, req.user_id, req.username), inline=False)
+        embed.add_field(name="Source", value="Discord request panel", inline=True)
+        if contribution_rate is not None:
+            embed.add_field(name="Contribution", value=f"{contribution_rate:.1f}%", inline=True)
+        embed.add_field(name="Request ID", value=str(req.request_id), inline=True)
+        embed.add_field(
+            name="Building",
+            value=_truncate_discord_text(f"{req.building_type} - {req.building_name}"),
+            inline=False,
+        )
+        self._add_request_location_fields(embed, req)
+        if create_result:
+            embed.add_field(
+                name="Auto Creation",
+                value=_truncate_discord_text(
+                    "Created in MissionChief" if create_result.ok else create_result.reason,
+                    900,
+                ),
+                inline=False,
+            )
+            if create_result.status is not None:
+                embed.add_field(name="MissionChief HTTP Status", value=str(create_result.status), inline=True)
+        if automation_message:
+            embed.add_field(
+                name="Post-Creation Automation",
+                value=_truncate_discord_text(automation_message, 900),
+                inline=False,
+            )
+        await log_channel.send(embed=embed)
+
+    async def _reject_discord_request_for_low_tax(
+        self,
+        guild: discord.Guild,
+        req: BuildingRequest,
+        requester: discord.abc.User,
+        *,
+        contribution_rate: float,
+        log_channel: Optional[discord.abc.Messageable],
+    ) -> str:
+        """Store and reject a Discord request when the requester has insufficient tax."""
+        request_id = self._store_building_request(guild, req)
+        reason = (
+            f"Latest alliance donation is {contribution_rate:.1f}%, below the required "
+            f"{BUILDING_BOARD_MIN_AUTO_ACCEPT_TAX:.1f}% minimum."
+        )
+        self.db.update_request_status(request_id, "denied")
+        self.db.add_action(
+            request_id=request_id,
+            guild_id=guild.id,
+            admin_user_id=None,
+            admin_username="BuildingManager",
+            action_type="auto_denied_low_tax",
+            denial_reason=reason,
+        )
+        await self._send_discord_auto_build_log(
+            guild,
+            log_channel,
+            req,
+            requester,
+            contribution_rate=contribution_rate,
+            status="Discord building request rejected",
+            color=discord.Color.orange(),
+        )
+        return (
+            "Your building request was rejected automatically because your latest known alliance "
+            f"donation is {contribution_rate:.1f}%. The minimum is "
+            f"{BUILDING_BOARD_MIN_AUTO_ACCEPT_TAX:.1f}%."
+        )
+
+    async def _auto_accept_discord_building_request(
+        self,
+        guild: discord.Guild,
+        req: BuildingRequest,
+        requester: discord.abc.User,
+        *,
+        contribution_rate: float,
+        log_channel: Optional[discord.abc.Messageable],
+    ) -> str:
+        """Automatically approve and build a Discord request."""
+        request_id = self._store_building_request(guild, req)
+        minimum_funds = await self._get_min_alliance_funds(guild)
+        try:
+            current_funds, funds_source = await asyncio.wait_for(
+                self._get_current_alliance_funds(),
+                timeout=BUILDING_APPROVAL_FUNDS_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            current_funds, funds_source = None, "live funds check timed out"
+
+        if not alliance_funds_allow_auto_build(current_funds, funds_source, minimum_funds):
+            return await self._queue_request_waiting_for_funds(
+                guild=guild,
+                req=req,
+                requester_id=int(req.user_id or 0),
+                admin_user=None,
+                funds=current_funds,
+                source=funds_source,
+                minimum=minimum_funds,
+                log_channel=log_channel,
+                record_approval=False,
+            )
+
+        create_result, automation_message = await self._create_and_queue_approved_building(guild, req)
+        final_status = "created" if create_result.ok else "approved_pending_manual"
+        self.db.update_request_status(request_id, final_status)
+        self.db.add_action(
+            request_id=request_id,
+            guild_id=guild.id,
+            admin_user_id=None,
+            admin_username="BuildingManager",
+            action_type="auto_approved",
+            previous_values=f"Discord request contribution: {contribution_rate:.1f}%",
+        )
+        self.db.add_action(
+            request_id=request_id,
+            guild_id=guild.id,
+            admin_user_id=None,
+            admin_username="BuildingManager",
+            action_type="created" if create_result.ok else "create_failed",
+            previous_values=None if create_result.ok else create_result.reason[:900],
+        )
+        await self._send_discord_auto_build_log(
+            guild,
+            log_channel,
+            req,
+            requester,
+            contribution_rate=contribution_rate,
+            create_result=create_result,
+            automation_message=automation_message,
+            status=(
+                "Discord building request auto-built"
+                if create_result.ok
+                else "Discord building request needs manual creation"
+            ),
+            color=discord.Color.green() if create_result.ok else discord.Color.orange(),
+        )
+        if create_result.ok:
+            return "Your building request was approved and automatically created in MissionChief."
+        return f"Your building request was approved, but automatic creation needs staff follow-up: {create_result.reason}"
 
     async def _reject_board_request_for_low_tax(
         self,
