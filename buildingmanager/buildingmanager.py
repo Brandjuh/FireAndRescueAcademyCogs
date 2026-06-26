@@ -278,11 +278,19 @@ async () => {
 BUILDING_FETCH_ALLIANCE_LIST_SCRIPT = r"""
 async (config) => {
   const maxPages = Number(config.maxPages || 6);
+  const targetName = String(config.targetName || "").replace(/\s+/g, " ").trim().toLowerCase();
   const startPath = "/verband/gebauede";
   const seenPages = new Set();
   const seenIds = new Set();
   const candidates = [];
   const textOf = (element) => String(element?.textContent || "").replace(/\s+/g, " ").trim();
+  const candidateText = (candidate) => [
+    candidate.text,
+    candidate.rowText,
+    candidate.searchAttribute,
+    ...(candidate.imageSources || []),
+  ].join(" ").replace(/\s+/g, " ").trim().toLowerCase();
+  const hasTargetCandidate = () => targetName && candidates.some((candidate) => candidateText(candidate).includes(targetName));
   const absolutePath = (href) => {
     try {
       const url = new URL(href, location.origin);
@@ -343,6 +351,7 @@ async (config) => {
     }
     const html = await response.text();
     pagePath = parsePage(html, pagePath);
+    if (hasTargetCandidate()) break;
   }
   return { ok: true, status: lastStatus, pages: [...seenPages], candidates };
 }
@@ -565,6 +574,22 @@ def _truncate_text(value: Any, limit: int = 180) -> str:
         return f"{text[:limit]}..."
     return text
 
+def _decode_url_text(value: Any) -> str:
+    """Decode URL-encoded text, including values encoded more than once."""
+    text = str(value or "")
+    for _ in range(4):
+        decoded = unquote(text)
+        if decoded == text:
+            break
+        text = decoded
+    return text.replace("+", " ").strip()
+
+def _clean_building_name(value: Any) -> str:
+    """Normalize a building name before storing or submitting it."""
+    text = _decode_url_text(value)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
 def _normalize_missionchief_url(value: Optional[str]) -> str:
     """Normalize a user-supplied MissionChief URL or path."""
     if not value:
@@ -612,7 +637,7 @@ def build_alliance_building_config(
 ) -> Dict[str, str]:
     """Build a browser automation config for supported alliance building creation."""
     latitude, longitude = _parse_coordinate_pair(coordinates)
-    name = _truncate_text(building_name, 100).strip()
+    name = _truncate_text(_clean_building_name(building_name), 100).strip()
     if not name:
         raise ValueError("Building name is required.")
     return {
@@ -1040,7 +1065,7 @@ class LocationParser:
     @staticmethod
     def extract_coordinates(text: str) -> Optional[Tuple[float, float]]:
         """Extract coordinates from various formats."""
-        decoded_text = unquote(text)
+        decoded_text = _decode_url_text(text)
 
         # Pattern 0: Google Maps place data !3dlat!4dlon. This is usually the
         # exact place marker and is better than the viewport /@ coordinates.
@@ -1103,10 +1128,10 @@ class LocationParser:
     @staticmethod
     def extract_place_name(text: str) -> Optional[str]:
         """Extract the visible place name from supported map URLs."""
-        decoded_text = unquote(text)
+        decoded_text = _decode_url_text(text)
         match = re.search(r"/maps/place/([^/@?]+)", decoded_text)
         if match:
-            return match.group(1).replace("+", " ").strip() or None
+            return _clean_building_name(match.group(1)) or None
 
         parsed = urlparse(decoded_text.strip())
         host = parsed.netloc.lower()
@@ -1126,7 +1151,7 @@ class LocationParser:
         """Return a human place query, ignoring coordinate-only values."""
         if not value:
             return None
-        cleaned = unquote(value).replace("+", " ").strip()
+        cleaned = _decode_url_text(value)
         if not cleaned:
             return None
         if re.fullmatch(r"-?\d+\.?\d*\s*[,~]\s*-?\d+\.?\d*", cleaned):
@@ -1137,16 +1162,16 @@ class LocationParser:
     def derive_building_name(building_type: str, location_details: LocationDetails) -> str:
         """Return the best building name from resolved location details."""
         if location_details.place_name:
-            return location_details.place_name
+            return _clean_building_name(location_details.place_name)
 
         if location_details.address:
             first_part = location_details.address.split(",", 1)[0].strip()
             if first_part:
-                return first_part
+                return _clean_building_name(first_part)
 
         place_name = LocationParser.extract_place_name(location_details.resolved_input)
         if place_name:
-            return place_name
+            return _clean_building_name(place_name)
 
         return f"{building_type} location"
 
@@ -1191,7 +1216,7 @@ class LocationParser:
             country = geocode.get("country")
             region = geocode.get("region")
             provider = geocode.get("provider")
-            place_name = place_name or geocode.get("place_name")
+            place_name = _clean_building_name(place_name or geocode.get("place_name"))
             detected_facility_type = geocode.get("facility_type")
 
         maps_url = cls.make_maps_url(coordinates_str, resolved_input)
@@ -1456,7 +1481,7 @@ class LocationParser:
             )
             if value
         )
-        searchable = unquote(searchable).replace("+", " ").lower()
+        searchable = _decode_url_text(searchable).lower()
 
         if building_type == "Hospital":
             if not any(keyword in searchable for keyword in cls._health_keywords):
@@ -3167,7 +3192,7 @@ class BuildingManager(commands.Cog):
                             with contextlib.suppress(Exception):
                                 alliance_list_lookup = await page.evaluate(
                                     BUILDING_FETCH_ALLIANCE_LIST_SCRIPT,
-                                    {"maxPages": 8},
+                                    {"maxPages": 80, "targetName": config.get("name")},
                                 )
                                 if alliance_list_lookup.get("ok"):
                                     candidates = alliance_list_lookup.get("candidates") or []
