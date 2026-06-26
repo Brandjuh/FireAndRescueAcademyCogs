@@ -278,18 +278,32 @@ async () => {
 BUILDING_FETCH_ALLIANCE_LIST_SCRIPT = r"""
 async (config) => {
   const maxPages = Number(config.maxPages || 6);
-  const targetName = String(config.targetName || "").replace(/\s+/g, " ").trim().toLowerCase();
+  const safeDecode = (value) => {
+    let text = String(value || "");
+    for (let i = 0; i < 4; i += 1) {
+      try {
+        const decoded = decodeURIComponent(text);
+        if (decoded === text) break;
+        text = decoded;
+      } catch (_) {
+        break;
+      }
+    }
+    return text.replace(/\+/g, " ");
+  };
+  const normalized = (value) => safeDecode(value).replace(/\s+/g, " ").trim().toLowerCase();
+  const targetName = normalized(config.targetName || "");
   const startPath = "/verband/gebauede";
   const seenPages = new Set();
   const seenIds = new Set();
   const candidates = [];
-  const textOf = (element) => String(element?.textContent || "").replace(/\s+/g, " ").trim();
+  const textOf = (element) => safeDecode(element?.textContent || "").replace(/\s+/g, " ").trim();
   const candidateText = (candidate) => [
     candidate.text,
     candidate.rowText,
     candidate.searchAttribute,
     ...(candidate.imageSources || []),
-  ].join(" ").replace(/\s+/g, " ").trim().toLowerCase();
+  ].map((value) => normalized(value)).join(" ");
   const hasTargetCandidate = () => targetName && candidates.some((candidate) => candidateText(candidate).includes(targetName));
   const absolutePath = (href) => {
     try {
@@ -310,12 +324,13 @@ async (config) => {
       source,
       text: textOf(element),
       rowText: textOf(row),
-      searchAttribute: row?.getAttribute?.("search_attribute") || "",
-      imageSources,
+      searchAttribute: safeDecode(row?.getAttribute?.("search_attribute") || ""),
+      imageSources: imageSources.map(safeDecode),
     });
   };
   const parsePage = (html, pagePath) => {
     const doc = new DOMParser().parseFromString(html, "text/html");
+    const beforeCount = candidates.length;
     for (const img of doc.querySelectorAll("[building_id]")) {
       const id = img.getAttribute("building_id");
       collectCandidate(id, "building_id", img, pagePath);
@@ -329,11 +344,15 @@ async (config) => {
         const label = textOf(link).toLowerCase();
         const className = String(link.getAttribute("class") || "").toLowerCase();
         const rel = String(link.getAttribute("rel") || "").toLowerCase();
-        const href = String(link.getAttribute("href") || "");
-        return href.includes("/verband/gebauede")
-          && (label.includes("next") || label.includes(">") || className.includes("next") || rel.includes("next"));
+        const aria = String(link.getAttribute("aria-label") || "").toLowerCase();
+        const href = absolutePath(link.getAttribute("href") || "");
+        return (href.startsWith("/verband/gebauede") || href.startsWith("?") || href.includes("page="))
+          && (label.includes("next") || label.includes(">") || className.includes("next") || rel.includes("next") || aria.includes("next"));
       });
-    return next ? absolutePath(next.getAttribute("href")) : "";
+    return {
+      nextPath: next ? absolutePath(next.getAttribute("href")) : "",
+      foundCandidates: candidates.length > beforeCount,
+    };
   };
 
   let pagePath = startPath;
@@ -350,8 +369,15 @@ async (config) => {
       return { ok: false, status: response.status, pages: [...seenPages], candidates, text: String(text || "").slice(0, 500) };
     }
     const html = await response.text();
-    pagePath = parsePage(html, pagePath);
+    const parsed = parsePage(html, pagePath);
     if (hasTargetCandidate()) break;
+    if (parsed.nextPath) {
+      pagePath = parsed.nextPath;
+    } else if (parsed.foundCandidates) {
+      pagePath = `${startPath}?page=${pageIndex + 2}`;
+    } else {
+      pagePath = "";
+    }
   }
   return { ok: true, status: lastStatus, pages: [...seenPages], candidates };
 }
@@ -656,7 +682,17 @@ def extract_missionchief_building_id(*values: Any) -> Optional[int]:
             continue
         if isinstance(value, dict):
             nested_values = []
-            for key in ("buildingId", "building_id", "url", "responseUrl", "finalUrl", "postUrl"):
+            for key in (
+                "buildingId",
+                "building_id",
+                "url",
+                "responseUrl",
+                "finalUrl",
+                "postUrl",
+                "location",
+                "Location",
+                "redirectLocation",
+            ):
                 nested_values.append(value.get(key))
             found = extract_missionchief_building_id(*nested_values)
             if found:
@@ -675,7 +711,12 @@ def extract_missionchief_building_id(*values: Any) -> Optional[int]:
 
 def _normalize_match_text(value: Any) -> str:
     """Normalize text for conservative MissionChief API matching."""
-    return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+    return re.sub(r"\s+", " ", _decode_url_text(value)).strip().casefold()
+
+def _normalize_loose_match_text(value: Any) -> str:
+    """Normalize text for matching names across punctuation differences."""
+    text = _normalize_match_text(value)
+    return re.sub(r"[^0-9a-zA-ZÀ-ž]+", " ", text).strip()
 
 def _coerce_float(value: Any) -> Optional[float]:
     """Return a float when MissionChief API data contains a numeric value."""
@@ -837,6 +878,7 @@ def find_created_alliance_building_id_from_list(
     When multiple exact matches exist, the newest/highest id is preferred.
     """
     target_name = _normalize_match_text(config.get("name"))
+    target_name_loose = _normalize_loose_match_text(config.get("name"))
     if not target_name:
         return None
 
@@ -848,7 +890,11 @@ def find_created_alliance_building_id_from_list(
         if building_id is None:
             continue
         candidate_text = _alliance_list_candidate_text(record)
-        if not candidate_text or target_name not in candidate_text:
+        candidate_text_loose = _normalize_loose_match_text(candidate_text)
+        if not candidate_text or (
+            target_name not in candidate_text
+            and (not target_name_loose or target_name_loose not in candidate_text_loose)
+        ):
             continue
 
         score = 100
@@ -2207,7 +2253,7 @@ class BuildingRequest:
         self.user_id = user_id
         self.username = username
         self.building_type = building_type
-        self.building_name = building_name
+        self.building_name = _clean_building_name(building_name)
         self.location_input = location_input
         self.coordinates = coordinates
         self.address = address
@@ -3130,6 +3176,7 @@ class BuildingManager(commands.Cog):
             prepare_result: Dict[str, Any] = {}
             response_url = ""
             final_url = ""
+            redirect_location = ""
             api_lookup: Dict[str, Any] = {}
             alliance_list_lookup: Dict[str, Any] = {}
             try:
@@ -3168,12 +3215,23 @@ class BuildingManager(commands.Cog):
                         response = await response_info.value
                         status = response.status
                         response_url = str(response.url or "")
+                        response_headers = response.headers or {}
+                        redirect_location = str(
+                            response_headers.get("location")
+                            or response_headers.get("Location")
+                            or ""
+                        )
                         with contextlib.suppress(Exception):
                             response_text = await response.text()
                         with contextlib.suppress(Exception):
                             await page.wait_for_load_state("domcontentloaded", timeout=10000)
                         final_url = str(page.url or "")
-                        detected_id = extract_missionchief_building_id(response_url, final_url, response_text)
+                        detected_id = extract_missionchief_building_id(
+                            response_url,
+                            final_url,
+                            redirect_location,
+                            response_text,
+                        )
                         if not detected_id and status is not None and int(status) < 400:
                             with contextlib.suppress(Exception):
                                 api_lookup = await page.evaluate(BUILDING_FETCH_API_SCRIPT)
@@ -3212,6 +3270,7 @@ class BuildingManager(commands.Cog):
                     {
                         "responseUrl": response_url,
                         "finalUrl": final_url,
+                        "redirectLocation": redirect_location,
                         "apiLookup": api_lookup,
                         "allianceListLookup": alliance_list_lookup,
                     }
@@ -3230,7 +3289,7 @@ class BuildingManager(commands.Cog):
                 return BuildingCreateResult(False, f"MissionChief browser building flow failed: {message}")
 
         details = dict(prepare_result.get("snapshot") or {})
-        building_id = extract_missionchief_building_id(response_url, final_url, response_text)
+        building_id = extract_missionchief_building_id(response_url, final_url, redirect_location, response_text)
         if not building_id:
             building_id = _coerce_int(api_lookup.get("matchedBuildingId"))
         if not building_id:
@@ -3239,6 +3298,7 @@ class BuildingManager(commands.Cog):
             {
                 "responseUrl": response_url,
                 "finalUrl": final_url,
+                "redirectLocation": redirect_location,
                 "apiLookup": api_lookup,
                 "allianceListLookup": alliance_list_lookup,
                 "buildingId": building_id,
