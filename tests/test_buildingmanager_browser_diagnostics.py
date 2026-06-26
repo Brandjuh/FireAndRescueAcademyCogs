@@ -1,8 +1,10 @@
 import tempfile
 import unittest
+from pathlib import Path
 
 from buildingmanager.buildingmanager import (
     ALLIANCE_BUILDING_TARGET_HOSPITAL_LEVEL,
+    BUILDING_AUTOMATION_MAX_ACTIONS_PER_RUN,
     BUILDING_AUTOMATION_MAX_EXTENSION_STARTS_PER_RUN,
     BUILDING_AUTOMATION_DIRECT_SCRIPT,
     BUILDING_AUTOMATION_PREPARE_SCRIPT,
@@ -508,8 +510,19 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertIn("large hospital", BUILDING_AUTOMATION_PREPARE_SCRIPT)
         self.assertIn("large prison", BUILDING_AUTOMATION_PREPARE_SCRIPT)
         self.assertIn("maxExtensionStarts", BUILDING_AUTOMATION_PREPARE_SCRIPT)
-        self.assertEqual(BUILDING_AUTOMATION_MAX_EXTENSION_STARTS_PER_RUN, 3)
+        self.assertIn("config.maxExtensionStarts || 24", BUILDING_AUTOMATION_PREPARE_SCRIPT)
+        self.assertIn("config.maxExtensionStarts || 24", BUILDING_AUTOMATION_DIRECT_SCRIPT)
+        self.assertEqual(
+            BUILDING_AUTOMATION_MAX_EXTENSION_STARTS_PER_RUN,
+            BUILDING_AUTOMATION_MAX_ACTIONS_PER_RUN,
+        )
         self.assertEqual(ALLIANCE_BUILDING_TARGET_HOSPITAL_LEVEL, 20)
+
+    def test_admin_approval_button_is_labeled_auto_build(self):
+        source = Path("buildingmanager/buildingmanager.py").read_text(encoding="utf-8")
+
+        self.assertIn('label="Auto build"', source)
+        self.assertIn('custom_id="bm:approve"', source)
 
     def test_direct_automation_script_uses_missionchief_building_endpoints(self):
         self.assertIn("/alliance_costs/${targetTaxId}", BUILDING_AUTOMATION_DIRECT_SCRIPT)

@@ -44,7 +44,7 @@ BUILDING_AUTOMATION_RETRY_SECONDS = 6 * 60 * 60
 BUILDING_AUTOMATION_LOOP_SECONDS = 15 * 60
 BUILDING_CREATION_QUEUE_LOOP_SECONDS = 15 * 60
 BUILDING_AUTOMATION_MAX_ACTIONS_PER_RUN = 24
-BUILDING_AUTOMATION_MAX_EXTENSION_STARTS_PER_RUN = 3
+BUILDING_AUTOMATION_MAX_EXTENSION_STARTS_PER_RUN = BUILDING_AUTOMATION_MAX_ACTIONS_PER_RUN
 BUILDING_AUTOMATION_EXCLUDED_EXTENSIONS = {
     "large hospital",
     "large prison",
@@ -439,7 +439,7 @@ async () => {
 BUILDING_AUTOMATION_PREPARE_SCRIPT = r"""
 (config) => {
   const targetTax = String(config.targetTax || "20");
-  const maxExtensionStarts = Number(config.maxExtensionStarts || 3);
+  const maxExtensionStarts = Number(config.maxExtensionStarts || 24);
   const extensionsStartedThisRun = Number(config.extensionsStartedThisRun || 0);
   const excludedLabels = (config.excludedLabels || []).map((item) => String(item || "").toLowerCase());
   const visibleText = (element) => [element?.value, element?.textContent, element?.getAttribute?.("title"), element?.getAttribute?.("aria-label")]
@@ -643,7 +643,7 @@ async (config) => {
   const buildingType = String(config.buildingType || "").trim().toLowerCase();
   const targetTax = Number(config.targetTax || 20);
   const maxHospitalLevel = Number(config.maxHospitalLevel || 20);
-  const maxExtensionStarts = Number(config.maxExtensionStarts || 3);
+  const maxExtensionStarts = Number(config.maxExtensionStarts || 24);
   const extensionsStartedThisRun = Number(config.extensionsStartedThisRun || 0);
   const targetTaxIds = { 0: 0, 10: 1, 20: 2, 30: 3, 40: 4, 50: 5 };
   const targetTaxId = targetTaxIds[targetTax];
@@ -3025,6 +3025,12 @@ class AdminDecisionView(discord.ui.View):
         role = guild.get_role(role_id)
         return role in interaction.user.roles if role else False
 
+    async def _delete_action_required_message(self, interaction: discord.Interaction):
+        """Remove the admin action-required message after a successful auto-build."""
+        with contextlib.suppress(Exception):
+            if getattr(interaction, "message", None) is not None:
+                await interaction.message.delete()
+
     async def on_error(
         self,
         interaction: discord.Interaction,
@@ -3043,7 +3049,7 @@ class AdminDecisionView(discord.ui.View):
             f"Check the bot logs. Error: {_truncate_discord_text(error, 300)}",
         )
 
-    @discord.ui.button(label="✅ Approve", style=discord.ButtonStyle.success, custom_id="bm:approve")
+    @discord.ui.button(label="Auto build", style=discord.ButtonStyle.success, custom_id="bm:approve")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._is_admin(interaction):
             await interaction.response.send_message("You don't have permission to do this.", ephemeral=True)
@@ -3166,6 +3172,9 @@ class AdminDecisionView(discord.ui.View):
             previous_values=None if create_result.ok else create_result.reason[:900],
         )
 
+        if create_result.ok:
+            await self._delete_action_required_message(interaction)
+
         user = guild.get_member(self.requester_id) if guild else None
         emoji_map = {"Hospital": "🏥", "Prison": "🔒"}
         emoji = emoji_map.get(self.req.building_type, "🏢")
@@ -3223,12 +3232,6 @@ class AdminDecisionView(discord.ui.View):
                 emb.add_field(name="MissionChief HTTP Status", value=str(create_result.status), inline=True)
             emb.add_field(name="Request ID", value=str(self.req.request_id), inline=True)
             await log_channel.send(embed=emb)
-
-        if create_result.ok:
-            try:
-                await interaction.message.delete()
-            except Exception:
-                pass
 
         if create_result.ok:
             if automation_message:
