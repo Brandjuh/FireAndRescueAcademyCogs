@@ -651,8 +651,8 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertIn("large hospital", BUILDING_AUTOMATION_PREPARE_SCRIPT)
         self.assertIn("large prison", BUILDING_AUTOMATION_PREPARE_SCRIPT)
         self.assertIn("maxExtensionStarts", BUILDING_AUTOMATION_PREPARE_SCRIPT)
-        self.assertIn("config.maxExtensionStarts || 24", BUILDING_AUTOMATION_PREPARE_SCRIPT)
-        self.assertIn("config.maxExtensionStarts || 24", BUILDING_AUTOMATION_DIRECT_SCRIPT)
+        self.assertIn("config.maxExtensionStarts || 30", BUILDING_AUTOMATION_PREPARE_SCRIPT)
+        self.assertIn("config.maxExtensionStarts || 30", BUILDING_AUTOMATION_DIRECT_SCRIPT)
         self.assertEqual(
             BUILDING_AUTOMATION_MAX_EXTENSION_STARTS_PER_RUN,
             BUILDING_AUTOMATION_MAX_ACTIONS_PER_RUN,
@@ -1269,8 +1269,11 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
             "Building request approved",
             body,
         )
-        self.assertIn("Request ID: 123", body)
         self.assertIn("Example Prison", body)
+        self.assertIn("Your building has been created in MissionChief.", body)
+        self.assertNotIn("Coordinates:", body)
+        self.assertNotIn("Address:", body)
+        self.assertNotIn("Request ID:", body)
 
     def test_building_request_game_update_skips_discord_requester(self):
         message_manager = types.SimpleNamespace(_send_message_and_link=AsyncMock())
