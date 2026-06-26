@@ -9,6 +9,7 @@ from buildingmanager.buildingmanager import (
     BUILDING_CREATE_SCRIPT,
     BUILDING_FETCH_API_SCRIPT,
     BUILDING_FETCH_ALLIANCE_LIST_SCRIPT,
+    BUILDING_FETCH_ALLIANCE_LOGS_SCRIPT,
     BuildingAutomationResult,
     BuildingDatabase,
     BuildingRequest,
@@ -25,6 +26,7 @@ from buildingmanager.buildingmanager import (
     extract_missionchief_building_id,
     find_created_alliance_building_id,
     find_created_alliance_building_id_from_list,
+    find_created_alliance_building_id_from_logs,
     find_new_created_alliance_building_id_from_list,
     parse_alliance_funds_from_html,
 )
@@ -188,6 +190,12 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertIn("decodeURIComponent", BUILDING_FETCH_ALLIANCE_LIST_SCRIPT)
         self.assertIn("?page=", BUILDING_FETCH_ALLIANCE_LIST_SCRIPT)
         self.assertIn('credentials: "same-origin"', BUILDING_FETCH_ALLIANCE_LIST_SCRIPT)
+
+    def test_fetch_alliance_logs_script_reads_building_links(self):
+        self.assertIn("/alliance_logfiles", BUILDING_FETCH_ALLIANCE_LOGS_SCRIPT)
+        self.assertIn('/buildings/', BUILDING_FETCH_ALLIANCE_LOGS_SCRIPT)
+        self.assertIn("affectedName", BUILDING_FETCH_ALLIANCE_LOGS_SCRIPT)
+        self.assertIn('credentials: "same-origin"', BUILDING_FETCH_ALLIANCE_LOGS_SCRIPT)
 
     def test_extract_building_id_from_urls_and_snapshots(self):
         self.assertEqual(
@@ -407,6 +415,48 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         ]
 
         self.assertEqual(find_new_created_alliance_building_id_from_list(before, after, config), 501)
+
+    def test_find_created_building_id_from_alliance_logs_matches_requested_name(self):
+        config = build_alliance_building_config(
+            building_type="Hospital",
+            building_name="University Hospital Quironsalud Madrid",
+            coordinates="40.4027317, -3.7834356",
+            address=None,
+        )
+        candidates = [
+            {
+                "id": 700,
+                "affectedName": "Other Hospital",
+                "rowText": "Building constructed Other Hospital",
+                "href": "/buildings/700",
+            },
+            {
+                "id": 701,
+                "affectedName": "University Hospital Quironsalud Madrid",
+                "rowText": "Building constructed University Hospital Quironsalud Madrid",
+                "href": "/buildings/701",
+            },
+        ]
+
+        self.assertEqual(find_created_alliance_building_id_from_logs(candidates, config), 701)
+
+    def test_find_created_building_id_from_alliance_logs_rejects_unrelated_first_log(self):
+        config = build_alliance_building_config(
+            building_type="Prison",
+            building_name="County Justice Center",
+            coordinates="40.1, -73.9",
+            address=None,
+        )
+        candidates = [
+            {
+                "id": 710,
+                "affectedName": "Other Prison",
+                "rowText": "Building constructed Other Prison",
+                "href": "/buildings/710",
+            }
+        ]
+
+        self.assertIsNone(find_created_alliance_building_id_from_logs(candidates, config))
 
     def test_automation_script_refuses_coins_and_excludes_large_buildings(self):
         self.assertIn("coin|coins", BUILDING_AUTOMATION_PREPARE_SCRIPT)

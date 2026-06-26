@@ -38,6 +38,8 @@ ALLIANCE_BUILDING_MIN_FUNDS = 2_000_000
 MISSIONCHIEF_BUILDING_NAME_LIMIT = 40
 BUILDING_APPROVAL_FUNDS_TIMEOUT_SECONDS = 45
 BUILDING_APPROVAL_CREATE_TIMEOUT_SECONDS = 180
+BUILDING_APPROVAL_RECOVERY_TIMEOUT_SECONDS = 75
+BUILDING_LOOKUP_MAX_ALLIANCE_LIST_PAGES = 8
 BUILDING_AUTOMATION_RETRY_SECONDS = 6 * 60 * 60
 BUILDING_AUTOMATION_LOOP_SECONDS = 15 * 60
 BUILDING_CREATION_QUEUE_LOOP_SECONDS = 15 * 60
@@ -386,6 +388,54 @@ async (config) => {
   return { ok: true, status: lastStatus, pages: [...seenPages], candidates };
 }
 """.strip()
+
+BUILDING_FETCH_ALLIANCE_LOGS_SCRIPT = r"""
+async () => {
+  const safeDecode = (value) => {
+    let text = String(value || "");
+    for (let i = 0; i < 4; i += 1) {
+      try {
+        const decoded = decodeURIComponent(text);
+        if (decoded === text) break;
+        text = decoded;
+      } catch (_) {
+        break;
+      }
+    }
+    return text.replace(/\+/g, " ");
+  };
+  const textOf = (element) => safeDecode(element?.textContent || "").replace(/\s+/g, " ").trim();
+  const response = await fetch("/alliance_logfiles", {
+    credentials: "same-origin",
+    headers: { "Accept": "text/html" },
+  });
+  const status = response.status;
+  const html = await response.text();
+  if (!response.ok) {
+    return { ok: false, status, candidates: [], text: String(html || "").slice(0, 500) };
+  }
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const candidates = [];
+  for (const row of doc.querySelectorAll("tr")) {
+    const links = [...row.querySelectorAll('a[href*="/buildings/"]')];
+    if (!links.length) continue;
+    const link = links[links.length - 1];
+    const href = link.getAttribute("href") || "";
+    const match = href.match(/\/buildings\/(\d+)/);
+    if (!match) continue;
+    const cells = [...row.querySelectorAll("td")].map((cell) => textOf(cell));
+    candidates.push({
+      id: Number(match[1]),
+      href,
+      affectedName: textOf(link),
+      rowText: textOf(row),
+      cells,
+    });
+  }
+  return { ok: true, status, candidates: candidates.slice(0, 40) };
+}
+""".strip()
+
 BUILDING_AUTOMATION_PREPARE_SCRIPT = r"""
 (config) => {
   const targetTax = String(config.targetTax || "20");
@@ -1263,6 +1313,54 @@ def find_new_created_alliance_building_id_from_list(
         return None
     matches.sort(key=lambda item: (item[0], item[1]), reverse=True)
     return matches[0][1]
+
+def find_created_alliance_building_id_from_logs(
+    candidates: Iterable[Dict[str, Any]],
+    config: Dict[str, str],
+) -> Optional[int]:
+    """Find a newly created alliance building from the newest alliance log page.
+
+    This fallback intentionally requires the requested building name to appear
+    in the log row. Alliance logs are newest-first, but other admins can build
+    around the same time, so a generic "first building log" match is not safe.
+    """
+    target_name = _normalize_match_text(config.get("name"))
+    target_name_loose = _normalize_loose_match_text(config.get("name"))
+    if not target_name:
+        return None
+
+    matches: List[Tuple[int, int, int]] = []
+    for index, record in enumerate(candidates or []):
+        if not isinstance(record, dict):
+            continue
+        building_id = _coerce_int(record.get("id"))
+        if building_id is None:
+            continue
+
+        affected_name = _normalize_match_text(record.get("affectedName"))
+        row_text = _normalize_match_text(
+            " ".join(
+                str(record.get(key) or "")
+                for key in ("affectedName", "rowText", "href")
+            )
+        )
+        row_text_loose = _normalize_loose_match_text(row_text)
+        exact_match = target_name in affected_name or target_name in row_text
+        loose_match = bool(target_name_loose and target_name_loose in row_text_loose)
+        if not exact_match and not loose_match:
+            continue
+
+        score = 100
+        if exact_match:
+            score += 50
+        if "building constructed" in row_text:
+            score += 25
+        matches.append((score, -index, building_id))
+
+    if not matches:
+        return None
+    matches.sort(reverse=True)
+    return matches[0][2]
 
 def _diagnostic_lines_for_fields(fields: Iterable[Dict[str, Any]]) -> List[str]:
     """Format no-submit browser field diagnostics."""
@@ -2936,6 +3034,10 @@ class AdminDecisionView(discord.ui.View):
             return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
+        for item in self.children:
+            item.disabled = True
+        with contextlib.suppress(Exception):
+            await interaction.message.edit(view=self)
         await safe_ephemeral_complete(
             interaction,
             "Approval accepted. BuildingManager is creating the alliance building now. "
@@ -2974,11 +3076,23 @@ class AdminDecisionView(discord.ui.View):
                 timeout=BUILDING_APPROVAL_CREATE_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
-            create_result = BuildingCreateResult(
-                False,
-                "MissionChief building creation timed out before a confirmed result was returned. "
-                "No post-creation automation was queued.",
-            )
+            try:
+                create_result = await asyncio.wait_for(
+                    self.cog._find_created_alliance_building_browser(
+                        self.req,
+                        reason=(
+                            "MissionChief building creation timed out, but the created building "
+                            "was found afterwards."
+                        ),
+                    ),
+                    timeout=BUILDING_APPROVAL_RECOVERY_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                create_result = BuildingCreateResult(
+                    False,
+                    "MissionChief building creation timed out and the recovery lookup also timed out. "
+                    "No post-creation automation was queued.",
+                )
         final_status = "created" if create_result.ok else "approved_pending_manual"
         automation_message = None
         if create_result.ok:
@@ -3588,6 +3702,136 @@ class BuildingManager(commands.Cog):
 
         return message
 
+    async def _find_created_alliance_building_browser(
+        self,
+        req: BuildingRequest,
+        *,
+        reason: str = "Created alliance building was found after lookup.",
+    ) -> BuildingCreateResult:
+        """Find an already-created alliance building and return its MissionChief id."""
+        try:
+            config = build_alliance_building_config(
+                building_type=req.building_type,
+                building_name=req.building_name,
+                coordinates=req.coordinates,
+                address=req.address,
+            )
+        except ValueError as exc:
+            return BuildingCreateResult(False, str(exc))
+
+        try:
+            from playwright.async_api import async_playwright
+        except Exception:
+            return BuildingCreateResult(False, PLAYWRIGHT_SETUP_MESSAGE)
+
+        try:
+            cookies = await self._playwright_cookies()
+        except Exception as exc:
+            return BuildingCreateResult(False, f"Could not load MissionChief cookies: {exc}")
+        if not cookies:
+            return BuildingCreateResult(False, "No MissionChief cookies are available from CookieManager.")
+
+        async with self._browser_lock:
+            api_lookup: Dict[str, Any] = {}
+            alliance_list_lookup: Dict[str, Any] = {}
+            log_lookup: Dict[str, Any] = {}
+            detected_id: Optional[int] = None
+            last_status: Optional[int] = None
+
+            try:
+                async with async_playwright() as playwright:
+                    browser = await playwright.chromium.launch(headless=True)
+                    try:
+                        context = await browser.new_context(viewport={"width": 1440, "height": 1000})
+                        await context.add_cookies(cookies)
+                        page = await context.new_page()
+                        page.set_default_timeout(30000)
+                        await page.goto(MISSIONCHIEF_HOME_URL, wait_until="domcontentloaded")
+
+                        login_fields = await page.locator("input[type='password']").count()
+                        if login_fields:
+                            return BuildingCreateResult(False, "MissionChief session is not logged in.")
+
+                        with contextlib.suppress(Exception):
+                            api_lookup = await page.evaluate(BUILDING_FETCH_API_SCRIPT)
+                            if api_lookup.get("ok"):
+                                detected_id = find_created_alliance_building_id(
+                                    api_lookup.get("buildings") or [],
+                                    config,
+                                )
+                                last_status = _coerce_int(api_lookup.get("status"))
+                                api_lookup = {
+                                    "ok": True,
+                                    "status": api_lookup.get("status"),
+                                    "count": len(api_lookup.get("buildings") or []),
+                                    "matchedBuildingId": detected_id,
+                                }
+
+                        if not detected_id:
+                            with contextlib.suppress(Exception):
+                                alliance_list_lookup = await page.evaluate(
+                                    BUILDING_FETCH_ALLIANCE_LIST_SCRIPT,
+                                    {
+                                        "maxPages": BUILDING_LOOKUP_MAX_ALLIANCE_LIST_PAGES,
+                                        "targetName": config.get("name") or "",
+                                    },
+                                )
+                                if alliance_list_lookup.get("ok"):
+                                    candidates = alliance_list_lookup.get("candidates") or []
+                                    detected_id = find_created_alliance_building_id_from_list(candidates, config)
+                                    last_status = _coerce_int(alliance_list_lookup.get("status")) or last_status
+                                    alliance_list_lookup = {
+                                        "ok": True,
+                                        "status": alliance_list_lookup.get("status"),
+                                        "pages": alliance_list_lookup.get("pages") or [],
+                                        "count": len(candidates),
+                                        "matchedBuildingId": detected_id,
+                                    }
+
+                        if not detected_id:
+                            with contextlib.suppress(Exception):
+                                log_lookup = await page.evaluate(BUILDING_FETCH_ALLIANCE_LOGS_SCRIPT)
+                                if log_lookup.get("ok"):
+                                    candidates = log_lookup.get("candidates") or []
+                                    detected_id = find_created_alliance_building_id_from_logs(candidates, config)
+                                    last_status = _coerce_int(log_lookup.get("status")) or last_status
+                                    log_lookup = {
+                                        "ok": True,
+                                        "status": log_lookup.get("status"),
+                                        "count": len(candidates),
+                                        "matchedBuildingId": detected_id,
+                                    }
+                    finally:
+                        await browser.close()
+            except Exception as exc:
+                message = str(exc)
+                if "Executable doesn't exist" in message or "playwright install" in message:
+                    return BuildingCreateResult(False, PLAYWRIGHT_SETUP_MESSAGE)
+                return BuildingCreateResult(False, f"MissionChief building lookup failed: {message}")
+
+        details = {
+            "apiLookup": api_lookup,
+            "allianceListLookup": alliance_list_lookup,
+            "allianceLogLookup": log_lookup,
+            "buildingId": detected_id,
+        }
+        if not detected_id:
+            return BuildingCreateResult(
+                False,
+                "MissionChief building was not found after creation lookup. "
+                "No post-creation automation was queued.",
+                status=last_status,
+                post_url=f"{BASE_URL}/buildings",
+                details=details,
+            )
+        return BuildingCreateResult(
+            True,
+            reason,
+            status=last_status,
+            post_url=f"{BASE_URL}/buildings/{detected_id}",
+            details=details,
+        )
+
     async def _create_alliance_building_browser(self, req: BuildingRequest) -> BuildingCreateResult:
         """Create an approved Hospital or Prison as an alliance building through the live browser form."""
         try:
@@ -3623,6 +3867,7 @@ class BuildingManager(commands.Cog):
             api_lookup: Dict[str, Any] = {}
             before_alliance_list_lookup: Dict[str, Any] = {}
             alliance_list_lookup: Dict[str, Any] = {}
+            log_lookup: Dict[str, Any] = {}
             before_alliance_candidates: List[Dict[str, Any]] = []
             try:
                 async with async_playwright() as playwright:
@@ -3641,7 +3886,10 @@ class BuildingManager(commands.Cog):
                         with contextlib.suppress(Exception):
                             before_alliance_list_lookup = await page.evaluate(
                                 BUILDING_FETCH_ALLIANCE_LIST_SCRIPT,
-                                {"maxPages": 80, "targetName": ""},
+                                {
+                                    "maxPages": BUILDING_LOOKUP_MAX_ALLIANCE_LIST_PAGES,
+                                    "targetName": config.get("name") or "",
+                                },
                             )
                             if before_alliance_list_lookup.get("ok"):
                                 before_alliance_candidates = before_alliance_list_lookup.get("candidates") or []
@@ -3709,7 +3957,10 @@ class BuildingManager(commands.Cog):
                             with contextlib.suppress(Exception):
                                 alliance_list_lookup = await page.evaluate(
                                     BUILDING_FETCH_ALLIANCE_LIST_SCRIPT,
-                                    {"maxPages": 80, "targetName": ""},
+                                    {
+                                        "maxPages": BUILDING_LOOKUP_MAX_ALLIANCE_LIST_PAGES,
+                                        "targetName": config.get("name") or "",
+                                    },
                                 )
                                 if alliance_list_lookup.get("ok"):
                                     candidates = alliance_list_lookup.get("candidates") or []
@@ -3728,6 +3979,18 @@ class BuildingManager(commands.Cog):
                                         "beforeCount": len(before_alliance_candidates),
                                         "matchedBuildingId": detected_id,
                                     }
+                        if not detected_id and status is not None and int(status) < 400:
+                            with contextlib.suppress(Exception):
+                                log_lookup = await page.evaluate(BUILDING_FETCH_ALLIANCE_LOGS_SCRIPT)
+                                if log_lookup.get("ok"):
+                                    candidates = log_lookup.get("candidates") or []
+                                    detected_id = find_created_alliance_building_id_from_logs(candidates, config)
+                                    log_lookup = {
+                                        "ok": True,
+                                        "status": log_lookup.get("status"),
+                                        "count": len(candidates),
+                                        "matchedBuildingId": detected_id,
+                                    }
                     finally:
                         await browser.close()
             except PlaywrightTimeoutError as exc:
@@ -3740,6 +4003,7 @@ class BuildingManager(commands.Cog):
                         "apiLookup": api_lookup,
                         "beforeAllianceListLookup": before_alliance_list_lookup,
                         "allianceListLookup": alliance_list_lookup,
+                        "allianceLogLookup": log_lookup,
                     }
                 )
                 return BuildingCreateResult(
@@ -3769,6 +4033,7 @@ class BuildingManager(commands.Cog):
                 "apiLookup": api_lookup,
                 "beforeAllianceListLookup": before_alliance_list_lookup,
                 "allianceListLookup": alliance_list_lookup,
+                "allianceLogLookup": log_lookup,
                 "buildingId": building_id,
             }
         )
