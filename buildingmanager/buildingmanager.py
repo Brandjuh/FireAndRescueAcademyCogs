@@ -60,7 +60,7 @@ BUILDING_LOOKUP_MAX_ALLIANCE_LIST_PAGES = 8
 BUILDING_AUTOMATION_RETRY_SECONDS = 6 * 60 * 60
 BUILDING_AUTOMATION_LOOP_SECONDS = 15 * 60
 BUILDING_CREATION_QUEUE_LOOP_SECONDS = 15 * 60
-BUILDING_AUTOMATION_MAX_ACTIONS_PER_RUN = 24
+BUILDING_AUTOMATION_MAX_ACTIONS_PER_RUN = 30
 BUILDING_AUTOMATION_MAX_EXTENSION_STARTS_PER_RUN = BUILDING_AUTOMATION_MAX_ACTIONS_PER_RUN
 BUILDING_AUTOMATION_EXCLUDED_EXTENSIONS = {
     "large hospital",
@@ -481,7 +481,7 @@ async () => {
 BUILDING_AUTOMATION_PREPARE_SCRIPT = r"""
 (config) => {
   const targetTax = String(config.targetTax || "20");
-  const maxExtensionStarts = Number(config.maxExtensionStarts || 24);
+  const maxExtensionStarts = Number(config.maxExtensionStarts || 30);
   const extensionsStartedThisRun = Number(config.extensionsStartedThisRun || 0);
   const excludedLabels = (config.excludedLabels || []).map((item) => String(item || "").toLowerCase());
   const visibleText = (element) => [element?.value, element?.textContent, element?.getAttribute?.("title"), element?.getAttribute?.("aria-label")]
@@ -685,7 +685,7 @@ async (config) => {
   const buildingType = String(config.buildingType || "").trim().toLowerCase();
   const targetTax = Number(config.targetTax || 20);
   const maxHospitalLevel = Number(config.maxHospitalLevel || 20);
-  const maxExtensionStarts = Number(config.maxExtensionStarts || 24);
+  const maxExtensionStarts = Number(config.maxExtensionStarts || 30);
   const extensionsStartedThisRun = Number(config.extensionsStartedThisRun || 0);
   const targetTaxIds = { 0: 0, 10: 1, 20: 2, 30: 3, 40: 4, 50: 5 };
   const targetTaxId = targetTaxIds[targetTax];
@@ -4464,12 +4464,6 @@ class BuildingManager(commands.Cog):
             f"Building: {req.building_type} - {req.building_name}",
             f"Status: {status}",
         ]
-        if req.coordinates:
-            lines.append(f"Coordinates: {req.coordinates}")
-        if req.address:
-            lines.append(f"Address: {req.address}")
-        if req.request_id:
-            lines.append(f"Request ID: {req.request_id}")
         lines.extend(
             [
                 "",
