@@ -1,7 +1,9 @@
 import asyncio
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 from buildingmanager.buildingmanager import (
     ALLIANCE_BUILDING_TARGET_HOSPITAL_LEVEL,
@@ -759,6 +761,37 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertEqual(spec.building_type, "Prison")
         self.assertEqual(spec.location_input, "https://maps.app.goo.gl/example")
 
+    def test_extract_building_board_request_accepts_missing_colon(self):
+        spec, error = extract_building_board_request(
+            "Prison https://maps.app.goo.gl/mPcFakXaRgMU99fm6"
+        )
+
+        self.assertIsNone(error)
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec.building_type, "Prison")
+        self.assertEqual(spec.location_input, "https://maps.app.goo.gl/mPcFakXaRgMU99fm6")
+
+    def test_extract_building_board_request_accepts_small_type_typos(self):
+        prison_spec, prison_error = extract_building_board_request(
+            "prisn https://maps.app.goo.gl/example"
+        )
+        hospital_spec, hospital_error = extract_building_board_request(
+            "hosptial https://www.google.com/maps/place/Example"
+        )
+
+        self.assertIsNone(prison_error)
+        self.assertIsNone(hospital_error)
+        self.assertEqual(prison_spec.building_type, "Prison")
+        self.assertEqual(hospital_spec.building_type, "Hospital")
+
+    def test_extract_building_board_request_ignores_type_words_inside_url(self):
+        spec, error = extract_building_board_request(
+            "Prison https://www.google.com/maps/place/Example+Hospital/@40.1,-73.9"
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(spec.building_type, "Prison")
+
     def test_extract_building_board_request_rejects_missing_type(self):
         spec, error = extract_building_board_request("https://www.google.com/maps/place/Example")
 
@@ -771,6 +804,7 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertIn("[BM-GUIDE:overview]", content)
         self.assertIn("Hospital: <Google Maps link>", content)
         self.assertIn("Prison: <Google Maps link>", content)
+        self.assertIn("A colon is optional", content)
         self.assertIn("removed after 12 hours", content)
         self.assertNotIn("This post is maintained automatically by the Fire & Rescue Academy bot", content)
 
@@ -837,6 +871,27 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertEqual(session.posts[-1][0], "https://www.missionchief.com/alliance_posts/200001")
         self.assertEqual(session.posts[-1][1]["data"]["_method"], "delete")
         self.assertEqual(session.posts[-1][1]["data"]["authenticity_token"], "token-building-board")
+
+    def test_board_processing_error_log_falls_back_to_admin_channel(self):
+        manager = BuildingManager.__new__(BuildingManager)
+        admin_channel = types.SimpleNamespace(send=AsyncMock())
+        guild = types.SimpleNamespace(id=1)
+        post = parse_building_board_page(BUILDING_BOARD_HTML).posts[0]
+        manager._resolve_channel = AsyncMock(
+            side_effect=lambda _guild, channel_id: admin_channel if channel_id == 99 else None
+        )
+
+        notified = asyncio.run(
+            manager._send_board_processing_error_log(
+                guild,
+                {"log_channel_id": None, "admin_channel_id": 99},
+                post,
+                RuntimeError("boom"),
+            )
+        )
+
+        self.assertTrue(notified)
+        admin_channel.send.assert_awaited_once()
 
 
 if __name__ == "__main__":
