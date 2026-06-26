@@ -13,6 +13,7 @@ import logging
 import re
 import sqlite3
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -1581,7 +1582,7 @@ class BoardPage:
 
 @dataclass(frozen=True)
 class BoardBuildingRequestSpec:
-    building_type: str
+    building_type: Optional[str]
     location_input: str
     matched_alias: str
 
@@ -1851,6 +1852,15 @@ def _normalize_board_type_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _normalize_facility_text(text: str) -> str:
+    """Normalize facility text for conservative building-type detection."""
+    text = html_lib.unescape(_decode_url_text(text or "")).casefold()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _levenshtein_distance(left: str, right: str) -> int:
     """Return a small edit distance for short request words."""
     if left == right:
@@ -1924,7 +1934,7 @@ def _match_board_building_type(text: str) -> Tuple[Optional[str], Optional[str],
     if len(unique_types) > 1:
         return None, None, "The request mentions both Hospital and Prison. Please submit one building per post."
     if not matches:
-        return None, None, "No supported building type was found. Start with `Hospital:` or `Prison:`."
+        return None, None, None
     return matches[0][0], matches[0][1], None
 
 
@@ -1934,18 +1944,18 @@ def extract_building_board_request(text: str) -> Tuple[Optional[BoardBuildingReq
     if not cleaned:
         return None, "The post is empty."
 
-    building_type, alias, error = _match_board_building_type(cleaned)
-    if error:
-        return None, error
-
     maps_url = _extract_board_maps_url(cleaned)
     if not maps_url:
         return None, "No supported Google Maps link was found. Paste a Google Maps place link or maps.app.goo.gl link."
 
+    building_type, alias, error = _match_board_building_type(cleaned)
+    if error:
+        return None, error
+
     return BoardBuildingRequestSpec(
-        building_type=str(building_type),
+        building_type=building_type,
         location_input=maps_url,
-        matched_alias=str(alias or building_type),
+        matched_alias=str(alias or building_type or ""),
     ), None
 
 
@@ -1967,21 +1977,20 @@ def build_building_board_guide_content(thread_id: int = BOARD_THREAD_ID) -> str:
             "",
             "[b]How to request[/b]",
             "- Create a new post in this topic.",
-            "- Mention Hospital or Prison and include a Google Maps link.",
-            "- A colon is optional. Small typos such as `hosptial` or `prisn` are accepted.",
+            "- Paste a Google Maps link to a real hospital or prison/jail.",
+            "- You do not need to type Hospital or Prison. The bot detects the type from the location.",
+            "- Clinics, doctor offices, museums, historic sites, courthouses, and police stations are rejected.",
             "- You do not need to type a building name. The name is detected from Google Maps.",
             "- Requests are reviewed by admins before they are built.",
             "- Your request post and the Fire & Rescue Academy reply are removed after 12 hours.",
             "",
             "[b]Formats[/b]",
-            "Hospital: <Google Maps link>",
-            "Prison: <Google Maps link>",
-            "Hospital <Google Maps link>",
-            "Prison <Google Maps link>",
+            "<Google Maps link>",
+            "Hospital: <Google Maps link> and Prison: <Google Maps link> still work, but the location decides the type.",
             "",
             "[b]Examples[/b]",
-            "Hospital: https://www.google.com/maps/place/Example+Hospital/@40.0,-73.0",
-            "Prison: https://maps.app.goo.gl/example",
+            "https://www.google.com/maps/place/Example+Hospital/@40.0,-73.0",
+            "https://maps.app.goo.gl/example",
         ]
     )
 
@@ -2034,6 +2043,83 @@ class LocationParser:
         "penitentiaire",
         "inrichting",
         "detentie",
+    }
+    _hospital_positive_terms = {
+        "hospital",
+        "general hospital",
+        "regional hospital",
+        "university hospital",
+        "childrens hospital",
+        "children s hospital",
+        "medical center",
+        "medical centre",
+        "ziekenhuis",
+        "hopital",
+        "krankenhaus",
+        "klinikum",
+        "ospedale",
+        "hospital universitario",
+        "centre hospitalier",
+        "centro hospitalario",
+        "sairaala",
+        "sjukhus",
+        "sygehus",
+    }
+    _hospital_reject_terms = {
+        "clinic",
+        "clinique",
+        "kliniek",
+        "doctor",
+        "doctors",
+        "medical office",
+        "physician",
+        "gp practice",
+        "urgent care",
+        "pharmacy",
+        "dentist",
+        "veterinary",
+        "rehab center",
+        "rehabilitation center",
+        "health center",
+        "health centre",
+    }
+    _prison_positive_terms = {
+        "prison",
+        "jail",
+        "correctional facility",
+        "correctional institution",
+        "detention center",
+        "detention centre",
+        "penitentiary",
+        "remand center",
+        "remand centre",
+        "gevangenis",
+        "carcel",
+        "jva",
+        "justizvollzugsanstalt",
+        "maison d arret",
+        "centre penitentiaire",
+    }
+    _prison_reject_terms = {
+        "courthouse",
+        "court house",
+        "police station",
+        "sheriff office",
+        "sheriff s office",
+        "police department",
+        "law office",
+    }
+    _inactive_facility_terms = {
+        "museum",
+        "historic",
+        "historical",
+        "heritage",
+        "monument",
+        "tourist attraction",
+        "former hospital",
+        "former prison",
+        "former jail",
+        "old jail museum",
     }
     
     @staticmethod
@@ -2437,6 +2523,77 @@ class LocationParser:
         }
 
     @classmethod
+    def _facility_search_text(
+        cls,
+        location_details: LocationDetails,
+        building_name: Optional[str] = None,
+    ) -> Tuple[str, str]:
+        values = [
+            building_name,
+            location_details.place_name,
+            location_details.address,
+            cls.extract_place_name(location_details.resolved_input),
+            location_details.resolved_input,
+            location_details.detected_facility_type,
+        ]
+        text = _normalize_facility_text(" ".join(value for value in values if value))
+        facility_type = _normalize_facility_text(location_details.detected_facility_type or "")
+        return text, facility_type
+
+    @staticmethod
+    def _contains_facility_term(text: str, terms: Iterable[str]) -> bool:
+        searchable = f" {text} "
+        return any(f" {_normalize_facility_text(term)} " in searchable for term in terms)
+
+    @classmethod
+    def detect_supported_building_type(
+        cls,
+        location_details: LocationDetails,
+        building_name: Optional[str] = None,
+    ) -> Tuple[Optional[str], str]:
+        """Detect whether a location is clearly a supported alliance building type."""
+        text, facility_type = cls._facility_search_text(location_details, building_name)
+        if not text:
+            return None, "The Google Maps link did not provide enough location details."
+
+        if cls._contains_facility_term(text, cls._inactive_facility_terms):
+            return None, "This location looks like a museum, historic site, or inactive facility."
+
+        hospital_facility = cls._contains_facility_term(facility_type, {"hospital"})
+        prison_facility = cls._contains_facility_term(
+            facility_type,
+            {"prison", "jail", "correctional", "detention", "penitentiary"},
+        )
+        hospital_name = cls._contains_facility_term(text, cls._hospital_positive_terms)
+        prison_name = cls._contains_facility_term(text, cls._prison_positive_terms)
+        hospital_reject = cls._contains_facility_term(text, cls._hospital_reject_terms)
+        prison_reject = cls._contains_facility_term(text, cls._prison_reject_terms)
+
+        hospital_score = (3 if hospital_facility else 0) + (2 if hospital_name else 0)
+        prison_score = (3 if prison_facility else 0) + (2 if prison_name else 0)
+
+        if hospital_reject and not hospital_facility:
+            hospital_score = 0
+        if prison_reject and not prison_facility:
+            prison_score = 0
+
+        if hospital_score > 0 and prison_score > 0:
+            if hospital_score > prison_score:
+                return "Hospital", "Detected as a hospital."
+            if prison_score > hospital_score:
+                return "Prison", "Detected as a prison or jail."
+            return None, "This location has conflicting hospital and prison/jail signals."
+        if hospital_score > 0:
+            return "Hospital", "Detected as a hospital."
+        if prison_score > 0:
+            return "Prison", "Detected as a prison or jail."
+        if hospital_reject:
+            return None, "This location looks like a clinic, doctor office, pharmacy, or other non-hospital facility."
+        if prison_reject:
+            return None, "This location looks like a courthouse, police station, or other non-prison facility."
+        return None, "This location does not clearly look like a real hospital or prison/jail."
+
+    @classmethod
     def facility_warning(
         cls,
         building_type: str,
@@ -2444,25 +2601,9 @@ class LocationParser:
         location_details: LocationDetails,
     ) -> Optional[str]:
         """Return a warning if the location does not clearly match the requested type."""
-        searchable = " ".join(
-            value
-            for value in (
-                building_name,
-                location_details.address,
-                cls.extract_place_name(location_details.resolved_input),
-                location_details.resolved_input,
-                location_details.detected_facility_type,
-            )
-            if value
-        )
-        searchable = _decode_url_text(searchable).lower()
-
-        if building_type == "Hospital":
-            if not any(keyword in searchable for keyword in cls._health_keywords):
-                return "This location does not clearly look like a health facility."
-        elif building_type == "Prison":
-            if not any(keyword in searchable for keyword in cls._justice_keywords):
-                return "This location does not clearly look like a justice or correctional facility."
+        detected_type, reason = cls.detect_supported_building_type(location_details, building_name)
+        if detected_type != building_type:
+            return reason
         return None
     
     @staticmethod
@@ -3215,11 +3356,7 @@ class StartView(discord.ui.View):
 
     @discord.ui.button(label="Request Building", style=discord.ButtonStyle.primary, custom_id="bm:start")
     async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "Select the type of building you want to request.",
-            view=BuildingTypeView(self.cog),
-            ephemeral=True,
-        )
+        await interaction.response.send_modal(BuildingRequestModal(self.cog))
 
 class BuildingTypeView(discord.ui.View):
     def __init__(self, cog: "BuildingManager"):
@@ -3259,7 +3396,7 @@ class BuildingRequestModal(discord.ui.Modal, title="Building Request"):
         placeholder="Any additional information...",
     )
 
-    def __init__(self, cog: "BuildingManager", building_type: str):
+    def __init__(self, cog: "BuildingManager", building_type: Optional[str] = None):
         super().__init__()
         self.cog = cog
         self.building_type = building_type
@@ -3270,9 +3407,22 @@ class BuildingRequestModal(discord.ui.Modal, title="Building Request"):
         
         location_input = str(self.location)
         location_details = await LocationParser.resolve_location(location_input)
-        building_name = LocationParser.derive_building_name(self.building_type, location_details)
+        detected_type, rejection_reason = LocationParser.detect_supported_building_type(location_details)
+        if not detected_type:
+            await interaction.followup.send(
+                (
+                    "This Google Maps link was not accepted.\n\n"
+                    f"Reason: {rejection_reason}\n\n"
+                    "Use a link to a real hospital or prison/jail. Clinics, doctor offices, museums, "
+                    "historic sites, courthouses, and police stations are not accepted."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        building_name = LocationParser.derive_building_name(detected_type, location_details)
         location_details.facility_warning = LocationParser.facility_warning(
-            self.building_type,
+            detected_type,
             building_name,
             location_details,
         )
@@ -3281,7 +3431,7 @@ class BuildingRequestModal(discord.ui.Modal, title="Building Request"):
         req = BuildingRequest(
             user_id=interaction.user.id,
             username=str(interaction.user),
-            building_type=self.building_type,
+            building_type=detected_type,
             building_name=building_name,
             location_input=location_input,
             coordinates=location_details.coordinates,
@@ -4485,16 +4635,26 @@ class BuildingManager(commands.Cog):
             await self._send_board_request_error_log(guild, post, reason)
             return
 
-        building_name = LocationParser.derive_building_name(spec.building_type, location_details)
+        detected_type, rejection_reason = LocationParser.detect_supported_building_type(location_details)
+        if not detected_type:
+            reply = self._build_building_board_error_reply(post, rejection_reason)
+            _status, reply_post_id = await self._post_building_board_reply_with_id(session, thread_id, page, reply)
+            await self._schedule_board_post_deletion(guild, thread_id, post.post_id, "unsupported facility request")
+            if reply_post_id:
+                await self._schedule_board_post_deletion(guild, thread_id, reply_post_id, "unsupported facility reply")
+            await self._send_board_request_error_log(guild, post, rejection_reason)
+            return
+
+        building_name = LocationParser.derive_building_name(detected_type, location_details)
         location_details.facility_warning = LocationParser.facility_warning(
-            spec.building_type,
+            detected_type,
             building_name,
             location_details,
         )
         req = BuildingRequest(
             user_id=0,
             username=post.author_name,
-            building_type=spec.building_type,
+            building_type=detected_type,
             building_name=building_name,
             location_input=spec.location_input,
             coordinates=location_details.coordinates,
@@ -5965,11 +6125,12 @@ class BuildingManager(commands.Cog):
         """Build the persistent request panel embed."""
         if description is None:
             description = (
-                "Request a new Hospital or Prison placement by clicking the button below.\n\n"
+                "Request a new alliance Hospital or Prison/Jail placement by clicking the button below.\n\n"
                 "Accepted location formats:\n"
                 "- Google Maps place link\n"
                 "- Google Maps short link, for example `https://maps.app.goo.gl/...`\n\n"
-                "The building name is detected automatically from the location when possible. "
+                "Only paste the link. The building type and name are detected automatically. "
+                "Clinics, doctor offices, museums, historic sites, courthouses, and police stations are rejected. "
                 "Your request will be reviewed by admins."
             )
 
