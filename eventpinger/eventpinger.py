@@ -490,6 +490,7 @@ def format_notification(
     region: RegionMatch | None,
     notify_role_mention: str,
     region_role_mention: str | None,
+    next_summary: str | None = None,
 ) -> str:
     mentions = [notify_role_mention]
     if region_role_mention:
@@ -505,6 +506,9 @@ def format_notification(
         lines.append(f"Region: {region.name}")
     else:
         lines.append("Region: Unresolved, Notify-Event only")
+    if next_summary:
+        next_label = "Next scheduled alliance mission" if announcement.kind == "mission" else "Next scheduled alliance event"
+        lines.extend(["", f"{next_label}:", str(next_summary).strip()])
     return "\n".join(lines)
 
 
@@ -561,7 +565,8 @@ class EventPinger(commands.Cog):
 
         notify_mention = getattr(notify_role, "mention", f"<@&{NOTIFY_EVENT_ROLE_ID}>")
         region_mention = getattr(region_role, "mention", None)
-        content = format_notification(announcement, region, notify_mention, region_mention)
+        next_summary = await self._eventmanager_next_summary(announcement)
+        content = format_notification(announcement, region, notify_mention, region_mention, next_summary)
 
         kwargs = {}
         if hasattr(discord, "AllowedMentions"):
@@ -571,6 +576,28 @@ class EventPinger(commands.Cog):
             await channel.send(content, **kwargs)
         except (discord.Forbidden, discord.HTTPException):
             log.exception("Failed to send event notification for MissionChief announcement")
+
+    async def _eventmanager_next_summary(self, announcement: EventAnnouncement) -> str | None:
+        """Read EventManager's next route summary when that cog started this item."""
+        get_cog = getattr(self.bot, "get_cog", None)
+        if not callable(get_cog):
+            return None
+        event_manager = get_cog("EventManager")
+        if not event_manager:
+            return None
+        method = getattr(event_manager, "get_next_notification_summary", None)
+        if not callable(method):
+            return None
+        kind = "large" if announcement.kind == "mission" else "event"
+        try:
+            result = method(kind)
+            if asyncio.iscoroutine(result):
+                result = await result
+        except Exception:
+            log.exception("Could not read EventManager next notification summary")
+            return None
+        summary = str(result or "").strip()
+        return summary or None
 
     async def resolve_region_for_address(self, address: str) -> RegionMatch | None:
         geocode_outcome = await self._resolve_region_with_geocode(address)

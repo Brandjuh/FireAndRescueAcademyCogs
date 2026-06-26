@@ -616,6 +616,42 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Location: Portland, OR, USA", summary)
         self.assertIn("Type: Surprise Alliance event type", summary)
 
+    async def test_notification_context_exposes_next_route_profile(self):
+        profile_names = route_profile_names()
+        fake = type("FakeEventManager", (), {})()
+        fake.config = FakeEventManagerConfig(
+            schedules={
+                "large": {
+                    "enabled": True,
+                    "profiles": profile_names,
+                    "rotation_index": 0,
+                }
+            },
+            profiles={
+                "large": {
+                    route_profile_names()[index]: route_profile_for_location("large", location)
+                    for index, location in enumerate(EVENT_ROUTE_LOCATIONS)
+                }
+            },
+        )
+        fake._notification_contexts = {}
+
+        async def next_summary(kind, profile_name):
+            return await EventManager._next_scheduled_profile_summary(fake, kind, profile_name)
+
+        fake._next_scheduled_profile_summary = next_summary
+
+        await EventManager._remember_notification_context(
+            fake,
+            "large",
+            "route_new_york_city",
+            route_profile_for_location("large", EVENT_ROUTE_LOCATIONS[0]),
+        )
+        summary = await EventManager.get_next_notification_summary(fake, "large")
+
+        self.assertIn("Location: Portland, OR, USA", summary)
+        self.assertIn("Type: Surprise Large scale alliance mission type", summary)
+
     async def test_reverse_address_replaces_payload_address(self):
         session = FakeSession(FakeResponse("MissionChief Address"))
         payload = [
