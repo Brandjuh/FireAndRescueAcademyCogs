@@ -1,9 +1,11 @@
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
 
 from buildingmanager.buildingmanager import (
     ALLIANCE_BUILDING_TARGET_HOSPITAL_LEVEL,
+    BOARD_REPLY_MARKER,
     BUILDING_AUTOMATION_MAX_ACTIONS_PER_RUN,
     BUILDING_AUTOMATION_MAX_EXTENSION_STARTS_PER_RUN,
     BUILDING_AUTOMATION_DIRECT_SCRIPT,
@@ -15,6 +17,7 @@ from buildingmanager.buildingmanager import (
     BuildingAutomationResult,
     BuildingCreateResult,
     BuildingDatabase,
+    BuildingManager,
     BuildingRequest,
     LocationParser,
     MISSIONCHIEF_BUILDING_NAME_LIMIT,
@@ -26,14 +29,81 @@ from buildingmanager.buildingmanager import (
     building_create_result_needs_recovery,
     build_alliance_building_config,
     building_request_from_row,
+    build_building_board_guide_content,
     build_browser_diagnostics_report,
     extract_missionchief_building_id,
+    extract_building_board_request,
     find_created_alliance_building_id,
     find_created_alliance_building_id_from_list,
     find_created_alliance_building_id_from_logs,
     find_new_created_alliance_building_id_from_list,
+    parse_building_board_page,
     parse_alliance_funds_from_html,
 )
+
+
+BUILDING_BOARD_HTML = """
+<script>
+  user_id = 88649;
+</script>
+<ul class="pagination pagination">
+  <li><a href="/alliance_threads/6165?page=1">1</a></li>
+  <li class="active"><span>2</span></li>
+</ul>
+<div class="panel panel-default" id="post-on-page-1">
+  <div class="panel-body">
+    <div class="row">
+      <div class="col-md-1">
+        <strong><a href="/profile/123456">BoardUser</a></strong>
+        <br>
+        <span title="June 26, 2026 08:15">June 26, 2026 08:15</span>
+      </div>
+      <div class="col-md-11">
+        <p>Hospital: https://www.google.com/maps/place/Example+Hospital/@40.1,-73.9</p>
+      </div>
+    </div>
+  </div>
+  <div class="panel-footer">
+    <a href="/alliance_posts/200001/edit">Edit</a>
+  </div>
+</div>
+<form action="/alliance_posts?alliance_thread_id=6165" id="new_alliance_post" method="post">
+  <input name="authenticity_token" type="hidden" value="token-building-board" />
+  <textarea name="alliance_post[content]"></textarea>
+</form>
+"""
+
+
+class _Response:
+    def __init__(self, html, status=200, url="https://www.missionchief.com/test"):
+        self._html = html
+        self.status = status
+        self.url = url
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def text(self):
+        return self._html
+
+
+class _Session:
+    def __init__(self, html):
+        self.html = html
+        self.posts = []
+        self.get_urls = []
+
+    def get(self, url, **kwargs):
+        self.get_urls.append(url)
+        html = self.html.get(url, "") if isinstance(self.html, dict) else self.html
+        return _Response(html, url=url)
+
+    def post(self, url, **kwargs):
+        self.posts.append((url, kwargs))
+        return _Response("<html>ok</html>", url=url)
 
 
 class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
@@ -665,6 +735,108 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertIn("authenticity_token", report)
         self.assertIn("REDACTED", report)
         self.assertNotIn("secret-token", report)
+
+    def test_parse_building_board_page_extracts_post_and_reply_form(self):
+        page = parse_building_board_page(BUILDING_BOARD_HTML)
+
+        self.assertEqual(page.last_page, 2)
+        self.assertEqual(page.current_user_id, "88649")
+        self.assertEqual(page.reply_action, "/alliance_posts?alliance_thread_id=6165")
+        self.assertEqual(page.reply_token, "token-building-board")
+        self.assertEqual(len(page.posts), 1)
+        self.assertEqual(page.posts[0].post_id, 200001)
+        self.assertEqual(page.posts[0].author_id, "123456")
+        self.assertEqual(page.posts[0].author_name, "BoardUser")
+        self.assertIn("Example+Hospital", page.posts[0].content)
+
+    def test_extract_building_board_request_reads_type_and_google_maps_link(self):
+        spec, error = extract_building_board_request(
+            "Prison: https://maps.app.goo.gl/example"
+        )
+
+        self.assertIsNone(error)
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec.building_type, "Prison")
+        self.assertEqual(spec.location_input, "https://maps.app.goo.gl/example")
+
+    def test_extract_building_board_request_rejects_missing_type(self):
+        spec, error = extract_building_board_request("https://www.google.com/maps/place/Example")
+
+        self.assertIsNone(spec)
+        self.assertIn("No supported building type", error)
+
+    def test_building_board_guide_content_explains_format_and_cleanup(self):
+        content = build_building_board_guide_content(6165)
+
+        self.assertIn("[BM-GUIDE:overview]", content)
+        self.assertIn("Hospital: <Google Maps link>", content)
+        self.assertIn("Prison: <Google Maps link>", content)
+        self.assertIn("removed after 12 hours", content)
+        self.assertNotIn("This post is maintained automatically by the Fire & Rescue Academy bot", content)
+
+    def test_building_board_reply_with_id_returns_new_bot_reply_post_id(self):
+        manager = BuildingManager.__new__(BuildingManager)
+        reply_page_html = BUILDING_BOARD_HTML.replace(
+            "</form>",
+            """
+<div class="panel panel-default" id="post-on-page-2">
+  <div class="panel-body">
+    <div class="row">
+      <div class="col-md-1">
+        <strong><a href="/profile/88649">FireAndRescueAcademy</a></strong>
+        <br>
+        <span title="June 26, 2026 08:16">June 26, 2026 08:16</span>
+      </div>
+      <div class="col-md-11">
+        <p>[BM-REPLY]<br>Building request received for BoardUser.</p>
+      </div>
+    </div>
+  </div>
+  <div class="panel-footer">
+    <a href="/alliance_posts/200002/edit">Edit</a>
+  </div>
+</div>
+</form>
+""",
+        )
+        session = _Session(
+            {
+                "https://www.missionchief.com/alliance_threads/6165": BUILDING_BOARD_HTML,
+                "https://www.missionchief.com/alliance_threads/6165?page=2": reply_page_html,
+            }
+        )
+        page = parse_building_board_page(BUILDING_BOARD_HTML)
+
+        status, post_id = asyncio.run(
+            manager._post_building_board_reply_with_id(
+                session,
+                6165,
+                page,
+                f"{BOARD_REPLY_MARKER}\nBuilding request received for BoardUser.",
+            )
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(post_id, 200002)
+        self.assertEqual(session.posts[0][0], "https://www.missionchief.com/alliance_posts?alliance_thread_id=6165")
+        self.assertEqual(session.posts[0][1]["data"]["authenticity_token"], "token-building-board")
+
+    def test_delete_building_board_post_submits_delete_method_with_reply_token(self):
+        manager = BuildingManager.__new__(BuildingManager)
+        session = _Session(
+            {
+                "https://www.missionchief.com/alliance_threads/6165": BUILDING_BOARD_HTML,
+                "https://www.missionchief.com/alliance_threads/6165?page=2": BUILDING_BOARD_HTML,
+            }
+        )
+
+        deleted, reason = asyncio.run(manager._delete_board_post(session, 6165, 200001))
+
+        self.assertTrue(deleted)
+        self.assertEqual(reason, "deleted")
+        self.assertEqual(session.posts[-1][0], "https://www.missionchief.com/alliance_posts/200001")
+        self.assertEqual(session.posts[-1][1]["data"]["_method"], "delete")
+        self.assertEqual(session.posts[-1][1]["data"]["authenticity_token"], "token-building-board")
 
 
 if __name__ == "__main__":

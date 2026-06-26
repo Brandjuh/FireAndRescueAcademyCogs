@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import aiohttp
 import contextlib
+import hashlib
 import html as html_lib
+from html.parser import HTMLParser
 from io import BytesIO
 import json
 import logging
@@ -13,7 +15,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
 
 import discord
 from redbot.core import commands, Config
@@ -28,6 +30,16 @@ MISSIONCHIEF_NEW_BUILDING_URL = f"{BASE_URL}/buildings/new"
 MISSIONCHIEF_ALLIANCE_BUILDINGS_URL = f"{BASE_URL}/verband/gebauede"
 MISSIONCHIEF_ALLIANCE_FUNDS_URL = f"{BASE_URL}/verband/kasse"
 DEFAULT_REQUEST_PANEL_CHANNEL_ID = 1421627971831070730
+BOARD_THREAD_ID = 6165
+BOARD_POLL_SECONDS = 5 * 60
+BOARD_GUIDE_SYNC_SECONDS = 60 * 60
+BOARD_CLEANUP_SECONDS = 10 * 60
+BOARD_POST_DELETE_AFTER_SECONDS = 12 * 60 * 60
+BOARD_PROCESSED_POST_ID_LIMIT = 1000
+BOARD_PENDING_DELETE_LIMIT = 1000
+BOARD_GUIDE_MAX_SCAN_PAGES = 25
+BOARD_GUIDE_MARKER = "[BM-GUIDE:overview]"
+BOARD_REPLY_MARKER = "[BM-REPLY]"
 ALLIANCE_BUILDING_TYPE_IDS = {
     "Hospital": "2",
     "Prison": "10",
@@ -54,6 +66,26 @@ PLAYWRIGHT_SETUP_MESSAGE = (
     "`python -m playwright install chromium` in the same Python environment as Redbot."
 )
 REQUEST_PANEL_TITLE = "🏢 Building Request System"
+
+BOARD_BUILDING_TYPE_ALIASES = {
+    "Hospital": (
+        "hospital",
+        "medical center",
+        "medical centre",
+        "health center",
+        "health centre",
+        "clinic",
+        "ziekenhuis",
+    ),
+    "Prison": (
+        "prison",
+        "jail",
+        "detention",
+        "correctional",
+        "correctional facility",
+        "gevangenis",
+    ),
+}
 
 BUILDING_DIAGNOSTICS_SCRIPT = r"""
 () => {
@@ -1521,6 +1553,357 @@ async def safe_update(interaction: discord.Interaction, *, content=None, embed=N
                 await interaction.response.send_message(content or "Updated.", embed=embed, view=view, ephemeral=True)
         except Exception:
             pass
+
+
+@dataclass
+class BoardBuildingPost:
+    post_id: int
+    author_id: Optional[str]
+    author_name: str
+    created_at: str
+    content: str
+
+
+@dataclass
+class BoardPage:
+    posts: List[BoardBuildingPost]
+    last_page: int = 1
+    current_user_id: Optional[str] = None
+    reply_action: Optional[str] = None
+    reply_token: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class BoardBuildingRequestSpec:
+    building_type: str
+    location_input: str
+    matched_alias: str
+
+
+@dataclass
+class MissionChiefForm:
+    action: Optional[str]
+    method: str
+    fields: Dict[str, str]
+
+
+class BuildingBoardPageParser(HTMLParser):
+    """Parse MissionChief alliance board pages for building requests and reply form data."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.posts: List[BoardBuildingPost] = []
+        self.page_numbers: List[int] = []
+        self.current_user_id: Optional[str] = None
+        self.reply_action: Optional[str] = None
+        self.reply_token: Optional[str] = None
+        self._post: Optional[dict] = None
+        self._post_depth = 0
+        self._content_depth = 0
+        self._capture_author = False
+        self._capture_content = False
+        self._capture_page_number = False
+        self._capture_active_page = False
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]):
+        attr = {key: value for key, value in attrs}
+
+        if tag == "div" and str(attr.get("id") or "").startswith("post-on-page-"):
+            self._post = {
+                "post_id": None,
+                "author_id": None,
+                "author_name": "",
+                "created_at": "",
+                "content": [],
+            }
+            self._post_depth = 1
+            return
+
+        if self._post is not None and tag == "div":
+            self._post_depth += 1
+            classes = str(attr.get("class") or "")
+            if "col-md-11" in classes:
+                self._content_depth = self._post_depth
+                self._capture_content = True
+
+        if self._post is not None and tag == "a":
+            href = str(attr.get("href") or "")
+            profile_match = re.search(r"/profile/(\d+)", href)
+            if profile_match and not self._post.get("author_id"):
+                self._post["author_id"] = profile_match.group(1)
+                self._capture_author = True
+
+            post_match = re.search(r"/alliance_posts/(\d+)", href)
+            if post_match:
+                self._post["post_id"] = int(post_match.group(1))
+
+        if self._post is not None and tag == "span":
+            title = attr.get("title")
+            if title and not self._post.get("created_at"):
+                self._post["created_at"] = str(title)
+
+        if self._post is not None and self._capture_content and tag == "br":
+            self._post["content"].append("\n")
+
+        if tag == "a":
+            href = str(attr.get("href") or "")
+            page_match = re.search(r"[?&]page=(\d+)", href)
+            if page_match:
+                self.page_numbers.append(int(page_match.group(1)))
+            self._capture_page_number = bool(page_match)
+
+        if tag == "li" and "active" in str(attr.get("class") or ""):
+            self._capture_active_page = True
+
+        if tag == "form" and str(attr.get("id") or "") == "new_alliance_post":
+            self.reply_action = attr.get("action")
+
+        if tag == "input" and attr.get("name") == "authenticity_token":
+            token = attr.get("value")
+            if token:
+                self.reply_token = token
+
+    def handle_data(self, data: str):
+        if "user_id =" in data:
+            match = re.search(r"user_id\s*=\s*(\d+)", data)
+            if match:
+                self.current_user_id = match.group(1)
+
+        if self._post is not None and self._capture_author:
+            text = re.sub(r"\s+", " ", data).strip()
+            if text:
+                self._post["author_name"] = text
+
+        if self._post is not None and self._capture_content:
+            self._post["content"].append(data)
+
+        if self._capture_page_number:
+            try:
+                self.page_numbers.append(int(data.strip()))
+            except ValueError:
+                pass
+
+        if self._capture_active_page:
+            try:
+                self.page_numbers.append(int(data.strip()))
+            except ValueError:
+                pass
+
+    def handle_endtag(self, tag: str):
+        if self._capture_author and tag == "a":
+            self._capture_author = False
+
+        if self._capture_page_number and tag == "a":
+            self._capture_page_number = False
+
+        if self._capture_active_page and tag == "li":
+            self._capture_active_page = False
+
+        if self._post is not None and tag == "div":
+            if self._capture_content and self._post_depth == self._content_depth:
+                self._capture_content = False
+                self._content_depth = 0
+
+            self._post_depth -= 1
+            if self._post_depth <= 0:
+                self._finish_post()
+
+    def _finish_post(self) -> None:
+        if self._post is None:
+            return
+
+        post_id = self._post.get("post_id")
+        if post_id is None:
+            self._post = None
+            return
+
+        content = "".join(self._post.get("content") or [])
+        content = re.sub(r"\n\s*\n+", "\n", content)
+        content = re.sub(r"[ \t]+", " ", content).strip()
+        self.posts.append(
+            BoardBuildingPost(
+                post_id=int(post_id),
+                author_id=self._post.get("author_id"),
+                author_name=str(self._post.get("author_name") or "Unknown"),
+                created_at=str(self._post.get("created_at") or ""),
+                content=content,
+            )
+        )
+        self._post = None
+
+    def page(self) -> BoardPage:
+        return BoardPage(
+            posts=self.posts,
+            last_page=max(self.page_numbers or [1]),
+            current_user_id=self.current_user_id,
+            reply_action=self.reply_action,
+            reply_token=self.reply_token,
+        )
+
+
+def parse_building_board_page(html: str) -> BoardPage:
+    parser = BuildingBoardPageParser()
+    parser.feed(html or "")
+    return parser.page()
+
+
+class MissionChiefFormParser(HTMLParser):
+    """Small generic parser for MissionChief Rails forms."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.forms: List[MissionChiefForm] = []
+        self._form: Optional[dict] = None
+        self._textarea_name: Optional[str] = None
+        self._textarea_text: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]):
+        attr = {key: value for key, value in attrs}
+        if tag == "form":
+            self._form = {
+                "action": attr.get("action"),
+                "method": str(attr.get("method") or "get").lower(),
+                "fields": {},
+            }
+            return
+
+        if self._form is None:
+            return
+
+        if tag == "input":
+            name = attr.get("name")
+            if name:
+                self._form["fields"][name] = attr.get("value") or ""
+        elif tag == "textarea":
+            name = attr.get("name")
+            if name:
+                self._textarea_name = name
+                self._textarea_text = []
+        elif tag == "select":
+            name = attr.get("name")
+            if name and name not in self._form["fields"]:
+                self._form["fields"][name] = ""
+
+    def handle_data(self, data: str):
+        if self._form is not None and self._textarea_name:
+            self._textarea_text.append(data)
+
+    def handle_endtag(self, tag: str):
+        if self._form is None:
+            return
+        if tag == "textarea" and self._textarea_name:
+            self._form["fields"][self._textarea_name] = "".join(self._textarea_text)
+            self._textarea_name = None
+            self._textarea_text = []
+        elif tag == "form":
+            self.forms.append(
+                MissionChiefForm(
+                    action=self._form.get("action"),
+                    method=str(self._form.get("method") or "get").lower(),
+                    fields=dict(self._form.get("fields") or {}),
+                )
+            )
+            self._form = None
+
+
+def parse_missionchief_forms(html: str) -> List[MissionChiefForm]:
+    parser = MissionChiefFormParser()
+    parser.feed(html or "")
+    return parser.forms
+
+
+def _is_supported_board_maps_url(value: str) -> bool:
+    try:
+        parsed = urlparse(value.strip())
+    except Exception:
+        return False
+    host = parsed.netloc.lower()
+    return (
+        "google." in host
+        or host in {"maps.app.goo.gl", "goo.gl"}
+        or host.endswith(".goo.gl")
+    )
+
+
+def _extract_board_maps_url(text: str) -> Optional[str]:
+    for match in re.finditer(r"https?://[^\s<>\]\)\"']+", text or "", flags=re.IGNORECASE):
+        url = match.group(0).rstrip(".,;")
+        if _is_supported_board_maps_url(url):
+            return url
+    return None
+
+
+def _match_board_building_type(text: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    matches: List[Tuple[str, str]] = []
+    searchable = f" {html_lib.unescape(text or '').casefold()} "
+    for building_type, aliases in BOARD_BUILDING_TYPE_ALIASES.items():
+        for alias in aliases:
+            escaped = re.escape(alias.casefold()).replace(r"\ ", r"\s+")
+            if re.search(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])", searchable):
+                matches.append((building_type, alias))
+                break
+
+    unique_types = list(dict.fromkeys(building_type for building_type, _alias in matches))
+    if len(unique_types) > 1:
+        return None, None, "The request mentions both Hospital and Prison. Please submit one building per post."
+    if not matches:
+        return None, None, "No supported building type was found. Start with `Hospital:` or `Prison:`."
+    return matches[0][0], matches[0][1], None
+
+
+def extract_building_board_request(text: str) -> Tuple[Optional[BoardBuildingRequestSpec], Optional[str]]:
+    """Extract one BuildingManager board request from a MissionChief post."""
+    cleaned = html_lib.unescape(str(text or "")).strip()
+    if not cleaned:
+        return None, "The post is empty."
+
+    building_type, alias, error = _match_board_building_type(cleaned)
+    if error:
+        return None, error
+
+    maps_url = _extract_board_maps_url(cleaned)
+    if not maps_url:
+        return None, "No supported Google Maps link was found. Paste a Google Maps place link or maps.app.goo.gl link."
+
+    return BoardBuildingRequestSpec(
+        building_type=str(building_type),
+        location_input=maps_url,
+        matched_alias=str(alias or building_type),
+    ), None
+
+
+def build_building_board_guide_content(thread_id: int = BOARD_THREAD_ID) -> str:
+    """Build the maintained MissionChief board guide post."""
+    return "\n".join(
+        [
+            BOARD_GUIDE_MARKER,
+            "[b]Building Request Guide[/b]",
+            "",
+            "This post is maintained automatically by the Fire & Rescue Academy.",
+            "",
+            "[b]Request in this topic[/b]",
+            f"Thread: https://www.missionchief.com/alliance_threads/{int(thread_id)}",
+            "",
+            "[b]What can be requested[/b]",
+            "- Hospital",
+            "- Prison",
+            "",
+            "[b]How to request[/b]",
+            "- Create a new post in this topic.",
+            "- Use one of the exact formats below.",
+            "- You do not need to type a building name. The name is detected from Google Maps.",
+            "- Requests are reviewed by admins before they are built.",
+            "- Your request post and the Fire & Rescue Academy reply are removed after 12 hours.",
+            "",
+            "[b]Formats[/b]",
+            "Hospital: <Google Maps link>",
+            "Prison: <Google Maps link>",
+            "",
+            "[b]Examples[/b]",
+            "Hospital: https://www.google.com/maps/place/Example+Hospital/@40.0,-73.0",
+            "Prison: https://maps.app.goo.gl/example",
+        ]
+    )
 
 # ---------- Location Parser ----------
 
@@ -3175,7 +3558,7 @@ class AdminDecisionView(discord.ui.View):
         if create_result.ok:
             await self._delete_action_required_message(interaction)
 
-        user = guild.get_member(self.requester_id) if guild else None
+        user = guild.get_member(self.requester_id) if guild and self.requester_id else None
         emoji_map = {"Hospital": "🏥", "Prison": "🔒"}
         emoji = emoji_map.get(self.req.building_type, "🏢")
         
@@ -3202,7 +3585,7 @@ class AdminDecisionView(discord.ui.View):
                 color=discord.Color.green() if create_result.ok else discord.Color.orange(),
                 timestamp=datetime.now(timezone.utc),
             )
-            requester = f"<@{self.requester_id}>"
+            requester = self.cog._requester_label(guild, self.requester_id, self.req.username)
             emb.add_field(name="Requester", value=requester, inline=False)
             emb.add_field(
                 name="Building",
@@ -3315,7 +3698,7 @@ class DenialReasonSelect(discord.ui.Select):
             denial_reason=reason
         )
 
-        user = guild.get_member(self.requester_id)
+        user = guild.get_member(self.requester_id) if self.requester_id else None
         text = (
             f"❌ Your building request has been **DENIED**.\n\n"
             f"**Building**: {self.req.building_type} - {self.req.building_name}\n"
@@ -3334,7 +3717,7 @@ class DenialReasonSelect(discord.ui.Select):
                 color=discord.Color.red(),
                 timestamp=datetime.now(timezone.utc),
             )
-            requester = f"<@{self.requester_id}>"
+            requester = self.cog._requester_label(guild, self.requester_id, self.req.username)
             emb.add_field(name="Requester", value=requester, inline=False)
             emb.add_field(name="Building", value=f"{self.req.building_type} - {self.req.building_name}", inline=False)
             emb.add_field(name="Reason", value=reason, inline=False)
@@ -3387,7 +3770,7 @@ class CustomDenialModal(discord.ui.Modal, title="Custom Denial Reason"):
             denial_reason=reason_text
         )
 
-        user = guild.get_member(self.requester_id)
+        user = guild.get_member(self.requester_id) if self.requester_id else None
         text = (
             f"❌ Your building request has been **DENIED**.\n\n"
             f"**Building**: {self.req.building_type} - {self.req.building_name}\n"
@@ -3406,7 +3789,7 @@ class CustomDenialModal(discord.ui.Modal, title="Custom Denial Reason"):
                 color=discord.Color.red(),
                 timestamp=datetime.now(timezone.utc),
             )
-            requester = f"<@{self.requester_id}>"
+            requester = self.cog._requester_label(guild, self.requester_id, self.req.username)
             emb.add_field(name="Requester", value=requester, inline=False)
             emb.add_field(name="Building", value=f"{self.req.building_type} - {self.req.building_name}", inline=False)
             emb.add_field(name="Reason", value=reason_text, inline=False)
@@ -3436,10 +3819,20 @@ class BuildingManager(commands.Cog):
             "admin_role_id": None,
             "button_message": None,
             "min_alliance_funds": ALLIANCE_BUILDING_MIN_FUNDS,
+            "board_poll_enabled": True,
+            "board_thread_id": BOARD_THREAD_ID,
+            "board_last_seen_post_id": None,
+            "board_processed_post_ids": [],
+            "board_pending_deletions": [],
+            "board_guide_enabled": True,
+            "board_guide_thread_id": None,
+            "board_guide_post_id": None,
+            "board_guide_content_hash": None,
         }
         default_global = {
             "google_api_key": None,
             "default_request_panel_message_id": None,
+            "board_thread_states": {},
         }
         self.config.register_guild(**default_guild)
         self.config.register_global(**default_global)
@@ -3452,12 +3845,16 @@ class BuildingManager(commands.Cog):
         self._panel_task = None
         self._automation_task = None
         self._creation_queue_task = None
+        self._board_poll_task = None
+        self._board_guide_task = None
+        self._board_cleanup_task = None
         self._browser_lock = asyncio.Lock()
         self._persistent_view_registered = False
         self._register_persistent_views()
         self._start_panel_task()
         self._start_automation_task()
         self._start_creation_queue_task()
+        self._start_board_tasks()
 
     def cog_unload(self):  # <-- Let op: 4 spaties inspringing, zelfde niveau als __init__
         if getattr(self, "_panel_task", None):
@@ -3466,6 +3863,12 @@ class BuildingManager(commands.Cog):
             self._automation_task.cancel()
         if getattr(self, "_creation_queue_task", None):
             self._creation_queue_task.cancel()
+        if getattr(self, "_board_poll_task", None):
+            self._board_poll_task.cancel()
+        if getattr(self, "_board_guide_task", None):
+            self._board_guide_task.cancel()
+        if getattr(self, "_board_cleanup_task", None):
+            self._board_cleanup_task.cancel()
 
     async def cog_load(self):
         """Register persistent views and ensure the default request panel exists."""
@@ -3473,6 +3876,7 @@ class BuildingManager(commands.Cog):
         self._start_panel_task()
         self._start_automation_task()
         self._start_creation_queue_task()
+        self._start_board_tasks()
 
     def _register_persistent_views(self):
         """Register persistent component views once per cog instance."""
@@ -3499,6 +3903,15 @@ class BuildingManager(commands.Cog):
             return
         self._creation_queue_task = self.bot.loop.create_task(self._building_creation_queue_loop())
 
+    def _start_board_tasks(self):
+        """Start MissionChief board polling, guide sync, and cleanup workers."""
+        if not self._board_poll_task or self._board_poll_task.done():
+            self._board_poll_task = self.bot.loop.create_task(self._board_poll_loop())
+        if not self._board_guide_task or self._board_guide_task.done():
+            self._board_guide_task = self.bot.loop.create_task(self._board_guide_loop())
+        if not self._board_cleanup_task or self._board_cleanup_task.done():
+            self._board_cleanup_task = self.bot.loop.create_task(self._board_cleanup_loop())
+
     def _cookie_manager(self):
         """Return the CookieManager cog when it exposes a MissionChief session."""
         cookie_manager = self.bot.get_cog("CookieManager")
@@ -3515,6 +3928,788 @@ class BuildingManager(commands.Cog):
         if not session:
             raise RuntimeError("CookieManager did not return a session.")
         return session
+
+    def _requester_label(self, guild: Optional[discord.Guild], user_id: Optional[int], username: str) -> str:
+        """Return a human requester label for Discord and MissionChief board users."""
+        try:
+            numeric_id = int(user_id or 0)
+        except (TypeError, ValueError):
+            numeric_id = 0
+        if numeric_id > 0:
+            member = guild.get_member(numeric_id) if guild else None
+            if member:
+                return f"{member.mention} ({member.id})"
+            return f"<@{numeric_id}> ({numeric_id})"
+        return f"{username or 'Unknown'} (MissionChief board)"
+
+    async def _resolve_channel(self, guild: discord.Guild, channel_id: Optional[int]) -> Optional[discord.abc.Messageable]:
+        """Resolve a configured Discord channel from cache or API."""
+        if not channel_id:
+            return None
+        try:
+            numeric_id = int(channel_id)
+        except (TypeError, ValueError):
+            return None
+        channel = guild.get_channel(numeric_id)
+        if channel:
+            return channel
+        fetch_channel = getattr(self.bot, "fetch_channel", None)
+        if fetch_channel:
+            with contextlib.suppress(Exception):
+                return await fetch_channel(numeric_id)
+        return None
+
+    def _add_request_location_fields(
+        self,
+        embed: discord.Embed,
+        req: BuildingRequest,
+        *,
+        warning_title: str = "Facility Check Warning",
+    ) -> None:
+        """Add normalized location fields for admin-facing request embeds."""
+        if req.coordinates:
+            embed.add_field(name="Coordinates", value=req.coordinates, inline=True)
+        else:
+            embed.add_field(name="Coordinates", value="Not detected", inline=True)
+
+        region_text = ", ".join(part for part in (req.region, req.country) if part)
+        if region_text:
+            embed.add_field(name="Country / Region", value=_truncate_discord_text(region_text, 200), inline=True)
+        if req.address:
+            embed.add_field(name="Address", value=_truncate_discord_text(req.address, 300), inline=False)
+        if req.maps_url:
+            embed.add_field(name="Maps URL", value=f"[Open in Google Maps]({req.maps_url})", inline=False)
+        if req.facility_warning:
+            embed.add_field(name=warning_title, value=f"Warning: {req.facility_warning}", inline=False)
+
+    async def _submit_building_request_to_admins(
+        self,
+        guild: discord.Guild,
+        req: BuildingRequest,
+        *,
+        source: str,
+        board_post: Optional[BoardBuildingPost] = None,
+    ) -> int:
+        """Store a building request and send it to the configured admin channel."""
+        conf = await self.config.guild(guild).all()
+        admin_channel = await self._resolve_channel(guild, conf.get("admin_channel_id"))
+        log_channel = await self._resolve_channel(guild, conf.get("log_channel_id"))
+        if not admin_channel or not log_channel:
+            raise RuntimeError("Admin and log channels must be configured before board requests can be processed.")
+
+        request_id = self.db.add_request(
+            guild_id=guild.id,
+            user_id=int(req.user_id or 0),
+            username=req.username,
+            building_type=req.building_type,
+            building_name=req.building_name,
+            location_input=req.location_input,
+            coordinates=req.coordinates,
+            address=req.address,
+            notes=req.notes,
+        )
+        req.request_id = request_id
+
+        requester = self._requester_label(guild, req.user_id, req.username)
+
+        embed = discord.Embed(
+            title="New Building Request",
+            color=discord.Color.yellow(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="Requester", value=requester, inline=False)
+        embed.add_field(name="Source", value=source, inline=True)
+        if board_post:
+            embed.add_field(name="Board Post", value=f"#{board_post.post_id}", inline=True)
+            if board_post.created_at:
+                embed.add_field(name="Posted at", value=board_post.created_at, inline=True)
+        embed.add_field(name="Building Type", value=req.building_type, inline=True)
+        embed.add_field(name="Building Name", value=req.building_name, inline=True)
+        embed.add_field(name="Location Input", value=req.location_input[:100], inline=False)
+        self._add_request_location_fields(embed)
+        if req.notes:
+            embed.add_field(name="Notes", value=req.notes[:300], inline=False)
+        embed.set_footer(text=f"Request ID: {request_id}")
+
+        await admin_channel.send(embed=embed, view=AdminDecisionView(self, requester_id=int(req.user_id or 0), req=req))
+
+        log_embed = discord.Embed(
+            title="Building request submitted",
+            color=discord.Color.green(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        log_embed.add_field(name="Requester", value=requester, inline=False)
+        log_embed.add_field(name="Source", value=source, inline=True)
+        log_embed.add_field(name="Building", value=f"{req.building_type} - {req.building_name}", inline=False)
+        if req.coordinates:
+            log_embed.add_field(name="Coordinates", value=req.coordinates, inline=True)
+        if req.maps_url:
+            log_embed.add_field(name="Maps", value=f"[Open]({req.maps_url})", inline=True)
+        log_embed.add_field(name="Request ID", value=str(request_id), inline=True)
+        await log_channel.send(embed=log_embed)
+        return int(request_id)
+
+    async def _board_poll_loop(self) -> None:
+        """Poll configured MissionChief board topics for new building requests."""
+        await self.bot.wait_until_ready()
+        while True:
+            try:
+                poll_targets: Dict[int, Tuple[discord.Guild, dict]] = {}
+                for guild in self.bot.guilds:
+                    conf = await self.config.guild(guild).all()
+                    if not conf.get("board_poll_enabled"):
+                        continue
+                    thread_id = int(conf.get("board_thread_id") or BOARD_THREAD_ID)
+                    poll_targets.setdefault(thread_id, (guild, conf))
+
+                for guild, conf in poll_targets.values():
+                    await self._poll_building_board_for_guild(guild, conf)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.exception("BuildingManager board poll loop error: %s", exc)
+            await asyncio.sleep(BOARD_POLL_SECONDS)
+
+    async def _poll_building_board_for_guild(self, guild: discord.Guild, conf: dict) -> None:
+        cookie_manager = self._cookie_manager()
+        if not cookie_manager:
+            log.info("Building board poll skipped: CookieManager is not loaded")
+            return
+
+        thread_id = int(conf.get("board_thread_id") or BOARD_THREAD_ID)
+        session = await cookie_manager.get_session()
+        page, status = await self._fetch_building_board_latest_page(session, thread_id)
+        if status is not None and int(status) >= 400:
+            log.warning("Building board poll failed: thread %s returned HTTP %s", thread_id, status)
+            return
+        if not page.posts:
+            return
+
+        latest_post_id = max(post.post_id for post in page.posts)
+        thread_state = await self._get_board_thread_state(thread_id)
+        last_seen_raw = thread_state.get("last_seen_post_id") or conf.get("board_last_seen_post_id")
+        if not last_seen_raw:
+            await self._set_board_thread_last_seen(thread_id, latest_post_id)
+            await self.config.guild(guild).board_last_seen_post_id.set(latest_post_id)
+            log.info("Building board baseline set to post %s for guild %s", latest_post_id, guild.id)
+            return
+
+        try:
+            last_seen = int(last_seen_raw)
+        except (TypeError, ValueError):
+            await self._set_board_thread_last_seen(thread_id, latest_post_id)
+            await self.config.guild(guild).board_last_seen_post_id.set(latest_post_id)
+            return
+
+        guild_processed_post_ids = self._normalize_board_post_ids(conf.get("board_processed_post_ids") or [])
+        processed_post_ids = self._normalize_board_post_ids(thread_state.get("processed_post_ids") or [])
+        if guild_processed_post_ids:
+            await self._merge_board_thread_processed_ids(thread_id, guild_processed_post_ids)
+            processed_post_ids = list(dict.fromkeys([*processed_post_ids, *guild_processed_post_ids]))
+
+        new_posts = [
+            post
+            for post in sorted(page.posts, key=lambda item: item.post_id)
+            if post.post_id > last_seen
+            and post.post_id not in processed_post_ids
+            and post.author_id != page.current_user_id
+            and not self._is_board_system_post(post)
+        ]
+
+        for post in new_posts:
+            if not await self._mark_board_post_processing(thread_id, post.post_id):
+                continue
+            try:
+                await self._handle_building_board_post(guild, session, thread_id, page, post)
+            except Exception as exc:
+                log.exception("Building board post %s processing failed: %s", post.post_id, exc)
+                await self._send_board_processing_error_log(guild, conf, post, exc)
+                reply = self._build_building_board_error_reply(
+                    post,
+                    "An internal error occurred while processing this request. Staff has been notified.",
+                )
+                with contextlib.suppress(Exception):
+                    _status, reply_post_id = await self._post_building_board_reply_with_id(
+                        session,
+                        thread_id,
+                        page,
+                        reply,
+                    )
+                    await self._schedule_board_post_deletion(guild, thread_id, post.post_id, "failed request")
+                    if reply_post_id:
+                        await self._schedule_board_post_deletion(guild, thread_id, reply_post_id, "failure reply")
+
+        if latest_post_id > last_seen:
+            await self._set_board_thread_last_seen(thread_id, latest_post_id)
+            await self.config.guild(guild).board_last_seen_post_id.set(latest_post_id)
+
+    async def _fetch_building_board_latest_page(self, session, thread_id: int) -> Tuple[BoardPage, Optional[int]]:
+        base_url = f"{BASE_URL}/alliance_threads/{int(thread_id)}"
+        async with session.get(base_url, allow_redirects=True) as response:
+            status = getattr(response, "status", None)
+            html = await response.text()
+        page = parse_building_board_page(html)
+        if status is not None and int(status) >= 400:
+            return page, status
+
+        if page.last_page > 1:
+            last_url = f"{base_url}?page={page.last_page}"
+            async with session.get(last_url, allow_redirects=True) as response:
+                status = getattr(response, "status", None)
+                html = await response.text()
+            page = parse_building_board_page(html)
+        return page, status
+
+    def _normalize_board_post_ids(self, values) -> List[int]:
+        post_ids: List[int] = []
+        for value in values or []:
+            try:
+                post_ids.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        return post_ids
+
+    async def _get_board_thread_state(self, thread_id: int) -> dict:
+        states = await self.config.board_thread_states()
+        return dict((states or {}).get(str(int(thread_id))) or {})
+
+    async def _merge_board_thread_processed_ids(self, thread_id: int, post_ids: List[int]) -> None:
+        if not post_ids:
+            return
+        key = str(int(thread_id))
+        async with self.config.board_thread_states() as states:
+            state = dict(states.get(key) or {})
+            current = self._normalize_board_post_ids(state.get("processed_post_ids") or [])
+            merged = list(dict.fromkeys([*current, *post_ids]))
+            del merged[:-BOARD_PROCESSED_POST_ID_LIMIT]
+            state["processed_post_ids"] = merged
+            states[key] = state
+
+    async def _set_board_thread_last_seen(self, thread_id: int, post_id: int) -> None:
+        key = str(int(thread_id))
+        async with self.config.board_thread_states() as states:
+            state = dict(states.get(key) or {})
+            state["last_seen_post_id"] = int(post_id)
+            states[key] = state
+
+    async def _mark_board_post_processing(self, thread_id: int, post_id: int) -> bool:
+        key = str(int(thread_id))
+        post_id = int(post_id)
+        async with self.config.board_thread_states() as states:
+            state = dict(states.get(key) or {})
+            current = self._normalize_board_post_ids(state.get("processed_post_ids") or [])
+            if post_id in current:
+                return False
+            current.append(post_id)
+            del current[:-BOARD_PROCESSED_POST_ID_LIMIT]
+            state["processed_post_ids"] = current
+            states[key] = state
+        return True
+
+    async def _handle_building_board_post(
+        self,
+        guild: discord.Guild,
+        session,
+        thread_id: int,
+        page: BoardPage,
+        post: BoardBuildingPost,
+    ) -> None:
+        if self._is_board_system_post(post):
+            return
+
+        spec, error = extract_building_board_request(post.content)
+        if error or not spec:
+            reply = self._build_building_board_error_reply(post, error or "Could not read this request.")
+            _status, reply_post_id = await self._post_building_board_reply_with_id(session, thread_id, page, reply)
+            await self._schedule_board_post_deletion(guild, thread_id, post.post_id, "unrecognized request")
+            if reply_post_id:
+                await self._schedule_board_post_deletion(guild, thread_id, reply_post_id, "unrecognized reply")
+            await self._send_board_request_error_log(guild, post, error or "Could not read this request.")
+            return
+
+        location_details = await LocationParser.resolve_location(spec.location_input)
+        if not location_details.coordinates:
+            reason = (
+                "The location could not be resolved to GPS coordinates. "
+                "Please use a Google Maps place link with a visible marker."
+            )
+            reply = self._build_building_board_error_reply(post, reason)
+            _status, reply_post_id = await self._post_building_board_reply_with_id(session, thread_id, page, reply)
+            await self._schedule_board_post_deletion(guild, thread_id, post.post_id, "unresolved request")
+            if reply_post_id:
+                await self._schedule_board_post_deletion(guild, thread_id, reply_post_id, "unresolved reply")
+            await self._send_board_request_error_log(guild, post, reason)
+            return
+
+        building_name = LocationParser.derive_building_name(spec.building_type, location_details)
+        location_details.facility_warning = LocationParser.facility_warning(
+            spec.building_type,
+            building_name,
+            location_details,
+        )
+        req = BuildingRequest(
+            user_id=0,
+            username=post.author_name,
+            building_type=spec.building_type,
+            building_name=building_name,
+            location_input=spec.location_input,
+            coordinates=location_details.coordinates,
+            address=location_details.address,
+            country=location_details.country,
+            region=location_details.region,
+            maps_url=location_details.maps_url,
+            facility_warning=location_details.facility_warning,
+            notes=f"MissionChief board post #{post.post_id}",
+        )
+        request_id = await self._submit_building_request_to_admins(
+            guild,
+            req,
+            source="MissionChief board",
+            board_post=post,
+        )
+        reply = self._build_building_board_success_reply(post, req, request_id)
+        reply_status, reply_post_id = await self._post_building_board_reply_with_id(session, thread_id, page, reply)
+        if reply_status is None or int(reply_status) >= 400:
+            log.warning("Building board reply for post %s returned HTTP %s", post.post_id, reply_status)
+        await self._schedule_board_post_deletion(guild, thread_id, post.post_id, "processed request")
+        if reply_post_id:
+            await self._schedule_board_post_deletion(guild, thread_id, reply_post_id, "processed reply")
+
+    def _build_building_board_success_reply(
+        self,
+        post: BoardBuildingPost,
+        req: BuildingRequest,
+        request_id: int,
+    ) -> str:
+        lines = [
+            BOARD_REPLY_MARKER,
+            f"Building request received for {post.author_name}.",
+            "",
+            f"Request ID: {int(request_id)}",
+            f"Type: {req.building_type}",
+            f"Detected name: {req.building_name}",
+        ]
+        if req.coordinates:
+            lines.append(f"Coordinates: {req.coordinates}")
+        if req.facility_warning:
+            lines.extend(["", f"Admin review note: {req.facility_warning}"])
+        lines.extend(["", "Admins will review this request."])
+        return "\n".join(lines)
+
+    def _build_building_board_error_reply(self, post: BoardBuildingPost, reason: str) -> str:
+        return "\n".join(
+            [
+                BOARD_REPLY_MARKER,
+                f"Building request could not be processed for {post.author_name}.",
+                "",
+                f"Reason: {reason}",
+                "",
+                "Use one of these formats:",
+                "Hospital: <Google Maps link>",
+                "Prison: <Google Maps link>",
+            ]
+        )
+
+    async def _send_board_request_error_log(self, guild: discord.Guild, post: BoardBuildingPost, reason: str) -> None:
+        conf = await self.config.guild(guild).all()
+        log_channel = await self._resolve_channel(guild, conf.get("log_channel_id"))
+        if not log_channel:
+            return
+        embed = discord.Embed(
+            title="MissionChief board building request rejected",
+            color=discord.Color.orange(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="Requester", value=f"{post.author_name} ({post.author_id or 'unknown ID'})", inline=False)
+        embed.add_field(name="Board post", value=f"#{post.post_id}", inline=True)
+        if post.created_at:
+            embed.add_field(name="Posted at", value=post.created_at, inline=True)
+        embed.add_field(name="Reason", value=_truncate_discord_text(reason), inline=False)
+        embed.add_field(name="Original text", value=_truncate_discord_text(post.content or "-", 1024), inline=False)
+        with contextlib.suppress(Exception):
+            await log_channel.send(embed=embed)
+
+    async def _send_board_processing_error_log(
+        self,
+        guild: discord.Guild,
+        conf: dict,
+        post: BoardBuildingPost,
+        error: Exception,
+    ) -> None:
+        log_channel = await self._resolve_channel(guild, conf.get("log_channel_id"))
+        if not log_channel:
+            return
+        embed = discord.Embed(
+            title="MissionChief board building request failed",
+            color=discord.Color.red(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="Requester", value=f"{post.author_name} ({post.author_id or 'unknown ID'})", inline=False)
+        embed.add_field(name="Board post", value=f"#{post.post_id}", inline=True)
+        if post.created_at:
+            embed.add_field(name="Posted at", value=post.created_at, inline=True)
+        embed.add_field(name="Error", value=_truncate_discord_text(str(error)), inline=False)
+        embed.add_field(name="Original text", value=_truncate_discord_text(post.content or "-", 1024), inline=False)
+        with contextlib.suppress(Exception):
+            await log_channel.send(embed=embed)
+
+    async def _post_building_board_reply(
+        self,
+        session,
+        thread_id: int,
+        page: BoardPage,
+        content: str,
+    ) -> Optional[int]:
+        action = page.reply_action or f"/alliance_posts?alliance_thread_id={int(thread_id)}"
+        post_url = urljoin(BASE_URL, action)
+        payload = {
+            "utf8": "\u2713",
+            "alliance_post[content]": content,
+            "commit": "Save",
+        }
+        if page.reply_token:
+            payload["authenticity_token"] = page.reply_token
+
+        async with session.post(post_url, data=payload, allow_redirects=True) as response:
+            status = getattr(response, "status", None)
+            await response.text()
+        return status
+
+    async def _post_building_board_reply_with_id(
+        self,
+        session,
+        thread_id: int,
+        page: BoardPage,
+        content: str,
+    ) -> Tuple[Optional[int], Optional[int]]:
+        status = await self._post_building_board_reply(session, thread_id, page, content)
+        if status is None or int(status) >= 400:
+            return status, None
+
+        refreshed_page, refreshed_status = await self._fetch_building_board_latest_page(session, thread_id)
+        if refreshed_status is not None and int(refreshed_status) >= 400:
+            return status, None
+
+        for post in sorted(refreshed_page.posts, key=lambda item: item.post_id, reverse=True):
+            if BOARD_REPLY_MARKER not in str(post.content or ""):
+                continue
+            if refreshed_page.current_user_id and post.author_id and post.author_id != refreshed_page.current_user_id:
+                continue
+            return status, int(post.post_id)
+        return status, None
+
+    async def _schedule_board_post_deletion(
+        self,
+        guild: discord.Guild,
+        thread_id: int,
+        post_id: int,
+        reason: str,
+    ) -> None:
+        due_ts = ts() + BOARD_POST_DELETE_AFTER_SECONDS
+        post_id = int(post_id)
+        thread_id = int(thread_id)
+        async with self.config.guild(guild).board_pending_deletions() as pending:
+            normalized = []
+            exists = False
+            for item in pending or []:
+                try:
+                    item_thread_id = int(item.get("thread_id"))
+                    item_post_id = int(item.get("post_id"))
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                if item_thread_id == thread_id and item_post_id == post_id:
+                    exists = True
+                    item = dict(item)
+                    item["due_ts"] = min(int(item.get("due_ts") or due_ts), due_ts)
+                    item["reason"] = str(item.get("reason") or reason)
+                normalized.append(item)
+
+            if not exists:
+                normalized.append(
+                    {
+                        "thread_id": thread_id,
+                        "post_id": post_id,
+                        "due_ts": due_ts,
+                        "reason": str(reason),
+                        "attempts": 0,
+                    }
+                )
+
+            normalized = sorted(normalized, key=lambda item: int(item.get("due_ts") or 0))
+            del normalized[:-BOARD_PENDING_DELETE_LIMIT]
+            pending.clear()
+            pending.extend(normalized)
+
+    async def _board_cleanup_loop(self) -> None:
+        await self.bot.wait_until_ready()
+        while True:
+            try:
+                for guild in self.bot.guilds:
+                    await self._cleanup_board_deletions_for_guild(guild)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.exception("BuildingManager board cleanup loop error: %s", exc)
+            await asyncio.sleep(BOARD_CLEANUP_SECONDS)
+
+    async def _cleanup_board_deletions_for_guild(self, guild: discord.Guild) -> None:
+        conf = await self.config.guild(guild).all()
+        pending = list(conf.get("board_pending_deletions") or [])
+        if not pending:
+            return
+
+        now_ts = ts()
+        due_items = []
+        remaining = []
+        for item in pending:
+            try:
+                due_ts = int(item.get("due_ts") or 0)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if due_ts <= now_ts:
+                due_items.append(dict(item))
+            else:
+                remaining.append(dict(item))
+
+        if not due_items:
+            return
+
+        cookie_manager = self._cookie_manager()
+        if not cookie_manager:
+            log.info("Building board cleanup skipped: CookieManager is not loaded")
+            return
+
+        session = await cookie_manager.get_session()
+        for item in due_items:
+            try:
+                thread_id = int(item.get("thread_id"))
+                post_id = int(item.get("post_id"))
+            except (TypeError, ValueError):
+                continue
+
+            deleted, reason = await self._delete_board_post(session, thread_id, post_id)
+            if deleted:
+                await asyncio.sleep(1)
+                continue
+
+            attempts = int(item.get("attempts") or 0) + 1
+            if attempts < 6:
+                item["attempts"] = attempts
+                item["last_error"] = reason[:200]
+                item["due_ts"] = now_ts + min(BOARD_CLEANUP_SECONDS * attempts, 60 * 60)
+                remaining.append(item)
+            else:
+                log.warning("Dropping building board post cleanup for %s after %s attempts: %s", post_id, attempts, reason)
+
+        remaining = sorted(remaining, key=lambda item: int(item.get("due_ts") or 0))
+        del remaining[:-BOARD_PENDING_DELETE_LIMIT]
+        await self.config.guild(guild).board_pending_deletions.set(remaining)
+
+    async def _delete_board_post(self, session, thread_id: int, post_id: int) -> Tuple[bool, str]:
+        page, status = await self._fetch_building_board_latest_page(session, int(thread_id))
+        if status is not None and int(status) >= 400:
+            return False, f"thread returned HTTP {status}"
+
+        payload = {
+            "utf8": "\u2713",
+            "_method": "delete",
+            "commit": "Delete",
+        }
+        if page.reply_token:
+            payload["authenticity_token"] = page.reply_token
+
+        url = f"{BASE_URL}/alliance_posts/{int(post_id)}"
+        async with session.post(url, data=payload, allow_redirects=True) as response:
+            delete_status = getattr(response, "status", None)
+            await response.text()
+        if delete_status is None:
+            return False, "delete returned no HTTP status"
+        if int(delete_status) in {404, 410}:
+            return True, "already deleted"
+        if int(delete_status) >= 400:
+            return False, f"delete returned HTTP {delete_status}"
+        return True, "deleted"
+
+    def _board_guide_hash(self, content: str) -> str:
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    def _is_board_guide_post(self, post: BoardBuildingPost) -> bool:
+        return BOARD_GUIDE_MARKER in str(post.content or "")
+
+    def _is_board_system_post(self, post: BoardBuildingPost) -> bool:
+        text = str(post.content or "").strip()
+        if self._is_board_guide_post(post):
+            return True
+        if BOARD_REPLY_MARKER in text:
+            return True
+        lowered = text.casefold()
+        return (
+            lowered.startswith("building request received for ")
+            or lowered.startswith("building request could not be processed for ")
+        )
+
+    def _set_form_value(
+        self,
+        payload: Dict[str, str],
+        candidates: Tuple[str, ...],
+        value: str,
+        fallback_name: str,
+    ) -> None:
+        for name in list(payload.keys()):
+            lowered = name.casefold()
+            if any(candidate in lowered for candidate in candidates):
+                payload[name] = value
+                return
+        payload[fallback_name] = value
+
+    def _select_post_edit_form(self, forms: List[MissionChiefForm], post_id: int) -> Optional[MissionChiefForm]:
+        wanted = f"/alliance_posts/{int(post_id)}"
+        for form in forms:
+            if wanted in str(form.action or ""):
+                return form
+        for form in forms:
+            if "/alliance_posts" in str(form.action or ""):
+                return form
+        return forms[0] if forms else None
+
+    async def _submit_missionchief_form(self, session, form: MissionChiefForm, payload: Dict[str, str]) -> Tuple[Optional[int], str, str]:
+        action = form.action or ""
+        url = urljoin(BASE_URL, action)
+        if form.method == "get":
+            async with session.get(url, params=payload, allow_redirects=True) as response:
+                status = getattr(response, "status", None)
+                html = await response.text()
+                final_url = str(getattr(response, "url", url))
+        else:
+            async with session.post(url, data=payload, allow_redirects=True) as response:
+                status = getattr(response, "status", None)
+                html = await response.text()
+                final_url = str(getattr(response, "url", url))
+        return status, html, final_url
+
+    async def _find_existing_board_guide_post(self, session, thread_id: int) -> Optional[int]:
+        base_url = f"{BASE_URL}/alliance_threads/{int(thread_id)}"
+        async with session.get(base_url, allow_redirects=True) as response:
+            status = getattr(response, "status", None)
+            html = await response.text()
+        if status is not None and int(status) >= 400:
+            return None
+
+        first_page = parse_building_board_page(html)
+        max_page = min(first_page.last_page, BOARD_GUIDE_MAX_SCAN_PAGES)
+        for page_number in range(1, max_page + 1):
+            page_url = f"{base_url}?page={page_number}"
+            async with session.get(page_url, allow_redirects=True) as response:
+                status = getattr(response, "status", None)
+                page_html = await response.text()
+            if status is not None and int(status) >= 400:
+                continue
+            page = parse_building_board_page(page_html)
+            for post in page.posts:
+                if self._is_board_guide_post(post):
+                    return int(post.post_id)
+        return None
+
+    async def _create_board_guide_post(self, session, thread_id: int, content: str) -> Tuple[Optional[int], str]:
+        page, status = await self._fetch_building_board_latest_page(session, thread_id)
+        if status is not None and int(status) >= 400:
+            return None, f"request thread returned HTTP {status}"
+
+        post_status = await self._post_building_board_reply(session, thread_id, page, content)
+        if post_status is None or int(post_status) >= 400:
+            return None, f"create guide post returned HTTP {post_status}"
+
+        page, status = await self._fetch_building_board_latest_page(session, thread_id)
+        if status is not None and int(status) >= 400:
+            return None, f"could not refetch request thread after create: HTTP {status}"
+        for post in sorted(page.posts, key=lambda item: item.post_id, reverse=True):
+            if self._is_board_guide_post(post):
+                return int(post.post_id), "created"
+        return None, "created guide post but could not resolve new post ID"
+
+    async def _edit_board_guide_post(self, session, post_id: int, content: str) -> Tuple[bool, str]:
+        edit_url = f"{BASE_URL}/alliance_posts/{int(post_id)}/edit"
+        async with session.get(edit_url, allow_redirects=True) as response:
+            status = getattr(response, "status", None)
+            html = await response.text()
+        if status is not None and int(status) >= 400:
+            return False, f"edit form returned HTTP {status}"
+
+        form = self._select_post_edit_form(parse_missionchief_forms(html), post_id)
+        if not form:
+            return False, "edit form not found"
+
+        payload = dict(form.fields)
+        payload.setdefault("utf8", "\u2713")
+        payload.setdefault("commit", "Save")
+        if "_method" not in payload and f"/alliance_posts/{int(post_id)}" in str(form.action or ""):
+            payload["_method"] = "patch"
+        self._set_form_value(
+            payload,
+            ("[content]", "[text]", "[body]", "content", "text", "body"),
+            content,
+            "alliance_post[content]",
+        )
+        status, _html, _final_url = await self._submit_missionchief_form(session, form, payload)
+        if status is None or int(status) >= 400:
+            return False, f"edit post returned HTTP {status}"
+        return True, "updated"
+
+    async def _sync_building_board_guide_for_guild(self, guild: discord.Guild, *, force: bool = False) -> bool:
+        conf = await self.config.guild(guild).all()
+        if not conf.get("board_guide_enabled"):
+            return False
+        cookie_manager = self._cookie_manager()
+        if not cookie_manager:
+            log.info("Building board guide skipped: CookieManager is not loaded")
+            return False
+
+        thread_id = int(conf.get("board_thread_id") or BOARD_THREAD_ID)
+        content = build_building_board_guide_content(thread_id)
+        content_hash = self._board_guide_hash(content)
+        post_id = conf.get("board_guide_post_id")
+        stored_hash = conf.get("board_guide_content_hash")
+        if post_id and not force and stored_hash == content_hash:
+            return False
+
+        session = await cookie_manager.get_session()
+        discovered_post_id = await self._find_existing_board_guide_post(session, thread_id)
+        if discovered_post_id:
+            post_id = discovered_post_id
+
+        changed = False
+        if post_id:
+            updated, reason = await self._edit_board_guide_post(session, int(post_id), content)
+            if updated:
+                changed = True
+            else:
+                log.warning("Building board guide post %s update failed: %s", post_id, reason)
+                post_id = None
+
+        if not post_id:
+            created_post_id, reason = await self._create_board_guide_post(session, thread_id, content)
+            if not created_post_id:
+                log.warning("Building board guide could not be created: %s", reason)
+                return False
+            post_id = int(created_post_id)
+            changed = True
+
+        await self.config.guild(guild).board_guide_thread_id.set(int(thread_id))
+        await self.config.guild(guild).board_guide_post_id.set(int(post_id))
+        await self.config.guild(guild).board_guide_content_hash.set(content_hash)
+        return changed
+
+    async def _board_guide_loop(self) -> None:
+        await self.bot.wait_until_ready()
+        while True:
+            try:
+                for guild in self.bot.guilds:
+                    await self._sync_building_board_guide_for_guild(guild)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.exception("BuildingManager board guide loop error: %s", exc)
+            await asyncio.sleep(BOARD_GUIDE_SYNC_SECONDS)
 
     async def _get_min_alliance_funds(self, guild: discord.Guild) -> int:
         """Return the configured minimum alliance funds before auto-building."""
@@ -3704,7 +4899,7 @@ class BuildingManager(commands.Cog):
             f"Approved and queued. Current alliance funds are {current}; "
             f"minimum required before auto-building is {minimum:,} credits."
         )
-        user = guild.get_member(requester_id)
+        user = guild.get_member(requester_id) if requester_id else None
         if user:
             with contextlib.suppress(discord.Forbidden, discord.HTTPException):
                 await user.send(
@@ -3721,7 +4916,7 @@ class BuildingManager(commands.Cog):
                 color=discord.Color.orange(),
                 timestamp=datetime.now(timezone.utc),
             )
-            embed.add_field(name="Requester", value=f"<@{requester_id}>", inline=False)
+            embed.add_field(name="Requester", value=self._requester_label(guild, requester_id, req.username), inline=False)
             embed.add_field(
                 name="Building",
                 value=_truncate_discord_text(f"{req.building_type} - {req.building_name}"),
@@ -4185,7 +5380,8 @@ class BuildingManager(commands.Cog):
                     "Post-creation automation was not queued."
                 )
 
-        user = guild.get_member(int(row["user_id"]))
+        user_id = int(row["user_id"])
+        user = guild.get_member(user_id) if user_id else None
         if user and create_result.ok:
             with contextlib.suppress(discord.Forbidden, discord.HTTPException):
                 await user.send(
@@ -4199,7 +5395,7 @@ class BuildingManager(commands.Cog):
                 color=discord.Color.green() if create_result.ok else discord.Color.orange(),
                 timestamp=datetime.now(timezone.utc),
             )
-            embed.add_field(name="Requester", value=f"<@{int(row['user_id'])}>", inline=False)
+            embed.add_field(name="Requester", value=self._requester_label(guild, user_id, str(row["username"])), inline=False)
             embed.add_field(name="Building", value=f"{req.building_type} - {req.building_name}", inline=False)
             embed.add_field(name="Funds at Build Time", value=f"{current_funds:,} credits", inline=True)
             embed.add_field(name="Required Minimum", value=f"{minimum_funds:,} credits", inline=True)
@@ -4558,6 +5754,8 @@ class BuildingManager(commands.Cog):
             f"Log channel: {ctx.guild.get_channel(conf['log_channel_id']).mention if conf.get('log_channel_id') else '—'}\n"
             f"Admin role: {ctx.guild.get_role(conf['admin_role_id']).mention if conf.get('admin_role_id') else '—'}\n"
             f"Minimum alliance funds before auto-build: {int(conf.get('min_alliance_funds') or ALLIANCE_BUILDING_MIN_FUNDS):,} credits\n"
+            f"MissionChief board polling: {'enabled' if conf.get('board_poll_enabled') else 'disabled'} "
+            f"(thread {conf.get('board_thread_id') or BOARD_THREAD_ID})\n"
             f"Custom button message: {'Set' if conf.get('button_message') else 'Not set (using default)'}\n"
         )
         await ctx.send(box(txt, lang="ini"))
@@ -4723,6 +5921,104 @@ class BuildingManager(commands.Cog):
         emb = self._request_panel_embed(description)
         await ch.send(embed=emb, view=StartView(self))
         await ctx.tick()
+
+    @buildset.command(name="board")
+    @commands.admin()
+    @commands.guild_only()
+    async def board_polling(self, ctx: commands.Context, state: str = "status"):
+        """Manage MissionChief board building request polling. Use on/off/status/reset."""
+        state = str(state or "status").casefold()
+        if state in {"on", "enable", "enabled"}:
+            await self.config.guild(ctx.guild).board_poll_enabled.set(True)
+            await ctx.send("Building board polling enabled.")
+            return
+        if state in {"off", "disable", "disabled"}:
+            await self.config.guild(ctx.guild).board_poll_enabled.set(False)
+            await ctx.send("Building board polling disabled.")
+            return
+        if state == "reset":
+            thread_id = int((await self.config.guild(ctx.guild).board_thread_id()) or BOARD_THREAD_ID)
+            await self.config.guild(ctx.guild).board_last_seen_post_id.set(None)
+            key = str(thread_id)
+            async with self.config.board_thread_states() as states:
+                state_data = dict(states.get(key) or {})
+                state_data.pop("last_seen_post_id", None)
+                state_data["processed_post_ids"] = []
+                states[key] = state_data
+            await ctx.send("Building board baseline reset. The next poll will baseline the latest post without processing older posts.")
+            return
+
+        conf = await self.config.guild(ctx.guild).all()
+        await ctx.send(
+            box(
+                "\n".join(
+                    [
+                        "Building board polling status",
+                        f"Enabled: {bool(conf.get('board_poll_enabled'))}",
+                        f"Thread ID: {conf.get('board_thread_id') or BOARD_THREAD_ID}",
+                        f"Last seen post ID: {conf.get('board_last_seen_post_id') or 'not set'}",
+                        f"Pending cleanup posts: {len(conf.get('board_pending_deletions') or [])}",
+                        f"Interval: {BOARD_POLL_SECONDS // 60} minutes",
+                    ]
+                ),
+                lang="text",
+            )
+        )
+
+    @buildset.command(name="boardthread")
+    @commands.admin()
+    @commands.guild_only()
+    async def board_thread(self, ctx: commands.Context, thread_id: int = BOARD_THREAD_ID):
+        """Set the MissionChief alliance thread ID used for board building requests."""
+        await self.config.guild(ctx.guild).board_thread_id.set(int(thread_id))
+        await self.config.guild(ctx.guild).board_last_seen_post_id.set(None)
+        await ctx.send(
+            f"Building board thread set to `{int(thread_id)}`. "
+            "The next poll will baseline the latest post without processing older posts."
+        )
+
+    @buildset.command(name="boardguide")
+    @commands.admin()
+    @commands.guild_only()
+    async def board_guide(self, ctx: commands.Context, state: str = "status"):
+        """Manage the MissionChief building request guide post. Use on/off/status/reset/sync."""
+        state = str(state or "status").casefold()
+        if state in {"on", "enable", "enabled"}:
+            await self.config.guild(ctx.guild).board_guide_enabled.set(True)
+            await ctx.send("Building board guide sync enabled.")
+            return
+        if state in {"off", "disable", "disabled"}:
+            await self.config.guild(ctx.guild).board_guide_enabled.set(False)
+            await ctx.send("Building board guide sync disabled.")
+            return
+        if state == "reset":
+            await self.config.guild(ctx.guild).board_guide_thread_id.set(None)
+            await self.config.guild(ctx.guild).board_guide_post_id.set(None)
+            await self.config.guild(ctx.guild).board_guide_content_hash.set(None)
+            await ctx.send("Building board guide tracking reset. The next sync will find or create the guide post.")
+            return
+        if state == "sync":
+            async with ctx.typing():
+                changed = await self._sync_building_board_guide_for_guild(ctx.guild, force=True)
+            await ctx.send("Building board guide synced." if changed else "Building board guide sync did not change anything.")
+            return
+
+        conf = await self.config.guild(ctx.guild).all()
+        await ctx.send(
+            box(
+                "\n".join(
+                    [
+                        "Building board guide status",
+                        f"Enabled: {bool(conf.get('board_guide_enabled'))}",
+                        f"Request thread ID: {conf.get('board_thread_id') or BOARD_THREAD_ID}",
+                        f"Managed thread ID: {conf.get('board_guide_thread_id') or 'not set'}",
+                        f"Managed guide post ID: {conf.get('board_guide_post_id') or 'not set'}",
+                        f"Sync interval: {BOARD_GUIDE_SYNC_SECONDS // 60} minutes",
+                    ]
+                ),
+                lang="text",
+            )
+        )
 
     @buildset.command(name="browsercheck")
     @commands.admin()
