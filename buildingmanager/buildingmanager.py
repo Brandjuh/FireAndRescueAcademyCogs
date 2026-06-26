@@ -1031,10 +1031,15 @@ def extract_missionchief_building_id(*values: Any) -> Optional[int]:
         if value is None:
             continue
         if isinstance(value, dict):
+            for key in ("buildingId", "building_id", "matchedBuildingId"):
+                found_id = _coerce_int(value.get(key))
+                if found_id:
+                    return found_id
             nested_values = []
             for key in (
                 "buildingId",
                 "building_id",
+                "matchedBuildingId",
                 "url",
                 "responseUrl",
                 "finalUrl",
@@ -1042,6 +1047,10 @@ def extract_missionchief_building_id(*values: Any) -> Optional[int]:
                 "location",
                 "Location",
                 "redirectLocation",
+                "apiLookup",
+                "allianceListLookup",
+                "allianceLogLookup",
+                "beforeAllianceListLookup",
             ):
                 nested_values.append(value.get(key))
             found = extract_missionchief_building_id(*nested_values)
@@ -1125,6 +1134,13 @@ def alliance_funds_allow_auto_build(
 ) -> bool:
     """Return whether automatic building is allowed by the funds safety rule."""
     return funds is not None and funds >= int(minimum) and source.startswith("live MissionChief")
+
+def building_create_result_needs_recovery(result: BuildingCreateResult) -> bool:
+    """Return whether a failed create result may still have created a building."""
+    if result.ok:
+        return False
+    reason = str(result.reason or "").casefold()
+    return "timed out" in reason or "timeout" in reason
 
 def _api_value(record: Dict[str, Any], *keys: str) -> Any:
     """Read the first present value from a MissionChief API record."""
@@ -3093,6 +3109,22 @@ class AdminDecisionView(discord.ui.View):
                     "MissionChief building creation timed out and the recovery lookup also timed out. "
                     "No post-creation automation was queued.",
                 )
+        if building_create_result_needs_recovery(create_result):
+            try:
+                recovered_result = await asyncio.wait_for(
+                    self.cog._find_created_alliance_building_browser(
+                        self.req,
+                        reason=(
+                            "MissionChief building creation returned a timeout, but the created building "
+                            "was found afterwards."
+                        ),
+                    ),
+                    timeout=BUILDING_APPROVAL_RECOVERY_TIMEOUT_SECONDS,
+                )
+                if recovered_result.ok:
+                    create_result = recovered_result
+            except asyncio.TimeoutError:
+                pass
         final_status = "created" if create_result.ok else "approved_pending_manual"
         automation_message = None
         if create_result.ok:
@@ -4025,6 +4057,8 @@ class BuildingManager(commands.Cog):
             building_id = _coerce_int(api_lookup.get("matchedBuildingId"))
         if not building_id:
             building_id = _coerce_int(alliance_list_lookup.get("matchedBuildingId"))
+        if not building_id:
+            building_id = _coerce_int(log_lookup.get("matchedBuildingId"))
         details.update(
             {
                 "responseUrl": response_url,

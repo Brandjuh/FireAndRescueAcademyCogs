@@ -11,6 +11,7 @@ from buildingmanager.buildingmanager import (
     BUILDING_FETCH_ALLIANCE_LIST_SCRIPT,
     BUILDING_FETCH_ALLIANCE_LOGS_SCRIPT,
     BuildingAutomationResult,
+    BuildingCreateResult,
     BuildingDatabase,
     BuildingRequest,
     LocationParser,
@@ -20,6 +21,7 @@ from buildingmanager.buildingmanager import (
     _normalize_missionchief_url,
     _truncate_discord_text,
     alliance_funds_allow_auto_build,
+    building_create_result_needs_recovery,
     build_alliance_building_config,
     building_request_from_row,
     build_browser_diagnostics_report,
@@ -210,7 +212,50 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
             extract_missionchief_building_id({"Location": "/buildings/654321"}),
             654321,
         )
+        self.assertEqual(
+            extract_missionchief_building_id(
+                {
+                    "allianceLogLookup": {
+                        "ok": True,
+                        "matchedBuildingId": 777,
+                    }
+                }
+            ),
+            777,
+        )
         self.assertIsNone(extract_missionchief_building_id("https://www.missionchief.com/buildings"))
+
+    def test_building_create_result_reads_nested_log_lookup_id(self):
+        result = BuildingCreateResult(
+            True,
+            "Created.",
+            details={
+                "buildingId": None,
+                "allianceLogLookup": {
+                    "ok": True,
+                    "matchedBuildingId": 888,
+                },
+            },
+        )
+
+        self.assertEqual(result.building_id, 888)
+
+    def test_building_create_result_needs_recovery_only_for_timeouts(self):
+        self.assertTrue(
+            building_create_result_needs_recovery(
+                BuildingCreateResult(False, "MissionChief browser building flow timed out: Timeout 30000ms")
+            )
+        )
+        self.assertFalse(
+            building_create_result_needs_recovery(
+                BuildingCreateResult(False, "No enabled alliance build button was found.")
+            )
+        )
+        self.assertFalse(
+            building_create_result_needs_recovery(
+                BuildingCreateResult(True, "Alliance building created through browser automation.")
+            )
+        )
 
     def test_find_created_building_id_matches_type_and_coordinates(self):
         config = build_alliance_building_config(
