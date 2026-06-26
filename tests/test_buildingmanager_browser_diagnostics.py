@@ -17,10 +17,13 @@ from buildingmanager.buildingmanager import (
     BUILDING_FETCH_ALLIANCE_LIST_SCRIPT,
     BUILDING_FETCH_ALLIANCE_LOGS_SCRIPT,
     BuildingAutomationResult,
+    BoardBuildingPost,
+    BoardPage,
     BuildingCreateResult,
     BuildingDatabase,
     BuildingManager,
     BuildingRequest,
+    LocationDetails,
     LocationParser,
     MISSIONCHIEF_BUILDING_NAME_LIMIT,
     _clean_building_name,
@@ -902,6 +905,110 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
 
         self.assertTrue(notified)
         admin_channel.send.assert_awaited_once()
+
+    def test_board_processing_error_log_prefers_admin_channel(self):
+        manager = BuildingManager.__new__(BuildingManager)
+        admin_channel = types.SimpleNamespace(send=AsyncMock())
+        log_channel = types.SimpleNamespace(send=AsyncMock())
+        guild = types.SimpleNamespace(id=1)
+        post = parse_building_board_page(BUILDING_BOARD_HTML).posts[0]
+        manager._resolve_channel = AsyncMock(
+            side_effect=lambda _guild, channel_id: {99: admin_channel, 12: log_channel}.get(channel_id)
+        )
+
+        notified = asyncio.run(
+            manager._send_board_processing_error_log(
+                guild,
+                {"log_channel_id": 12, "admin_channel_id": 99},
+                post,
+                RuntimeError("boom"),
+            )
+        )
+
+        self.assertTrue(notified)
+        admin_channel.send.assert_awaited_once()
+        log_channel.send.assert_not_awaited()
+
+    def test_board_poll_targets_skip_guilds_without_admin_channel(self):
+        manager = BuildingManager.__new__(BuildingManager)
+        unconfigured_guild = types.SimpleNamespace(id=1)
+        configured_guild = types.SimpleNamespace(id=2)
+
+        targets = manager._select_board_poll_targets(
+            [
+                (
+                    unconfigured_guild,
+                    {
+                        "board_poll_enabled": True,
+                        "board_thread_id": 6165,
+                        "admin_channel_id": None,
+                        "log_channel_id": 20,
+                    },
+                ),
+                (
+                    configured_guild,
+                    {
+                        "board_poll_enabled": True,
+                        "board_thread_id": 6165,
+                        "admin_channel_id": 10,
+                        "log_channel_id": None,
+                    },
+                ),
+            ]
+        )
+
+        self.assertEqual(targets[6165][0], configured_guild)
+
+    def test_board_post_with_maps_link_is_forwarded_to_discord_admin_approval(self):
+        manager = BuildingManager.__new__(BuildingManager)
+        manager._submit_building_request_to_admins = AsyncMock(return_value=321)
+        manager._post_building_board_reply_with_id = AsyncMock(return_value=(200, 200002))
+        manager._schedule_board_post_deletion = AsyncMock()
+        guild = types.SimpleNamespace(id=1)
+        page = BoardPage(posts=[], reply_action="/alliance_posts?alliance_thread_id=6165", reply_token="token")
+        post = BoardBuildingPost(
+            post_id=200003,
+            author_id="88649",
+            author_name="DutchFireFighter",
+            created_at="June 26, 2026 11:58",
+            content="Prison 🔗 https://maps.app.goo.gl/mPcFakXaRgMU99fm6",
+        )
+        original_resolve_location = LocationParser.resolve_location
+
+        async def fake_resolve_location(cls, location_input):
+            self.assertEqual(location_input, "https://maps.app.goo.gl/mPcFakXaRgMU99fm6")
+            return LocationDetails(
+                original_input=location_input,
+                resolved_input=location_input,
+                place_name="Example Prison",
+                coordinates="40.1, -73.9",
+                address="Example Address",
+                country="United States",
+                region="New York",
+                maps_url=location_input,
+                provider="test",
+            )
+
+        try:
+            LocationParser.resolve_location = classmethod(fake_resolve_location)
+            asyncio.run(manager._handle_building_board_post(guild, object(), 6165, page, post))
+        finally:
+            LocationParser.resolve_location = original_resolve_location
+
+        manager._submit_building_request_to_admins.assert_awaited_once()
+        submitted_args = manager._submit_building_request_to_admins.await_args.args
+        submitted_kwargs = manager._submit_building_request_to_admins.await_args.kwargs
+        request = submitted_args[1]
+        self.assertEqual(submitted_args[0], guild)
+        self.assertEqual(submitted_kwargs["source"], "MissionChief board")
+        self.assertEqual(submitted_kwargs["board_post"], post)
+        self.assertEqual(request.building_type, "Prison")
+        self.assertEqual(request.building_name, "Example Prison")
+        self.assertEqual(request.location_input, "https://maps.app.goo.gl/mPcFakXaRgMU99fm6")
+        self.assertEqual(request.coordinates, "40.1, -73.9")
+        manager._post_building_board_reply_with_id.assert_awaited_once()
+        reply_content = manager._post_building_board_reply_with_id.await_args.args[3]
+        self.assertIn("Request ID: 321", reply_content)
 
     def test_board_request_submission_posts_admin_approval_with_location_fields(self):
         class FakeGuildConfig:

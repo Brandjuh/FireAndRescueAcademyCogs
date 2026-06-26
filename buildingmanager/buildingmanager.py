@@ -4135,14 +4135,12 @@ class BuildingManager(commands.Cog):
         await self.bot.wait_until_ready()
         while True:
             try:
-                poll_targets: Dict[int, Tuple[discord.Guild, dict]] = {}
+                guild_configs: List[Tuple[discord.Guild, dict]] = []
                 for guild in self.bot.guilds:
                     conf = await self.config.guild(guild).all()
-                    if not conf.get("board_poll_enabled"):
-                        continue
-                    thread_id = int(conf.get("board_thread_id") or BOARD_THREAD_ID)
-                    poll_targets.setdefault(thread_id, (guild, conf))
+                    guild_configs.append((guild, conf))
 
+                poll_targets = self._select_board_poll_targets(guild_configs)
                 for guild, conf in poll_targets.values():
                     await self._poll_building_board_for_guild(guild, conf)
             except asyncio.CancelledError:
@@ -4151,7 +4149,46 @@ class BuildingManager(commands.Cog):
                 log.exception("BuildingManager board poll loop error: %s", exc)
             await asyncio.sleep(BOARD_POLL_SECONDS)
 
+    def _select_board_poll_targets(
+        self,
+        guild_configs: Iterable[Tuple[discord.Guild, dict]],
+    ) -> Dict[int, Tuple[discord.Guild, dict]]:
+        """Select one properly configured Discord guild per MissionChief board thread."""
+        poll_targets: Dict[int, Tuple[discord.Guild, dict]] = {}
+        for guild, conf in guild_configs:
+            if not conf.get("board_poll_enabled"):
+                continue
+            if not conf.get("admin_channel_id"):
+                log.info(
+                    "Building board poll skipped for guild %s: admin channel is not configured",
+                    getattr(guild, "id", "unknown"),
+                )
+                continue
+            try:
+                thread_id = int(conf.get("board_thread_id") or BOARD_THREAD_ID)
+            except (TypeError, ValueError):
+                thread_id = BOARD_THREAD_ID
+
+            current = poll_targets.get(thread_id)
+            if current is None or self._board_poll_target_score(conf) > self._board_poll_target_score(current[1]):
+                poll_targets[thread_id] = (guild, conf)
+        return poll_targets
+
+    @staticmethod
+    def _board_poll_target_score(conf: dict) -> int:
+        """Prefer board targets with both admin and log channels configured."""
+        score = 0
+        if conf.get("admin_channel_id"):
+            score += 10
+        if conf.get("log_channel_id"):
+            score += 1
+        return score
+
     async def _poll_building_board_for_guild(self, guild: discord.Guild, conf: dict) -> None:
+        if not conf.get("admin_channel_id"):
+            log.info("Building board poll skipped: admin channel is not configured for guild %s", guild.id)
+            return
+
         cookie_manager = self._cookie_manager()
         if not cookie_manager:
             log.info("Building board poll skipped: CookieManager is not loaded")
@@ -4398,9 +4435,9 @@ class BuildingManager(commands.Cog):
 
     async def _send_board_request_error_log(self, guild: discord.Guild, post: BoardBuildingPost, reason: str) -> None:
         conf = await self.config.guild(guild).all()
-        log_channel = await self._resolve_channel(guild, conf.get("log_channel_id"))
+        log_channel = await self._resolve_channel(guild, conf.get("admin_channel_id"))
         if not log_channel:
-            log_channel = await self._resolve_channel(guild, conf.get("admin_channel_id"))
+            log_channel = await self._resolve_channel(guild, conf.get("log_channel_id"))
         if not log_channel:
             return
         embed = discord.Embed(
@@ -4426,9 +4463,9 @@ class BuildingManager(commands.Cog):
         post: BoardBuildingPost,
         error: Exception,
     ) -> bool:
-        log_channel = await self._resolve_channel(guild, conf.get("log_channel_id"))
+        log_channel = await self._resolve_channel(guild, conf.get("admin_channel_id"))
         if not log_channel:
-            log_channel = await self._resolve_channel(guild, conf.get("admin_channel_id"))
+            log_channel = await self._resolve_channel(guild, conf.get("log_channel_id"))
         if not log_channel:
             return False
         embed = discord.Embed(
