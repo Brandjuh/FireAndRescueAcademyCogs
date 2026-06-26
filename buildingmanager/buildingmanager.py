@@ -4106,7 +4106,7 @@ class BuildingManager(commands.Cog):
         embed.add_field(name="Building Type", value=req.building_type, inline=True)
         embed.add_field(name="Building Name", value=req.building_name, inline=True)
         embed.add_field(name="Location Input", value=req.location_input[:100], inline=False)
-        self._add_request_location_fields(embed)
+        self._add_request_location_fields(embed, req)
         if req.notes:
             embed.add_field(name="Notes", value=req.notes[:300], inline=False)
         embed.set_footer(text=f"Request ID: {request_id}")
