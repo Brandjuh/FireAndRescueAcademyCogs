@@ -42,6 +42,9 @@ BOARD_PENDING_DELETE_LIMIT = 1000
 BOARD_GUIDE_MAX_SCAN_PAGES = 25
 BOARD_GUIDE_MARKER = "[BM-GUIDE:overview]"
 BOARD_REPLY_MARKER = "[BM-REPLY]"
+BUILDING_BOARD_MIN_AUTO_ACCEPT_TAX = 5.0
+GEOCODE_MAPS_SEARCH_URL = "https://geocode.maps.co/search"
+GEOCODE_MAPS_TIMEOUT_SECONDS = 8
 ALLIANCE_BUILDING_TYPE_IDS = {
     "Hospital": "2",
     "Prison": "10",
@@ -2242,15 +2245,87 @@ class LocationParser:
             return text
 
         try:
+            headers = {
+                "User-Agent": "DiscordBot-BuildingManager/1.0",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
             async with aiohttp.ClientSession() as session:
-                async with session.get(text, allow_redirects=True, timeout=10) as resp:
+                async with session.get(text, allow_redirects=True, timeout=10, headers=headers) as resp:
                     return str(resp.url)
         except Exception as e:
             log.warning("Google Maps URL expansion failed: %r", e)
             return text
 
+    @staticmethod
+    def _normalize_geocode_query(value: Optional[str]) -> Optional[str]:
+        """Normalize a Maps-derived place query before sending it to geocoders."""
+        if not value:
+            return None
+        text = _decode_url_text(value)
+        text = html_lib.unescape(text)
+        text = text.replace("،", ",")
+        replacements = {
+            "egypte": "Egypt",
+            "nederland": "Netherlands",
+            "duitsland": "Germany",
+            "belgie": "Belgium",
+            "belgië": "Belgium",
+            "spanje": "Spain",
+            "italie": "Italy",
+            "italië": "Italy",
+            "frankrijk": "France",
+            "verenigd koninkrijk": "United Kingdom",
+        }
+        for source, target in replacements.items():
+            text = re.sub(rf"\b{re.escape(source)}\b", target, text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text).strip(" ,")
+        return text or None
+
     @classmethod
-    async def resolve_location(cls, location_input: str) -> LocationDetails:
+    def _location_query_candidates(cls, place_name: Optional[str], resolved_input: str) -> List[str]:
+        """Return conservative geocode queries from a Maps place URL."""
+        raw_values = [place_name, cls.extract_place_name(resolved_input)]
+        candidates: List[str] = []
+
+        for raw in raw_values:
+            cleaned = cls._normalize_geocode_query(raw)
+            if not cleaned:
+                continue
+            candidates.append(cleaned)
+            parts = [part.strip() for part in cleaned.split(",") if part.strip()]
+            if len(parts) >= 3:
+                candidates.append(" ".join([parts[0], parts[-2], parts[-1]]))
+            if len(parts) >= 2:
+                candidates.append(" ".join([parts[0], parts[-1]]))
+            candidates.append(parts[0] if parts else cleaned)
+
+        normalized_resolved = cls._normalize_geocode_query(resolved_input)
+        if normalized_resolved and not cls.extract_coordinates(normalized_resolved):
+            parsed = urlparse(normalized_resolved)
+            if parsed.scheme not in {"http", "https"}:
+                candidates.append(normalized_resolved)
+
+        deduped: List[str] = []
+        seen = set()
+        for candidate in candidates:
+            candidate = re.sub(r"\s+", " ", candidate or "").strip()
+            if not candidate:
+                continue
+            key = candidate.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(candidate)
+        return deduped
+
+    @classmethod
+    async def resolve_location(
+        cls,
+        location_input: str,
+        *,
+        google_key: Optional[str] = None,
+        mapsco_key: Optional[str] = None,
+    ) -> LocationDetails:
         """Resolve user-provided location input into admin-facing location details."""
         cleaned_input = location_input.strip()
         resolved_input = await cls.expand_maps_url(cleaned_input)
@@ -2266,9 +2341,17 @@ class LocationParser:
         if coords:
             lat, lon = coords
             coordinates_str = f"{lat}, {lon}"
-            geocode = await cls.reverse_geocode_details(lat, lon)
+            geocode = await cls.reverse_geocode_details(lat, lon, google_key=google_key)
         else:
-            geocode = await cls.forward_geocode_nominatim_details(place_name or resolved_input)
+            geocode = None
+            for query in cls._location_query_candidates(place_name, resolved_input):
+                geocode = await cls.forward_geocode_details(
+                    query,
+                    google_key=google_key,
+                    mapsco_key=mapsco_key,
+                )
+                if geocode and geocode.get("coordinates"):
+                    break
             coordinates_str = geocode.get("coordinates") if geocode else None
 
         if geocode:
@@ -2378,10 +2461,20 @@ class LocationParser:
         return cls._nominatim_result_to_details(data)
 
     @classmethod
-    async def forward_geocode_details(cls, query: str, *, google_key: Optional[str] = None) -> Optional[dict]:
+    async def forward_geocode_details(
+        cls,
+        query: str,
+        *,
+        google_key: Optional[str] = None,
+        mapsco_key: Optional[str] = None,
+    ) -> Optional[dict]:
         """Forward geocode text or place names."""
         if google_key:
             details = await cls.forward_geocode_google_details(query, google_key)
+            if details:
+                return details
+        if mapsco_key:
+            details = await cls.forward_geocode_mapsco_details(query, mapsco_key)
             if details:
                 return details
         return await cls.forward_geocode_nominatim_details(query)
@@ -2421,6 +2514,45 @@ class LocationParser:
         if not data:
             return None
         return cls._nominatim_result_to_details(data[0])
+
+    @classmethod
+    async def forward_geocode_mapsco_details(cls, query: str, api_key: str) -> Optional[dict]:
+        """Forward geocode using geocode.maps.co for Google Maps place fallbacks."""
+        params = {
+            "q": query,
+            "format": "json",
+            "addressdetails": "1",
+            "namedetails": "1",
+            "limit": "1",
+            "accept-language": "en",
+        }
+        headers = {
+            "User-Agent": "DiscordBot-BuildingManager/1.0",
+            "Authorization": f"Bearer {api_key}",
+        }
+        timeout = aiohttp.ClientTimeout(total=GEOCODE_MAPS_TIMEOUT_SECONDS)
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    GEOCODE_MAPS_SEARCH_URL,
+                    params=params,
+                    headers=headers,
+                    timeout=timeout,
+                ) as resp:
+                    if resp.status != 200:
+                        log.warning("geocode.maps.co returned HTTP %s for BuildingManager query %r", resp.status, query)
+                        return None
+                    data = await resp.json(content_type=None)
+        except Exception as e:
+            log.warning("geocode.maps.co forward geocoding failed: %r", e)
+            return None
+
+        if not data:
+            return None
+        details = cls._nominatim_result_to_details(data[0])
+        details["provider"] = "geocode.maps.co"
+        return details
 
     @staticmethod
     async def reverse_geocode_google_details(lat: float, lon: float, api_key: str) -> Optional[dict]:
@@ -4083,9 +4215,11 @@ class BuildingManager(commands.Cog):
             "board_guide_thread_id": None,
             "board_guide_post_id": None,
             "board_guide_content_hash": None,
+            "board_auto_accept_enabled": True,
         }
         default_global = {
             "google_api_key": None,
+            "geocode_maps_api_key": None,
             "default_request_panel_message_id": None,
             "board_thread_states": {},
         }
@@ -4184,12 +4318,118 @@ class BuildingManager(commands.Cog):
             raise RuntimeError("CookieManager did not return a session.")
         return session
 
+    async def _get_google_api_key(self) -> Optional[str]:
+        """Return the optional Google geocoding key for BuildingManager."""
+        try:
+            value = await self.config.google_api_key()
+        except Exception:
+            return None
+        value = str(value or "").strip()
+        return value or None
+
+    async def _get_geocode_maps_api_key(self) -> Optional[str]:
+        """Return the optional geocode.maps.co key, reusing EventPinger when available."""
+        try:
+            value = str(await self.config.geocode_maps_api_key() or "").strip()
+        except Exception:
+            value = ""
+        if value:
+            return value
+
+        get_cog = getattr(self.bot, "get_cog", None)
+        if not callable(get_cog):
+            return None
+        eventpinger = get_cog("EventPinger")
+        method = getattr(eventpinger, "_get_geocode_api_key", None) if eventpinger else None
+        if not callable(method):
+            return None
+        try:
+            result = method()
+            if asyncio.iscoroutine(result):
+                result = await result
+        except Exception:
+            return None
+        result = str(result or "").strip()
+        return result or None
+
+    async def _resolve_building_location(self, location_input: str) -> LocationDetails:
+        """Resolve a request location using all configured geocoding fallbacks."""
+        return await LocationParser.resolve_location(
+            location_input,
+            google_key=await self._get_google_api_key(),
+            mapsco_key=await self._get_geocode_maps_api_key(),
+        )
+
     def _message_manager(self):
         """Return MessageManager when it exposes the MissionChief send contract."""
         message_manager = self.bot.get_cog("MessageManager")
         if not message_manager or not hasattr(message_manager, "_send_message_and_link"):
             return None
         return message_manager
+
+    @staticmethod
+    def _extract_contribution_rate(member: Optional[dict]) -> Optional[float]:
+        """Read a contribution rate from a MembersScraper member shape."""
+        if not member:
+            return None
+        for key in ("contribution_rate", "contribution", "tax_rate", "tax"):
+            value = member.get(key)
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    async def _get_board_request_contribution_rate(self, post: BoardBuildingPost) -> Tuple[Optional[float], str]:
+        """Return the latest known alliance contribution rate for a board author."""
+        get_cog = getattr(self.bot, "get_cog", None)
+        if not callable(get_cog):
+            return None, "Bot cog registry is unavailable"
+        members_scraper = get_cog("MembersScraper") or get_cog("membersscraper")
+        if not members_scraper:
+            return None, "MembersScraper is not loaded"
+
+        author_id = str(post.author_id or "").strip()
+        if author_id and hasattr(members_scraper, "get_member_snapshot"):
+            try:
+                snapshot = await members_scraper.get_member_snapshot(author_id)
+            except Exception:
+                snapshot = None
+            rate = self._extract_contribution_rate(snapshot)
+            if rate is not None:
+                return rate, f"MembersScraper snapshot for MC ID {author_id}"
+
+        if hasattr(members_scraper, "get_members"):
+            try:
+                members = await members_scraper.get_members()
+            except Exception:
+                members = []
+            author_name = str(post.author_name or "").casefold()
+            for member in members or []:
+                ids = {
+                    str(member.get(key) or "").strip()
+                    for key in ("member_id", "mc_user_id", "user_id", "id")
+                }
+                names = {
+                    str(member.get(key) or "").strip().casefold()
+                    for key in ("username", "name", "mc_username", "mc_name")
+                }
+                if (author_id and author_id in ids) or (author_name and author_name in names):
+                    rate = self._extract_contribution_rate(member)
+                    if rate is not None:
+                        return rate, "MembersScraper current members"
+
+        return None, "MembersScraper has no usable contribution snapshot"
+
+    async def _board_auto_accept_enabled(self, guild: discord.Guild) -> bool:
+        """Return whether MissionChief board requests may auto-build."""
+        try:
+            conf = await self.config.guild(guild).all()
+        except Exception:
+            return False
+        return bool(conf.get("board_auto_accept_enabled", True))
 
     def _missionchief_board_request_username(self, req: BuildingRequest) -> Optional[str]:
         """Return the MissionChief username for board requests, avoiding Discord-name guesses."""
@@ -4333,6 +4573,22 @@ class BuildingManager(commands.Cog):
         if req.facility_warning:
             embed.add_field(name=warning_title, value=f"Warning: {req.facility_warning}", inline=False)
 
+    def _store_building_request(self, guild: discord.Guild, req: BuildingRequest) -> int:
+        """Persist a building request and attach the request id to the model."""
+        request_id = self.db.add_request(
+            guild_id=guild.id,
+            user_id=int(req.user_id or 0),
+            username=req.username,
+            building_type=req.building_type,
+            building_name=req.building_name,
+            location_input=req.location_input,
+            coordinates=req.coordinates,
+            address=req.address,
+            notes=req.notes,
+        )
+        req.request_id = int(request_id)
+        return int(request_id)
+
     async def _submit_building_request_to_admins(
         self,
         guild: discord.Guild,
@@ -4348,18 +4604,7 @@ class BuildingManager(commands.Cog):
         if not admin_channel:
             raise RuntimeError("Admin channel must be configured before board requests can be processed.")
 
-        request_id = self.db.add_request(
-            guild_id=guild.id,
-            user_id=int(req.user_id or 0),
-            username=req.username,
-            building_type=req.building_type,
-            building_name=req.building_name,
-            location_input=req.location_input,
-            coordinates=req.coordinates,
-            address=req.address,
-            notes=req.notes,
-        )
-        req.request_id = request_id
+        request_id = self._store_building_request(guild, req)
 
         requester = self._requester_label(guild, req.user_id, req.username)
 
@@ -4400,6 +4645,251 @@ class BuildingManager(commands.Cog):
         if log_channel:
             await log_channel.send(embed=log_embed)
         return int(request_id)
+
+    async def _create_and_queue_approved_building(
+        self,
+        guild: discord.Guild,
+        req: BuildingRequest,
+    ) -> Tuple[BuildingCreateResult, Optional[str]]:
+        """Create an approved building and queue post-creation automation when possible."""
+        try:
+            create_result = await asyncio.wait_for(
+                self._create_alliance_building_browser(req),
+                timeout=BUILDING_APPROVAL_CREATE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            try:
+                create_result = await asyncio.wait_for(
+                    self._find_created_alliance_building_browser(
+                        req,
+                        reason=(
+                            "MissionChief building creation timed out, but the created building "
+                            "was found afterwards."
+                        ),
+                    ),
+                    timeout=BUILDING_APPROVAL_RECOVERY_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                create_result = BuildingCreateResult(
+                    False,
+                    "MissionChief building creation timed out and the recovery lookup also timed out. "
+                    "No post-creation automation was queued.",
+                )
+
+        if building_create_result_needs_recovery(create_result):
+            try:
+                recovered_result = await asyncio.wait_for(
+                    self._find_created_alliance_building_browser(
+                        req,
+                        reason=(
+                            "MissionChief building creation returned a timeout, but the created building "
+                            "was found afterwards."
+                        ),
+                    ),
+                    timeout=BUILDING_APPROVAL_RECOVERY_TIMEOUT_SECONDS,
+                )
+                if recovered_result.ok:
+                    create_result = recovered_result
+            except asyncio.TimeoutError:
+                pass
+
+        automation_message = None
+        if create_result.ok:
+            building_id = create_result.building_id
+            if building_id:
+                job_id = self.db.add_or_update_automation_job(
+                    request_id=int(req.request_id),
+                    guild_id=guild.id,
+                    building_id=building_id,
+                    building_type=req.building_type,
+                    building_name=req.building_name,
+                )
+                automation_message = (
+                    f"Queued post-creation automation for MissionChief building `{building_id}`: "
+                    f"tax {ALLIANCE_BUILDING_TARGET_TAX}%, max level, and allowed extensions."
+                )
+                self.bot.loop.create_task(self._process_building_automation_job(job_id))
+            else:
+                automation_message = (
+                    "Created in MissionChief, but the building ID was not detected. "
+                    "Post-creation automation was not queued."
+                )
+        return create_result, automation_message
+
+    async def _send_board_auto_build_log(
+        self,
+        guild: discord.Guild,
+        log_channel: Optional[discord.abc.Messageable],
+        req: BuildingRequest,
+        post: BoardBuildingPost,
+        *,
+        contribution_rate: Optional[float],
+        create_result: Optional[BuildingCreateResult] = None,
+        automation_message: Optional[str] = None,
+        status: str,
+        color: discord.Color,
+    ) -> None:
+        """Log one automatic board decision to Discord."""
+        if not log_channel:
+            return
+        embed = discord.Embed(
+            title=status,
+            color=color,
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="Requester", value=f"{post.author_name} ({post.author_id or 'unknown ID'})", inline=False)
+        if contribution_rate is not None:
+            embed.add_field(name="Contribution", value=f"{contribution_rate:.1f}%", inline=True)
+        embed.add_field(name="Board Post", value=f"#{post.post_id}", inline=True)
+        embed.add_field(name="Request ID", value=str(req.request_id), inline=True)
+        embed.add_field(
+            name="Building",
+            value=_truncate_discord_text(f"{req.building_type} - {req.building_name}"),
+            inline=False,
+        )
+        self._add_request_location_fields(embed, req)
+        if create_result:
+            embed.add_field(
+                name="Auto Creation",
+                value=_truncate_discord_text(
+                    "Created in MissionChief" if create_result.ok else create_result.reason,
+                    900,
+                ),
+                inline=False,
+            )
+            if create_result.status is not None:
+                embed.add_field(name="MissionChief HTTP Status", value=str(create_result.status), inline=True)
+        if automation_message:
+            embed.add_field(
+                name="Post-Creation Automation",
+                value=_truncate_discord_text(automation_message, 900),
+                inline=False,
+            )
+        await log_channel.send(embed=embed)
+
+    async def _reject_board_request_for_low_tax(
+        self,
+        guild: discord.Guild,
+        req: BuildingRequest,
+        post: BoardBuildingPost,
+        *,
+        contribution_rate: float,
+        log_channel: Optional[discord.abc.Messageable],
+    ) -> int:
+        """Store and reject a board request when the requester has insufficient tax."""
+        request_id = self._store_building_request(guild, req)
+        reason = (
+            f"Latest alliance donation is {contribution_rate:.1f}%, below the required "
+            f"{BUILDING_BOARD_MIN_AUTO_ACCEPT_TAX:.1f}% minimum."
+        )
+        self.db.update_request_status(request_id, "denied")
+        self.db.add_action(
+            request_id=request_id,
+            guild_id=guild.id,
+            admin_user_id=None,
+            admin_username="BuildingManager",
+            action_type="auto_denied_low_tax",
+            denial_reason=reason,
+        )
+        await self._send_building_request_game_update(
+            req,
+            subject="Building request rejected",
+            body=self._build_game_rejection_message(req, reason=reason),
+        )
+        await self._send_board_auto_build_log(
+            guild,
+            log_channel,
+            req,
+            post,
+            contribution_rate=contribution_rate,
+            status="MissionChief board building request rejected",
+            color=discord.Color.orange(),
+        )
+        return request_id
+
+    async def _auto_accept_board_building_request(
+        self,
+        guild: discord.Guild,
+        req: BuildingRequest,
+        post: BoardBuildingPost,
+        *,
+        contribution_rate: float,
+        log_channel: Optional[discord.abc.Messageable],
+    ) -> str:
+        """Automatically approve and build a board request."""
+        request_id = self._store_building_request(guild, req)
+        minimum_funds = await self._get_min_alliance_funds(guild)
+        try:
+            current_funds, funds_source = await asyncio.wait_for(
+                self._get_current_alliance_funds(),
+                timeout=BUILDING_APPROVAL_FUNDS_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            current_funds, funds_source = None, "live funds check timed out"
+
+        if not alliance_funds_allow_auto_build(current_funds, funds_source, minimum_funds):
+            message = await self._queue_request_waiting_for_funds(
+                guild=guild,
+                req=req,
+                requester_id=0,
+                admin_user=None,
+                funds=current_funds,
+                source=funds_source,
+                minimum=minimum_funds,
+                log_channel=log_channel,
+            )
+            return f"Building request approved and queued for automatic build. {message}"
+
+        create_result, automation_message = await self._create_and_queue_approved_building(guild, req)
+        final_status = "created" if create_result.ok else "approved_pending_manual"
+        self.db.update_request_status(request_id, final_status)
+        self.db.add_action(
+            request_id=request_id,
+            guild_id=guild.id,
+            admin_user_id=None,
+            admin_username="BuildingManager",
+            action_type="auto_approved",
+            previous_values=f"Contribution: {contribution_rate:.1f}%",
+        )
+        self.db.add_action(
+            request_id=request_id,
+            guild_id=guild.id,
+            admin_user_id=None,
+            admin_username="BuildingManager",
+            action_type="created" if create_result.ok else "create_failed",
+            previous_values=None if create_result.ok else create_result.reason[:900],
+        )
+
+        await self._send_building_request_game_update(
+            req,
+            subject="Building request approved",
+            body=self._build_game_approval_message(
+                req,
+                status=(
+                    "Your building has been created in MissionChief."
+                    if create_result.ok
+                    else "Your request was approved, but staff need to complete the build manually."
+                ),
+            ),
+        )
+        await self._send_board_auto_build_log(
+            guild,
+            log_channel,
+            req,
+            post,
+            contribution_rate=contribution_rate,
+            create_result=create_result,
+            automation_message=automation_message,
+            status=(
+                "MissionChief board building request auto-built"
+                if create_result.ok
+                else "MissionChief board building request needs manual creation"
+            ),
+            color=discord.Color.green() if create_result.ok else discord.Color.orange(),
+        )
+        if create_result.ok:
+            return "Building request approved and automatically created in MissionChief."
+        return f"Building request approved, but automatic creation needs staff follow-up: {create_result.reason}"
 
     async def _board_poll_loop(self) -> None:
         """Poll configured MissionChief board topics for new building requests."""
@@ -4621,7 +5111,7 @@ class BuildingManager(commands.Cog):
             await self._send_board_request_error_log(guild, post, error or "Could not read this request.")
             return
 
-        location_details = await LocationParser.resolve_location(spec.location_input)
+        location_details = await self._resolve_building_location(spec.location_input)
         if not location_details.coordinates:
             reason = (
                 "The location could not be resolved to GPS coordinates. "
@@ -4665,13 +5155,70 @@ class BuildingManager(commands.Cog):
             facility_warning=location_details.facility_warning,
             notes=f"MissionChief board post #{post.post_id}",
         )
-        request_id = await self._submit_building_request_to_admins(
-            guild,
-            req,
-            source="MissionChief board",
-            board_post=post,
-        )
-        reply = self._build_building_board_success_reply(post, req, request_id)
+
+        conf = await self.config.guild(guild).all()
+        log_channel = await self._resolve_channel(guild, conf.get("log_channel_id"))
+        if log_channel is None:
+            log_channel = await self._resolve_channel(guild, conf.get("admin_channel_id"))
+
+        if await self._board_auto_accept_enabled(guild):
+            contribution_rate, contribution_source = await self._get_board_request_contribution_rate(post)
+            if contribution_rate is None:
+                req.notes = (
+                    f"{req.notes or ''}\n"
+                    f"Auto-accept skipped: contribution rate unknown ({contribution_source})."
+                ).strip()
+                request_id = await self._submit_building_request_to_admins(
+                    guild,
+                    req,
+                    source="MissionChief board - contribution unknown",
+                    board_post=post,
+                )
+                reply = self._build_building_board_success_reply(
+                    post,
+                    req,
+                    request_id,
+                    status="Admins will review this request because the requester contribution rate is unknown.",
+                )
+            elif contribution_rate < BUILDING_BOARD_MIN_AUTO_ACCEPT_TAX:
+                request_id = await self._reject_board_request_for_low_tax(
+                    guild,
+                    req,
+                    post,
+                    contribution_rate=contribution_rate,
+                    log_channel=log_channel,
+                )
+                reply = self._build_building_board_rejection_reply(
+                    post,
+                    request_id,
+                    (
+                        f"Your latest alliance donation is {contribution_rate:.1f}%, below the required "
+                        f"{BUILDING_BOARD_MIN_AUTO_ACCEPT_TAX:.1f}% minimum."
+                    ),
+                )
+            else:
+                status = await self._auto_accept_board_building_request(
+                    guild,
+                    req,
+                    post,
+                    contribution_rate=contribution_rate,
+                    log_channel=log_channel,
+                )
+                reply = self._build_building_board_success_reply(
+                    post,
+                    req,
+                    int(req.request_id or 0),
+                    status=status,
+                )
+        else:
+            request_id = await self._submit_building_request_to_admins(
+                guild,
+                req,
+                source="MissionChief board",
+                board_post=post,
+            )
+            reply = self._build_building_board_success_reply(post, req, request_id)
+
         reply_status, reply_post_id = await self._post_building_board_reply_with_id(session, thread_id, page, reply)
         if reply_status is None or int(reply_status) >= 400:
             log.warning("Building board reply for post %s returned HTTP %s", post.post_id, reply_status)
@@ -4684,6 +5231,8 @@ class BuildingManager(commands.Cog):
         post: BoardBuildingPost,
         req: BuildingRequest,
         request_id: int,
+        *,
+        status: str = "Admins will review this request.",
     ) -> str:
         lines = [
             BOARD_REPLY_MARKER,
@@ -4697,8 +5246,26 @@ class BuildingManager(commands.Cog):
             lines.append(f"Coordinates: {req.coordinates}")
         if req.facility_warning:
             lines.extend(["", f"Admin review note: {req.facility_warning}"])
-        lines.extend(["", "Admins will review this request."])
+        lines.extend(["", status])
         return "\n".join(lines)
+
+    def _build_building_board_rejection_reply(
+        self,
+        post: BoardBuildingPost,
+        request_id: int,
+        reason: str,
+    ) -> str:
+        return "\n".join(
+            [
+                BOARD_REPLY_MARKER,
+                f"Building request rejected for {post.author_name}.",
+                "",
+                f"Request ID: {int(request_id)}",
+                f"Reason: {reason}",
+                "",
+                "Please correct this before submitting another building request.",
+            ]
+        )
 
     def _build_building_board_error_reply(self, post: BoardBuildingPost, reason: str) -> str:
         return "\n".join(
@@ -6196,6 +6763,8 @@ class BuildingManager(commands.Cog):
             f"Minimum alliance funds before auto-build: {int(conf.get('min_alliance_funds') or ALLIANCE_BUILDING_MIN_FUNDS):,} credits\n"
             f"MissionChief board polling: {'enabled' if conf.get('board_poll_enabled') else 'disabled'} "
             f"(thread {conf.get('board_thread_id') or BOARD_THREAD_ID})\n"
+            f"MissionChief board auto-accept: {'enabled' if conf.get('board_auto_accept_enabled', True) else 'disabled'} "
+            f"(requires known tax >= {BUILDING_BOARD_MIN_AUTO_ACCEPT_TAX:.1f}%)\n"
             f"Custom button message: {'Set' if conf.get('button_message') else 'Not set (using default)'}\n"
         )
         await ctx.send(box(txt, lang="ini"))
@@ -6267,6 +6836,52 @@ class BuildingManager(commands.Cog):
                 lang="text",
             )
         )
+
+    @buildset.command(name="boardauto")
+    @commands.admin()
+    @commands.guild_only()
+    async def board_auto_accept(self, ctx: commands.Context, state: str = "status"):
+        """Manage automatic MissionChief board building approval. Use on/off/status."""
+        normalized = str(state or "status").casefold().strip()
+        if normalized in {"on", "enable", "enabled"}:
+            await self.config.guild(ctx.guild).board_auto_accept_enabled.set(True)
+            await ctx.send(
+                f"Building board auto-accept enabled. Known requester tax must be at least "
+                f"{BUILDING_BOARD_MIN_AUTO_ACCEPT_TAX:.1f}%."
+            )
+            return
+        if normalized in {"off", "disable", "disabled"}:
+            await self.config.guild(ctx.guild).board_auto_accept_enabled.set(False)
+            await ctx.send("Building board auto-accept disabled. Board requests will go to admin review.")
+            return
+        conf = await self.config.guild(ctx.guild).all()
+        await ctx.send(
+            box(
+                "\n".join(
+                    [
+                        "Building board auto-accept status",
+                        f"Enabled: {bool(conf.get('board_auto_accept_enabled', True))}",
+                        f"Minimum known tax: {BUILDING_BOARD_MIN_AUTO_ACCEPT_TAX:.1f}%",
+                        "Known tax below minimum: rejected automatically",
+                        "Unknown tax: sent to admin review",
+                    ]
+                ),
+                lang="text",
+            )
+        )
+
+    @buildset.command(name="geocodeapikey")
+    @commands.is_owner()
+    async def geocodeapikey(self, ctx: commands.Context, api_key: str = ""):
+        """Set or clear the optional geocode.maps.co API key for BuildingManager."""
+        try:
+            await ctx.message.delete()
+        except (discord.Forbidden, discord.HTTPException, AttributeError):
+            pass
+
+        clean_key = str(api_key or "").strip()
+        await self.config.geocode_maps_api_key.set(clean_key)
+        await ctx.send("BuildingManager geocode API key updated." if clean_key else "BuildingManager geocode API key cleared.")
 
     @buildset.command(name="fundsqueue")
     @commands.admin()
