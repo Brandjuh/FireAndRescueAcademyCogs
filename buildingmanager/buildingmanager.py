@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import aiohttp
 import contextlib
+import difflib
 import hashlib
 import html as html_lib
 from html.parser import HTMLParser
@@ -70,20 +71,25 @@ REQUEST_PANEL_TITLE = "🏢 Building Request System"
 BOARD_BUILDING_TYPE_ALIASES = {
     "Hospital": (
         "hospital",
+        "hospitaal",
         "medical center",
         "medical centre",
         "health center",
         "health centre",
+        "healthcare",
         "clinic",
         "ziekenhuis",
+        "ziekenhuiz",
     ),
     "Prison": (
         "prison",
+        "prision",
         "jail",
         "detention",
         "correctional",
         "correctional facility",
         "gevangenis",
+        "gevangeniss",
     ),
 }
 
@@ -1833,15 +1839,86 @@ def _extract_board_maps_url(text: str) -> Optional[str]:
     return None
 
 
+def _strip_urls_for_board_type_match(text: str) -> str:
+    """Remove URLs before matching the requested building type."""
+    return re.sub(r"https?://[^\s<>\]\)\"']+", " ", text or "", flags=re.IGNORECASE)
+
+
+def _normalize_board_type_text(text: str) -> str:
+    """Normalize board type text for exact and fuzzy matching."""
+    text = html_lib.unescape(text or "").casefold()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _levenshtein_distance(left: str, right: str) -> int:
+    """Return a small edit distance for short request words."""
+    if left == right:
+        return 0
+    if not left:
+        return len(right)
+    if not right:
+        return len(left)
+    previous = list(range(len(right) + 1))
+    for left_index, left_char in enumerate(left, start=1):
+        current = [left_index]
+        for right_index, right_char in enumerate(right, start=1):
+            current.append(
+                min(
+                    current[right_index - 1] + 1,
+                    previous[right_index] + 1,
+                    previous[right_index - 1] + (0 if left_char == right_char else 1),
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
+def _is_fuzzy_board_type_match(candidate: str, alias: str) -> bool:
+    """Return whether a user word is a likely typo for a supported building type."""
+    candidate = _normalize_board_type_text(candidate).replace(" ", "")
+    alias = _normalize_board_type_text(alias).replace(" ", "")
+    if len(candidate) < 4 or len(alias) < 4:
+        return False
+    if abs(len(candidate) - len(alias)) > max(1, len(alias) // 4):
+        return False
+    distance = _levenshtein_distance(candidate, alias)
+    if distance <= 1:
+        return True
+    if len(alias) >= 8 and distance <= 2:
+        return difflib.SequenceMatcher(None, candidate, alias).ratio() >= 0.78
+    return difflib.SequenceMatcher(None, candidate, alias).ratio() >= 0.86
+
+
 def _match_board_building_type(text: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     matches: List[Tuple[str, str]] = []
-    searchable = f" {html_lib.unescape(text or '').casefold()} "
+    type_text = _strip_urls_for_board_type_match(text)
+    normalized = _normalize_board_type_text(type_text)
+    searchable = f" {normalized} "
     for building_type, aliases in BOARD_BUILDING_TYPE_ALIASES.items():
         for alias in aliases:
-            escaped = re.escape(alias.casefold()).replace(r"\ ", r"\s+")
-            if re.search(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])", searchable):
+            normalized_alias = _normalize_board_type_text(alias)
+            if not normalized_alias:
+                continue
+            if f" {normalized_alias} " in searchable:
                 matches.append((building_type, alias))
                 break
+
+    if not matches:
+        tokens = normalized.split()
+        for building_type, aliases in BOARD_BUILDING_TYPE_ALIASES.items():
+            for alias in aliases:
+                alias_words = _normalize_board_type_text(alias).split()
+                if not alias_words:
+                    continue
+                size = len(alias_words)
+                for index in range(0, max(0, len(tokens) - size + 1)):
+                    candidate = " ".join(tokens[index : index + size])
+                    if _is_fuzzy_board_type_match(candidate, " ".join(alias_words)):
+                        matches.append((building_type, alias))
+                        break
+                if any(match_type == building_type for match_type, _alias in matches):
+                    break
 
     unique_types = list(dict.fromkeys(building_type for building_type, _alias in matches))
     if len(unique_types) > 1:
@@ -1890,7 +1967,8 @@ def build_building_board_guide_content(thread_id: int = BOARD_THREAD_ID) -> str:
             "",
             "[b]How to request[/b]",
             "- Create a new post in this topic.",
-            "- Use one of the exact formats below.",
+            "- Mention Hospital or Prison and include a Google Maps link.",
+            "- A colon is optional. Small typos such as `hosptial` or `prisn` are accepted.",
             "- You do not need to type a building name. The name is detected from Google Maps.",
             "- Requests are reviewed by admins before they are built.",
             "- Your request post and the Fire & Rescue Academy reply are removed after 12 hours.",
@@ -1898,6 +1976,8 @@ def build_building_board_guide_content(thread_id: int = BOARD_THREAD_ID) -> str:
             "[b]Formats[/b]",
             "Hospital: <Google Maps link>",
             "Prison: <Google Maps link>",
+            "Hospital <Google Maps link>",
+            "Prison <Google Maps link>",
             "",
             "[b]Examples[/b]",
             "Hospital: https://www.google.com/maps/place/Example+Hospital/@40.0,-73.0",
@@ -3994,8 +4074,8 @@ class BuildingManager(commands.Cog):
         conf = await self.config.guild(guild).all()
         admin_channel = await self._resolve_channel(guild, conf.get("admin_channel_id"))
         log_channel = await self._resolve_channel(guild, conf.get("log_channel_id"))
-        if not admin_channel or not log_channel:
-            raise RuntimeError("Admin and log channels must be configured before board requests can be processed.")
+        if not admin_channel:
+            raise RuntimeError("Admin channel must be configured before board requests can be processed.")
 
         request_id = self.db.add_request(
             guild_id=guild.id,
@@ -4046,7 +4126,8 @@ class BuildingManager(commands.Cog):
         if req.maps_url:
             log_embed.add_field(name="Maps", value=f"[Open]({req.maps_url})", inline=True)
         log_embed.add_field(name="Request ID", value=str(request_id), inline=True)
-        await log_channel.send(embed=log_embed)
+        if log_channel:
+            await log_channel.send(embed=log_embed)
         return int(request_id)
 
     async def _board_poll_loop(self) -> None:
@@ -4123,10 +4204,15 @@ class BuildingManager(commands.Cog):
                 await self._handle_building_board_post(guild, session, thread_id, page, post)
             except Exception as exc:
                 log.exception("Building board post %s processing failed: %s", post.post_id, exc)
-                await self._send_board_processing_error_log(guild, conf, post, exc)
+                notified = await self._send_board_processing_error_log(guild, conf, post, exc)
+                reason = (
+                    "An internal error occurred while processing this request. Staff has been notified."
+                    if notified
+                    else "An internal error occurred while processing this request. Please contact staff."
+                )
                 reply = self._build_building_board_error_reply(
                     post,
-                    "An internal error occurred while processing this request. Staff has been notified.",
+                    reason,
                 )
                 with contextlib.suppress(Exception):
                     _status, reply_post_id = await self._post_building_board_reply_with_id(
@@ -4314,6 +4400,8 @@ class BuildingManager(commands.Cog):
         conf = await self.config.guild(guild).all()
         log_channel = await self._resolve_channel(guild, conf.get("log_channel_id"))
         if not log_channel:
+            log_channel = await self._resolve_channel(guild, conf.get("admin_channel_id"))
+        if not log_channel:
             return
         embed = discord.Embed(
             title="MissionChief board building request rejected",
@@ -4326,8 +4414,10 @@ class BuildingManager(commands.Cog):
             embed.add_field(name="Posted at", value=post.created_at, inline=True)
         embed.add_field(name="Reason", value=_truncate_discord_text(reason), inline=False)
         embed.add_field(name="Original text", value=_truncate_discord_text(post.content or "-", 1024), inline=False)
-        with contextlib.suppress(Exception):
+        try:
             await log_channel.send(embed=embed)
+        except Exception:
+            log.exception("Could not send BuildingManager board request error log for post %s", post.post_id)
 
     async def _send_board_processing_error_log(
         self,
@@ -4335,10 +4425,12 @@ class BuildingManager(commands.Cog):
         conf: dict,
         post: BoardBuildingPost,
         error: Exception,
-    ) -> None:
+    ) -> bool:
         log_channel = await self._resolve_channel(guild, conf.get("log_channel_id"))
         if not log_channel:
-            return
+            log_channel = await self._resolve_channel(guild, conf.get("admin_channel_id"))
+        if not log_channel:
+            return False
         embed = discord.Embed(
             title="MissionChief board building request failed",
             color=discord.Color.red(),
@@ -4350,8 +4442,12 @@ class BuildingManager(commands.Cog):
             embed.add_field(name="Posted at", value=post.created_at, inline=True)
         embed.add_field(name="Error", value=_truncate_discord_text(str(error)), inline=False)
         embed.add_field(name="Original text", value=_truncate_discord_text(post.content or "-", 1024), inline=False)
-        with contextlib.suppress(Exception):
+        try:
             await log_channel.send(embed=embed)
+            return True
+        except Exception:
+            log.exception("Could not send BuildingManager board processing error log for post %s", post.post_id)
+            return False
 
     async def _post_building_board_reply(
         self,
