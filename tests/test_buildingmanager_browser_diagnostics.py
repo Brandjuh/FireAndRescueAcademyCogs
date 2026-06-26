@@ -6,6 +6,7 @@ from buildingmanager.buildingmanager import (
     BUILDING_AUTOMATION_PREPARE_SCRIPT,
     BUILDING_CREATE_SCRIPT,
     BUILDING_FETCH_API_SCRIPT,
+    BUILDING_FETCH_ALLIANCE_LIST_SCRIPT,
     BuildingAutomationResult,
     BuildingDatabase,
     _normalize_missionchief_url,
@@ -13,6 +14,7 @@ from buildingmanager.buildingmanager import (
     build_browser_diagnostics_report,
     extract_missionchief_building_id,
     find_created_alliance_building_id,
+    find_created_alliance_building_id_from_list,
 )
 
 
@@ -84,6 +86,12 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertIn("/api/buildings", BUILDING_FETCH_API_SCRIPT)
         self.assertIn('credentials: "same-origin"', BUILDING_FETCH_API_SCRIPT)
 
+    def test_fetch_alliance_list_script_uses_same_browser_session(self):
+        self.assertIn("/verband/gebauede", BUILDING_FETCH_ALLIANCE_LIST_SCRIPT)
+        self.assertIn("[building_id]", BUILDING_FETCH_ALLIANCE_LIST_SCRIPT)
+        self.assertIn('/buildings/', BUILDING_FETCH_ALLIANCE_LIST_SCRIPT)
+        self.assertIn('credentials: "same-origin"', BUILDING_FETCH_ALLIANCE_LIST_SCRIPT)
+
     def test_extract_building_id_from_urls_and_snapshots(self):
         self.assertEqual(
             extract_missionchief_building_id("https://www.missionchief.com/buildings/123456"),
@@ -142,6 +150,96 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
 
         self.assertEqual(find_created_alliance_building_id(buildings, config), 201)
 
+    def test_find_created_building_id_from_alliance_list_matches_name_and_type(self):
+        config = build_alliance_building_config(
+            building_type="Hospital",
+            building_name="Maxima MC Eindhoven",
+            coordinates="51.4, 5.4",
+            address=None,
+        )
+        candidates = [
+            {
+                "id": 300,
+                "text": "Other Hospital",
+                "rowText": "Other Hospital",
+                "searchAttribute": "Other Hospital",
+                "imageSources": ["/images/building_hospital.png"],
+            },
+            {
+                "id": 301,
+                "text": "Maxima MC Eindhoven",
+                "rowText": "[AA] Maxima MC Eindhoven",
+                "searchAttribute": "Maxima MC Eindhoven",
+                "imageSources": ["/images/building_hospital.png"],
+            },
+        ]
+
+        self.assertEqual(find_created_alliance_building_id_from_list(candidates, config), 301)
+
+    def test_find_created_building_id_from_alliance_list_rejects_missing_name(self):
+        config = build_alliance_building_config(
+            building_type="Hospital",
+            building_name="Maxima MC Eindhoven",
+            coordinates="51.4, 5.4",
+            address=None,
+        )
+        candidates = [
+            {
+                "id": 302,
+                "text": "Generic Hospital",
+                "rowText": "Generic Hospital",
+                "searchAttribute": "Generic Hospital",
+                "imageSources": ["/images/building_hospital.png"],
+            }
+        ]
+
+        self.assertIsNone(find_created_alliance_building_id_from_list(candidates, config))
+
+    def test_find_created_building_id_from_alliance_list_rejects_obvious_wrong_type(self):
+        config = build_alliance_building_config(
+            building_type="Hospital",
+            building_name="Shared Campus",
+            coordinates="51.4, 5.4",
+            address=None,
+        )
+        candidates = [
+            {
+                "id": 303,
+                "text": "Shared Campus",
+                "rowText": "Shared Campus prison",
+                "searchAttribute": "Shared Campus",
+                "imageSources": ["/images/building_prison.png"],
+            }
+        ]
+
+        self.assertIsNone(find_created_alliance_building_id_from_list(candidates, config))
+
+    def test_find_created_building_id_from_alliance_list_prefers_highest_id_for_duplicate_name(self):
+        config = build_alliance_building_config(
+            building_type="Prison",
+            building_name="County Prison",
+            coordinates="40.1, -73.9",
+            address=None,
+        )
+        candidates = [
+            {
+                "id": 310,
+                "text": "County Prison",
+                "rowText": "County Prison",
+                "searchAttribute": "County Prison",
+                "imageSources": ["/images/building_prison.png"],
+            },
+            {
+                "id": 311,
+                "text": "County Prison",
+                "rowText": "County Prison",
+                "searchAttribute": "County Prison",
+                "imageSources": ["/images/building_prison.png"],
+            },
+        ]
+
+        self.assertEqual(find_created_alliance_building_id_from_list(candidates, config), 311)
+
     def test_automation_script_refuses_coins_and_excludes_large_buildings(self):
         self.assertIn("coin|coins", BUILDING_AUTOMATION_PREPARE_SCRIPT)
         self.assertIn("large hospital", BUILDING_AUTOMATION_PREPARE_SCRIPT)
@@ -198,6 +296,28 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
             self.assertEqual(completed.status, "completed")
             self.assertTrue(completed.level_complete)
             self.assertTrue(completed.extensions_complete)
+
+    def test_database_can_read_request_by_id_for_manual_automation_queue(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = BuildingDatabase(f"{temp_dir}/building_manager.db")
+            request_id = db.add_request(
+                guild_id=100,
+                user_id=200,
+                username="Requester",
+                building_type="Hospital",
+                building_name="Example Hospital",
+                location_input="https://maps.example/request",
+                coordinates="40.1, -73.9",
+                address="Example Street",
+                notes=None,
+            )
+
+            request = db.get_request_by_id(request_id)
+
+            self.assertIsNotNone(request)
+            self.assertEqual(request["request_id"], request_id)
+            self.assertEqual(request["building_type"], "Hospital")
+            self.assertEqual(request["building_name"], "Example Hospital")
 
     def test_browser_diagnostics_report_formats_controls_and_redacted_fields(self):
         report = build_browser_diagnostics_report(
