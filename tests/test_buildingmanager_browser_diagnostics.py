@@ -1,10 +1,16 @@
+import tempfile
 import unittest
 
 from buildingmanager.buildingmanager import (
+    BUILDING_AUTOMATION_MAX_EXTENSION_STARTS_PER_RUN,
+    BUILDING_AUTOMATION_PREPARE_SCRIPT,
     BUILDING_CREATE_SCRIPT,
+    BuildingAutomationResult,
+    BuildingDatabase,
     _normalize_missionchief_url,
     build_alliance_building_config,
     build_browser_diagnostics_report,
+    extract_missionchief_building_id,
 )
 
 
@@ -69,6 +75,74 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertIn("build as alliance building", BUILDING_CREATE_SCRIPT)
         self.assertIn('text.includes("credits")', BUILDING_CREATE_SCRIPT)
         self.assertIn('!text.includes("coins")', BUILDING_CREATE_SCRIPT)
+
+    def test_extract_building_id_from_urls_and_snapshots(self):
+        self.assertEqual(
+            extract_missionchief_building_id("https://www.missionchief.com/buildings/123456"),
+            123456,
+        )
+        self.assertEqual(
+            extract_missionchief_building_id({"finalUrl": "https://www.missionchief.com/buildings/987"}),
+            987,
+        )
+        self.assertIsNone(extract_missionchief_building_id("https://www.missionchief.com/buildings"))
+
+    def test_automation_script_refuses_coins_and_excludes_large_buildings(self):
+        self.assertIn("coin|coins", BUILDING_AUTOMATION_PREPARE_SCRIPT)
+        self.assertIn("large hospital", BUILDING_AUTOMATION_PREPARE_SCRIPT)
+        self.assertIn("large prison", BUILDING_AUTOMATION_PREPARE_SCRIPT)
+        self.assertIn("maxExtensionStarts", BUILDING_AUTOMATION_PREPARE_SCRIPT)
+        self.assertEqual(BUILDING_AUTOMATION_MAX_EXTENSION_STARTS_PER_RUN, 3)
+
+    def test_automation_queue_tracks_waiting_and_completion(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = BuildingDatabase(f"{temp_dir}/building_manager.db")
+            job_id = db.add_or_update_automation_job(
+                request_id=42,
+                guild_id=100,
+                building_id=555,
+                building_type="Hospital",
+                building_name="Example Hospital",
+                next_run_at=1,
+            )
+
+            due = db.get_due_automation_jobs(now_ts=2)
+            self.assertEqual([job.job_id for job in due], [job_id])
+
+            db.update_automation_job(
+                job_id,
+                BuildingAutomationResult(
+                    ok=True,
+                    completed=False,
+                    wait=True,
+                    reason="Waiting for next extension slot.",
+                    actions=["Set tax to 20%", "Extension A"],
+                    tax_complete=True,
+                    extensions_started=1,
+                ),
+            )
+            waiting = db.get_automation_job(job_id)
+            self.assertEqual(waiting.status, "waiting")
+            self.assertTrue(waiting.tax_complete)
+            self.assertEqual(waiting.extensions_started, 1)
+
+            db.update_automation_job(
+                job_id,
+                BuildingAutomationResult(
+                    ok=True,
+                    completed=True,
+                    wait=False,
+                    reason="Done.",
+                    actions=[],
+                    tax_complete=True,
+                    level_complete=True,
+                    extensions_complete=True,
+                ),
+            )
+            completed = db.get_automation_job_by_request_or_building(555)
+            self.assertEqual(completed.status, "completed")
+            self.assertTrue(completed.level_complete)
+            self.assertTrue(completed.extensions_complete)
 
     def test_browser_diagnostics_report_formats_controls_and_redacted_fields(self):
         report = build_browser_diagnostics_report(
