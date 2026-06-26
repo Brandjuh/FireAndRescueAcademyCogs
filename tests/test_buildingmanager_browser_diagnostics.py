@@ -248,6 +248,72 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertFalse(alliance_funds_allow_auto_build(10_000_000, "income_v2.db"))
         self.assertFalse(alliance_funds_allow_auto_build(None, "live MissionChief"))
 
+    def test_current_alliance_funds_reports_live_failure_reason(self):
+        manager = BuildingManager.__new__(BuildingManager)
+
+        async def fail_aiohttp():
+            raise RuntimeError("session expired")
+
+        async def fail_browser():
+            raise RuntimeError("browser unavailable")
+
+        manager._fetch_live_alliance_funds = fail_aiohttp
+        manager._fetch_live_alliance_funds_browser = fail_browser
+        manager._get_alliance_funds_from_contract = AsyncMock(return_value=None)
+        manager._read_alliance_funds_from_income_db = lambda: None
+
+        funds, source = asyncio.run(manager._get_current_alliance_funds())
+
+        self.assertIsNone(funds)
+        self.assertIn("live MissionChief: RuntimeError: session expired", source)
+        self.assertIn("live MissionChief browser: RuntimeError: browser unavailable", source)
+
+    def test_queue_waiting_for_funds_does_not_record_auto_approval(self):
+        class FakeDb:
+            def __init__(self):
+                self.status = None
+                self.actions = []
+
+            def update_request_status(self, request_id, status):
+                self.status = (request_id, status)
+
+            def add_action(self, **kwargs):
+                self.actions.append(kwargs)
+
+        manager = BuildingManager.__new__(BuildingManager)
+        manager.db = FakeDb()
+        manager._send_building_request_game_update = AsyncMock(return_value={"ok": True})
+
+        req = BuildingRequest(
+            user_id=0,
+            username="BoardUser",
+            building_type="Hospital",
+            building_name="Example Hospital",
+            location_input="https://maps.app.goo.gl/example",
+            request_id=49,
+        )
+        guild = types.SimpleNamespace(id=1, get_member=lambda _user_id: None)
+
+        message = asyncio.run(
+            manager._queue_request_waiting_for_funds(
+                guild=guild,
+                req=req,
+                requester_id=0,
+                admin_user=None,
+                funds=None,
+                source="unavailable; live MissionChief: session expired",
+                minimum=2_000_000,
+                log_channel=None,
+                record_approval=False,
+            )
+        )
+
+        self.assertEqual(manager.db.status, (49, "awaiting_funds"))
+        self.assertEqual([action["action_type"] for action in manager.db.actions], ["awaiting_funds"])
+        self.assertIn("No building was created yet", message)
+        manager._send_building_request_game_update.assert_awaited_once()
+        self.assertEqual(manager._send_building_request_game_update.await_args.kwargs["subject"], "Building request queued")
+
     def test_create_script_requires_alliance_context_and_refuses_coins(self):
         self.assertIn("build_as_alliance", BUILDING_CREATE_SCRIPT)
         self.assertIn("build_with_coins", BUILDING_CREATE_SCRIPT)
