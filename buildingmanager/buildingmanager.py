@@ -5394,7 +5394,6 @@ class BuildingManager(commands.Cog):
             await self._schedule_board_post_deletion(guild, thread_id, post.post_id, "unrecognized request")
             if reply_post_id:
                 await self._schedule_board_post_deletion(guild, thread_id, reply_post_id, "unrecognized reply")
-            await self._send_board_request_error_log(guild, post, error or "Could not read this request.")
             return
 
         location_details = await self._resolve_building_location(spec.location_input)
@@ -5408,7 +5407,6 @@ class BuildingManager(commands.Cog):
             await self._schedule_board_post_deletion(guild, thread_id, post.post_id, "unresolved request")
             if reply_post_id:
                 await self._schedule_board_post_deletion(guild, thread_id, reply_post_id, "unresolved reply")
-            await self._send_board_request_error_log(guild, post, reason)
             return
 
         detected_type, rejection_reason = LocationParser.detect_supported_building_type(location_details)
@@ -5418,7 +5416,6 @@ class BuildingManager(commands.Cog):
             await self._schedule_board_post_deletion(guild, thread_id, post.post_id, "unsupported facility request")
             if reply_post_id:
                 await self._schedule_board_post_deletion(guild, thread_id, reply_post_id, "unsupported facility reply")
-            await self._send_board_request_error_log(guild, post, rejection_reason)
             return
 
         building_name = LocationParser.derive_building_name(detected_type, location_details)

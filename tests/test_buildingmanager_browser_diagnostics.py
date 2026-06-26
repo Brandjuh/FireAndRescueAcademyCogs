@@ -1265,6 +1265,32 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         reply_content = manager._post_building_board_reply_with_id.await_args.args[3]
         self.assertIn("Request ID: 321", reply_content)
 
+    def test_invalid_board_facility_replies_without_discord_log(self):
+        manager = BuildingManager.__new__(BuildingManager)
+        manager._resolve_building_location = AsyncMock(
+            return_value=LocationDetails(
+                original_input="https://maps.app.goo.gl/example",
+                resolved_input="https://maps.app.goo.gl/example",
+                place_name="Example Clinic",
+                coordinates="40.1, -73.9",
+                address="Example Clinic, New York",
+                detected_facility_type="clinic",
+            )
+        )
+        manager._post_building_board_reply_with_id = AsyncMock(return_value=(200, 200004))
+        manager._schedule_board_post_deletion = AsyncMock()
+        manager._send_board_request_error_log = AsyncMock()
+        page = BoardPage(posts=[], reply_action="/alliance_posts?alliance_thread_id=6165", reply_token="token")
+        post = BoardBuildingPost(200003, "123", "BoardUser", "now", "https://maps.app.goo.gl/example")
+
+        asyncio.run(manager._handle_building_board_post(types.SimpleNamespace(id=1), object(), 6165, page, post))
+
+        manager._post_building_board_reply_with_id.assert_awaited_once()
+        manager._send_board_request_error_log.assert_not_awaited()
+        reply_content = manager._post_building_board_reply_with_id.await_args.args[3]
+        self.assertIn("Building request could not be processed", reply_content)
+        self.assertIn("clinic", reply_content)
+
     def test_board_post_with_unknown_tax_is_forwarded_to_admin_review(self):
         class FakeGuildConfig:
             async def all(self):
