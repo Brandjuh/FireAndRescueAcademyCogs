@@ -44,6 +44,7 @@ from buildingmanager.buildingmanager import (
     find_new_created_alliance_building_id_from_list,
     parse_building_board_page,
     parse_alliance_funds_from_html,
+    send_ephemeral_followup,
 )
 
 
@@ -182,6 +183,18 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
 
         self.assertEqual(len(value), 20)
         self.assertTrue(value.endswith("..."))
+
+    def test_ephemeral_followup_edits_deferred_original_response(self):
+        interaction = types.SimpleNamespace(
+            response=types.SimpleNamespace(is_done=lambda: True),
+            edit_original_response=AsyncMock(),
+            followup=types.SimpleNamespace(send=AsyncMock()),
+        )
+
+        asyncio.run(send_ephemeral_followup(interaction, "Done"))
+
+        interaction.edit_original_response.assert_awaited_once_with(content="Done", embed=None, view=None)
+        interaction.followup.send.assert_not_awaited()
 
     def test_building_request_cleans_encoded_names(self):
         request = BuildingRequest(
