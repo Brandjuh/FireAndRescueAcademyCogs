@@ -771,6 +771,16 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertEqual(spec.building_type, "Prison")
         self.assertEqual(spec.location_input, "https://maps.app.goo.gl/mPcFakXaRgMU99fm6")
 
+    def test_extract_building_board_request_accepts_link_icon_between_type_and_url(self):
+        spec, error = extract_building_board_request(
+            "Prison 🔗 https://maps.app.goo.gl/mPcFakXaRgMU99fm6"
+        )
+
+        self.assertIsNone(error)
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec.building_type, "Prison")
+        self.assertEqual(spec.location_input, "https://maps.app.goo.gl/mPcFakXaRgMU99fm6")
+
     def test_extract_building_board_request_accepts_small_type_typos(self):
         prison_spec, prison_error = extract_building_board_request(
             "prisn https://maps.app.goo.gl/example"
@@ -892,6 +902,70 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
 
         self.assertTrue(notified)
         admin_channel.send.assert_awaited_once()
+
+    def test_board_request_submission_posts_admin_approval_with_location_fields(self):
+        class FakeGuildConfig:
+            async def all(self):
+                return {"admin_channel_id": 10, "log_channel_id": 20}
+
+        class FakeConfig:
+            def guild(self, _guild):
+                return FakeGuildConfig()
+
+        class FakeDb:
+            def __init__(self):
+                self.added = None
+
+            def add_request(self, **kwargs):
+                self.added = kwargs
+                return 123
+
+        admin_channel = types.SimpleNamespace(send=AsyncMock())
+        log_channel = types.SimpleNamespace(send=AsyncMock())
+        guild = types.SimpleNamespace(
+            id=1,
+            get_member=lambda _member_id: None,
+            get_channel=lambda channel_id: {10: admin_channel, 20: log_channel}.get(channel_id),
+        )
+        manager = BuildingManager.__new__(BuildingManager)
+        manager.config = FakeConfig()
+        manager.db = FakeDb()
+        manager.bot = types.SimpleNamespace(fetch_channel=AsyncMock(return_value=None))
+        request = BuildingRequest(
+            user_id=0,
+            username="BoardUser",
+            building_type="Prison",
+            building_name="Example Prison",
+            location_input="https://maps.app.goo.gl/mPcFakXaRgMU99fm6",
+            coordinates="40.1, -73.9",
+            address="Example Address",
+            country="United States",
+            region="New York",
+            maps_url="https://maps.app.goo.gl/mPcFakXaRgMU99fm6",
+            facility_warning=None,
+            notes="MissionChief board post #200001",
+        )
+        post = parse_building_board_page(BUILDING_BOARD_HTML).posts[0]
+
+        request_id = asyncio.run(
+            manager._submit_building_request_to_admins(
+                guild,
+                request,
+                source="MissionChief board",
+                board_post=post,
+            )
+        )
+
+        self.assertEqual(request_id, 123)
+        self.assertEqual(manager.db.added["building_type"], "Prison")
+        admin_channel.send.assert_awaited_once()
+        admin_embed = admin_channel.send.await_args.kwargs["embed"]
+        admin_fields = {field["name"]: field["value"] for field in admin_embed.fields}
+        self.assertEqual(admin_fields["Coordinates"], "40.1, -73.9")
+        self.assertEqual(admin_fields["Country / Region"], "New York, United States")
+        self.assertEqual(admin_fields["Address"], "Example Address")
+        self.assertIn("maps.app.goo.gl", admin_fields["Maps URL"])
+        log_channel.send.assert_awaited_once()
 
 
 if __name__ == "__main__":
