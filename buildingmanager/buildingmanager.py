@@ -35,6 +35,9 @@ ALLIANCE_BUILDING_TYPE_IDS = {
 ALLIANCE_BUILDING_TARGET_TAX = 20
 ALLIANCE_BUILDING_TARGET_HOSPITAL_LEVEL = 20
 ALLIANCE_BUILDING_MIN_FUNDS = 2_000_000
+MISSIONCHIEF_BUILDING_NAME_LIMIT = 40
+BUILDING_APPROVAL_FUNDS_TIMEOUT_SECONDS = 45
+BUILDING_APPROVAL_CREATE_TIMEOUT_SECONDS = 180
 BUILDING_AUTOMATION_RETRY_SECONDS = 6 * 60 * 60
 BUILDING_AUTOMATION_LOOP_SECONDS = 15 * 60
 BUILDING_CREATION_QUEUE_LOOP_SECONDS = 15 * 60
@@ -909,6 +912,10 @@ def _clean_building_name(value: Any) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
+def _missionchief_building_name(value: Any) -> str:
+    """Return a building name that fits MissionChief's 40-character limit."""
+    return _clean_building_name(value)[:MISSIONCHIEF_BUILDING_NAME_LIMIT].strip()
+
 def _normalize_missionchief_url(value: Optional[str]) -> str:
     """Normalize a user-supplied MissionChief URL or path."""
     if not value:
@@ -956,7 +963,7 @@ def build_alliance_building_config(
 ) -> Dict[str, str]:
     """Build a browser automation config for supported alliance building creation."""
     latitude, longitude = _parse_coordinate_pair(coordinates)
-    name = _truncate_text(_clean_building_name(building_name), 100).strip()
+    name = _missionchief_building_name(building_name)
     if not name:
         raise ValueError("Building name is required.")
     return {
@@ -2929,11 +2936,22 @@ class AdminDecisionView(discord.ui.View):
             return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
+        await safe_ephemeral_complete(
+            interaction,
+            "Approval accepted. BuildingManager is creating the alliance building now. "
+            "The final result will be posted here and in the configured log channel.",
+        )
         guild = interaction.guild
         conf = await self.cog.config.guild(guild).all()
         log_channel = guild.get_channel(conf["log_channel_id"]) if conf.get("log_channel_id") else None
         minimum_funds = await self.cog._get_min_alliance_funds(guild)
-        current_funds, funds_source = await self.cog._get_current_alliance_funds()
+        try:
+            current_funds, funds_source = await asyncio.wait_for(
+                self.cog._get_current_alliance_funds(),
+                timeout=BUILDING_APPROVAL_FUNDS_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            current_funds, funds_source = None, "live funds check timed out"
         if not alliance_funds_allow_auto_build(current_funds, funds_source, minimum_funds):
             queue_message = await self.cog._queue_request_waiting_for_funds(
                 guild=guild,
@@ -2950,7 +2968,17 @@ class AdminDecisionView(discord.ui.View):
             await safe_ephemeral_complete(interaction, queue_message)
             return
 
-        create_result = await self.cog._create_alliance_building_browser(self.req)
+        try:
+            create_result = await asyncio.wait_for(
+                self.cog._create_alliance_building_browser(self.req),
+                timeout=BUILDING_APPROVAL_CREATE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            create_result = BuildingCreateResult(
+                False,
+                "MissionChief building creation timed out before a confirmed result was returned. "
+                "No post-creation automation was queued.",
+            )
         final_status = "created" if create_result.ok else "approved_pending_manual"
         automation_message = None
         if create_result.ok:
@@ -3388,7 +3416,7 @@ class BuildingManager(commands.Cog):
     async def _fetch_live_alliance_funds(self) -> Optional[int]:
         """Fetch and parse the live MissionChief alliance funds page."""
         session = await self._get_session()
-        async with session.get(MISSIONCHIEF_ALLIANCE_FUNDS_URL) as response:
+        async with session.get(MISSIONCHIEF_ALLIANCE_FUNDS_URL, timeout=30) as response:
             if response.status != 200:
                 raise RuntimeError(f"MissionChief returned HTTP {response.status} for alliance funds.")
             html = await response.text()

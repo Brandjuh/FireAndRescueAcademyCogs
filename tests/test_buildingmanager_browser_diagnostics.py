@@ -13,7 +13,9 @@ from buildingmanager.buildingmanager import (
     BuildingDatabase,
     BuildingRequest,
     LocationParser,
+    MISSIONCHIEF_BUILDING_NAME_LIMIT,
     _clean_building_name,
+    _missionchief_building_name,
     _normalize_missionchief_url,
     _truncate_discord_text,
     alliance_funds_allow_auto_build,
@@ -42,6 +44,12 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _normalize_missionchief_url("https://example.com/buildings/new")
 
+    def test_missionchief_building_name_respects_game_limit(self):
+        name = _missionchief_building_name("A very long hospital name that exceeds the game limit")
+
+        self.assertEqual(len(name), MISSIONCHIEF_BUILDING_NAME_LIMIT)
+        self.assertFalse(name.endswith("..."))
+
     def test_build_alliance_building_config_allows_hospital(self):
         config = build_alliance_building_config(
             building_type="Hospital",
@@ -54,6 +62,17 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertEqual(config["name"], "Example Hospital")
         self.assertEqual(config["latitude"], "40.1234568")
         self.assertEqual(config["longitude"], "-73.9876543")
+
+    def test_build_alliance_building_config_limits_name_to_missionchief_max(self):
+        config = build_alliance_building_config(
+            building_type="Hospital",
+            building_name="A very long hospital name that exceeds the MissionChief limit",
+            coordinates="42.6973, 9.4509",
+            address=None,
+        )
+
+        self.assertEqual(len(config["name"]), MISSIONCHIEF_BUILDING_NAME_LIMIT)
+        self.assertFalse(config["name"].endswith("..."))
 
     def test_build_alliance_building_config_decodes_url_encoded_names(self):
         config = build_alliance_building_config(
