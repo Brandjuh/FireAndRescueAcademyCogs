@@ -2,7 +2,9 @@ import tempfile
 import unittest
 
 from buildingmanager.buildingmanager import (
+    ALLIANCE_BUILDING_TARGET_HOSPITAL_LEVEL,
     BUILDING_AUTOMATION_MAX_EXTENSION_STARTS_PER_RUN,
+    BUILDING_AUTOMATION_DIRECT_SCRIPT,
     BUILDING_AUTOMATION_PREPARE_SCRIPT,
     BUILDING_CREATE_SCRIPT,
     BUILDING_FETCH_API_SCRIPT,
@@ -337,6 +339,16 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertIn("large prison", BUILDING_AUTOMATION_PREPARE_SCRIPT)
         self.assertIn("maxExtensionStarts", BUILDING_AUTOMATION_PREPARE_SCRIPT)
         self.assertEqual(BUILDING_AUTOMATION_MAX_EXTENSION_STARTS_PER_RUN, 3)
+        self.assertEqual(ALLIANCE_BUILDING_TARGET_HOSPITAL_LEVEL, 20)
+
+    def test_direct_automation_script_uses_missionchief_building_endpoints(self):
+        self.assertIn("/alliance_costs/${targetTaxId}", BUILDING_AUTOMATION_DIRECT_SCRIPT)
+        self.assertIn("/expand_do/credits?level=${levelTarget}", BUILDING_AUTOMATION_DIRECT_SCRIPT)
+        self.assertIn("/extension/credits/", BUILDING_AUTOMATION_DIRECT_SCRIPT)
+        self.assertIn("offer.extId !== 9", BUILDING_AUTOMATION_DIRECT_SCRIPT)
+        self.assertIn("offer.extId !== 30", BUILDING_AUTOMATION_DIRECT_SCRIPT)
+        self.assertIn("offer.price !== 200000", BUILDING_AUTOMATION_DIRECT_SCRIPT)
+        self.assertIn("maxExtensionStarts", BUILDING_AUTOMATION_DIRECT_SCRIPT)
 
     def test_automation_queue_tracks_waiting_and_completion(self):
         with tempfile.TemporaryDirectory() as temp_dir:

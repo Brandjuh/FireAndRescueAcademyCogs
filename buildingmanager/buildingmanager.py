@@ -33,6 +33,7 @@ ALLIANCE_BUILDING_TYPE_IDS = {
     "Prison": "10",
 }
 ALLIANCE_BUILDING_TARGET_TAX = 20
+ALLIANCE_BUILDING_TARGET_HOSPITAL_LEVEL = 20
 ALLIANCE_BUILDING_MIN_FUNDS = 2_000_000
 BUILDING_AUTOMATION_RETRY_SECONDS = 6 * 60 * 60
 BUILDING_AUTOMATION_LOOP_SECONDS = 15 * 60
@@ -579,6 +580,273 @@ BUILDING_AUTOMATION_PREPARE_SCRIPT = r"""
       excludedLabels,
       taxFields: taxFields.map((item) => item.label).slice(0, 5),
     },
+  };
+}
+""".strip()
+
+BUILDING_AUTOMATION_DIRECT_SCRIPT = r"""
+async (config) => {
+  const buildingId = String(config.buildingId || "").trim();
+  const buildingType = String(config.buildingType || "").trim().toLowerCase();
+  const targetTax = Number(config.targetTax || 20);
+  const maxHospitalLevel = Number(config.maxHospitalLevel || 20);
+  const maxExtensionStarts = Number(config.maxExtensionStarts || 3);
+  const extensionsStartedThisRun = Number(config.extensionsStartedThisRun || 0);
+  const targetTaxIds = { 0: 0, 10: 1, 20: 2, 30: 3, 40: 4, 50: 5 };
+  const targetTaxId = targetTaxIds[targetTax];
+
+  const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const csrf = () => document.querySelector('meta[name="csrf-token"]')?.content || "";
+
+  const fail = (reason, extra = {}) => ({
+    ok: false,
+    action: null,
+    completed: false,
+    wait: true,
+    reason,
+    snapshot: { url: location.href, buildingId, buildingType, ...extra },
+  });
+
+  if (!buildingId || !/^\d+$/.test(buildingId)) {
+    return fail("MissionChief building id is missing or invalid.");
+  }
+  if (!["hospital", "prison"].includes(buildingType)) {
+    return fail(`Unsupported alliance building automation type: ${buildingType || "unknown"}.`);
+  }
+  if (targetTaxId === undefined) {
+    return fail("Invalid target tax percentage. Supported values are 0, 10, 20, 30, 40, and 50.");
+  }
+
+  async function fetchText(path) {
+    const response = await fetch(path, {
+      credentials: "same-origin",
+      headers: { "Accept": "text/html" },
+    });
+    const text = await response.text();
+    return { ok: response.ok, status: response.status, url: response.url, text };
+  }
+
+  async function doGet(path) {
+    const response = await fetch(path, {
+      credentials: "same-origin",
+      headers: { "Accept": "text/html", "X-Requested-With": "XMLHttpRequest" },
+    });
+    const text = await response.text();
+    return { ok: response.ok, status: response.status, url: response.url, text };
+  }
+
+  async function doPost(path) {
+    const token = csrf();
+    const headers = {
+      "Accept": "text/html",
+      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+      "X-Requested-With": "XMLHttpRequest",
+    };
+    if (token) headers["X-CSRF-Token"] = token;
+
+    const body = new URLSearchParams();
+    if (token) body.set("authenticity_token", token);
+
+    const response = await fetch(path, {
+      method: "POST",
+      credentials: "same-origin",
+      headers,
+      body,
+    });
+    const text = await response.text();
+    return { ok: response.ok, status: response.status, url: response.url, text };
+  }
+
+  function parseCredits(text) {
+    const match = String(text || "").match(/([\d.,\s]+)/);
+    if (!match) return null;
+    const digits = match[1].replace(/[^\d]/g, "");
+    return digits ? Number.parseInt(digits, 10) : null;
+  }
+
+  function parseDoc(html) {
+    return new DOMParser().parseFromString(String(html || ""), "text/html");
+  }
+
+  function extractCurrentLevel(html) {
+    const match = String(html || "").match(/<dt><strong>Level:<\/strong><\/dt>\s*<dd>\s*(\d+)/i);
+    return match ? Number.parseInt(match[1], 10) : null;
+  }
+
+  function isTaxAlreadyTarget(html) {
+    const doc = parseDoc(html);
+    const selector = `a.btn.btn-alliance_costs[href="/buildings/${buildingId}/alliance_costs/${targetTaxId}"]`;
+    const link = doc.querySelector(selector);
+    if (!link) return false;
+    return normalize(link.textContent).includes(`${targetTax}%`) && normalize(link.className).includes("btn-success");
+  }
+
+  function extractExtensionOffers(html) {
+    const doc = parseDoc(html);
+    const links = [...doc.querySelectorAll(`a[href^="/buildings/${buildingId}/extension/credits/"]`)];
+    const offers = [];
+    for (const link of links) {
+      const href = link.getAttribute("href") || "";
+      const match = href.match(new RegExp(`^/buildings/${buildingId}/extension/credits/(\\d+)`));
+      if (!match) continue;
+      const extId = Number.parseInt(match[1], 10);
+      offers.push({
+        extId,
+        price: parseCredits(link.textContent || ""),
+        href,
+        label: (link.textContent || href).replace(/\s+/g, " ").trim(),
+      });
+    }
+    const unique = new Map();
+    for (const offer of offers) {
+      if (!unique.has(offer.extId)) unique.set(offer.extId, offer);
+    }
+    return [...unique.values()].sort((a, b) => a.extId - b.extId);
+  }
+
+  const detailPath = `/buildings/${buildingId}`;
+  const detail = await fetchText(detailPath);
+  if (!detail.ok) {
+    return fail(`MissionChief returned HTTP ${detail.status} for building ${buildingId}.`, {
+      status: detail.status,
+      response: String(detail.text || "").slice(0, 500),
+    });
+  }
+
+  if (!config.taxComplete) {
+    if (isTaxAlreadyTarget(detail.text)) {
+      return {
+        ok: true,
+        action: "tax_already_set",
+        completed: false,
+        label: `Tax already set to ${targetTax}%`,
+        status: detail.status,
+        snapshot: { url: detail.url || detailPath },
+      };
+    }
+
+    const taxResult = await doGet(`/buildings/${buildingId}/alliance_costs/${targetTaxId}`);
+    if (!taxResult.ok) {
+      return fail(`MissionChief returned HTTP ${taxResult.status} while setting tax to ${targetTax}%.`, {
+        status: taxResult.status,
+        response: String(taxResult.text || "").slice(0, 500),
+      });
+    }
+    await sleep(500);
+    return {
+      ok: true,
+      action: "set_tax",
+      completed: false,
+      label: `Set tax to ${targetTax}%`,
+      status: taxResult.status,
+      snapshot: { url: taxResult.url || detailPath },
+    };
+  }
+
+  if (buildingType === "prison" && !config.levelComplete) {
+    return {
+      ok: true,
+      action: "level_not_applicable",
+      completed: false,
+      label: "Prison level not applicable",
+      status: detail.status,
+      snapshot: { url: detail.url || detailPath },
+    };
+  }
+
+  if (buildingType === "hospital" && !config.levelComplete) {
+    const currentLevel = extractCurrentLevel(detail.text);
+    if (currentLevel !== null && currentLevel >= maxHospitalLevel) {
+      return {
+        ok: true,
+        action: "level_already_max",
+        completed: false,
+        label: `Hospital level already ${maxHospitalLevel}`,
+        status: detail.status,
+        snapshot: { url: detail.url || detailPath, currentLevel },
+      };
+    }
+    if (currentLevel === null) {
+      return {
+        ok: true,
+        action: null,
+        completed: false,
+        wait: true,
+        reason: "Hospital level could not be read from the MissionChief building page.",
+        status: detail.status,
+        snapshot: { url: detail.url || detailPath },
+      };
+    }
+
+    const levelTarget = Math.max(0, maxHospitalLevel - 1);
+    const levelResult = await doGet(`/buildings/${buildingId}/expand_do/credits?level=${levelTarget}`);
+    if (!levelResult.ok) {
+      return fail(`MissionChief returned HTTP ${levelResult.status} while setting hospital level.`, {
+        status: levelResult.status,
+        response: String(levelResult.text || "").slice(0, 500),
+      });
+    }
+    await sleep(500);
+    return {
+      ok: true,
+      action: "start_level_upgrade",
+      completed: false,
+      label: `Set hospital level to ${maxHospitalLevel}`,
+      status: levelResult.status,
+      snapshot: { url: levelResult.url || detailPath, previousLevel: currentLevel },
+    };
+  }
+
+  let offers = extractExtensionOffers(detail.text);
+  if (buildingType === "hospital") {
+    offers = offers.filter((offer) => offer.extId !== 9);
+  }
+  if (buildingType === "prison") {
+    offers = offers.filter((offer) => offer.extId !== 30 && offer.price !== 200000);
+  }
+
+  if (!offers.length) {
+    return {
+      ok: true,
+      action: null,
+      completed: true,
+      wait: false,
+      reason: "Tax, level, and eligible extensions are complete.",
+      status: detail.status,
+      snapshot: { url: detail.url || detailPath },
+    };
+  }
+
+  if (extensionsStartedThisRun >= maxExtensionStarts) {
+    return {
+      ok: true,
+      action: null,
+      completed: false,
+      wait: true,
+      reason: `Started ${extensionsStartedThisRun} extension(s) this run; waiting before starting more.`,
+      status: detail.status,
+      snapshot: { url: detail.url || detailPath, remainingExtensions: offers.map((offer) => offer.extId).slice(0, 10) },
+    };
+  }
+
+  const next = offers[0];
+  const extensionResult = await doPost(next.href);
+  if (!extensionResult.ok) {
+    return fail(`MissionChief returned HTTP ${extensionResult.status} while starting extension ${next.extId}.`, {
+      status: extensionResult.status,
+      extensionId: next.extId,
+      response: String(extensionResult.text || "").slice(0, 500),
+    });
+  }
+  await sleep(500);
+  return {
+    ok: true,
+    action: "start_extension",
+    completed: false,
+    label: `Started extension ${next.extId}${next.price ? ` (${next.price} credits)` : ""}`,
+    status: extensionResult.status,
+    snapshot: { url: extensionResult.url || detailPath, extensionId: next.extId, price: next.price },
   };
 }
 """.strip()
@@ -3606,16 +3874,21 @@ class BuildingManager(commands.Cog):
 
                         for _ in range(BUILDING_AUTOMATION_MAX_ACTIONS_PER_RUN):
                             prepare_config = {
+                                "buildingId": str(job.building_id),
+                                "buildingType": str(job.building_type),
                                 "targetTax": str(job.target_tax),
+                                "maxHospitalLevel": ALLIANCE_BUILDING_TARGET_HOSPITAL_LEVEL,
                                 "taxComplete": bool(tax_complete),
                                 "levelComplete": bool(level_complete),
                                 "extensionsComplete": bool(extensions_complete),
                                 "extensionsStartedThisRun": extensions_started_this_run,
                                 "maxExtensionStarts": BUILDING_AUTOMATION_MAX_EXTENSION_STARTS_PER_RUN,
-                                "excludedLabels": sorted(BUILDING_AUTOMATION_EXCLUDED_EXTENSIONS),
                             }
-                            last_prepare = await page.evaluate(BUILDING_AUTOMATION_PREPARE_SCRIPT, prepare_config)
+                            last_prepare = await page.evaluate(BUILDING_AUTOMATION_DIRECT_SCRIPT, prepare_config)
                             details["last_prepare"] = last_prepare
+                            if last_prepare.get("status") is not None:
+                                with contextlib.suppress(TypeError, ValueError):
+                                    last_status = int(last_prepare.get("status"))
                             if not last_prepare.get("ok"):
                                 return BuildingAutomationResult(
                                     False,
@@ -3630,6 +3903,11 @@ class BuildingManager(commands.Cog):
                             label = _truncate_text(last_prepare.get("label") or action or "MissionChief action", 160)
                             if action == "tax_already_set":
                                 tax_complete = True
+                                if label not in actions:
+                                    actions.append(label)
+                                continue
+                            if action == "level_already_max" or action == "level_not_applicable":
+                                level_complete = True
                                 if label not in actions:
                                     actions.append(label)
                                 continue
@@ -3657,42 +3935,14 @@ class BuildingManager(commands.Cog):
                                     details=details,
                                 )
 
-                            selector = last_prepare.get("selector")
-                            if not selector:
-                                return BuildingAutomationResult(
-                                    False,
-                                    False,
-                                    True,
-                                    f"MissionChief action `{action}` did not expose a safe selector.",
-                                    actions,
-                                    details=details,
-                                )
-
-                            try:
-                                await page.locator(str(selector)).click(timeout=15000)
-                                with contextlib.suppress(PlaywrightTimeoutError):
-                                    await page.wait_for_load_state("domcontentloaded", timeout=5000)
-                                await page.wait_for_timeout(1200)
-                                with contextlib.suppress(Exception):
-                                    response = await page.goto(building_url, wait_until="domcontentloaded", timeout=30000)
-                                    if response:
-                                        last_status = response.status
-                            except PlaywrightTimeoutError as exc:
-                                return BuildingAutomationResult(
-                                    False,
-                                    False,
-                                    True,
-                                    f"MissionChief building automation timed out while running `{label}`: {exc}",
-                                    actions,
-                                    status=last_status,
-                                    details=details,
-                                )
-
                             actions.append(label)
                             if action == "set_tax":
                                 tax_complete = True
+                            elif action == "start_level_upgrade":
+                                level_complete = True
                             elif action == "start_extension":
                                 extensions_started_this_run += 1
+                            await page.wait_for_timeout(1200)
 
                         return BuildingAutomationResult(
                             True,
