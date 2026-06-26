@@ -314,6 +314,122 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         manager._send_building_request_game_update.assert_awaited_once()
         self.assertEqual(manager._send_building_request_game_update.await_args.kwargs["subject"], "Building request queued")
 
+    def test_discord_request_contribution_uses_membersync_and_membersscraper(self):
+        member_sync = types.SimpleNamespace(
+            get_link_for_discord=AsyncMock(return_value={"discord_id": 123, "mc_user_id": "456"})
+        )
+        members_scraper = types.SimpleNamespace(
+            get_member_snapshot=AsyncMock(return_value={"member_id": 456, "contribution_rate": 7.5})
+        )
+        manager = BuildingManager.__new__(BuildingManager)
+        manager.bot = types.SimpleNamespace(
+            get_cog=lambda name: {
+                "MemberSync": member_sync,
+                "MembersScraper": members_scraper,
+            }.get(name)
+        )
+        user = types.SimpleNamespace(id=123)
+
+        rate, source = asyncio.run(manager._get_discord_request_contribution_rate(user))
+
+        self.assertEqual(rate, 7.5)
+        self.assertIn("MC ID 456", source)
+        member_sync.get_link_for_discord.assert_awaited_once_with(123)
+        members_scraper.get_member_snapshot.assert_awaited_once_with("456")
+
+    def test_discord_request_low_tax_is_rejected_without_admin_review(self):
+        class FakeDb:
+            def __init__(self):
+                self.status = None
+                self.actions = []
+
+            def add_request(self, **kwargs):
+                self.added = kwargs
+                return 800
+
+            def update_request_status(self, request_id, status):
+                self.status = (request_id, status)
+
+            def add_action(self, **kwargs):
+                self.actions.append(kwargs)
+
+        log_channel = types.SimpleNamespace(send=AsyncMock())
+        guild = types.SimpleNamespace(id=1, get_member=lambda _member_id: None)
+        requester = types.SimpleNamespace(id=123, mention="@User")
+        manager = BuildingManager.__new__(BuildingManager)
+        manager.db = FakeDb()
+        request = BuildingRequest(
+            user_id=123,
+            username="DiscordUser",
+            building_type="Hospital",
+            building_name="Example Hospital",
+            location_input="https://maps.app.goo.gl/example",
+        )
+
+        message = asyncio.run(
+            manager._reject_discord_request_for_low_tax(
+                guild,
+                request,
+                requester,
+                contribution_rate=4.9,
+                log_channel=log_channel,
+            )
+        )
+
+        self.assertEqual(manager.db.status, (800, "denied"))
+        self.assertEqual(manager.db.actions[0]["action_type"], "auto_denied_low_tax")
+        self.assertIn("4.9%", message)
+        log_channel.send.assert_awaited_once()
+
+    def test_discord_request_auto_accept_builds_with_known_tax_and_live_funds(self):
+        class FakeDb:
+            def __init__(self):
+                self.status = None
+                self.actions = []
+
+            def add_request(self, **kwargs):
+                self.added = kwargs
+                return 801
+
+            def update_request_status(self, request_id, status):
+                self.status = (request_id, status)
+
+            def add_action(self, **kwargs):
+                self.actions.append(kwargs)
+
+        log_channel = types.SimpleNamespace(send=AsyncMock())
+        guild = types.SimpleNamespace(id=1, get_member=lambda _member_id: None)
+        requester = types.SimpleNamespace(id=123, mention="@User")
+        manager = BuildingManager.__new__(BuildingManager)
+        manager.db = FakeDb()
+        manager._get_min_alliance_funds = AsyncMock(return_value=2_000_000)
+        manager._get_current_alliance_funds = AsyncMock(return_value=(34_000_000, "live MissionChief"))
+        manager._create_and_queue_approved_building = AsyncMock(
+            return_value=(BuildingCreateResult(True, "created", details={"buildingId": 999}), "Queued automation.")
+        )
+        request = BuildingRequest(
+            user_id=123,
+            username="DiscordUser",
+            building_type="Prison",
+            building_name="Example Prison",
+            location_input="https://maps.app.goo.gl/example",
+        )
+
+        message = asyncio.run(
+            manager._auto_accept_discord_building_request(
+                guild,
+                request,
+                requester,
+                contribution_rate=5.0,
+                log_channel=log_channel,
+            )
+        )
+
+        self.assertEqual(manager.db.status, (801, "created"))
+        self.assertEqual([action["action_type"] for action in manager.db.actions], ["auto_approved", "created"])
+        self.assertIn("automatically created", message)
+        log_channel.send.assert_awaited_once()
+
     def test_create_script_requires_alliance_context_and_refuses_coins(self):
         self.assertIn("build_as_alliance", BUILDING_CREATE_SCRIPT)
         self.assertIn("build_with_coins", BUILDING_CREATE_SCRIPT)
