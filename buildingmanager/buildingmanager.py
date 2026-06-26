@@ -1181,6 +1181,57 @@ def find_created_alliance_building_id_from_list(
     matches.sort(key=lambda item: (item[0], item[1]), reverse=True)
     return matches[0][1]
 
+def find_new_created_alliance_building_id_from_list(
+    before_candidates: Iterable[Dict[str, Any]],
+    after_candidates: Iterable[Dict[str, Any]],
+    config: Dict[str, str],
+) -> Optional[int]:
+    """Find a newly created alliance building by comparing list snapshots.
+
+    This is more reliable than name matching when MissionChief displays a
+    URL-encoded or localized name differently from the request data.
+    """
+    before_ids = {
+        building_id
+        for record in before_candidates or []
+        if isinstance(record, dict)
+        for building_id in [_coerce_int(record.get("id"))]
+        if building_id is not None
+    }
+    target_name = _normalize_match_text(config.get("name"))
+    target_name_loose = _normalize_loose_match_text(config.get("name"))
+    requested_type = str(config.get("buildingType") or "")
+
+    matches: List[Tuple[int, int]] = []
+    for record in after_candidates or []:
+        if not isinstance(record, dict):
+            continue
+        building_id = _coerce_int(record.get("id"))
+        if building_id is None or building_id in before_ids:
+            continue
+
+        type_score = _alliance_list_type_score(record, requested_type)
+        if type_score < 0:
+            continue
+
+        candidate_text = _alliance_list_candidate_text(record)
+        candidate_text_loose = _normalize_loose_match_text(candidate_text)
+        score = 100 + type_score
+        if target_name and target_name in candidate_text:
+            score += 50
+        elif target_name_loose and target_name_loose in candidate_text_loose:
+            score += 35
+        if _normalize_match_text(record.get("text")) == target_name:
+            score += 40
+        if _normalize_match_text(record.get("searchAttribute")) == target_name:
+            score += 30
+        matches.append((score, building_id))
+
+    if not matches:
+        return None
+    matches.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return matches[0][1]
+
 def _diagnostic_lines_for_fields(fields: Iterable[Dict[str, Any]]) -> List[str]:
     """Format no-submit browser field diagnostics."""
     lines = []
@@ -3482,7 +3533,9 @@ class BuildingManager(commands.Cog):
             final_url = ""
             redirect_location = ""
             api_lookup: Dict[str, Any] = {}
+            before_alliance_list_lookup: Dict[str, Any] = {}
             alliance_list_lookup: Dict[str, Any] = {}
+            before_alliance_candidates: List[Dict[str, Any]] = []
             try:
                 async with async_playwright() as playwright:
                     browser = await playwright.chromium.launch(headless=True)
@@ -3496,6 +3549,20 @@ class BuildingManager(commands.Cog):
                         login_fields = await page.locator("input[type='password']").count()
                         if login_fields:
                             return BuildingCreateResult(False, "MissionChief session is not logged in.")
+
+                        with contextlib.suppress(Exception):
+                            before_alliance_list_lookup = await page.evaluate(
+                                BUILDING_FETCH_ALLIANCE_LIST_SCRIPT,
+                                {"maxPages": 80, "targetName": ""},
+                            )
+                            if before_alliance_list_lookup.get("ok"):
+                                before_alliance_candidates = before_alliance_list_lookup.get("candidates") or []
+                                before_alliance_list_lookup = {
+                                    "ok": True,
+                                    "status": before_alliance_list_lookup.get("status"),
+                                    "pages": before_alliance_list_lookup.get("pages") or [],
+                                    "count": len(before_alliance_candidates),
+                                }
 
                         prepare_result = await page.evaluate(BUILDING_CREATE_SCRIPT, config)
                         if not prepare_result.get("ok"):
@@ -3554,16 +3621,23 @@ class BuildingManager(commands.Cog):
                             with contextlib.suppress(Exception):
                                 alliance_list_lookup = await page.evaluate(
                                     BUILDING_FETCH_ALLIANCE_LIST_SCRIPT,
-                                    {"maxPages": 80, "targetName": config.get("name")},
+                                    {"maxPages": 80, "targetName": ""},
                                 )
                                 if alliance_list_lookup.get("ok"):
                                     candidates = alliance_list_lookup.get("candidates") or []
-                                    detected_id = find_created_alliance_building_id_from_list(candidates, config)
+                                    detected_id = find_new_created_alliance_building_id_from_list(
+                                        before_alliance_candidates,
+                                        candidates,
+                                        config,
+                                    )
+                                    if not detected_id:
+                                        detected_id = find_created_alliance_building_id_from_list(candidates, config)
                                     alliance_list_lookup = {
                                         "ok": True,
                                         "status": alliance_list_lookup.get("status"),
                                         "pages": alliance_list_lookup.get("pages") or [],
                                         "count": len(candidates),
+                                        "beforeCount": len(before_alliance_candidates),
                                         "matchedBuildingId": detected_id,
                                     }
                     finally:
@@ -3576,6 +3650,7 @@ class BuildingManager(commands.Cog):
                         "finalUrl": final_url,
                         "redirectLocation": redirect_location,
                         "apiLookup": api_lookup,
+                        "beforeAllianceListLookup": before_alliance_list_lookup,
                         "allianceListLookup": alliance_list_lookup,
                     }
                 )
@@ -3604,6 +3679,7 @@ class BuildingManager(commands.Cog):
                 "finalUrl": final_url,
                 "redirectLocation": redirect_location,
                 "apiLookup": api_lookup,
+                "beforeAllianceListLookup": before_alliance_list_lookup,
                 "allianceListLookup": alliance_list_lookup,
                 "buildingId": building_id,
             }
