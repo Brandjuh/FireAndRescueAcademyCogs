@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import aiohttp
 import contextlib
+import html as html_lib
 from io import BytesIO
 import json
 import logging
@@ -25,14 +26,17 @@ BASE_URL = "https://www.missionchief.com"
 MISSIONCHIEF_HOME_URL = BASE_URL
 MISSIONCHIEF_NEW_BUILDING_URL = f"{BASE_URL}/buildings/new"
 MISSIONCHIEF_ALLIANCE_BUILDINGS_URL = f"{BASE_URL}/verband/gebauede"
+MISSIONCHIEF_ALLIANCE_FUNDS_URL = f"{BASE_URL}/verband/kasse"
 DEFAULT_REQUEST_PANEL_CHANNEL_ID = 1421627971831070730
 ALLIANCE_BUILDING_TYPE_IDS = {
     "Hospital": "2",
     "Prison": "10",
 }
 ALLIANCE_BUILDING_TARGET_TAX = 20
+ALLIANCE_BUILDING_MIN_FUNDS = 2_000_000
 BUILDING_AUTOMATION_RETRY_SECONDS = 6 * 60 * 60
 BUILDING_AUTOMATION_LOOP_SECONDS = 15 * 60
+BUILDING_CREATION_QUEUE_LOOP_SECONDS = 15 * 60
 BUILDING_AUTOMATION_MAX_ACTIONS_PER_RUN = 24
 BUILDING_AUTOMATION_MAX_EXTENSION_STARTS_PER_RUN = 3
 BUILDING_AUTOMATION_EXCLUDED_EXTENSIONS = {
@@ -665,6 +669,46 @@ def _coerce_int(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+def _parse_credit_amount(value: Any) -> Optional[int]:
+    """Parse a visible MissionChief credit amount."""
+    digits = re.sub(r"\D", "", str(value or ""))
+    if not digits:
+        return None
+    try:
+        return int(digits)
+    except ValueError:
+        return None
+
+def parse_alliance_funds_from_html(html: str) -> Optional[int]:
+    """Parse the current alliance funds balance from the MissionChief treasury page."""
+    text = html_lib.unescape(re.sub(r"<[^>]+>", " ", str(html or "")))
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return None
+
+    lowered = text.casefold()
+    marker = lowered.find("alliance funds")
+    if marker < 0:
+        return None
+
+    window = text[marker : marker + 400]
+    for pattern in (
+        r"Alliance\s+Funds\s+(\d[\d,\.\s]*)\s+Credits",
+        r"(\d[\d,\.\s]*)\s+Credits",
+    ):
+        match = re.search(pattern, window, re.IGNORECASE)
+        if match:
+            return _parse_credit_amount(match.group(1))
+    return None
+
+def alliance_funds_allow_auto_build(
+    funds: Optional[int],
+    source: str,
+    minimum: int = ALLIANCE_BUILDING_MIN_FUNDS,
+) -> bool:
+    """Return whether automatic building is allowed by the funds safety rule."""
+    return funds is not None and funds >= int(minimum) and source == "live MissionChief"
 
 def _api_value(record: Dict[str, Any], *keys: str) -> Any:
     """Read the first present value from a MissionChief API record."""
@@ -1595,6 +1639,25 @@ class BuildingDatabase:
         row = cursor.fetchone()
         conn.close()
         return dict(row) if row else None
+
+    def get_requests_by_status(self, status: str, *, limit: int = 10) -> List[Dict[str, Any]]:
+        """Return stored building requests with a specific status."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT *
+            FROM building_requests
+            WHERE status = ?
+            ORDER BY updated_at ASC, request_id ASC
+            LIMIT ?
+            ''',
+            (str(status), int(limit)),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
     
     def add_action(self, request_id: int, guild_id: int, admin_user_id: Optional[int],
                   admin_username: Optional[str], action_type: str, denial_reason: Optional[str] = None,
@@ -2130,6 +2193,20 @@ class BuildingRequest:
         self.notes = notes
         self.request_id = request_id
 
+def building_request_from_row(row: Dict[str, Any]) -> BuildingRequest:
+    """Build a request model from a stored database row."""
+    return BuildingRequest(
+        user_id=int(row["user_id"]),
+        username=str(row["username"]),
+        building_type=str(row["building_type"]),
+        building_name=str(row["building_name"]),
+        location_input=str(row["location_input"]),
+        coordinates=row.get("coordinates"),
+        address=row.get("address"),
+        notes=row.get("notes"),
+        request_id=int(row["request_id"]),
+    )
+
 # ---------- Views ----------
 
 class StartView(discord.ui.View):
@@ -2422,6 +2499,24 @@ class AdminDecisionView(discord.ui.View):
         guild = interaction.guild
         conf = await self.cog.config.guild(guild).all()
         log_channel = guild.get_channel(conf["log_channel_id"]) if conf.get("log_channel_id") else None
+        minimum_funds = await self.cog._get_min_alliance_funds(guild)
+        current_funds, funds_source = await self.cog._get_current_alliance_funds()
+        if not alliance_funds_allow_auto_build(current_funds, funds_source, minimum_funds):
+            queue_message = await self.cog._queue_request_waiting_for_funds(
+                guild=guild,
+                req=self.req,
+                requester_id=self.requester_id,
+                admin_user=interaction.user,
+                funds=current_funds,
+                source=funds_source,
+                minimum=minimum_funds,
+                log_channel=log_channel,
+            )
+            with contextlib.suppress(Exception):
+                await interaction.message.delete()
+            await interaction.followup.send(queue_message, ephemeral=True)
+            return
+
         create_result = await self.cog._create_alliance_building_browser(self.req)
         final_status = "created" if create_result.ok else "approved_pending_manual"
         automation_message = None
@@ -2720,6 +2815,7 @@ class BuildingManager(commands.Cog):
             "log_channel_id": None,
             "admin_role_id": None,
             "button_message": None,
+            "min_alliance_funds": ALLIANCE_BUILDING_MIN_FUNDS,
         }
         default_global = {
             "google_api_key": None,
@@ -2735,23 +2831,28 @@ class BuildingManager(commands.Cog):
 
         self._panel_task = None
         self._automation_task = None
+        self._creation_queue_task = None
         self._browser_lock = asyncio.Lock()
         self._persistent_view_registered = False
         self._register_persistent_views()
         self._start_panel_task()
         self._start_automation_task()
+        self._start_creation_queue_task()
 
     def cog_unload(self):  # <-- Let op: 4 spaties inspringing, zelfde niveau als __init__
         if getattr(self, "_panel_task", None):
             self._panel_task.cancel()
         if getattr(self, "_automation_task", None):
             self._automation_task.cancel()
+        if getattr(self, "_creation_queue_task", None):
+            self._creation_queue_task.cancel()
 
     async def cog_load(self):
         """Register persistent views and ensure the default request panel exists."""
         self._register_persistent_views()
         self._start_panel_task()
         self._start_automation_task()
+        self._start_creation_queue_task()
 
     def _register_persistent_views(self):
         """Register persistent component views once per cog instance."""
@@ -2772,6 +2873,12 @@ class BuildingManager(commands.Cog):
             return
         self._automation_task = self.bot.loop.create_task(self._building_automation_loop())
 
+    def _start_creation_queue_task(self):
+        """Start the approved-but-waiting-for-funds creation worker."""
+        if self._creation_queue_task and not self._creation_queue_task.done():
+            return
+        self._creation_queue_task = self.bot.loop.create_task(self._building_creation_queue_loop())
+
     def _cookie_manager(self):
         """Return the CookieManager cog when it exposes a MissionChief session."""
         cookie_manager = self.bot.get_cog("CookieManager")
@@ -2788,6 +2895,78 @@ class BuildingManager(commands.Cog):
         if not session:
             raise RuntimeError("CookieManager did not return a session.")
         return session
+
+    async def _get_min_alliance_funds(self, guild: discord.Guild) -> int:
+        """Return the configured minimum alliance funds before auto-building."""
+        value = await self.config.guild(guild).min_alliance_funds()
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return ALLIANCE_BUILDING_MIN_FUNDS
+
+    def _read_alliance_funds_from_income_db(self) -> Optional[int]:
+        """Read the latest known alliance funds from IncomeScraper storage when available."""
+        income_scraper = self.bot.get_cog("IncomeScraper")
+        db_path = getattr(income_scraper, "db_path", None) if income_scraper else None
+        if not db_path:
+            return None
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT total_funds FROM treasury_balance ORDER BY scraped_at DESC LIMIT 1")
+            row = cursor.fetchone()
+            conn.close()
+        except sqlite3.Error:
+            return None
+        return _coerce_int(row[0]) if row else None
+
+    async def _get_alliance_funds_from_contract(self) -> Optional[int]:
+        """Read alliance funds through a public scraper contract when one is available."""
+        income_scraper = self.bot.get_cog("IncomeScraper")
+        if not income_scraper:
+            return None
+        for method_name in ("get_current_alliance_funds", "get_alliance_funds"):
+            method = getattr(income_scraper, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                result = method()
+                if asyncio.iscoroutine(result):
+                    result = await result
+            except Exception:
+                continue
+            if isinstance(result, dict):
+                result = result.get("total_funds", result.get("funds", result.get("balance")))
+            funds = _coerce_int(result)
+            if funds is not None:
+                return funds
+        return None
+
+    async def _fetch_live_alliance_funds(self) -> Optional[int]:
+        """Fetch and parse the live MissionChief alliance funds page."""
+        session = await self._get_session()
+        async with session.get(MISSIONCHIEF_ALLIANCE_FUNDS_URL) as response:
+            if response.status != 200:
+                raise RuntimeError(f"MissionChief returned HTTP {response.status} for alliance funds.")
+            html = await response.text()
+        return parse_alliance_funds_from_html(html)
+
+    async def _get_current_alliance_funds(self) -> Tuple[Optional[int], str]:
+        """Return current alliance funds and the source used."""
+        with contextlib.suppress(Exception):
+            funds = await self._fetch_live_alliance_funds()
+            if funds is not None:
+                return funds, "live MissionChief"
+
+        funds = await self._get_alliance_funds_from_contract()
+        if funds is not None:
+            return funds, "IncomeScraper contract"
+
+        funds = self._read_alliance_funds_from_income_db()
+        if funds is not None:
+            return funds, "income_v2.db"
+
+        return None, "unavailable"
 
     async def _playwright_cookies(self) -> List[Dict[str, str]]:
         """Copy CookieManager's aiohttp cookies into Playwright cookie format."""
@@ -2831,6 +3010,69 @@ class BuildingManager(commands.Cog):
                 await browser.close()
 
         return build_browser_diagnostics_report(snapshot or {})
+
+    async def _queue_request_waiting_for_funds(
+        self,
+        *,
+        guild: discord.Guild,
+        req: BuildingRequest,
+        requester_id: int,
+        admin_user: Optional[discord.abc.User],
+        funds: Optional[int],
+        source: str,
+        minimum: int,
+        log_channel: Optional[discord.abc.Messageable],
+    ):
+        """Mark an approved request as waiting until alliance funds are high enough."""
+        self.db.update_request_status(int(req.request_id), "awaiting_funds")
+        self.db.add_action(
+            request_id=int(req.request_id),
+            guild_id=guild.id,
+            admin_user_id=getattr(admin_user, "id", None),
+            admin_username=str(admin_user) if admin_user else "BuildingManager",
+            action_type="approved",
+        )
+        self.db.add_action(
+            request_id=int(req.request_id),
+            guild_id=guild.id,
+            admin_user_id=getattr(admin_user, "id", None),
+            admin_username=str(admin_user) if admin_user else "BuildingManager",
+            action_type="awaiting_funds",
+            previous_values=(
+                f"Funds: {funds:,}" if funds is not None else f"Funds unavailable via {source}"
+            ),
+        )
+
+        current = f"{funds:,} credits" if funds is not None else "unknown"
+        message = (
+            f"Approved and queued. Current alliance funds are {current}; "
+            f"minimum required before auto-building is {minimum:,} credits."
+        )
+        user = guild.get_member(requester_id)
+        if user:
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                await user.send(
+                    "Your building request has been approved, but it is waiting for enough alliance funds "
+                    f"before it is built automatically.\n\n{req.building_type}: {req.building_name}"
+                )
+
+        if log_channel:
+            embed = discord.Embed(
+                title="Building request approved - waiting for alliance funds",
+                color=discord.Color.orange(),
+                timestamp=datetime.now(timezone.utc),
+            )
+            embed.add_field(name="Requester", value=f"<@{requester_id}>", inline=False)
+            embed.add_field(name="Building", value=f"{req.building_type} - {req.building_name}", inline=False)
+            embed.add_field(name="Current Funds", value=current, inline=True)
+            embed.add_field(name="Required Minimum", value=f"{minimum:,} credits", inline=True)
+            embed.add_field(name="Funds Source", value=source, inline=True)
+            if admin_user:
+                embed.add_field(name="Approved by", value=f"{admin_user.mention} ({admin_user.id})", inline=False)
+            embed.add_field(name="Request ID", value=str(req.request_id), inline=True)
+            await log_channel.send(embed=embed)
+
+        return message
 
     async def _create_alliance_building_browser(self, req: BuildingRequest) -> BuildingCreateResult:
         """Create an approved Hospital or Prison as an alliance building through the live browser form."""
@@ -3016,11 +3258,151 @@ class BuildingManager(commands.Cog):
         except asyncio.CancelledError:
             raise
 
+    async def _building_creation_queue_loop(self):
+        """Create approved building requests once live alliance funds are high enough."""
+        try:
+            await self.bot.wait_until_ready()
+            await asyncio.sleep(60)
+            while True:
+                try:
+                    await self._process_waiting_for_funds_queue()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("BuildingManager funds queue loop failed")
+                await asyncio.sleep(BUILDING_CREATION_QUEUE_LOOP_SECONDS)
+        except asyncio.CancelledError:
+            raise
+
+    async def _process_waiting_for_funds_queue(self) -> bool:
+        """Process at most one approved request waiting for sufficient funds."""
+        rows = self.db.get_requests_by_status("awaiting_funds", limit=1)
+        if not rows:
+            return False
+
+        row = rows[0]
+        guild = self.bot.get_guild(int(row["guild_id"]))
+        if guild is None:
+            return False
+
+        minimum_funds = await self._get_min_alliance_funds(guild)
+        current_funds, funds_source = await self._get_current_alliance_funds()
+        if not alliance_funds_allow_auto_build(current_funds, funds_source, minimum_funds):
+            return False
+
+        req = building_request_from_row(row)
+        conf = await self.config.guild(guild).all()
+        log_channel = guild.get_channel(conf["log_channel_id"]) if conf.get("log_channel_id") else None
+        create_result = await self._create_alliance_building_browser(req)
+        final_status = "created" if create_result.ok else "approved_pending_manual"
+        self.db.update_request_status(int(req.request_id), final_status)
+
+        self.db.add_action(
+            request_id=int(req.request_id),
+            guild_id=guild.id,
+            admin_user_id=None,
+            admin_username="BuildingManager",
+            action_type="created_from_funds_queue" if create_result.ok else "create_failed_from_funds_queue",
+            previous_values=None if create_result.ok else create_result.reason[:900],
+        )
+
+        automation_message = None
+        if create_result.ok:
+            building_id = create_result.building_id
+            if building_id:
+                job_id = self.db.add_or_update_automation_job(
+                    request_id=int(req.request_id),
+                    guild_id=guild.id,
+                    building_id=building_id,
+                    building_type=req.building_type,
+                    building_name=req.building_name,
+                )
+                automation_message = (
+                    f"Queued post-creation automation for MissionChief building `{building_id}`: "
+                    f"tax {ALLIANCE_BUILDING_TARGET_TAX}%, max level, and allowed extensions."
+                )
+                self.bot.loop.create_task(self._process_building_automation_job(job_id))
+            else:
+                automation_message = (
+                    "Created in MissionChief, but the building ID was not detected. "
+                    "Post-creation automation was not queued."
+                )
+
+        user = guild.get_member(int(row["user_id"]))
+        if user and create_result.ok:
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                await user.send(
+                    "Your approved building request has now been built automatically because alliance funds "
+                    f"are above {minimum_funds:,} credits.\n\n{req.building_type}: {req.building_name}"
+                )
+
+        if log_channel:
+            embed = discord.Embed(
+                title="Queued building request created" if create_result.ok else "Queued building request needs manual creation",
+                color=discord.Color.green() if create_result.ok else discord.Color.orange(),
+                timestamp=datetime.now(timezone.utc),
+            )
+            embed.add_field(name="Requester", value=f"<@{int(row['user_id'])}>", inline=False)
+            embed.add_field(name="Building", value=f"{req.building_type} - {req.building_name}", inline=False)
+            embed.add_field(name="Funds at Build Time", value=f"{current_funds:,} credits", inline=True)
+            embed.add_field(name="Required Minimum", value=f"{minimum_funds:,} credits", inline=True)
+            embed.add_field(
+                name="Auto Creation",
+                value="Created in MissionChief" if create_result.ok else create_result.reason[:900],
+                inline=False,
+            )
+            if automation_message:
+                embed.add_field(name="Post-Creation Automation", value=automation_message[:900], inline=False)
+            if create_result.status is not None:
+                embed.add_field(name="MissionChief HTTP Status", value=str(create_result.status), inline=True)
+            embed.add_field(name="Request ID", value=str(req.request_id), inline=True)
+            await log_channel.send(embed=embed)
+
+        return create_result.ok
+
     async def _process_building_automation_job(self, job_id: int) -> Optional[BuildingAutomationResult]:
         """Run and persist one post-creation automation job."""
         job = self.db.get_automation_job(job_id)
         if not job or job.status == "completed":
             return None
+
+        guild = self.bot.get_guild(job.guild_id)
+        if guild is None:
+            result = BuildingAutomationResult(
+                ok=True,
+                completed=False,
+                wait=True,
+                reason="Guild is unavailable; waiting before running building automation.",
+                actions=[],
+            )
+            self.db.update_automation_job(job.job_id, result)
+            return result
+
+        minimum_funds = await self._get_min_alliance_funds(guild)
+        current_funds, funds_source = await self._get_current_alliance_funds()
+        if not alliance_funds_allow_auto_build(current_funds, funds_source, minimum_funds):
+            current = f"{current_funds:,} credits" if current_funds is not None else "unknown"
+            result = BuildingAutomationResult(
+                ok=True,
+                completed=False,
+                wait=True,
+                reason=(
+                    "Alliance funds safety hold: "
+                    f"current funds are {current} from {funds_source}; "
+                    f"required live minimum is {minimum_funds:,} credits."
+                ),
+                actions=[],
+            )
+            self.db.update_automation_job(job.job_id, result)
+            self.db.add_action(
+                request_id=job.request_id,
+                guild_id=job.guild_id,
+                admin_user_id=None,
+                admin_username="BuildingManager",
+                action_type="automation_waiting",
+                previous_values=_truncate_text(result.reason, 900),
+            )
+            return result
 
         result = await self._upgrade_alliance_building_browser(job)
         self.db.update_automation_job(job.job_id, result)
@@ -3336,6 +3718,7 @@ class BuildingManager(commands.Cog):
             f"Admin channel: {ctx.guild.get_channel(conf['admin_channel_id']).mention if conf.get('admin_channel_id') else '—'}\n"
             f"Log channel: {ctx.guild.get_channel(conf['log_channel_id']).mention if conf.get('log_channel_id') else '—'}\n"
             f"Admin role: {ctx.guild.get_role(conf['admin_role_id']).mention if conf.get('admin_role_id') else '—'}\n"
+            f"Minimum alliance funds before auto-build: {int(conf.get('min_alliance_funds') or ALLIANCE_BUILDING_MIN_FUNDS):,} credits\n"
             f"Custom button message: {'Set' if conf.get('button_message') else 'Not set (using default)'}\n"
         )
         await ctx.send(box(txt, lang="ini"))
@@ -3371,6 +3754,63 @@ class BuildingManager(commands.Cog):
         """Set the role that can approve/deny building requests."""
         await self.config.guild(ctx.guild).admin_role_id.set(role.id)
         await ctx.tick()
+
+    @buildset.command(name="minfunds")
+    @commands.admin()
+    @commands.guild_only()
+    async def minfunds(self, ctx: commands.Context, credits: int = ALLIANCE_BUILDING_MIN_FUNDS):
+        """Set the minimum alliance funds required before auto-building."""
+        if credits < 0:
+            await ctx.send("Minimum funds cannot be negative.")
+            return
+        await self.config.guild(ctx.guild).min_alliance_funds.set(int(credits))
+        await ctx.send(f"Minimum alliance funds before auto-build set to {int(credits):,} credits.")
+
+    @buildset.command(name="fundscheck")
+    @commands.admin()
+    @commands.guild_only()
+    async def fundscheck(self, ctx: commands.Context):
+        """Check current alliance funds and whether auto-building is allowed."""
+        minimum = await self._get_min_alliance_funds(ctx.guild)
+        async with ctx.typing():
+            funds, source = await self._get_current_alliance_funds()
+        allowed = alliance_funds_allow_auto_build(funds, source, minimum)
+        funds_text = f"{funds:,} credits" if funds is not None else "unknown"
+        status = "AUTO-BUILD ALLOWED" if allowed else "AUTO-BUILD BLOCKED"
+        await ctx.send(
+            box(
+                "\n".join(
+                    [
+                        f"Current alliance funds: {funds_text}",
+                        f"Source: {source}",
+                        f"Required minimum: {minimum:,} credits",
+                        f"Status: {status}",
+                    ]
+                ),
+                lang="text",
+            )
+        )
+
+    @buildset.command(name="fundsqueue")
+    @commands.admin()
+    @commands.guild_only()
+    async def fundsqueue(self, ctx: commands.Context):
+        """Show approved building requests waiting for enough alliance funds."""
+        rows = [
+            row
+            for row in self.db.get_requests_by_status("awaiting_funds", limit=10)
+            if int(row["guild_id"]) == ctx.guild.id
+        ]
+        if not rows:
+            await ctx.send("No approved building requests are waiting for alliance funds.")
+            return
+        lines = ["Building requests waiting for alliance funds:"]
+        for row in rows:
+            lines.append(
+                f"- Request {int(row['request_id'])}: {row['building_type']} - {row['building_name']} "
+                f"(requested by {row['username']})"
+            )
+        await ctx.send(box("\n".join(lines), lang="text"))
 
     @buildset.command(name="buttonmessage")
     @commands.admin()

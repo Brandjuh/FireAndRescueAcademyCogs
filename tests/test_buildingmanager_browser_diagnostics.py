@@ -10,11 +10,14 @@ from buildingmanager.buildingmanager import (
     BuildingAutomationResult,
     BuildingDatabase,
     _normalize_missionchief_url,
+    alliance_funds_allow_auto_build,
     build_alliance_building_config,
+    building_request_from_row,
     build_browser_diagnostics_report,
     extract_missionchief_building_id,
     find_created_alliance_building_id,
     find_created_alliance_building_id_from_list,
+    parse_alliance_funds_from_html,
 )
 
 
@@ -72,6 +75,22 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
                 coordinates="not coordinates",
                 address=None,
             )
+
+    def test_parse_alliance_funds_from_html_requires_alliance_funds_marker(self):
+        html = """
+        <div>Alliance Funds</div>
+        <div>16,935,312 Credits</div>
+        <div>Your contribution to the alliance</div>
+        """
+
+        self.assertEqual(parse_alliance_funds_from_html(html), 16935312)
+        self.assertIsNone(parse_alliance_funds_from_html("<div>1,000 Credits</div>"))
+
+    def test_alliance_funds_allow_auto_build_requires_live_funds_over_threshold(self):
+        self.assertTrue(alliance_funds_allow_auto_build(2_000_000, "live MissionChief"))
+        self.assertFalse(alliance_funds_allow_auto_build(1_999_999, "live MissionChief"))
+        self.assertFalse(alliance_funds_allow_auto_build(10_000_000, "income_v2.db"))
+        self.assertFalse(alliance_funds_allow_auto_build(None, "live MissionChief"))
 
     def test_create_script_requires_alliance_context_and_refuses_coins(self):
         self.assertIn("build_as_alliance", BUILDING_CREATE_SCRIPT)
@@ -318,6 +337,29 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
             self.assertEqual(request["request_id"], request_id)
             self.assertEqual(request["building_type"], "Hospital")
             self.assertEqual(request["building_name"], "Example Hospital")
+
+    def test_database_can_list_requests_waiting_for_funds(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = BuildingDatabase(f"{temp_dir}/building_manager.db")
+            request_id = db.add_request(
+                guild_id=100,
+                user_id=200,
+                username="Requester",
+                building_type="Prison",
+                building_name="Example Prison",
+                location_input="Location",
+                coordinates="40.1, -73.9",
+                address="Example Street",
+                notes="Note",
+            )
+            db.update_request_status(request_id, "awaiting_funds")
+
+            rows = db.get_requests_by_status("awaiting_funds")
+            req = building_request_from_row(rows[0])
+
+            self.assertEqual([row["request_id"] for row in rows], [request_id])
+            self.assertEqual(req.request_id, request_id)
+            self.assertEqual(req.building_type, "Prison")
 
     def test_browser_diagnostics_report_formats_controls_and_redacted_fields(self):
         report = build_browser_diagnostics_report(
