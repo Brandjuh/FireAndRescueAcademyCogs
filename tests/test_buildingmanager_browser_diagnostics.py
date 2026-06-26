@@ -9,6 +9,8 @@ from buildingmanager.buildingmanager import (
     BUILDING_FETCH_ALLIANCE_LIST_SCRIPT,
     BuildingAutomationResult,
     BuildingDatabase,
+    LocationParser,
+    _clean_building_name,
     _normalize_missionchief_url,
     alliance_funds_allow_auto_build,
     build_alliance_building_config,
@@ -47,6 +49,24 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertEqual(config["name"], "Example Hospital")
         self.assertEqual(config["latitude"], "40.1234568")
         self.assertEqual(config["longitude"], "-73.9876543")
+
+    def test_build_alliance_building_config_decodes_url_encoded_names(self):
+        config = build_alliance_building_config(
+            building_type="Hospital",
+            building_name="h%25C3%25B4pital de Bastia",
+            coordinates="42.6973, 9.4509",
+            address=None,
+        )
+
+        self.assertEqual(config["name"], "hôpital de Bastia")
+
+    def test_location_parser_extracts_decoded_google_place_name(self):
+        url = "https://www.google.nl/maps/place/h%25C3%25B4pital+de+Bastia/@42.6973,9.4509,17z"
+
+        self.assertEqual(LocationParser.extract_place_name(url), "hôpital de Bastia")
+
+    def test_clean_building_name_decodes_repeated_encoding(self):
+        self.assertEqual(_clean_building_name("h%25C3%25B4pital de Bastia"), "hôpital de Bastia")
 
     def test_build_alliance_building_config_allows_prison(self):
         config = build_alliance_building_config(
@@ -109,6 +129,7 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertIn("/verband/gebauede", BUILDING_FETCH_ALLIANCE_LIST_SCRIPT)
         self.assertIn("[building_id]", BUILDING_FETCH_ALLIANCE_LIST_SCRIPT)
         self.assertIn('/buildings/', BUILDING_FETCH_ALLIANCE_LIST_SCRIPT)
+        self.assertIn("targetName", BUILDING_FETCH_ALLIANCE_LIST_SCRIPT)
         self.assertIn('credentials: "same-origin"', BUILDING_FETCH_ALLIANCE_LIST_SCRIPT)
 
     def test_extract_building_id_from_urls_and_snapshots(self):
