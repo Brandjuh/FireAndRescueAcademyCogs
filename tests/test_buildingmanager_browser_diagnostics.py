@@ -5,12 +5,14 @@ from buildingmanager.buildingmanager import (
     BUILDING_AUTOMATION_MAX_EXTENSION_STARTS_PER_RUN,
     BUILDING_AUTOMATION_PREPARE_SCRIPT,
     BUILDING_CREATE_SCRIPT,
+    BUILDING_FETCH_API_SCRIPT,
     BuildingAutomationResult,
     BuildingDatabase,
     _normalize_missionchief_url,
     build_alliance_building_config,
     build_browser_diagnostics_report,
     extract_missionchief_building_id,
+    find_created_alliance_building_id,
 )
 
 
@@ -72,9 +74,15 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
     def test_create_script_requires_alliance_context_and_refuses_coins(self):
         self.assertIn("build_as_alliance", BUILDING_CREATE_SCRIPT)
         self.assertIn("build_with_coins", BUILDING_CREATE_SCRIPT)
+        self.assertIn("build_another", BUILDING_CREATE_SCRIPT)
+        self.assertIn("buildAnother.checked = false", BUILDING_CREATE_SCRIPT)
         self.assertIn("build as alliance building", BUILDING_CREATE_SCRIPT)
         self.assertIn('text.includes("credits")', BUILDING_CREATE_SCRIPT)
         self.assertIn('!text.includes("coins")', BUILDING_CREATE_SCRIPT)
+
+    def test_fetch_api_script_uses_same_browser_session(self):
+        self.assertIn("/api/buildings", BUILDING_FETCH_API_SCRIPT)
+        self.assertIn('credentials: "same-origin"', BUILDING_FETCH_API_SCRIPT)
 
     def test_extract_building_id_from_urls_and_snapshots(self):
         self.assertEqual(
@@ -86,6 +94,53 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
             987,
         )
         self.assertIsNone(extract_missionchief_building_id("https://www.missionchief.com/buildings"))
+
+    def test_find_created_building_id_matches_type_and_coordinates(self):
+        config = build_alliance_building_config(
+            building_type="Hospital",
+            building_name="Example Hospital",
+            coordinates="40.1234567, -73.9876543",
+            address="Example Street",
+        )
+        buildings = [
+            {
+                "id": 100,
+                "caption": "Wrong Type",
+                "building_type": 10,
+                "latitude": 40.1234567,
+                "longitude": -73.9876543,
+            },
+            {
+                "id": 101,
+                "caption": "Wrong Coordinates",
+                "building_type": 2,
+                "latitude": 41.1234567,
+                "longitude": -73.9876543,
+            },
+            {
+                "id": 102,
+                "caption": "Example Hospital",
+                "building_type": 2,
+                "latitude": 40.12345671,
+                "longitude": -73.98765431,
+            },
+        ]
+
+        self.assertEqual(find_created_alliance_building_id(buildings, config), 102)
+
+    def test_find_created_building_id_prefers_name_then_highest_id(self):
+        config = build_alliance_building_config(
+            building_type="Prison",
+            building_name="Target Prison",
+            coordinates="40.1, -73.9",
+            address=None,
+        )
+        buildings = [
+            {"id": 200, "caption": "Other Prison", "building_type": 10, "latitude": "40.1", "longitude": "-73.9"},
+            {"id": 201, "caption": "Target Prison", "building_type": 10, "latitude": "40.1", "longitude": "-73.9"},
+        ]
+
+        self.assertEqual(find_created_alliance_building_id(buildings, config), 201)
 
     def test_automation_script_refuses_coins_and_excludes_large_buildings(self):
         self.assertIn("coin|coins", BUILDING_AUTOMATION_PREPARE_SCRIPT)

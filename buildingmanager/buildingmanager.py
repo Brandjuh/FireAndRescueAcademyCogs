@@ -202,6 +202,11 @@ async (config) => {
   setField("building[address]", config.address || "");
   setField("build_with_coins", "0");
   setField("build_as_alliance", "1");
+  const buildAnother = fieldByName("build_another");
+  if (buildAnother) {
+    buildAnother.checked = false;
+    dispatch(buildAnother);
+  }
 
   const buttons = [...document.querySelectorAll('input[type="submit"], button[type="submit"], button:not([type])')];
   const candidates = buttons
@@ -233,6 +238,7 @@ async (config) => {
       address: fieldValue("building[address]"),
       buildAsAlliance: fieldValue("build_as_alliance"),
       buildWithCoins: fieldValue("build_with_coins"),
+      buildAnother: buildAnother ? Boolean(buildAnother.checked) : null,
     },
   };
 }
@@ -244,6 +250,24 @@ BUILDING_CLICK_CREATE_SCRIPT = r"""
   if (!button) return false;
   button.click();
   return true;
+}
+""".strip()
+BUILDING_FETCH_API_SCRIPT = r"""
+async () => {
+  const response = await fetch("/api/buildings", {
+    credentials: "same-origin",
+    headers: { "Accept": "application/json" },
+  });
+  const status = response.status;
+  if (!response.ok) {
+    let text = "";
+    try {
+      text = await response.text();
+    } catch (_) {}
+    return { ok: false, status, text: String(text || "").slice(0, 500) };
+  }
+  const buildings = await response.json();
+  return { ok: true, status, buildings };
 }
 """.strip()
 BUILDING_AUTOMATION_PREPARE_SCRIPT = r"""
@@ -546,6 +570,75 @@ def extract_missionchief_building_id(*values: Any) -> Optional[int]:
             if match:
                 return int(match.group(1))
     return None
+
+def _normalize_match_text(value: Any) -> str:
+    """Normalize text for conservative MissionChief API matching."""
+    return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+
+def _coerce_float(value: Any) -> Optional[float]:
+    """Return a float when MissionChief API data contains a numeric value."""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+def _coerce_int(value: Any) -> Optional[int]:
+    """Return an int when MissionChief API data contains a numeric id/type."""
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+def _api_value(record: Dict[str, Any], *keys: str) -> Any:
+    """Read the first present value from a MissionChief API record."""
+    for key in keys:
+        if key in record:
+            return record.get(key)
+    return None
+
+def find_created_alliance_building_id(
+    buildings: Iterable[Dict[str, Any]],
+    config: Dict[str, str],
+) -> Optional[int]:
+    """Find a newly created building in MissionChief `/api/buildings` data.
+
+    The match intentionally requires type and coordinates. Name is used only as
+    a preference, because MissionChief names can be edited or normalized.
+    """
+    target_type = _coerce_int(config.get("buildingTypeId"))
+    target_lat = _coerce_float(config.get("latitude"))
+    target_lon = _coerce_float(config.get("longitude"))
+    target_name = _normalize_match_text(config.get("name"))
+    if target_type is None or target_lat is None or target_lon is None:
+        return None
+
+    candidates: List[Tuple[int, int]] = []
+    for record in buildings or []:
+        if not isinstance(record, dict):
+            continue
+        building_id = _coerce_int(_api_value(record, "id", "building_id", "buildingId"))
+        building_type = _coerce_int(_api_value(record, "building_type", "building_type_id", "buildingType"))
+        latitude = _coerce_float(_api_value(record, "latitude", "lat"))
+        longitude = _coerce_float(_api_value(record, "longitude", "lon", "lng"))
+        if building_id is None or building_type != target_type or latitude is None or longitude is None:
+            continue
+        if abs(latitude - target_lat) > 0.0002 or abs(longitude - target_lon) > 0.0002:
+            continue
+
+        record_name = _normalize_match_text(_api_value(record, "caption", "name", "building_name", "buildingName"))
+        score = 100
+        if record_name and target_name and record_name == target_name:
+            score += 50
+        candidates.append((score, building_id))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return candidates[0][1]
 
 def _diagnostic_lines_for_fields(fields: Iterable[Dict[str, Any]]) -> List[str]:
     """Format no-submit browser field diagnostics."""
@@ -2594,6 +2687,7 @@ class BuildingManager(commands.Cog):
             prepare_result: Dict[str, Any] = {}
             response_url = ""
             final_url = ""
+            api_lookup: Dict[str, Any] = {}
             try:
                 async with async_playwright() as playwright:
                     browser = await playwright.chromium.launch(headless=True)
@@ -2635,11 +2729,26 @@ class BuildingManager(commands.Cog):
                         with contextlib.suppress(Exception):
                             await page.wait_for_load_state("domcontentloaded", timeout=10000)
                         final_url = str(page.url or "")
+                        detected_id = extract_missionchief_building_id(response_url, final_url, response_text)
+                        if not detected_id and status is not None and int(status) < 400:
+                            with contextlib.suppress(Exception):
+                                api_lookup = await page.evaluate(BUILDING_FETCH_API_SCRIPT)
+                                if api_lookup.get("ok"):
+                                    detected_id = find_created_alliance_building_id(
+                                        api_lookup.get("buildings") or [],
+                                        config,
+                                    )
+                                    api_lookup = {
+                                        "ok": True,
+                                        "status": api_lookup.get("status"),
+                                        "count": len(api_lookup.get("buildings") or []),
+                                        "matchedBuildingId": detected_id,
+                                    }
                     finally:
                         await browser.close()
             except PlaywrightTimeoutError as exc:
                 details = dict(prepare_result.get("snapshot") or {})
-                details.update({"responseUrl": response_url, "finalUrl": final_url})
+                details.update({"responseUrl": response_url, "finalUrl": final_url, "apiLookup": api_lookup})
                 return BuildingCreateResult(
                     False,
                     f"MissionChief browser building flow timed out: {exc}",
@@ -2654,11 +2763,15 @@ class BuildingManager(commands.Cog):
                 return BuildingCreateResult(False, f"MissionChief browser building flow failed: {message}")
 
         details = dict(prepare_result.get("snapshot") or {})
+        building_id = extract_missionchief_building_id(response_url, final_url, response_text)
+        if not building_id:
+            building_id = _coerce_int(api_lookup.get("matchedBuildingId"))
         details.update(
             {
                 "responseUrl": response_url,
                 "finalUrl": final_url,
-                "buildingId": extract_missionchief_building_id(response_url, final_url, response_text),
+                "apiLookup": api_lookup,
+                "buildingId": building_id,
             }
         )
 
