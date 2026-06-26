@@ -989,10 +989,15 @@ async def safe_ephemeral_complete(interaction: discord.Interaction, content: str
         log.exception("safe_ephemeral_complete failed: %r", exc)
 
 async def send_ephemeral_followup(interaction: discord.Interaction, content: str):
-    """Send a private result without editing the component message."""
+    """Send a private result without leaving a deferred thinking response behind."""
     message = _truncate_discord_text(content, 1900)
     try:
         if interaction.response.is_done():
+            try:
+                await interaction.edit_original_response(content=message, embed=None, view=None)
+                return
+            except Exception as exc:
+                log.debug("send_ephemeral_followup: edit_original_response failed: %r", exc)
             await interaction.followup.send(message, ephemeral=True)
             return
         await interaction.response.send_message(message, ephemeral=True)
