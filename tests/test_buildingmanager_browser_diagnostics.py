@@ -15,6 +15,7 @@ from buildingmanager.buildingmanager import (
     LocationParser,
     _clean_building_name,
     _normalize_missionchief_url,
+    _truncate_discord_text,
     alliance_funds_allow_auto_build,
     build_alliance_building_config,
     building_request_from_row,
@@ -75,6 +76,12 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
             _clean_building_name("OSPEDALE %22San Giuseppe%22 di Isili"),
             'OSPEDALE "San Giuseppe" di Isili',
         )
+
+    def test_truncate_discord_text_respects_limit(self):
+        value = _truncate_discord_text("A" * 50, 20)
+
+        self.assertEqual(len(value), 20)
+        self.assertTrue(value.endswith("..."))
 
     def test_building_request_cleans_encoded_names(self):
         request = BuildingRequest(
