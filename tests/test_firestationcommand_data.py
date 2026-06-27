@@ -797,6 +797,37 @@ def test_station_image_helper_builds_level_urls_and_clamps_range():
     )
 
 
+def test_dashboard_embed_shows_station_image_for_started_station():
+    cog = _cog_with_game_data({})
+    user = type("User", (), {"id": 123})()
+    data = {
+        "started": True,
+        "credits": 2500,
+        "vehicles": [],
+        "equipment": [],
+        "trainings": [],
+        "expansions": [],
+        "station_level": 4,
+        "command_level": 1,
+        "xp": 0,
+        "reputation": 0,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "active_mission": {},
+    }
+    cog.config = _Config(data, {})
+
+    embed = asyncio.run(FireStationCommand._build_dashboard_embed(cog, user))
+
+    assert embed.image == {
+        "url": (
+            "https://raw.githubusercontent.com/Brandjuh/FireAndRescueAcademyCogs/"
+            "refs/heads/main/FireStationCommand/Images/Stations/station_level_04.png"
+        )
+    }
+
+
 def test_vehicle_image_helpers_build_raw_urls_and_apply_embed_image():
     cog = _cog_with_game_data({})
     vehicle = {"image": "Images/Vehicles/engine_basic.png"}

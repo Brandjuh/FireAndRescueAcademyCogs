@@ -1683,6 +1683,9 @@ class FireStationCommand(commands.Cog):
             )
         else:
             embed.add_field(name="Active incident", value="None", inline=False)
+        image_url = self._station_image_url(lvl)
+        if image_url:
+            embed.set_image(url=image_url)
         return embed
 
     def _build_mission_control_embed(self, mission: Dict[str, Any]) -> discord.Embed:
