@@ -6,7 +6,6 @@ This document tracks larger gameplay systems that should be implemented after th
 
 - Improve purchase-blocked feedback for vehicles, equipment, expansions, and upgrades with clear reasons such as missing credits, missing level, missing extension, full capacity, or already owned.
 - Add a developer menu toggle for user ID `132620654087241729` that enables a testing mode with all unlocks, unrestricted actions, and fast access to credits, XP, station levels, vehicles, equipment, missions, and outcome controls.
-- Add level-up messaging that clearly lists newly unlocked missions, vehicles, equipment, trainings, expansions, station upgrades, and feature buttons when a player reaches a new command level.
 
 ## Mutual Aid
 

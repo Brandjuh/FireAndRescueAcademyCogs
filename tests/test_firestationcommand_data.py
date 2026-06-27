@@ -597,6 +597,90 @@ def test_command_level_uses_progression_thresholds():
     assert FireStationCommand._xp_for_next_command_level(cog, 2) == 250
 
 
+def test_level_up_summary_lists_new_unlocks_by_category():
+    cog = _cog_with_game_data(
+        {
+            "progression": {
+                "progression": {
+                    "unlocks": {
+                        "2": {
+                            "missions": ["legacy_rescue_call"],
+                            "features": ["career_conversion"],
+                        }
+                    }
+                }
+            },
+            "missions": {
+                "missions": [
+                    {
+                        "id": "rescue_call",
+                        "name": "Rescue Call",
+                        "description": "Rescue Call is a test incident.",
+                        "scene_narrative": "Rescue Call scene.",
+                        "dispatch_narrative": "Rescue Call dispatch.",
+                        "required_vehicles": [],
+                        "required_equipment": [],
+                        "unlock_level": 2,
+                    }
+                ]
+            },
+            "vehicles": {
+                "vehicles": [
+                    {
+                        "id": "rescue_basic",
+                        "name": "Basic Rescue Truck",
+                        "base_cost": 75000,
+                        "required_staff": 3,
+                        "unlock_level": 2,
+                    }
+                ]
+            },
+            "equipment": {
+                "equipment": [
+                    {
+                        "id": "rescue_tools",
+                        "name": "Hydraulic Rescue Tools",
+                        "base_cost": 8000,
+                        "unlock_level": 2,
+                        "capabilities": {"technical_rescue": 10},
+                    }
+                ]
+            },
+            "trainings": {
+                "trainings": [
+                    {
+                        "id": "technical_rescue",
+                        "name": "Technical Rescue",
+                        "cost": 12000,
+                        "unlock_level": 2,
+                    }
+                ]
+            },
+            "expansions": {
+                "expansions": [
+                    {
+                        "id": "command_room",
+                        "name": "Command Room",
+                        "base_cost": 40000,
+                        "unlock_level": 2,
+                    }
+                ]
+            },
+        }
+    )
+
+    summary = FireStationCommand._level_up_field_text(cog, 1, 2)
+
+    assert "Command level 1 -> 2." in summary
+    assert "Station: Station level 2 upgrade" in summary
+    assert "Features: Career station conversion after station level 2" in summary
+    assert "Missions: Legacy Rescue Call, Rescue Call" in summary
+    assert "Vehicles: Basic Rescue Truck" in summary
+    assert "Equipment: Hydraulic Rescue Tools" in summary
+    assert "Training: Technical Rescue" in summary
+    assert "Extensions: Command Room" in summary
+
+
 def test_readiness_score_combines_capabilities_staff_vehicles_and_level():
     cog = _cog_with_game_data(
         {
@@ -888,7 +972,8 @@ def test_daily_command_grants_balance_rewards_and_blocks_until_cooldown():
     assert first_embed.kwargs["title"] == "Daily station reward"
     assert first_fields["Credits"] == "+12,345"
     assert first_fields["Command XP"] == "+100"
-    assert first_fields["Level up"] == "Command level 1 -> 2."
+    assert "Command level 1 -> 2." in first_fields["Level up"]
+    assert "Station: Station level 2 upgrade" in first_fields["Level up"]
     assert data["credits"] == 12345
     assert data["xp"] == 100
     assert data["command_level"] == 2
