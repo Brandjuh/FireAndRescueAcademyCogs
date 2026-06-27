@@ -8,6 +8,7 @@ from trainings_manager.trainings_manager import (
     AutoTrainingResult,
     BoardTrainingPost,
     BoardTrainingMatch,
+    COURSE_JOIN_INSTRUCTIONS,
     DEVELOPER_PANEL_CHANNEL_ID,
     MEMBER_PANEL_CHANNEL_ID,
     DeveloperTrainingPanelView,
@@ -1061,6 +1062,22 @@ def test_normal_submit_button_falls_back_to_admin_when_auto_open_fails():
     cog._try_auto_open_training.assert_awaited_once()
     second_interaction.response.send_message.assert_awaited_once()
     assert "already being processed" in second_interaction.response.send_message.await_args.args[0]
+
+
+def test_auto_open_requester_message_includes_course_join_instructions():
+    user = types.SimpleNamespace(id=123, mention="<@123>", send=AsyncMock())
+    manager = TrainingManager.__new__(TrainingManager)
+    req = _training_request()
+    result = AutoTrainingResult(True, "Opened", academy_id=100)
+
+    asyncio.run(manager._notify_auto_open_requester(user, req, result, request_channel=None))
+
+    user.send.assert_awaited_once()
+    message = user.send.await_args.args[0]
+    assert "How to add people to the course" in message
+    assert "Browser/Desktop" in message
+    assert "Phone" in message
+    assert COURSE_JOIN_INSTRUCTIONS in message
 
 
 def test_developer_panel_uses_configured_test_channel():

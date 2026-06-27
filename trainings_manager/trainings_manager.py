@@ -175,6 +175,13 @@ BOARD_PROCESSED_POST_ID_LIMIT = 1000
 BOARD_PENDING_DELETE_LIMIT = 1000
 AGENCY_ORDER = ("Fire", "Police", "EMS", "Coastal")
 BOARD_GUIDE_SECTIONS = (BOARD_GUIDE_OVERVIEW_SECTION, *AGENCY_ORDER)
+COURSE_JOIN_INSTRUCTIONS = (
+    "\n\n**How to add people to the course**\n"
+    "**Browser/Desktop:** Open MissionChief in your browser, open the academy building or active training course, "
+    "choose the course, then use the participant/personnel option to add the required people.\n"
+    "**Phone:** Open MissionChief in your mobile browser, open the same academy building or active training course, "
+    "then use the course participant/personnel option to add the required people."
+)
 
 
 @dataclass
@@ -1999,6 +2006,8 @@ class ApproveModal(discord.ui.Modal, title="Approve training request"):
         if admin_message:
             ok_text += f"\n\n**Message from admin:**\n{admin_message}"
 
+        ok_text += COURSE_JOIN_INSTRUCTIONS
+
         if user:
             try:
                 await user.send(ok_text)
@@ -3623,6 +3632,7 @@ class TrainingManager(commands.Cog):
         )
         if result.academy_id:
             message += f"\nAcademy: https://www.missionchief.com/buildings/{result.academy_id}"
+        message += COURSE_JOIN_INSTRUCTIONS
 
         try:
             await user.send(message)
