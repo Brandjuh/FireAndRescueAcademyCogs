@@ -68,6 +68,7 @@ BUILDING_AUTOMATION_LOOP_SECONDS = 15 * 60
 BUILDING_CREATION_QUEUE_LOOP_SECONDS = 15 * 60
 BUILDING_AUTOMATION_MAX_ACTIONS_PER_RUN = 30
 BUILDING_AUTOMATION_MAX_EXTENSION_STARTS_PER_RUN = BUILDING_AUTOMATION_MAX_ACTIONS_PER_RUN
+BUILDING_AUTOMATION_MAX_SCRIPT_STEPS_PER_RUN = BUILDING_AUTOMATION_MAX_EXTENSION_STARTS_PER_RUN + 10
 BUILDING_AUTOMATION_EXCLUDED_EXTENSIONS = {
     "large hospital",
     "large prison",
@@ -8514,7 +8515,7 @@ class BuildingManager(commands.Cog):
                                 details=details,
                             )
 
-                        for _ in range(BUILDING_AUTOMATION_MAX_ACTIONS_PER_RUN):
+                        for _ in range(BUILDING_AUTOMATION_MAX_SCRIPT_STEPS_PER_RUN):
                             prepare_config = {
                                 "buildingId": str(job.building_id),
                                 "buildingType": str(job.building_type),
@@ -8590,7 +8591,7 @@ class BuildingManager(commands.Cog):
                             True,
                             False,
                             True,
-                            "Action limit reached for this run; queued for the next pass.",
+                            "Internal safety limit reached for this run; queued for the next pass.",
                             actions,
                             tax_complete=tax_complete,
                             level_complete=level_complete,
