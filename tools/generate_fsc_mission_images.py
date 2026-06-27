@@ -18,6 +18,11 @@ MISSIONS_CONFIG = FSC_ROOT / "data" / "config" / "missions.yaml"
 VEHICLES_CONFIG = FSC_ROOT / "data" / "config" / "vehicles.yaml"
 EQUIPMENT_CONFIG = FSC_ROOT / "data" / "config" / "equipment.yaml"
 SIZE = 1024
+LEGACY_MISSION_IMAGE_IDS = (
+    "rescue_call",
+    "small_bin_fire",
+    "vehicle_collision",
+)
 
 
 def slug_seed(value: str) -> int:
@@ -595,20 +600,33 @@ def draw_asset_station_backdrop(draw: ImageDraw.ImageDraw, rng: random.Random, a
 
 def draw_large_fire_engine(draw: ImageDraw.ImageDraw, rng: random.Random, kind: str = "fire") -> None:
     color = "#c7372f"
+    accent = "#f1ead7"
     if kind == "hazmat":
         color = "#e2b542"
+        accent = "#1f2832"
     elif kind == "rescue":
         color = "#d64b35"
-    draw_fire_engine(draw, 110, 575, rng)
-    rect(draw, (372, 592, 770, 728), color, width=7)
-    rect(draw, (600, 526, 748, 728), color, width=7)
-    draw_windows(draw, [(622, 548, 722, 612)])
-    rect(draw, (420, 615, 520, 705), "#4a5259", width=5)
-    rect(draw, (540, 615, 640, 705), "#4a5259", width=5)
-    line(draw, [(148, 660), (748, 660)], "#f1ead7", 10)
-    for wx in (226, 438, 696):
-        ellipse(draw, (wx - 48, 700, wx + 48, 796), "#20252b", width=7)
-        ellipse(draw, (wx - 22, 726, wx + 22, 770), "#8c949b", width=5)
+    elif kind == "support":
+        color = "#d34a38"
+
+    rect(draw, (128, 608, 794, 748), color, width=8)
+    polygon(draw, [(610, 608), (655, 520), (790, 520), (842, 608)], color, "#1b2228", 8)
+    rect(draw, (166, 638, 332, 716), "#333b42", width=6)
+    rect(draw, (360, 633, 468, 724), "#4a5259", width=5)
+    rect(draw, (496, 633, 604, 724), "#4a5259", width=5)
+    draw_windows(draw, [(665, 545, 768, 615)])
+    line(draw, [(150, 675), (818, 675)], accent, 11)
+    rect(draw, (650, 480, 760, 510), "#2f353a", width=5)
+    rect(draw, (660, 474, 695, 508), "#e43a36", width=4)
+    rect(draw, (700, 474, 735, 508), "#f1ead7", width=4)
+    for px in range(184, 318, 28):
+        ellipse(draw, (px, 656, px + 15, 671), "#d9d3bf", width=3)
+    line(draw, [(180, 585), (340, 525), (555, 525), (715, 570)], "#d9d3bf", 11)
+    line(draw, [(218, 564), (378, 505), (585, 505), (744, 550)], "#1b2228", 4)
+    for wx in (238, 514, 742):
+        ellipse(draw, (wx - 52, 714, wx + 52, 818), "#20252b", width=8)
+        ellipse(draw, (wx - 24, 742, wx + 24, 790), "#8c949b", width=5)
+    rect(draw, (106, 736, 838, 762), "#2f353a", width=5)
 
 
 def draw_large_ambulance(draw: ImageDraw.ImageDraw) -> None:
@@ -689,11 +707,20 @@ def render_vehicle(vehicle: dict[str, Any]) -> Image.Image:
 
 def draw_equipment_panel(draw: ImageDraw.ImageDraw, rng: random.Random) -> None:
     draw_sky(draw, rng)
-    draw_cloud(draw, 95, 105, 0.78)
-    draw_cloud(draw, 720, 125, 0.62)
-    rect(draw, (0, 690, SIZE, SIZE), "#5b8c4c", width=0)
-    rounded(draw, (202, 210, 822, 814), 28, "#f1ead7", width=8)
-    rect(draw, (260, 730, 764, 778), "#2f353a", width=6)
+    draw_cloud(draw, 95, 95, 0.78)
+    draw_cloud(draw, 720, 120, 0.62)
+    draw_bricks(draw, 100, 245, 924, 710, rng)
+    rect(draw, (72, 218, 952, 268), "#2f353a", width=7)
+    rect(draw, (170, 325, 854, 615), "#475057", width=7)
+    for x in range(205, 830, 56):
+        line(draw, [(x, 342), (x, 595)], "#353d43", 2)
+    for y in range(362, 595, 56):
+        line(draw, [(188, y), (836, y)], "#353d43", 2)
+    rect(draw, (0, 710, SIZE, SIZE), "#d2ccc0", width=0)
+    for x in range(-70, SIZE, 160):
+        line(draw, [(x, 1024), (x + 118, 710)], "#aaa69d", 4)
+    rect(draw, (190, 690, 834, 780), "#2f353a", width=7)
+    rect(draw, (222, 650, 802, 714), "#59636b", width=6)
 
 
 def draw_tool_icon(draw: ImageDraw.ImageDraw, item: dict[str, Any]) -> None:
@@ -781,13 +808,29 @@ def write_catalog_images(items: list[dict[str, Any]], image_prefix: str, rendere
     return written
 
 
+def write_legacy_mission_images() -> int:
+    written = 0
+    for mission_id in LEGACY_MISSION_IMAGE_IDS:
+        item = {
+            "id": mission_id,
+            "name": mission_id.replace("_", " ").title(),
+            "image": f"Images/Missions/{mission_id}.png",
+        }
+        output = FSC_ROOT / item["image"]
+        output.parent.mkdir(parents=True, exist_ok=True)
+        prepare_fsc_image(render_mission(item)).save(output, "PNG", compress_level=6)
+        written += 1
+    return written
+
+
 def main() -> None:
     mission_count = write_catalog_images(load_config(MISSIONS_CONFIG, "missions"), "Images/Missions", render_mission)
+    legacy_mission_count = write_legacy_mission_images()
     vehicle_count = write_catalog_images(load_config(VEHICLES_CONFIG, "vehicles"), "Images/Vehicles", render_vehicle)
     equipment_count = write_catalog_images(load_config(EQUIPMENT_CONFIG, "equipment"), "Images/Equipment", render_equipment)
     print(
         "Wrote "
-        f"{mission_count} mission images, "
+        f"{mission_count + legacy_mission_count} mission images, "
         f"{vehicle_count} vehicle images and "
         f"{equipment_count} equipment images."
     )

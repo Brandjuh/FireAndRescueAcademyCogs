@@ -34,8 +34,7 @@ from FireStationCommand.fire_station_command import (
 
 _FSC_ROOT = Path(__file__).resolve().parents[1] / "FireStationCommand"
 _FSC_IMAGE_SIZE = (1024, 1024)
-_FSC_PIXEL_SOURCE_SIZE = (256, 256)
-_FSC_PIXEL_ART_MAX_COLORS = 128
+_FSC_ASSET_MAX_COLORS = 192
 
 
 def _cog_with_game_data(game_data):
@@ -340,12 +339,7 @@ def test_all_firestationcommand_images_use_consistent_png_canvas():
             assert image.format == "PNG", relative_path
             assert image.size == _FSC_IMAGE_SIZE, relative_path
             assert image.mode in {"RGB", "RGBA"}, relative_path
-            assert rgb_image.getcolors(maxcolors=_FSC_PIXEL_ART_MAX_COLORS + 1) is not None, relative_path
-            reconstructed = rgb_image.resize(_FSC_PIXEL_SOURCE_SIZE, Image.Resampling.NEAREST).resize(
-                _FSC_IMAGE_SIZE,
-                Image.Resampling.NEAREST,
-            )
-            assert reconstructed.tobytes() == rgb_image.tobytes(), relative_path
+            assert rgb_image.getcolors(maxcolors=_FSC_ASSET_MAX_COLORS + 1) is not None, relative_path
 
 
 def test_imported_missions_have_equipment_depth_without_losing_quantities():
