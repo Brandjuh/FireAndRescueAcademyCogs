@@ -593,6 +593,54 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertEqual(next_attempt, now)
         self.assertEqual(schedule_run_key("event", now), "2026-W26")
 
+    def test_weekly_schedule_uses_actual_last_start_as_next_anchor(self):
+        now = datetime(2026, 6, 27, 15, 0, 30, tzinfo=ZoneInfo("America/New_York"))
+        schedule = {
+            "enabled": True,
+            "profiles": ["weekly"],
+            "rotation_index": 0,
+            "time": DEFAULT_EVENT_ROUTE_TIME,
+            "timezone": "America/New_York",
+            "weekday": "saturday",
+        }
+        last_started_at = {"event": "2026-06-20T19:08:30+00:00"}
+
+        next_attempt = next_schedule_attempt_time("event", schedule, {}, {}, now, last_started_at)
+
+        self.assertEqual(next_attempt.isoformat(), "2026-06-27T15:08:30-04:00")
+
+    def test_weekly_schedule_is_due_when_actual_last_start_interval_has_passed(self):
+        now = datetime(2026, 6, 27, 15, 9, 0, tzinfo=ZoneInfo("America/New_York"))
+        schedule = {
+            "enabled": True,
+            "profiles": ["weekly"],
+            "rotation_index": 0,
+            "time": DEFAULT_EVENT_ROUTE_TIME,
+            "timezone": "America/New_York",
+            "weekday": "saturday",
+        }
+        last_started_at = {"event": "2026-06-20T19:08:30+00:00"}
+
+        next_attempt = next_schedule_attempt_time("event", schedule, {}, {}, now, last_started_at)
+
+        self.assertEqual(next_attempt, now)
+
+    def test_daily_schedule_uses_actual_last_start_as_next_anchor(self):
+        now = datetime(2026, 6, 27, 14, 0, 0, tzinfo=ZoneInfo("America/New_York"))
+        schedule = {
+            "enabled": True,
+            "profiles": ["daily"],
+            "rotation_index": 0,
+            "time": "07:00",
+            "timezone": "America/New_York",
+            "weekday": None,
+        }
+        last_started_at = {"large": "2026-06-26T19:08:30+00:00"}
+
+        next_attempt = next_schedule_attempt_time("large", schedule, {}, {}, now, last_started_at)
+
+        self.assertEqual(next_attempt.isoformat(), "2026-06-27T15:08:30-04:00")
+
     def test_migrates_legacy_weekly_event_schedule_to_1500_new_york(self):
         schedules = {
             "event": {

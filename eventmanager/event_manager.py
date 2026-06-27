@@ -1197,6 +1197,11 @@ def schedule_run_key(kind: str, when: datetime) -> str:
     return when.strftime("%Y-%m-%d")
 
 
+def schedule_interval(kind: str) -> timedelta:
+    """Return the MissionChief free-start interval for scheduled alliance items."""
+    return timedelta(days=7 if normalize_kind(kind) == "event" else 1)
+
+
 def migrate_default_event_schedule_time(schedules: dict) -> bool:
     """Move existing default alliance event schedules from 07:00 to 15:00 New York time."""
     event_schedule = schedules.get("event")
@@ -1211,7 +1216,13 @@ def migrate_default_event_schedule_time(schedules: dict) -> bool:
     return True
 
 
-def next_nominal_schedule_time(kind: str, schedule: dict, last_runs: dict, now: datetime) -> Optional[datetime]:
+def next_nominal_schedule_time(
+    kind: str,
+    schedule: dict,
+    last_runs: dict,
+    now: datetime,
+    last_started_at: Optional[dict] = None,
+) -> Optional[datetime]:
     """Return the next intended scheduler attempt before cooldown retry overrides."""
     kind = normalize_kind(kind)
     if not schedule.get("enabled"):
@@ -1219,6 +1230,14 @@ def next_nominal_schedule_time(kind: str, schedule: dict, last_runs: dict, now: 
     profile_name, _ = select_scheduled_profile(schedule)
     if not profile_name:
         return None
+
+    last_started = parse_config_datetime((last_started_at or {}).get(kind))
+    if last_started:
+        next_start = last_started + schedule_interval(kind)
+        next_start_local = next_start.astimezone(now.tzinfo)
+        if next_start_local <= now:
+            return now
+        return next_start_local
 
     hour, minute = valid_time(schedule.get("time") or "23:55")
     target_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
@@ -1257,9 +1276,10 @@ def next_schedule_attempt_time(
     last_runs: dict,
     retry_after: dict,
     now: datetime,
+    last_started_at: Optional[dict] = None,
 ) -> Optional[datetime]:
     """Return the next scheduler attempt, including cooldown retry throttling."""
-    nominal = next_nominal_schedule_time(kind, schedule, last_runs, now)
+    nominal = next_nominal_schedule_time(kind, schedule, last_runs, now, last_started_at)
     if not nominal:
         return None
     retry_at = parse_config_datetime(retry_after.get(kind))
@@ -1855,6 +1875,7 @@ class EventManager(commands.Cog):
                 },
             },
             last_runs={},
+            last_started_at={},
             schedule_retry_after={},
             log_channel_id=None,
             panel_channel_id=DEFAULT_PANEL_CHANNEL_ID,
@@ -2243,6 +2264,53 @@ class EventManager(commands.Cog):
         """Start an item from an in-memory profile."""
         return await self._start_profile_data(kind, label, profile)
 
+    async def _record_scheduled_success(
+        self,
+        kind: str,
+        schedule: dict,
+        profile_name: str,
+        next_rotation_index: int,
+        started_at: datetime,
+    ):
+        """Persist a successful scheduled start as the anchor for the next run."""
+        timezone_name = schedule.get("timezone") or DEFAULT_TIMEZONE
+        started_local = started_at.astimezone(ZoneInfo(timezone_name))
+        async with self.config.last_runs() as last_runs:
+            last_runs[kind] = schedule_run_key(kind, started_local)
+        async with self.config.last_started_at() as last_started_at:
+            last_started_at[kind] = config_datetime(started_at)
+        async with self.config.schedules() as schedules:
+            schedules[kind]["profile"] = profile_name
+            schedules[kind]["rotation_index"] = next_rotation_index
+        async with self.config.schedule_retry_after() as retry_after:
+            retry_after.pop(kind, None)
+
+    async def _record_scheduled_failure(self, kind: str, result: EventStartResult):
+        """Persist a retry moment after a failed scheduled start."""
+        next_retry = result.details.get("next_eligible_at") if result.details else None
+        if not isinstance(next_retry, datetime) or next_retry <= datetime.now(timezone.utc):
+            next_retry = datetime.now(timezone.utc) + timedelta(seconds=SCHEDULE_RETRY_SECONDS)
+        async with self.config.schedule_retry_after() as retry_after:
+            retry_after[kind] = config_datetime(next_retry)
+
+    async def _start_scheduled_kind(self, kind: str) -> Tuple[EventStartResult, Optional[str], Optional[datetime]]:
+        """Start the current scheduled profile and update schedule bookkeeping."""
+        kind = normalize_kind(kind)
+        schedules = await self.config.schedules()
+        schedule = schedules.get(kind, {})
+        profile_name, next_rotation_index = select_scheduled_profile(schedule)
+        if not profile_name:
+            return EventStartResult(False, f"No scheduled {EVENT_KINDS[kind]['label']} profile is configured."), None, None
+
+        result = await self._start_from_profile(kind, profile_name)
+        if result.ok:
+            started_at = datetime.now(timezone.utc)
+            await self._record_scheduled_success(kind, schedule, profile_name, next_rotation_index, started_at)
+            return result, profile_name, started_at
+
+        await self._record_scheduled_failure(kind, result)
+        return result, profile_name, None
+
     async def start_quick(self, kind: str) -> EventStartResult:
         """Start using configured rotation when available, otherwise fall back to live defaults."""
         kind = normalize_kind(kind)
@@ -2618,60 +2686,23 @@ class EventManager(commands.Cog):
         schedules = await self.config.schedules()
         last_runs = await self.config.last_runs()
         retry_after = await self.config.schedule_retry_after()
-        schedule_changed = False
-        last_runs_changed = False
-        retry_changed = False
+        last_started_at = await self.config.last_started_at()
 
         for kind, schedule in schedules.items():
             if not schedule.get("enabled"):
                 continue
-            profile_name, next_rotation_index = select_scheduled_profile(schedule)
+            profile_name, _ = select_scheduled_profile(schedule)
             if not profile_name:
                 continue
             timezone_name = schedule.get("timezone") or DEFAULT_TIMEZONE
             now = datetime.now(ZoneInfo(timezone_name))
-            hour, minute = valid_time(schedule.get("time") or "23:55")
-            if (now.hour, now.minute) < (hour, minute):
+            next_attempt = next_schedule_attempt_time(kind, schedule, last_runs, retry_after, now, last_started_at)
+            if not next_attempt or now < next_attempt:
                 continue
 
-            if kind == "event":
-                weekday = (schedule.get("weekday") or "monday").lower()
-                if now.weekday() != WEEKDAYS.get(weekday, 0):
-                    continue
-                run_key = f"{now:%G-W%V}"
-            else:
-                run_key = now.strftime("%Y-%m-%d")
-
-            if last_runs.get(kind) == run_key:
-                continue
-
-            retry_at = parse_config_datetime(retry_after.get(kind))
-            if retry_at and retry_at > datetime.now(timezone.utc):
-                continue
-
-            result = await self._start_from_profile(kind, profile_name)
-            if result.ok:
-                last_runs[kind] = run_key
-                schedule["profile"] = profile_name
-                schedule["rotation_index"] = next_rotation_index
-                retry_after.pop(kind, None)
-                last_runs_changed = True
-                schedule_changed = True
-                retry_changed = True
-            else:
-                next_retry = result.details.get("next_eligible_at") if result.details else None
-                if not isinstance(next_retry, datetime) or next_retry <= datetime.now(timezone.utc):
-                    next_retry = datetime.now(timezone.utc) + timedelta(seconds=SCHEDULE_RETRY_SECONDS)
-                retry_after[kind] = config_datetime(next_retry)
-                retry_changed = True
+            result, _, _ = await self._start_scheduled_kind(kind)
+            if not result.ok:
                 log.warning("Scheduled %s failed: %s", kind, result.reason)
-
-        if last_runs_changed:
-            await self.config.last_runs.set(last_runs)
-        if schedule_changed:
-            await self.config.schedules.set(schedules)
-        if retry_changed:
-            await self.config.schedule_retry_after.set(retry_after)
 
     @commands.group(name="eventmanager", aliases=["eventmgr"], invoke_without_command=True)
     @commands.admin()
@@ -3120,12 +3151,16 @@ class EventManager(commands.Cog):
         async with self.config.schedule_retry_after() as retry_after:
             retry_after.pop("large", None)
             retry_after.pop("event", None)
+        async with self.config.last_started_at() as last_started_at:
+            last_started_at.pop("large", None)
+            last_started_at.pop("event", None)
 
         notes = [location["input_note"] for location in EVENT_ROUTE_LOCATIONS if location.get("input_note")]
         lines = [
             "Created route profiles for both large missions and alliance events.",
-            f"Large scale mission schedule: daily at {daily_time} {DEFAULT_TIMEZONE}.",
-            f"Alliance event schedule: {weekly_day} at {weekly_time} {DEFAULT_TIMEZONE}.",
+            f"Large scale mission first-start schedule: daily at {daily_time} {DEFAULT_TIMEZONE}.",
+            f"Alliance event first-start schedule: {weekly_day} at {weekly_time} {DEFAULT_TIMEZONE}.",
+            "After a successful scheduled or manual scheduled start, future attempts use the actual start time.",
             "Alliance event defaults: Large area, Circle, Every 30 seconds.",
             "MissionChief type: random live option at start time.",
             "",
@@ -3214,23 +3249,57 @@ class EventManager(commands.Cog):
         schedules = await self.config.schedules()
         last_runs = await self.config.last_runs()
         retry_after = await self.config.schedule_retry_after()
+        last_started_at = await self.config.last_started_at()
         lines = []
         for kind, schedule in schedules.items():
             profiles = schedule.get("profiles") or [schedule.get("profile")]
             profiles = [profile for profile in profiles if profile]
             timezone_name = schedule.get("timezone") or DEFAULT_TIMEZONE
             now = datetime.now(ZoneInfo(timezone_name))
-            next_attempt = next_schedule_attempt_time(kind, schedule, last_runs, retry_after, now)
+            next_attempt = next_schedule_attempt_time(kind, schedule, last_runs, retry_after, now, last_started_at)
             next_attempt_text = next_attempt.isoformat() if next_attempt else "not scheduled"
             retry_at = parse_config_datetime(retry_after.get(kind))
             retry_text = retry_at.isoformat() if retry_at else "none"
+            last_started = parse_config_datetime(last_started_at.get(kind))
+            last_started_text = last_started.isoformat() if last_started else "none"
             lines.append(
                 f"{kind}: enabled={schedule.get('enabled')} profiles={profiles or 'none'} "
                 f"time={schedule.get('time')} timezone={schedule.get('timezone')} "
                 f"weekday={schedule.get('weekday')} rotation_index={schedule.get('rotation_index', 0)} "
-                f"last_run={last_runs.get(kind, 'none')} retry_after={retry_text} next_attempt={next_attempt_text}"
+                f"last_run={last_runs.get(kind, 'none')} last_started_at={last_started_text} "
+                f"retry_after={retry_text} next_attempt={next_attempt_text}"
             )
         await ctx.send(box("\n".join(lines), lang="ini"))
+
+    @schedule.command(name="fire", aliases=["run", "startnow"])
+    @commands.admin()
+    async def schedule_fire(self, ctx: commands.Context, kind: str):
+        """Immediately start the current scheduled profile and anchor future runs to this start."""
+        try:
+            kind = normalize_kind(kind)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+
+        await ctx.send(f"Starting current scheduled {EVENT_KINDS[kind]['label']} profile now...")
+        result, profile_name, started_at = await self._start_scheduled_kind(kind)
+        if not result.ok:
+            await ctx.send(f"Could not start scheduled {EVENT_KINDS[kind]['label']}: {result.reason}")
+            return
+
+        next_start = (started_at + schedule_interval(kind)).astimezone(ZoneInfo(DEFAULT_TIMEZONE)) if started_at else None
+        next_text = next_start.isoformat() if next_start else "unknown"
+        schedules = await self.config.schedules()
+        enabled = bool(schedules.get(kind, {}).get("enabled"))
+        automatic_note = (
+            f"Next automatic attempt is anchored to this start time: `{next_text}`."
+            if enabled
+            else f"The next automatic attempt is anchored to `{next_text}`, but this schedule is currently disabled."
+        )
+        await ctx.send(
+            f"Started scheduled {EVENT_KINDS[kind]['label']} with profile `{profile_name}`.\n"
+            f"{automatic_note}"
+        )
 
     @schedule.command(name="daily")
     @commands.admin()
@@ -3252,6 +3321,10 @@ class EventManager(commands.Cog):
                 timezone=DEFAULT_TIMEZONE,
                 weekday=None,
             )
+        async with self.config.last_started_at() as last_started_at:
+            last_started_at.pop("large", None)
+        async with self.config.schedule_retry_after() as retry_after:
+            retry_after.pop("large", None)
         await ctx.tick()
 
     @schedule.command(name="weekly")
@@ -3278,6 +3351,10 @@ class EventManager(commands.Cog):
                 timezone=DEFAULT_TIMEZONE,
                 weekday=weekday,
             )
+        async with self.config.last_started_at() as last_started_at:
+            last_started_at.pop("event", None)
+        async with self.config.schedule_retry_after() as retry_after:
+            retry_after.pop("event", None)
         await ctx.tick()
 
     @schedule.command(name="off")
