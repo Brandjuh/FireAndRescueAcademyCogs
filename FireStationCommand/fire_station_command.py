@@ -1351,6 +1351,7 @@ class FireStationCommand(commands.Cog):
             "old_level": old_level,
             "new_level": new_level,
             "leveled_up": new_level > old_level,
+            "level_up_text": self._level_up_field_text(old_level, new_level) if new_level > old_level else "",
         }
 
     async def _award_flat_xp(self, user_conf, data: Dict[str, Any], amount: int) -> Dict[str, Any]:
@@ -1367,6 +1368,7 @@ class FireStationCommand(commands.Cog):
             "old_level": old_level,
             "new_level": new_level,
             "leveled_up": new_level > old_level,
+            "level_up_text": self._level_up_field_text(old_level, new_level) if new_level > old_level else "",
         }
 
     async def _claim_daily_reward(self, user: discord.abc.User) -> discord.Embed:
@@ -1413,7 +1415,7 @@ class FireStationCommand(commands.Cog):
         if xp_result["leveled_up"]:
             embed.add_field(
                 name="Level up",
-                value=f"Command level {xp_result['old_level']} -> {xp_result['new_level']}.",
+                value=xp_result["level_up_text"],
                 inline=False,
             )
         return embed
@@ -1572,6 +1574,157 @@ class FireStationCommand(commands.Cog):
         if next_xp is None:
             return f"Level {command_level} - {xp:,} XP (max)"
         return f"Level {command_level} - {xp:,} / {next_xp:,} XP"
+
+    @staticmethod
+    def _humanize_unlock_id(item_id: str) -> str:
+        return item_id.replace("_", " ").replace("-", " ").title()
+
+    @staticmethod
+    def _format_unlock_names(names: List[str], *, limit: int = 5) -> str:
+        unique_names = list(dict.fromkeys(name for name in names if name))
+        if not unique_names:
+            return ""
+        shown = unique_names[:limit]
+        text = ", ".join(shown)
+        remaining = len(unique_names) - len(shown)
+        if remaining > 0:
+            text = f"{text}, +{remaining} more"
+        return text
+
+    def _progression_unlocks_config(self) -> Dict[str, Any]:
+        unlocks = self._progression_config().get("unlocks", {})
+        return unlocks if isinstance(unlocks, dict) else {}
+
+    def _configured_unlock_names(
+        self,
+        category: str,
+        catalog: Dict[str, Dict[str, Any]],
+        old_level: int,
+        new_level: int,
+    ) -> List[str]:
+        unlocks = self._progression_unlocks_config()
+        names: List[str] = []
+        for level in range(old_level + 1, new_level + 1):
+            entry = unlocks.get(str(level), unlocks.get(level, {}))
+            if not isinstance(entry, dict):
+                continue
+            values = entry.get(category, [])
+            if not isinstance(values, list):
+                continue
+            for item_id in values:
+                if not isinstance(item_id, str) or not item_id:
+                    continue
+                item = catalog.get(item_id, {})
+                name = item.get("name") if isinstance(item, dict) else None
+                names.append(name if isinstance(name, str) and name else self._humanize_unlock_id(item_id))
+        return names
+
+    def _catalog_unlock_names(
+        self,
+        catalog: Dict[str, Dict[str, Any]],
+        old_level: int,
+        new_level: int,
+    ) -> List[str]:
+        names: List[str] = []
+        for item_id, item in catalog.items():
+            if not isinstance(item, dict):
+                continue
+            unlock_level = self._unlock_level(item)
+            if old_level < unlock_level <= new_level:
+                name = item.get("name")
+                names.append(name if isinstance(name, str) and name else self._humanize_unlock_id(item_id))
+        return sorted(names)
+
+    def _incident_unlock_catalog(self) -> Dict[str, Dict[str, Any]]:
+        incidents = getattr(self, "INCIDENTS", None) or self._build_incidents()
+        return {
+            incident["id"]: incident
+            for incident in incidents
+            if isinstance(incident, dict) and isinstance(incident.get("id"), str)
+        }
+
+    def _feature_unlock_names(self, old_level: int, new_level: int) -> List[str]:
+        feature_labels = {
+            "career_conversion": "Career station conversion after station level 2",
+            "expansions": "Station extensions",
+            "maintenance": "Maintenance bay",
+            "training": "Training desk",
+        }
+        built_in_unlocks = {
+            2: ["career_conversion"],
+            4: ["expansions", "maintenance"],
+            5: ["training"],
+        }
+        configured = self._progression_unlocks_config()
+        names: List[str] = []
+        for level in range(old_level + 1, new_level + 1):
+            feature_ids = list(built_in_unlocks.get(level, []))
+            entry = configured.get(str(level), configured.get(level, {}))
+            if isinstance(entry, dict):
+                raw_features = entry.get("features", [])
+                if isinstance(raw_features, list):
+                    feature_ids.extend(feature for feature in raw_features if isinstance(feature, str))
+            for feature_id in feature_ids:
+                names.append(feature_labels.get(feature_id, self._humanize_unlock_id(feature_id)))
+        return names
+
+    def _station_upgrade_unlock_names(self, old_level: int, new_level: int) -> List[str]:
+        max_level = min(self.MAX_COMMAND_LEVEL, new_level)
+        return [f"Station level {level} upgrade" for level in range(old_level + 1, max_level + 1)]
+
+    def _level_unlock_summary(self, old_level: int, new_level: int) -> str:
+        if new_level <= old_level:
+            return ""
+
+        incident_catalog = self._incident_unlock_catalog()
+        sections = [
+            (
+                "Station",
+                self._station_upgrade_unlock_names(old_level, new_level),
+            ),
+            (
+                "Features",
+                self._feature_unlock_names(old_level, new_level),
+            ),
+            (
+                "Missions",
+                self._configured_unlock_names("missions", incident_catalog, old_level, new_level)
+                + self._catalog_unlock_names(incident_catalog, old_level, new_level),
+            ),
+            (
+                "Vehicles",
+                self._configured_unlock_names("vehicles", self.VEHICLE_CATALOG, old_level, new_level)
+                + self._catalog_unlock_names(self.VEHICLE_CATALOG, old_level, new_level),
+            ),
+            (
+                "Equipment",
+                self._configured_unlock_names("equipment", self.EQUIPMENT_CATALOG, old_level, new_level)
+                + self._catalog_unlock_names(self.EQUIPMENT_CATALOG, old_level, new_level),
+            ),
+            (
+                "Training",
+                self._configured_unlock_names("trainings", self.TRAINING_CATALOG, old_level, new_level)
+                + self._catalog_unlock_names(self.TRAINING_CATALOG, old_level, new_level),
+            ),
+            (
+                "Extensions",
+                self._configured_unlock_names("expansions", self.EXPANSION_CATALOG, old_level, new_level)
+                + self._catalog_unlock_names(self.EXPANSION_CATALOG, old_level, new_level),
+            ),
+        ]
+        lines = []
+        for label, names in sections:
+            text = self._format_unlock_names(names)
+            if text:
+                lines.append(f"{label}: {text}")
+        return "\n".join(lines)
+
+    def _level_up_field_text(self, old_level: int, new_level: int) -> str:
+        text = f"Command level {old_level} -> {new_level}."
+        unlocks = self._level_unlock_summary(old_level, new_level)
+        if unlocks:
+            return f"{text}\n{unlocks}"
+        return text
 
     def _vehicle_is_unlocked(
         self,
@@ -3810,7 +3963,7 @@ class FireStationCommand(commands.Cog):
         if xp_result["leveled_up"]:
             embed.add_field(
                 name="Level up",
-                value=f"Command level increased to {xp_result['new_level']}. New unlocks may be available.",
+                value=xp_result["level_up_text"],
                 inline=False,
             )
 
