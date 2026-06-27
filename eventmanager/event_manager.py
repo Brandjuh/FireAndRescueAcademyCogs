@@ -1246,7 +1246,7 @@ def next_schedule_attempt_time(
     if not nominal:
         return None
     retry_at = parse_config_datetime(retry_after.get(kind))
-    if retry_at and retry_at > datetime.now(timezone.utc):
+    if retry_at and retry_at > now.astimezone(timezone.utc):
         retry_local = retry_at.astimezone(now.tzinfo)
         if retry_local > nominal:
             return retry_local

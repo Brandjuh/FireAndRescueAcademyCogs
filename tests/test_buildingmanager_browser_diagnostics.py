@@ -16,6 +16,7 @@ from buildingmanager.buildingmanager import (
     BUILDING_FETCH_API_SCRIPT,
     BUILDING_FETCH_ALLIANCE_LIST_SCRIPT,
     BUILDING_FETCH_ALLIANCE_LOGS_SCRIPT,
+    AUTO_CANDIDATE_DUPLICATE_RADIUS_METERS,
     BuildingAutomationResult,
     BoardBuildingPost,
     BoardPage,
@@ -35,6 +36,7 @@ from buildingmanager.buildingmanager import (
     build_alliance_building_config,
     building_request_from_row,
     build_building_board_guide_content,
+    build_overpass_candidate_query,
     build_browser_diagnostics_report,
     extract_missionchief_building_id,
     extract_building_board_request,
@@ -44,6 +46,7 @@ from buildingmanager.buildingmanager import (
     find_new_created_alliance_building_id_from_list,
     parse_building_board_page,
     parse_alliance_funds_from_html,
+    parse_overpass_auto_build_candidates,
     send_ephemeral_followup,
 )
 
@@ -941,6 +944,212 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
             self.assertEqual([row["request_id"] for row in rows], [request_id])
             self.assertEqual(req.request_id, request_id)
             self.assertEqual(req.building_type, "Prison")
+
+    def test_overpass_parser_accepts_hospital_and_prison_candidates(self):
+        data = {
+            "elements": [
+                {
+                    "type": "node",
+                    "id": 101,
+                    "lat": 40.1,
+                    "lon": -73.9,
+                    "tags": {
+                        "amenity": "hospital",
+                        "name": "Example General Hospital",
+                        "addr:city": "New York",
+                        "addr:country": "US",
+                    },
+                },
+                {
+                    "type": "way",
+                    "id": 202,
+                    "center": {"lat": 41.1, "lon": -74.9},
+                    "tags": {
+                        "amenity": "prison",
+                        "name": "Example Correctional Facility",
+                        "addr:state": "NY",
+                    },
+                },
+                {
+                    "type": "node",
+                    "id": 303,
+                    "lat": 42.1,
+                    "lon": -75.9,
+                    "tags": {
+                        "amenity": "hospital",
+                        "name": "Example Doctor Clinic",
+                    },
+                },
+            ]
+        }
+
+        candidates, stats = parse_overpass_auto_build_candidates(data)
+
+        self.assertEqual(stats["source_elements"], 3)
+        self.assertEqual(stats["accepted"], 2)
+        self.assertEqual(stats["rejected"], 1)
+        self.assertEqual([candidate["building_type"] for candidate in candidates], ["Hospital", "Prison"])
+        self.assertEqual(candidates[0]["source_id"], "node/101")
+        self.assertEqual(candidates[1]["source_id"], "way/202")
+
+    def test_overpass_query_uses_bbox_and_supported_tags(self):
+        query = build_overpass_candidate_query(40.0, -74.0, 41.0, -73.0)
+
+        self.assertIn('nwr["amenity"="hospital"](40.0000000,-74.0000000,41.0000000,-73.0000000);', query)
+        self.assertIn('nwr["healthcare"="hospital"]', query)
+        self.assertIn('nwr["amenity"="prison"]', query)
+        self.assertIn("out center tags;", query)
+
+    def test_candidate_database_tracks_available_used_and_duplicate_status(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = BuildingDatabase(f"{temp_dir}/building_manager.db")
+            stats = db.upsert_auto_candidates(
+                [
+                    {
+                        "source": "openstreetmap",
+                        "source_id": "node/101",
+                        "building_type": "Hospital",
+                        "name": "Example Hospital",
+                        "lat": 40.1,
+                        "lon": -73.9,
+                        "raw_tags_json": "{}",
+                    },
+                    {
+                        "source": "openstreetmap",
+                        "source_id": "way/202",
+                        "building_type": "Prison",
+                        "name": "Example Prison",
+                        "lat": 41.1,
+                        "lon": -74.9,
+                        "raw_tags_json": "{}",
+                    },
+                ]
+            )
+
+            self.assertEqual(stats, {"inserted": 2, "updated": 0, "skipped": 0})
+            hospital = db.get_random_auto_candidates("Hospital", limit=1)[0]
+            db.mark_auto_candidate(hospital.candidate_id, "used", missionchief_building_id=999)
+            counts = db.get_auto_candidate_stats()
+
+            self.assertEqual(counts["Hospital:used"], 1)
+            self.assertEqual(counts["Prison:available"], 1)
+            self.assertEqual(db.get_auto_candidate(hospital.candidate_id).missionchief_building_id, 999)
+
+    def test_candidate_selection_skips_nearby_existing_building(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = BuildingManager.__new__(BuildingManager)
+            manager.db = BuildingDatabase(f"{temp_dir}/building_manager.db")
+            manager.db.upsert_auto_candidates(
+                [
+                    {
+                        "source": "openstreetmap",
+                        "source_id": "node/101",
+                        "building_type": "Hospital",
+                        "name": "Duplicate Hospital",
+                        "lat": 40.1000000,
+                        "lon": -73.9000000,
+                        "raw_tags_json": "{}",
+                    },
+                    {
+                        "source": "openstreetmap",
+                        "source_id": "node/102",
+                        "building_type": "Hospital",
+                        "name": "Available Hospital",
+                        "lat": 41.0000000,
+                        "lon": -74.0000000,
+                        "raw_tags_json": "{}",
+                    },
+                ]
+            )
+            candidates = sorted(
+                manager.db.get_random_auto_candidates("Hospital", limit=10),
+                key=lambda candidate: candidate.name,
+                reverse=True,
+            )
+            manager.db.get_random_auto_candidates = lambda *_args, **_kwargs: candidates
+            existing = [
+                {
+                    "id": 555,
+                    "building_type": 2,
+                    "latitude": 40.10001,
+                    "longitude": -73.90001,
+                }
+            ]
+
+            plan = manager._select_auto_candidate(
+                "Hospital",
+                existing_buildings=existing,
+                duplicate_source="test",
+                duplicate_radius_m=AUTO_CANDIDATE_DUPLICATE_RADIUS_METERS,
+            )
+
+            self.assertIsNotNone(plan.candidate)
+            self.assertEqual(plan.candidate.name, "Available Hospital")
+            duplicate = manager.db.get_auto_candidate_stats()
+            self.assertEqual(duplicate["Hospital:duplicate"], 1)
+
+    def test_auto_candidate_build_marks_candidate_used_on_success(self):
+        class FakeGuildConfig:
+            async def auto_candidate_min_funds(self):
+                return 5_000_000
+
+            async def all(self):
+                return {
+                    "log_channel_id": None,
+                    "admin_channel_id": None,
+                }
+
+        class FakeConfig:
+            def guild(self, _guild):
+                return FakeGuildConfig()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = BuildingManager.__new__(BuildingManager)
+            manager.db = BuildingDatabase(f"{temp_dir}/building_manager.db")
+            manager.config = FakeConfig()
+            manager.bot = types.SimpleNamespace()
+            manager._get_current_alliance_funds = AsyncMock(return_value=(6_000_000, "live MissionChief"))
+            manager._candidate_duplicate_context = AsyncMock(return_value=([], "test duplicate check", 250))
+            manager._create_and_queue_approved_building = AsyncMock(
+                return_value=(
+                    BuildingCreateResult(
+                        True,
+                        "Created.",
+                        details={"buildingId": 12345},
+                    ),
+                    "Queued post-creation automation.",
+                )
+            )
+            manager._resolve_channel = AsyncMock(return_value=None)
+            manager.db.upsert_auto_candidates(
+                [
+                    {
+                        "source": "openstreetmap",
+                        "source_id": "node/101",
+                        "building_type": "Hospital",
+                        "name": "Example Hospital",
+                        "lat": 40.1,
+                        "lon": -73.9,
+                        "raw_tags_json": "{}",
+                    }
+                ]
+            )
+
+            result = asyncio.run(
+                manager._run_auto_candidate_build(
+                    types.SimpleNamespace(id=1),
+                    "Hospital",
+                    run_date="2026-06-27",
+                    scheduled=False,
+                )
+            )
+
+            self.assertIn("created Example Hospital", result)
+            run = manager.db.get_auto_run(1, "2026-06-27", "Hospital")
+            self.assertEqual(run["result"], "created")
+            self.assertEqual(run["missionchief_building_id"], 12345)
+            counts = manager.db.get_auto_candidate_stats()
+            self.assertEqual(counts["Hospital:used"], 1)
 
     def test_browser_diagnostics_report_formats_controls_and_redacted_fields(self):
         report = build_browser_diagnostics_report(

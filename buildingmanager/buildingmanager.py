@@ -6,6 +6,7 @@ import contextlib
 import difflib
 import hashlib
 import html as html_lib
+import math
 from html.parser import HTMLParser
 from io import BytesIO
 import json
@@ -18,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
+from zoneinfo import ZoneInfo
 
 import discord
 from redbot.core import commands, Config
@@ -66,6 +68,13 @@ BUILDING_AUTOMATION_EXCLUDED_EXTENSIONS = {
     "large hospital",
     "large prison",
 }
+AUTO_CANDIDATE_MIN_FUNDS = 5_000_000
+AUTO_CANDIDATE_LOOP_SECONDS = 15 * 60
+AUTO_CANDIDATE_DEFAULT_TIME = "07:00"
+AUTO_CANDIDATE_DEFAULT_TIMEZONE = "America/New_York"
+AUTO_CANDIDATE_DUPLICATE_RADIUS_METERS = 250
+AUTO_CANDIDATE_SELECTION_POOL = 50
+OVERPASS_API_URL = "https://overpass-api.de/api/interpreter"
 PLAYWRIGHT_SETUP_MESSAGE = (
     "Playwright browser automation is not ready. Install the BuildingManager requirements and run "
     "`python -m playwright install chromium` in the same Python environment as Redbot."
@@ -1083,6 +1092,195 @@ def build_alliance_building_config(
         "address": _truncate_text(address, 180),
     }
 
+def _haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Return approximate distance between two coordinates in meters."""
+    radius_m = 6_371_000
+    phi1 = math.radians(float(lat1))
+    phi2 = math.radians(float(lat2))
+    delta_phi = math.radians(float(lat2) - float(lat1))
+    delta_lambda = math.radians(float(lon2) - float(lon1))
+    a = (
+        math.sin(delta_phi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
+    )
+    return radius_m * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+def _osm_address_from_tags(tags: Dict[str, Any]) -> Optional[str]:
+    """Build a compact address from OSM addr:* tags."""
+    street = " ".join(
+        part
+        for part in (
+            tags.get("addr:housenumber"),
+            tags.get("addr:street"),
+        )
+        if part
+    ).strip()
+    parts = [
+        street,
+        tags.get("addr:postcode"),
+        tags.get("addr:city") or tags.get("addr:town") or tags.get("addr:village"),
+        tags.get("addr:state") or tags.get("addr:province"),
+        tags.get("addr:country"),
+    ]
+    text = ", ".join(str(part).strip() for part in parts if str(part or "").strip())
+    return text or None
+
+def _osm_candidate_type_from_tags(tags: Dict[str, Any]) -> Optional[str]:
+    """Return supported BuildingManager type from OSM tags."""
+    amenity = str(tags.get("amenity") or "").casefold()
+    healthcare = str(tags.get("healthcare") or "").casefold()
+    if amenity == "prison":
+        return "Prison"
+    if amenity == "hospital" or healthcare == "hospital":
+        return "Hospital"
+    return None
+
+def _osm_location_details(
+    *,
+    element: Dict[str, Any],
+    tags: Dict[str, Any],
+    name: str,
+    lat: float,
+    lon: float,
+) -> LocationDetails:
+    """Build LocationDetails used by the existing facility validator."""
+    source_id = f"{element.get('type')}/{element.get('id')}"
+    address = _osm_address_from_tags(tags)
+    facility_type = " ".join(
+        str(tags.get(key) or "")
+        for key in (
+            "amenity",
+            "healthcare",
+            "building",
+            "operator:type",
+            "disused:amenity",
+            "historic",
+            "tourism",
+        )
+    )
+    return LocationDetails(
+        original_input=f"osm:{source_id}",
+        resolved_input=f"osm:{source_id} {json.dumps(tags, ensure_ascii=False, sort_keys=True)}",
+        place_name=name,
+        coordinates=f"{float(lat):.7f}, {float(lon):.7f}",
+        address=address,
+        country=tags.get("addr:country") or tags.get("is_in:country"),
+        region=tags.get("addr:state") or tags.get("addr:province") or tags.get("is_in:state"),
+        maps_url=f"https://www.openstreetmap.org/{source_id}",
+        provider="openstreetmap",
+        detected_facility_type=facility_type,
+    )
+
+def _overpass_element_to_candidate_record(element: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Convert one Overpass element into a database candidate record."""
+    if not isinstance(element, dict):
+        return None, "Element is not an object."
+    tags = element.get("tags") or {}
+    if not isinstance(tags, dict):
+        return None, "Element has no tags."
+
+    building_type = _osm_candidate_type_from_tags(tags)
+    if not building_type:
+        return None, "Element is not a supported hospital/prison tag."
+
+    name = _clean_building_name(
+        tags.get("name")
+        or tags.get("official_name")
+        or tags.get("operator")
+        or tags.get("brand")
+        or ""
+    )
+    if not name:
+        return None, "Element has no usable name."
+
+    lat = element.get("lat")
+    lon = element.get("lon")
+    if (lat is None or lon is None) and isinstance(element.get("center"), dict):
+        lat = element["center"].get("lat")
+        lon = element["center"].get("lon")
+    try:
+        lat = float(lat)
+        lon = float(lon)
+    except (TypeError, ValueError):
+        return None, "Element has no usable coordinates."
+    if not -90 <= lat <= 90 or not -180 <= lon <= 180:
+        return None, "Element coordinates are out of range."
+
+    details = _osm_location_details(element=element, tags=tags, name=name, lat=lat, lon=lon)
+    name_address_text = _normalize_facility_text(" ".join(part for part in (name, details.address) if part))
+    if (
+        building_type == "Hospital"
+        and LocationParser._contains_facility_term(name_address_text, LocationParser._hospital_reject_terms)
+        and not LocationParser._contains_facility_term(name_address_text, LocationParser._hospital_positive_terms)
+    ):
+        return None, "Element looks like a clinic, doctor office, pharmacy, or other non-hospital facility."
+    if (
+        building_type == "Prison"
+        and LocationParser._contains_facility_term(name_address_text, LocationParser._prison_reject_terms)
+        and not LocationParser._contains_facility_term(name_address_text, LocationParser._prison_positive_terms)
+    ):
+        return None, "Element looks like a courthouse, police station, or other non-prison facility."
+    detected_type, reason = LocationParser.detect_supported_building_type(details, name)
+    if detected_type != building_type:
+        return None, reason
+
+    source_id = f"{element.get('type')}/{element.get('id')}"
+    return {
+        "source": "openstreetmap",
+        "source_id": source_id,
+        "building_type": building_type,
+        "name": name,
+        "lat": lat,
+        "lon": lon,
+        "address": details.address,
+        "country": details.country,
+        "region": details.region,
+        "raw_tags_json": json.dumps(tags, ensure_ascii=False, sort_keys=True),
+    }, None
+
+def parse_overpass_auto_build_candidates(data: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """Parse Overpass JSON into clean automatic building candidates."""
+    candidates: List[Dict[str, Any]] = []
+    stats = {
+        "source_elements": 0,
+        "accepted": 0,
+        "rejected": 0,
+    }
+    for element in data.get("elements") or []:
+        stats["source_elements"] += 1
+        record, _reason = _overpass_element_to_candidate_record(element)
+        if record:
+            candidates.append(record)
+            stats["accepted"] += 1
+        else:
+            stats["rejected"] += 1
+    return candidates, stats
+
+def build_overpass_candidate_query(south: float, west: float, north: float, east: float) -> str:
+    """Build an Overpass query for hospitals and prisons in a bounding box."""
+    if south >= north:
+        raise ValueError("South latitude must be lower than north latitude.")
+    if west >= east:
+        raise ValueError("West longitude must be lower than east longitude.")
+    for latitude in (south, north):
+        if not -90 <= latitude <= 90:
+            raise ValueError("Latitude must be between -90 and 90.")
+    for longitude in (west, east):
+        if not -180 <= longitude <= 180:
+            raise ValueError("Longitude must be between -180 and 180.")
+    bbox = f"{south:.7f},{west:.7f},{north:.7f},{east:.7f}"
+    return "\n".join(
+        [
+            "[out:json][timeout:180];",
+            "(",
+            f'  nwr["amenity"="hospital"]({bbox});',
+            f'  nwr["healthcare"="hospital"]({bbox});',
+            f'  nwr["amenity"="prison"]({bbox});',
+            ");",
+            "out center tags;",
+        ]
+    )
+
 def extract_missionchief_building_id(*values: Any) -> Optional[int]:
     """Extract a MissionChief building id from URLs, response text, or snapshots."""
     for value in values:
@@ -1565,6 +1763,53 @@ class BuildingAutomationResult:
     extensions_started: int = 0
     status: Optional[int] = None
     details: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class AutoBuildCandidate:
+    """Local OSM-derived candidate for automatic alliance building creation."""
+
+    candidate_id: int
+    source: str
+    source_id: str
+    building_type: str
+    name: str
+    lat: float
+    lon: float
+    address: Optional[str] = None
+    country: Optional[str] = None
+    region: Optional[str] = None
+    raw_tags: Optional[Dict[str, Any]] = None
+    status: str = "available"
+    status_reason: Optional[str] = None
+    missionchief_building_id: Optional[int] = None
+
+    @property
+    def coordinates(self) -> str:
+        return f"{self.lat:.7f}, {self.lon:.7f}"
+
+    @property
+    def location_input(self) -> str:
+        return f"{self.source}:{self.source_id}"
+
+    @property
+    def osm_url(self) -> str:
+        element_type, _, element_id = self.source_id.partition("/")
+        if element_type and element_id:
+            return f"https://www.openstreetmap.org/{element_type}/{element_id}"
+        return "https://www.openstreetmap.org/"
+
+
+@dataclass
+class AutoBuildPlan:
+    """Dry-run result for one automatic candidate build slot."""
+
+    building_type: str
+    candidate: Optional[AutoBuildCandidate]
+    blocked_reason: Optional[str] = None
+    duplicate_distance_m: Optional[float] = None
+    duplicate_building_id: Optional[int] = None
+    duplicate_check_source: str = "not checked"
 
 async def safe_update(interaction: discord.Interaction, *, content=None, embed=None, view=None):
     """Robust message updater for component/modal callbacks."""
@@ -2880,6 +3125,48 @@ class BuildingDatabase:
                 completed_at INTEGER
             )
         ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS building_auto_candidates (
+                candidate_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                building_type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                lat REAL NOT NULL,
+                lon REAL NOT NULL,
+                address TEXT,
+                country TEXT,
+                region TEXT,
+                raw_tags_json TEXT,
+                status TEXT NOT NULL DEFAULT 'available',
+                status_reason TEXT,
+                missionchief_building_id INTEGER,
+                imported_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                used_at INTEGER,
+                last_attempt_at INTEGER,
+                UNIQUE(source, source_id)
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS building_auto_runs (
+                run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                run_date TEXT NOT NULL,
+                building_type TEXT NOT NULL,
+                candidate_id INTEGER,
+                funds INTEGER,
+                funds_source TEXT,
+                result TEXT NOT NULL,
+                request_id INTEGER,
+                missionchief_building_id INTEGER,
+                reason TEXT,
+                created_at INTEGER NOT NULL,
+                UNIQUE(guild_id, run_date, building_type)
+            )
+        ''')
         
         conn.commit()
         conn.close()
@@ -3002,6 +3289,266 @@ class BuildingDatabase:
             VALUES (?, ?, ?, ?, ?)
         ''', (location_input, coordinates, address, provider, ts()))
         
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def _candidate_row_to_model(row: sqlite3.Row) -> AutoBuildCandidate:
+        """Convert a candidate row to a typed model."""
+        raw_tags = None
+        if row["raw_tags_json"]:
+            with contextlib.suppress(json.JSONDecodeError, TypeError):
+                raw_tags = json.loads(row["raw_tags_json"])
+        return AutoBuildCandidate(
+            candidate_id=int(row["candidate_id"]),
+            source=str(row["source"]),
+            source_id=str(row["source_id"]),
+            building_type=str(row["building_type"]),
+            name=str(row["name"]),
+            lat=float(row["lat"]),
+            lon=float(row["lon"]),
+            address=row["address"],
+            country=row["country"],
+            region=row["region"],
+            raw_tags=raw_tags,
+            status=str(row["status"]),
+            status_reason=row["status_reason"],
+            missionchief_building_id=_coerce_int(row["missionchief_building_id"]),
+        )
+
+    def upsert_auto_candidates(self, records: Iterable[Dict[str, Any]]) -> Dict[str, int]:
+        """Insert or refresh automatic build candidates."""
+        now = ts()
+        inserted = 0
+        updated = 0
+        skipped = 0
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        for record in records:
+            try:
+                source = str(record["source"])
+                source_id = str(record["source_id"])
+                building_type = str(record["building_type"])
+                name = _clean_building_name(record["name"])
+                lat = float(record["lat"])
+                lon = float(record["lon"])
+            except (KeyError, TypeError, ValueError):
+                skipped += 1
+                continue
+            if building_type not in ALLIANCE_BUILDING_TYPE_IDS or not name:
+                skipped += 1
+                continue
+
+            cursor.execute(
+                "SELECT candidate_id, status FROM building_auto_candidates WHERE source = ? AND source_id = ?",
+                (source, source_id),
+            )
+            existing = cursor.fetchone()
+            cursor.execute(
+                '''
+                INSERT INTO building_auto_candidates
+                (source, source_id, building_type, name, lat, lon, address, country, region,
+                 raw_tags_json, status, imported_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available', ?, ?)
+                ON CONFLICT(source, source_id) DO UPDATE SET
+                    building_type = excluded.building_type,
+                    name = excluded.name,
+                    lat = excluded.lat,
+                    lon = excluded.lon,
+                    address = excluded.address,
+                    country = excluded.country,
+                    region = excluded.region,
+                    raw_tags_json = excluded.raw_tags_json,
+                    status = CASE
+                        WHEN building_auto_candidates.status IN ('used', 'duplicate') THEN building_auto_candidates.status
+                        ELSE 'available'
+                    END,
+                    status_reason = CASE
+                        WHEN building_auto_candidates.status IN ('used', 'duplicate') THEN building_auto_candidates.status_reason
+                        ELSE NULL
+                    END,
+                    updated_at = excluded.updated_at
+                ''',
+                (
+                    source,
+                    source_id,
+                    building_type,
+                    name,
+                    lat,
+                    lon,
+                    record.get("address"),
+                    record.get("country"),
+                    record.get("region"),
+                    record.get("raw_tags_json"),
+                    now,
+                    now,
+                ),
+            )
+            if existing:
+                updated += 1
+            else:
+                inserted += 1
+        conn.commit()
+        conn.close()
+        return {"inserted": inserted, "updated": updated, "skipped": skipped}
+
+    def get_auto_candidate_stats(self) -> Dict[str, int]:
+        """Return candidate counts by type and status."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT building_type, status, COUNT(*)
+            FROM building_auto_candidates
+            GROUP BY building_type, status
+            '''
+        )
+        stats: Dict[str, int] = {}
+        for building_type, status, count in cursor.fetchall():
+            stats[f"{building_type}:{status}"] = int(count)
+            stats[f"{building_type}:total"] = stats.get(f"{building_type}:total", 0) + int(count)
+            stats[f"total:{status}"] = stats.get(f"total:{status}", 0) + int(count)
+            stats["total"] = stats.get("total", 0) + int(count)
+        conn.close()
+        return stats
+
+    def get_random_auto_candidates(self, building_type: str, *, limit: int = 25) -> List[AutoBuildCandidate]:
+        """Return random available candidates for one building type."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT *
+            FROM building_auto_candidates
+            WHERE building_type = ?
+              AND status = 'available'
+            ORDER BY RANDOM()
+            LIMIT ?
+            ''',
+            (str(building_type), int(limit)),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [self._candidate_row_to_model(row) for row in rows]
+
+    def get_auto_candidate(self, candidate_id: int) -> Optional[AutoBuildCandidate]:
+        """Return one automatic build candidate."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM building_auto_candidates WHERE candidate_id = ?",
+            (int(candidate_id),),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return self._candidate_row_to_model(row) if row else None
+
+    def mark_auto_candidate(
+        self,
+        candidate_id: int,
+        status: str,
+        *,
+        reason: Optional[str] = None,
+        missionchief_building_id: Optional[int] = None,
+    ) -> None:
+        """Update candidate state after duplicate detection or build attempts."""
+        now = ts()
+        used_at = now if status == "used" else None
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            UPDATE building_auto_candidates
+            SET status = ?,
+                status_reason = ?,
+                missionchief_building_id = COALESCE(?, missionchief_building_id),
+                used_at = COALESCE(?, used_at),
+                last_attempt_at = ?,
+                updated_at = ?
+            WHERE candidate_id = ?
+            ''',
+            (
+                str(status),
+                reason,
+                missionchief_building_id,
+                used_at,
+                now,
+                now,
+                int(candidate_id),
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+    def get_auto_run(self, guild_id: int, run_date: str, building_type: str) -> Optional[Dict[str, Any]]:
+        """Return an automatic build run for one guild/date/type."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT *
+            FROM building_auto_runs
+            WHERE guild_id = ?
+              AND run_date = ?
+              AND building_type = ?
+            LIMIT 1
+            ''',
+            (int(guild_id), str(run_date), str(building_type)),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def record_auto_run(
+        self,
+        *,
+        guild_id: int,
+        run_date: str,
+        building_type: str,
+        candidate_id: Optional[int],
+        funds: Optional[int],
+        funds_source: str,
+        result: str,
+        request_id: Optional[int] = None,
+        missionchief_building_id: Optional[int] = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        """Persist the result of one automatic daily build slot."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            INSERT INTO building_auto_runs
+            (guild_id, run_date, building_type, candidate_id, funds, funds_source, result,
+             request_id, missionchief_building_id, reason, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, run_date, building_type) DO UPDATE SET
+                candidate_id = excluded.candidate_id,
+                funds = excluded.funds,
+                funds_source = excluded.funds_source,
+                result = excluded.result,
+                request_id = excluded.request_id,
+                missionchief_building_id = excluded.missionchief_building_id,
+                reason = excluded.reason,
+                created_at = excluded.created_at
+            ''',
+            (
+                int(guild_id),
+                str(run_date),
+                str(building_type),
+                candidate_id,
+                funds,
+                str(funds_source),
+                str(result),
+                request_id,
+                missionchief_building_id,
+                reason,
+                ts(),
+            ),
+        )
         conn.commit()
         conn.close()
 
@@ -4236,6 +4783,11 @@ class BuildingManager(commands.Cog):
             "board_guide_post_id": None,
             "board_guide_content_hash": None,
             "board_auto_accept_enabled": True,
+            "auto_candidate_build_enabled": False,
+            "auto_candidate_min_funds": AUTO_CANDIDATE_MIN_FUNDS,
+            "auto_candidate_time": AUTO_CANDIDATE_DEFAULT_TIME,
+            "auto_candidate_timezone": AUTO_CANDIDATE_DEFAULT_TIMEZONE,
+            "auto_candidate_duplicate_radius_m": AUTO_CANDIDATE_DUPLICATE_RADIUS_METERS,
         }
         default_global = {
             "google_api_key": None,
@@ -4257,6 +4809,7 @@ class BuildingManager(commands.Cog):
         self._board_poll_task = None
         self._board_guide_task = None
         self._board_cleanup_task = None
+        self._auto_candidate_task = None
         self._browser_lock = asyncio.Lock()
         self._persistent_view_registered = False
         self._register_persistent_views()
@@ -4264,6 +4817,7 @@ class BuildingManager(commands.Cog):
         self._start_automation_task()
         self._start_creation_queue_task()
         self._start_board_tasks()
+        self._start_auto_candidate_task()
 
     def cog_unload(self):  # <-- Let op: 4 spaties inspringing, zelfde niveau als __init__
         if getattr(self, "_panel_task", None):
@@ -4278,6 +4832,8 @@ class BuildingManager(commands.Cog):
             self._board_guide_task.cancel()
         if getattr(self, "_board_cleanup_task", None):
             self._board_cleanup_task.cancel()
+        if getattr(self, "_auto_candidate_task", None):
+            self._auto_candidate_task.cancel()
 
     async def cog_load(self):
         """Register persistent views and ensure the default request panel exists."""
@@ -4286,6 +4842,7 @@ class BuildingManager(commands.Cog):
         self._start_automation_task()
         self._start_creation_queue_task()
         self._start_board_tasks()
+        self._start_auto_candidate_task()
 
     def _register_persistent_views(self):
         """Register persistent component views once per cog instance."""
@@ -4320,6 +4877,12 @@ class BuildingManager(commands.Cog):
             self._board_guide_task = self.bot.loop.create_task(self._board_guide_loop())
         if not self._board_cleanup_task or self._board_cleanup_task.done():
             self._board_cleanup_task = self.bot.loop.create_task(self._board_cleanup_loop())
+
+    def _start_auto_candidate_task(self):
+        """Start the daily candidate auto-build worker."""
+        if self._auto_candidate_task and not self._auto_candidate_task.done():
+            return
+        self._auto_candidate_task = self.bot.loop.create_task(self._auto_candidate_build_loop())
 
     def _cookie_manager(self):
         """Return the CookieManager cog when it exposes a MissionChief session."""
@@ -6716,6 +7279,403 @@ class BuildingManager(commands.Cog):
 
         return create_result.ok
 
+    async def _auto_candidate_build_loop(self):
+        """Run the daily automatic candidate build scheduler."""
+        try:
+            await self.bot.wait_until_ready()
+            await asyncio.sleep(90)
+            while True:
+                try:
+                    for guild in self.bot.guilds:
+                        await self._maybe_run_daily_auto_candidates(guild)
+                        await asyncio.sleep(2)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("BuildingManager candidate auto-build loop failed")
+                await asyncio.sleep(AUTO_CANDIDATE_LOOP_SECONDS)
+        except asyncio.CancelledError:
+            raise
+
+    async def _maybe_run_daily_auto_candidates(self, guild: discord.Guild) -> None:
+        """Run automatic candidate builds when enabled and due for the guild."""
+        conf = await self.config.guild(guild).all()
+        if not conf.get("auto_candidate_build_enabled"):
+            return
+        timezone_name = str(conf.get("auto_candidate_timezone") or AUTO_CANDIDATE_DEFAULT_TIMEZONE)
+        time_text = str(conf.get("auto_candidate_time") or AUTO_CANDIDATE_DEFAULT_TIME)
+        try:
+            zone = ZoneInfo(timezone_name)
+        except Exception:
+            zone = ZoneInfo(AUTO_CANDIDATE_DEFAULT_TIMEZONE)
+            timezone_name = AUTO_CANDIDATE_DEFAULT_TIMEZONE
+        now_local = datetime.now(zone)
+        try:
+            hour_text, minute_text = time_text.split(":", 1)
+            due_hour = int(hour_text)
+            due_minute = int(minute_text)
+        except (TypeError, ValueError):
+            due_hour, due_minute = (7, 0)
+            time_text = AUTO_CANDIDATE_DEFAULT_TIME
+        if now_local.hour < due_hour or (now_local.hour == due_hour and now_local.minute < due_minute):
+            return
+
+        run_date = now_local.date().isoformat()
+        for building_type in ("Hospital", "Prison"):
+            if self.db.get_auto_run(guild.id, run_date, building_type):
+                continue
+            await self._run_auto_candidate_build(
+                guild,
+                building_type,
+                run_date=run_date,
+                timezone_name=timezone_name,
+                scheduled=True,
+            )
+            await asyncio.sleep(5)
+
+    async def _fetch_existing_missionchief_buildings(self) -> Tuple[List[Dict[str, Any]], str]:
+        """Fetch current MissionChief buildings for duplicate checks."""
+        session = await self._get_session()
+        async with session.get(f"{BASE_URL}/api/buildings", timeout=45) as response:
+            if response.status != 200:
+                raise RuntimeError(f"MissionChief returned HTTP {response.status} for /api/buildings.")
+            data = await response.json(content_type=None)
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)], "live MissionChief /api/buildings"
+        if isinstance(data, dict):
+            for key in ("buildings", "result", "data"):
+                value = data.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)], "live MissionChief /api/buildings"
+        return [], "live MissionChief /api/buildings returned no list"
+
+    def _nearest_duplicate_building(
+        self,
+        candidate: AutoBuildCandidate,
+        existing_buildings: Iterable[Dict[str, Any]],
+        *,
+        radius_m: int,
+    ) -> Tuple[Optional[float], Optional[int]]:
+        """Return nearest same-type existing building within the configured radius."""
+        target_type_id = _coerce_int(ALLIANCE_BUILDING_TYPE_IDS.get(candidate.building_type))
+        best_distance = None
+        best_id = None
+        for record in existing_buildings or []:
+            building_type = _coerce_int(_api_value(record, "building_type", "building_type_id", "buildingType"))
+            if target_type_id is not None and building_type is not None and building_type != target_type_id:
+                continue
+            lat = _coerce_float(_api_value(record, "latitude", "lat"))
+            lon = _coerce_float(_api_value(record, "longitude", "lon", "lng"))
+            if lat is None or lon is None:
+                continue
+            distance = _haversine_meters(candidate.lat, candidate.lon, lat, lon)
+            if distance <= radius_m and (best_distance is None or distance < best_distance):
+                best_distance = distance
+                best_id = _coerce_int(_api_value(record, "id", "building_id", "buildingId"))
+        return best_distance, best_id
+
+    async def _candidate_duplicate_context(
+        self,
+        guild: discord.Guild,
+    ) -> Tuple[List[Dict[str, Any]], str, int]:
+        """Return existing buildings and configured duplicate radius for candidate selection."""
+        conf = await self.config.guild(guild).all()
+        radius = int(conf.get("auto_candidate_duplicate_radius_m") or AUTO_CANDIDATE_DUPLICATE_RADIUS_METERS)
+        try:
+            buildings, source = await self._fetch_existing_missionchief_buildings()
+            return buildings, source, max(0, radius)
+        except Exception as exc:
+            return [], f"duplicate check unavailable: {type(exc).__name__}: {_truncate_text(exc, 180)}", max(0, radius)
+
+    def _select_auto_candidate(
+        self,
+        building_type: str,
+        *,
+        existing_buildings: Iterable[Dict[str, Any]],
+        duplicate_source: str,
+        duplicate_radius_m: int,
+        mark_duplicates: bool = True,
+    ) -> AutoBuildPlan:
+        """Choose one available candidate, skipping confirmed local duplicates."""
+        candidates = self.db.get_random_auto_candidates(
+            building_type,
+            limit=AUTO_CANDIDATE_SELECTION_POOL,
+        )
+        if not candidates:
+            return AutoBuildPlan(building_type=building_type, candidate=None, blocked_reason="No available candidates.")
+
+        for candidate in candidates:
+            duplicate_distance, duplicate_building_id = self._nearest_duplicate_building(
+                candidate,
+                existing_buildings,
+                radius_m=duplicate_radius_m,
+            )
+            if duplicate_distance is not None:
+                reason = (
+                    f"Existing MissionChief building {duplicate_building_id or 'unknown'} is "
+                    f"{duplicate_distance:.0f}m away."
+                )
+                if mark_duplicates:
+                    self.db.mark_auto_candidate(candidate.candidate_id, "duplicate", reason=reason)
+                continue
+            return AutoBuildPlan(
+                building_type=building_type,
+                candidate=candidate,
+                duplicate_check_source=duplicate_source,
+            )
+
+        return AutoBuildPlan(
+            building_type=building_type,
+            candidate=None,
+            blocked_reason="All sampled candidates were confirmed duplicates.",
+            duplicate_check_source=duplicate_source,
+        )
+
+    async def _build_auto_candidate_plan(self, guild: discord.Guild) -> Tuple[Optional[int], str, int, List[AutoBuildPlan]]:
+        """Build a dry-run plan for both daily automatic building slots."""
+        minimum = await self._get_auto_candidate_min_funds(guild)
+        funds, funds_source = await self._get_current_alliance_funds()
+        existing_buildings, duplicate_source, duplicate_radius = await self._candidate_duplicate_context(guild)
+        plans = [
+            self._select_auto_candidate(
+                building_type,
+                existing_buildings=existing_buildings,
+                duplicate_source=duplicate_source,
+                duplicate_radius_m=duplicate_radius,
+                mark_duplicates=False,
+            )
+            for building_type in ("Hospital", "Prison")
+        ]
+        return funds, funds_source, minimum, plans
+
+    async def _get_auto_candidate_min_funds(self, guild: discord.Guild) -> int:
+        """Return the funds minimum for autonomous daily candidate builds."""
+        value = await self.config.guild(guild).auto_candidate_min_funds()
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return AUTO_CANDIDATE_MIN_FUNDS
+
+    def _format_candidate_autobuild_status(self, conf: Dict[str, Any], stats: Dict[str, int]) -> str:
+        """Format candidate auto-build configuration and counts."""
+        return "\n".join(
+            [
+                "Daily candidate auto-build",
+                f"Enabled: {bool(conf.get('auto_candidate_build_enabled'))}",
+                f"Time: {conf.get('auto_candidate_time') or AUTO_CANDIDATE_DEFAULT_TIME}",
+                f"Timezone: {conf.get('auto_candidate_timezone') or AUTO_CANDIDATE_DEFAULT_TIMEZONE}",
+                f"Minimum funds: {int(conf.get('auto_candidate_min_funds') or AUTO_CANDIDATE_MIN_FUNDS):,} credits",
+                f"Duplicate radius: {int(conf.get('auto_candidate_duplicate_radius_m') or AUTO_CANDIDATE_DUPLICATE_RADIUS_METERS)}m",
+                "",
+                "Candidates:",
+                f"- Hospitals available: {stats.get('Hospital:available', 0):,} / {stats.get('Hospital:total', 0):,}",
+                f"- Prisons available: {stats.get('Prison:available', 0):,} / {stats.get('Prison:total', 0):,}",
+                f"- Used: {stats.get('total:used', 0):,}",
+                f"- Duplicates: {stats.get('total:duplicate', 0):,}",
+                f"- Failed: {stats.get('total:failed', 0):,}",
+            ]
+        )
+
+    def _request_from_auto_candidate(self, candidate: AutoBuildCandidate) -> BuildingRequest:
+        """Convert a candidate into a normal BuildingRequest model."""
+        return BuildingRequest(
+            user_id=0,
+            username="BuildingManager AutoBuild",
+            building_type=candidate.building_type,
+            building_name=candidate.name,
+            location_input=candidate.osm_url,
+            coordinates=candidate.coordinates,
+            address=candidate.address,
+            country=candidate.country,
+            region=candidate.region,
+            maps_url=candidate.osm_url,
+            notes=(
+                "Automatic daily alliance building candidate. "
+                f"Source: {candidate.source} {candidate.source_id}."
+            ),
+        )
+
+    async def _run_auto_candidate_build(
+        self,
+        guild: discord.Guild,
+        building_type: str,
+        *,
+        run_date: Optional[str] = None,
+        timezone_name: Optional[str] = None,
+        scheduled: bool = False,
+        force: bool = False,
+    ) -> str:
+        """Run one automatic candidate build slot."""
+        timezone_name = timezone_name or AUTO_CANDIDATE_DEFAULT_TIMEZONE
+        if run_date is None:
+            try:
+                run_date = datetime.now(ZoneInfo(timezone_name)).date().isoformat()
+            except Exception:
+                run_date = datetime.now(timezone.utc).date().isoformat()
+
+        if not force and self.db.get_auto_run(guild.id, run_date, building_type):
+            return f"{building_type}: already processed for {run_date}."
+
+        minimum = await self._get_auto_candidate_min_funds(guild)
+        funds, funds_source = await self._get_current_alliance_funds()
+        if not alliance_funds_allow_auto_build(funds, funds_source, minimum):
+            current = f"{funds:,} credits" if funds is not None else "unknown"
+            return (
+                f"{building_type}: blocked by funds safety rule. Current funds: {current}; "
+                f"source: {funds_source}; required: {minimum:,} credits."
+            )
+
+        existing_buildings, duplicate_source, duplicate_radius = await self._candidate_duplicate_context(guild)
+        plan = self._select_auto_candidate(
+            building_type,
+            existing_buildings=existing_buildings,
+            duplicate_source=duplicate_source,
+            duplicate_radius_m=duplicate_radius,
+        )
+        if not plan.candidate:
+            reason = plan.blocked_reason or "No candidate selected."
+            self.db.record_auto_run(
+                guild_id=guild.id,
+                run_date=run_date,
+                building_type=building_type,
+                candidate_id=None,
+                funds=funds,
+                funds_source=funds_source,
+                result="no_candidate",
+                reason=reason,
+            )
+            await self._send_auto_candidate_build_log(
+                guild,
+                building_type=building_type,
+                candidate=None,
+                funds=funds,
+                funds_source=funds_source,
+                result="No candidate",
+                reason=reason,
+                scheduled=scheduled,
+            )
+            return f"{building_type}: {reason}"
+
+        candidate = plan.candidate
+        req = self._request_from_auto_candidate(candidate)
+        request_id = self._store_building_request(guild, req)
+        self.db.update_request_status(request_id, "auto_selected")
+        self.db.add_action(
+            request_id=request_id,
+            guild_id=guild.id,
+            admin_user_id=None,
+            admin_username="BuildingManager",
+            action_type="auto_candidate_selected",
+            previous_values=f"{candidate.source} {candidate.source_id}",
+        )
+
+        create_result, automation_message = await self._create_and_queue_approved_building(guild, req)
+        building_id = create_result.building_id
+        final_status = "created" if create_result.ok else "auto_create_failed"
+        self.db.update_request_status(request_id, final_status)
+        self.db.add_action(
+            request_id=request_id,
+            guild_id=guild.id,
+            admin_user_id=None,
+            admin_username="BuildingManager",
+            action_type="auto_candidate_created" if create_result.ok else "auto_candidate_create_failed",
+            previous_values=None if create_result.ok else create_result.reason[:900],
+        )
+
+        if create_result.ok:
+            self.db.mark_auto_candidate(
+                candidate.candidate_id,
+                "used",
+                reason=f"Built automatically on {run_date}.",
+                missionchief_building_id=building_id,
+            )
+        else:
+            self.db.mark_auto_candidate(
+                candidate.candidate_id,
+                "failed",
+                reason=_truncate_text(create_result.reason, 900),
+            )
+
+        self.db.record_auto_run(
+            guild_id=guild.id,
+            run_date=run_date,
+            building_type=building_type,
+            candidate_id=candidate.candidate_id,
+            funds=funds,
+            funds_source=funds_source,
+            result="created" if create_result.ok else "failed",
+            request_id=request_id,
+            missionchief_building_id=building_id,
+            reason=create_result.reason,
+        )
+        await self._send_auto_candidate_build_log(
+            guild,
+            building_type=building_type,
+            candidate=candidate,
+            funds=funds,
+            funds_source=funds_source,
+            result="Created" if create_result.ok else "Failed",
+            reason=create_result.reason,
+            scheduled=scheduled,
+            request_id=request_id,
+            missionchief_building_id=building_id,
+            automation_message=automation_message,
+        )
+
+        if create_result.ok:
+            return f"{building_type}: created {candidate.name}."
+        return f"{building_type}: failed to create {candidate.name}: {create_result.reason}"
+
+    async def _send_auto_candidate_build_log(
+        self,
+        guild: discord.Guild,
+        *,
+        building_type: str,
+        candidate: Optional[AutoBuildCandidate],
+        funds: Optional[int],
+        funds_source: str,
+        result: str,
+        reason: str,
+        scheduled: bool,
+        request_id: Optional[int] = None,
+        missionchief_building_id: Optional[int] = None,
+        automation_message: Optional[str] = None,
+    ) -> None:
+        """Log one autonomous candidate build result."""
+        conf = await self.config.guild(guild).all()
+        log_channel = await self._resolve_channel(guild, conf.get("log_channel_id"))
+        if log_channel is None:
+            log_channel = await self._resolve_channel(guild, conf.get("admin_channel_id"))
+        if log_channel is None:
+            return
+
+        ok = result.casefold() == "created"
+        embed = discord.Embed(
+            title=f"Automatic {building_type} build: {result}",
+            color=discord.Color.green() if ok else discord.Color.orange(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="Mode", value="Scheduled" if scheduled else "Manual", inline=True)
+        funds_text = f"{funds:,} credits" if funds is not None else "unknown"
+        embed.add_field(name="Alliance Funds", value=funds_text, inline=True)
+        embed.add_field(name="Funds Source", value=_truncate_discord_text(funds_source, 200), inline=False)
+        if candidate:
+            embed.add_field(name="Candidate", value=_truncate_discord_text(candidate.name, 200), inline=False)
+            embed.add_field(name="Source", value=f"{candidate.source} {candidate.source_id}", inline=True)
+            embed.add_field(name="Coordinates", value=candidate.coordinates, inline=True)
+            region_text = ", ".join(part for part in (candidate.region, candidate.country) if part)
+            if region_text:
+                embed.add_field(name="Region", value=_truncate_discord_text(region_text, 200), inline=True)
+            embed.add_field(name="OSM", value=f"[Open]({candidate.osm_url})", inline=False)
+        embed.add_field(name="Result", value=_truncate_discord_text(reason, 900), inline=False)
+        if automation_message:
+            embed.add_field(name="Post-Creation Automation", value=_truncate_discord_text(automation_message, 900), inline=False)
+        if request_id:
+            embed.add_field(name="Request ID", value=str(request_id), inline=True)
+        if missionchief_building_id:
+            embed.add_field(name="MissionChief Building ID", value=str(missionchief_building_id), inline=True)
+        await log_channel.send(embed=embed)
+
     async def _process_building_automation_job(self, job_id: int) -> Optional[BuildingAutomationResult]:
         """Run and persist one post-creation automation job."""
         job = self.db.get_automation_job(job_id)
@@ -7062,6 +8022,10 @@ class BuildingManager(commands.Cog):
             f"(thread {conf.get('board_thread_id') or BOARD_THREAD_ID})\n"
             f"MissionChief board auto-accept: {'enabled' if conf.get('board_auto_accept_enabled', True) else 'disabled'} "
             f"(requires known tax >= {BUILDING_BOARD_MIN_AUTO_ACCEPT_TAX:.1f}%)\n"
+            f"Daily candidate auto-build: {'enabled' if conf.get('auto_candidate_build_enabled') else 'disabled'} "
+            f"at {conf.get('auto_candidate_time') or AUTO_CANDIDATE_DEFAULT_TIME} "
+            f"{conf.get('auto_candidate_timezone') or AUTO_CANDIDATE_DEFAULT_TIMEZONE} "
+            f"(minimum {int(conf.get('auto_candidate_min_funds') or AUTO_CANDIDATE_MIN_FUNDS):,} credits)\n"
             f"Custom button message: {'Set' if conf.get('button_message') else 'Not set (using default)'}\n"
         )
         await ctx.send(box(txt, lang="ini"))
@@ -7371,6 +8335,243 @@ class BuildingManager(commands.Cog):
                 lang="text",
             )
         )
+
+    @buildset.group(name="autobuild", invoke_without_command=True)
+    @commands.admin()
+    @commands.guild_only()
+    async def candidate_autobuild(self, ctx: commands.Context):
+        """Manage automatic daily hospital/prison building from local candidates."""
+        conf = await self.config.guild(ctx.guild).all()
+        stats = self.db.get_auto_candidate_stats()
+        await ctx.send(box(self._format_candidate_autobuild_status(conf, stats), lang="text"))
+
+    @candidate_autobuild.command(name="status")
+    @commands.admin()
+    @commands.guild_only()
+    async def candidate_autobuild_status(self, ctx: commands.Context):
+        """Show automatic candidate build configuration and local candidate counts."""
+        conf = await self.config.guild(ctx.guild).all()
+        stats = self.db.get_auto_candidate_stats()
+        await ctx.send(box(self._format_candidate_autobuild_status(conf, stats), lang="text"))
+
+    @candidate_autobuild.command(name="enable")
+    @commands.admin()
+    @commands.guild_only()
+    async def candidate_autobuild_enable(self, ctx: commands.Context):
+        """Enable daily candidate auto-building."""
+        await self.config.guild(ctx.guild).auto_candidate_build_enabled.set(True)
+        await ctx.send("Daily candidate auto-build enabled.")
+
+    @candidate_autobuild.command(name="disable")
+    @commands.admin()
+    @commands.guild_only()
+    async def candidate_autobuild_disable(self, ctx: commands.Context):
+        """Disable daily candidate auto-building."""
+        await self.config.guild(ctx.guild).auto_candidate_build_enabled.set(False)
+        await ctx.send("Daily candidate auto-build disabled.")
+
+    @candidate_autobuild.command(name="time")
+    @commands.admin()
+    @commands.guild_only()
+    async def candidate_autobuild_time(
+        self,
+        ctx: commands.Context,
+        time_text: str = AUTO_CANDIDATE_DEFAULT_TIME,
+        timezone_name: str = AUTO_CANDIDATE_DEFAULT_TIMEZONE,
+    ):
+        """Set daily candidate auto-build time, for example 07:00 America/New_York."""
+        if not re.fullmatch(r"\d{1,2}:\d{2}", str(time_text or "")):
+            await ctx.send("Use HH:MM format, for example `07:00`.")
+            return
+        hour, minute = (int(part) for part in time_text.split(":", 1))
+        if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+            await ctx.send("Time must be a valid 24-hour HH:MM value.")
+            return
+        try:
+            ZoneInfo(timezone_name)
+        except Exception:
+            await ctx.send("Unknown timezone. Use an IANA timezone like `America/New_York`.")
+            return
+        await self.config.guild(ctx.guild).auto_candidate_time.set(f"{hour:02d}:{minute:02d}")
+        await self.config.guild(ctx.guild).auto_candidate_timezone.set(timezone_name)
+        await ctx.send(f"Daily candidate auto-build time set to {hour:02d}:{minute:02d} {timezone_name}.")
+
+    @candidate_autobuild.command(name="minfunds")
+    @commands.admin()
+    @commands.guild_only()
+    async def candidate_autobuild_minfunds(self, ctx: commands.Context, credits: int = AUTO_CANDIDATE_MIN_FUNDS):
+        """Set minimum alliance funds before autonomous daily building."""
+        if credits < 0:
+            await ctx.send("Minimum funds cannot be negative.")
+            return
+        await self.config.guild(ctx.guild).auto_candidate_min_funds.set(int(credits))
+        await ctx.send(f"Daily candidate auto-build minimum funds set to {int(credits):,} credits.")
+
+    @candidate_autobuild.command(name="radius")
+    @commands.admin()
+    @commands.guild_only()
+    async def candidate_autobuild_radius(
+        self,
+        ctx: commands.Context,
+        meters: int = AUTO_CANDIDATE_DUPLICATE_RADIUS_METERS,
+    ):
+        """Set duplicate detection radius in meters."""
+        if meters < 0:
+            await ctx.send("Duplicate radius cannot be negative.")
+            return
+        await self.config.guild(ctx.guild).auto_candidate_duplicate_radius_m.set(int(meters))
+        await ctx.send(f"Duplicate radius set to {int(meters):,} meters.")
+
+    @candidate_autobuild.command(name="importjson")
+    @commands.admin()
+    @commands.guild_only()
+    async def candidate_autobuild_import_json(self, ctx: commands.Context):
+        """Import candidates from an attached Overpass JSON export."""
+        if not ctx.message.attachments:
+            await ctx.send("Attach an Overpass JSON file to this command.")
+            return
+        attachment = ctx.message.attachments[0]
+        async with ctx.typing():
+            try:
+                payload = await attachment.read()
+                data = json.loads(payload.decode("utf-8-sig"))
+            except Exception as exc:
+                await ctx.send(f"Could not read JSON attachment: {exc}")
+                return
+            candidates, parse_stats = parse_overpass_auto_build_candidates(data)
+            db_stats = self.db.upsert_auto_candidates(candidates)
+        await ctx.send(
+            box(
+                "\n".join(
+                    [
+                        "Candidate import complete.",
+                        f"Source elements: {parse_stats['source_elements']:,}",
+                        f"Accepted candidates: {parse_stats['accepted']:,}",
+                        f"Rejected source elements: {parse_stats['rejected']:,}",
+                        f"Inserted: {db_stats['inserted']:,}",
+                        f"Updated: {db_stats['updated']:,}",
+                        f"Skipped: {db_stats['skipped']:,}",
+                    ]
+                ),
+                lang="text",
+            )
+        )
+
+    @candidate_autobuild.command(name="importoverpass")
+    @commands.admin()
+    @commands.guild_only()
+    async def candidate_autobuild_import_overpass(
+        self,
+        ctx: commands.Context,
+        south: float,
+        west: float,
+        north: float,
+        east: float,
+    ):
+        """Download OSM hospital/prison candidates for one bounding box."""
+        try:
+            query = build_overpass_candidate_query(float(south), float(west), float(north), float(east))
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+
+        async with ctx.typing():
+            try:
+                timeout = aiohttp.ClientTimeout(total=240)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(OVERPASS_API_URL, data={"data": query}) as response:
+                        if response.status != 200:
+                            text = await response.text()
+                            await ctx.send(
+                                f"Overpass returned HTTP {response.status}: {_truncate_discord_text(text, 500)}"
+                            )
+                            return
+                        data = await response.json(content_type=None)
+            except Exception as exc:
+                await ctx.send(f"Overpass import failed: {exc}")
+                return
+
+            candidates, parse_stats = parse_overpass_auto_build_candidates(data)
+            db_stats = self.db.upsert_auto_candidates(candidates)
+
+        await ctx.send(
+            box(
+                "\n".join(
+                    [
+                        "Overpass candidate import complete.",
+                        f"Source elements: {parse_stats['source_elements']:,}",
+                        f"Accepted candidates: {parse_stats['accepted']:,}",
+                        f"Rejected source elements: {parse_stats['rejected']:,}",
+                        f"Inserted: {db_stats['inserted']:,}",
+                        f"Updated: {db_stats['updated']:,}",
+                        f"Skipped: {db_stats['skipped']:,}",
+                    ]
+                ),
+                lang="text",
+            )
+        )
+
+    @candidate_autobuild.command(name="dryrun")
+    @commands.admin()
+    @commands.guild_only()
+    async def candidate_autobuild_dryrun(self, ctx: commands.Context):
+        """Show what daily candidate auto-build would do without creating buildings."""
+        async with ctx.typing():
+            funds, funds_source, minimum, plans = await self._build_auto_candidate_plan(ctx.guild)
+        funds_text = f"{funds:,} credits" if funds is not None else "unknown"
+        allowed = alliance_funds_allow_auto_build(funds, funds_source, minimum)
+        lines = [
+            "Daily candidate auto-build dry run",
+            f"Current alliance funds: {funds_text}",
+            f"Funds source: {funds_source}",
+            f"Required minimum: {minimum:,} credits",
+            f"Funds check: {'PASS' if allowed else 'BLOCKED'}",
+            "",
+        ]
+        for plan in plans:
+            lines.append(f"{plan.building_type}:")
+            if not plan.candidate:
+                lines.append(f"- Blocked: {plan.blocked_reason or 'No candidate selected.'}")
+                continue
+            candidate = plan.candidate
+            lines.extend(
+                [
+                    f"- Candidate: {candidate.name}",
+                    f"- Source: {candidate.source} {candidate.source_id}",
+                    f"- Coordinates: {candidate.coordinates}",
+                    f"- Region: {', '.join(part for part in (candidate.region, candidate.country) if part) or 'unknown'}",
+                    f"- Duplicate check: {plan.duplicate_check_source}",
+                ]
+            )
+        await ctx.send(box("\n".join(lines), lang="text"))
+
+    @candidate_autobuild.command(name="run")
+    @commands.admin()
+    @commands.guild_only()
+    async def candidate_autobuild_run(
+        self,
+        ctx: commands.Context,
+        building_type: str = "both",
+        force: bool = False,
+    ):
+        """Run candidate auto-build now for hospital, prison, or both."""
+        normalized = str(building_type or "both").casefold()
+        if normalized in {"both", "all"}:
+            building_types = ["Hospital", "Prison"]
+        elif normalized in {"hospital", "hospitals"}:
+            building_types = ["Hospital"]
+        elif normalized in {"prison", "prisons", "jail", "jails"}:
+            building_types = ["Prison"]
+        else:
+            await ctx.send("Use `hospital`, `prison`, or `both`.")
+            return
+
+        async with ctx.typing():
+            results = [
+                await self._run_auto_candidate_build(ctx.guild, item, scheduled=False, force=bool(force))
+                for item in building_types
+            ]
+        await ctx.send(box("\n".join(results), lang="text"))
 
     @buildset.command(name="browsercheck")
     @commands.admin()
