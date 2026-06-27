@@ -7498,11 +7498,32 @@ class BuildingManager(commands.Cog):
         except (TypeError, ValueError):
             return AUTO_CANDIDATE_MIN_FUNDS
 
+    def _is_auto_candidate_request_row(self, row: Optional[Dict[str, Any]]) -> bool:
+        """Return whether a stored request was created by autonomous candidate building."""
+        if not row:
+            return False
+        username = str(row.get("username") or "")
+        notes = str(row.get("notes") or "")
+        return username == "BuildingManager AutoBuild" or "Automatic daily alliance building candidate" in notes
+
+    async def _get_min_funds_for_automation_job(
+        self,
+        guild: discord.Guild,
+        job: BuildingAutomationJob,
+    ) -> Tuple[int, str]:
+        """Return the correct funds threshold for one post-creation automation job."""
+        request = self.db.get_request_by_id(job.request_id)
+        if self._is_auto_candidate_request_row(request):
+            return await self._get_auto_candidate_min_funds(guild), "autonomous daily build"
+        return await self._get_min_alliance_funds(guild), "member/admin request"
+
     def _format_candidate_autobuild_status(self, conf: Dict[str, Any], stats: Dict[str, int]) -> str:
         """Format candidate auto-build configuration and counts."""
         return "\n".join(
             [
                 "Daily candidate auto-build",
+                "Candidate source: local SQLite database",
+                "Online imports: optional; daily dry-run/run does not call Overpass",
                 f"Enabled: {bool(conf.get('auto_candidate_build_enabled'))}",
                 f"Time: {conf.get('auto_candidate_time') or AUTO_CANDIDATE_DEFAULT_TIME}",
                 f"Timezone: {conf.get('auto_candidate_timezone') or AUTO_CANDIDATE_DEFAULT_TIMEZONE}",
@@ -7736,7 +7757,7 @@ class BuildingManager(commands.Cog):
             self.db.update_automation_job(job.job_id, result)
             return result
 
-        minimum_funds = await self._get_min_alliance_funds(guild)
+        minimum_funds, minimum_reason = await self._get_min_funds_for_automation_job(guild, job)
         current_funds, funds_source = await self._get_current_alliance_funds()
         if not alliance_funds_allow_auto_build(current_funds, funds_source, minimum_funds):
             current = f"{current_funds:,} credits" if current_funds is not None else "unknown"
@@ -7747,7 +7768,7 @@ class BuildingManager(commands.Cog):
                 reason=(
                     "Alliance funds safety hold: "
                     f"current funds are {current} from {funds_source}; "
-                    f"required live minimum is {minimum_funds:,} credits."
+                    f"required live minimum is {minimum_funds:,} credits for {minimum_reason}."
                 ),
                 actions=[],
             )
@@ -8119,21 +8140,28 @@ class BuildingManager(commands.Cog):
     @commands.admin()
     @commands.guild_only()
     async def fundscheck(self, ctx: commands.Context):
-        """Check current alliance funds and whether auto-building is allowed."""
-        minimum = await self._get_min_alliance_funds(ctx.guild)
+        """Check current alliance funds and both automatic building safety thresholds."""
+        request_minimum = await self._get_min_alliance_funds(ctx.guild)
+        autonomous_minimum = await self._get_auto_candidate_min_funds(ctx.guild)
         async with ctx.typing():
             funds, source = await self._get_current_alliance_funds()
-        allowed = alliance_funds_allow_auto_build(funds, source, minimum)
+        request_allowed = alliance_funds_allow_auto_build(funds, source, request_minimum)
+        autonomous_allowed = alliance_funds_allow_auto_build(funds, source, autonomous_minimum)
         funds_text = f"{funds:,} credits" if funds is not None else "unknown"
-        status = "AUTO-BUILD ALLOWED" if allowed else "AUTO-BUILD BLOCKED"
         await ctx.send(
             box(
                 "\n".join(
                     [
                         f"Current alliance funds: {funds_text}",
                         f"Source: {source}",
-                        f"Required minimum: {minimum:,} credits",
-                        f"Status: {status}",
+                        "",
+                        "Member/admin request auto-build",
+                        f"Required minimum: {request_minimum:,} credits",
+                        f"Status: {'ALLOWED' if request_allowed else 'BLOCKED'}",
+                        "",
+                        "Autonomous daily candidate build",
+                        f"Required minimum: {autonomous_minimum:,} credits",
+                        f"Status: {'ALLOWED' if autonomous_allowed else 'BLOCKED'}",
                     ]
                 ),
                 lang="text",
@@ -8449,6 +8477,31 @@ class BuildingManager(commands.Cog):
         await self.config.guild(ctx.guild).auto_candidate_min_funds.set(int(credits))
         await ctx.send(f"Daily candidate auto-build minimum funds set to {int(credits):,} credits.")
 
+    @candidate_autobuild.command(name="fundscheck")
+    @commands.admin()
+    @commands.guild_only()
+    async def candidate_autobuild_fundscheck(self, ctx: commands.Context):
+        """Check current funds against the autonomous daily build threshold."""
+        minimum = await self._get_auto_candidate_min_funds(ctx.guild)
+        async with ctx.typing():
+            funds, source = await self._get_current_alliance_funds()
+        allowed = alliance_funds_allow_auto_build(funds, source, minimum)
+        funds_text = f"{funds:,} credits" if funds is not None else "unknown"
+        await ctx.send(
+            box(
+                "\n".join(
+                    [
+                        "Autonomous daily candidate build funds check",
+                        f"Current alliance funds: {funds_text}",
+                        f"Source: {source}",
+                        f"Required minimum: {minimum:,} credits",
+                        f"Status: {'ALLOWED' if allowed else 'BLOCKED'}",
+                    ]
+                ),
+                lang="text",
+            )
+        )
+
     @candidate_autobuild.command(name="radius")
     @commands.admin()
     @commands.guild_only()
@@ -8511,7 +8564,7 @@ class BuildingManager(commands.Cog):
         east: float,
         building_type: str = "both",
     ):
-        """Download OSM hospital/prison candidates for one bounding box."""
+        """Download OSM hospital/prison candidates through public Overpass for one bounding box."""
         try:
             query = build_overpass_candidate_query(
                 float(south),
@@ -8544,6 +8597,9 @@ class BuildingManager(commands.Cog):
 
         lines = [
             "Overpass candidate import complete.",
+            "Network source: public Overpass API",
+            "Stored result: local SQLite candidate database",
+            "Daily dry-run/run uses local data and does not call Overpass.",
             f"Source elements: {parse_stats['source_elements']:,}",
             f"Accepted candidates: {parse_stats['accepted']:,}",
             f"Rejected source elements: {parse_stats['rejected']:,}",
