@@ -3169,6 +3169,11 @@ class TrainingManager(commands.Cog):
         post: BoardTrainingPost,
         results: List[Tuple[BoardTrainingMatch, AutoTrainingResult]],
     ) -> str:
+        opened_academy_ids = [
+            int(result.academy_id)
+            for _match, result in results
+            if result.success and result.academy_id
+        ]
         opened = [
             f"- {match.training}: opened {result.classes_opened or 1} class(es)"
             + (f" in academy {result.academy_id}" if result.academy_id else "")
@@ -3189,6 +3194,13 @@ class TrainingManager(commands.Cog):
             lines.append("")
             lines.append("Opened:")
             lines.extend(opened)
+            if opened_academy_ids:
+                lines.append("")
+                lines.append("Where to find and join the class:")
+                for academy_id in dict.fromkeys(opened_academy_ids):
+                    lines.append(f"- Academy {academy_id}: https://www.missionchief.com/buildings/{academy_id}")
+                lines.append("- Browser/Desktop: open the academy link, open the active training course, then add the required personnel.")
+                lines.append("- Phone: open the same academy link in your mobile browser, open the active course, then add personnel from the course page.")
         if failed:
             lines.append("")
             lines.append("Could not open automatically:")
