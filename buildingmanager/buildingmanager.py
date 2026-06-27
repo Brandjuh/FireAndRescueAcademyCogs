@@ -74,8 +74,33 @@ AUTO_CANDIDATE_DEFAULT_TIME = "07:00"
 AUTO_CANDIDATE_DEFAULT_TIMEZONE = "America/New_York"
 AUTO_CANDIDATE_DUPLICATE_RADIUS_METERS = 250
 AUTO_CANDIDATE_SELECTION_POOL = 50
+AUTO_CANDIDATE_REFILL_MIN_AVAILABLE = 10
+AUTO_CANDIDATE_REFILL_REGIONS_PER_RUN = 4
+AUTO_CANDIDATE_REFILL_TIMEOUT_SECONDS = 120
 OVERPASS_API_URL = "https://overpass-api.de/api/interpreter"
 OVERPASS_IMPORT_AREA_WARNING_DEGREES = 0.35
+AUTO_CANDIDATE_REFILL_REGIONS: Tuple[Dict[str, Any], ...] = (
+    {"name": "Portland, Oregon, USA", "bbox": (45.4300, -122.8000, 45.6500, -122.4500)},
+    {"name": "Sacramento, California, USA", "bbox": (38.4500, -121.6000, 38.7000, -121.3500)},
+    {"name": "San Francisco, California, USA", "bbox": (37.7000, -122.5500, 37.8500, -122.3500)},
+    {"name": "Los Angeles, California, USA", "bbox": (33.9000, -118.4500, 34.1500, -118.1500)},
+    {"name": "Houma, Louisiana, USA", "bbox": (29.5000, -90.8500, 29.7500, -90.5500)},
+    {"name": "Bermuda Islands", "bbox": (32.2000, -64.9500, 32.4000, -64.6500)},
+    {"name": "Glasgow, United Kingdom", "bbox": (55.7800, -4.4000, 55.9500, -4.1000)},
+    {"name": "Copenhagen, Denmark", "bbox": (55.6000, 12.4500, 55.7800, 12.7000)},
+    {"name": "Beersheba, Israel", "bbox": (31.1500, 34.6500, 31.3500, 34.9000)},
+    {"name": "New York City, New York, USA", "bbox": (40.6000, -74.0500, 40.8500, -73.7500)},
+    {"name": "Miami, Florida, USA", "bbox": (25.6500, -80.3500, 25.9000, -80.1000)},
+    {"name": "Dallas, Texas, USA", "bbox": (32.6500, -97.0000, 32.9500, -96.6500)},
+    {"name": "Chicago, Illinois, USA", "bbox": (41.7500, -87.8500, 42.0000, -87.5500)},
+    {"name": "Toronto, Ontario, Canada", "bbox": (43.5500, -79.6500, 43.8500, -79.2500)},
+    {"name": "Amsterdam, Netherlands", "bbox": (52.2500, 4.7500, 52.4500, 5.0500)},
+    {"name": "Madrid, Spain", "bbox": (40.3000, -3.8500, 40.5500, -3.5500)},
+    {"name": "Paris, France", "bbox": (48.7500, 2.2000, 48.9500, 2.5000)},
+    {"name": "Berlin, Germany", "bbox": (52.4000, 13.2500, 52.6000, 13.5500)},
+    {"name": "Rome, Italy", "bbox": (41.7500, 12.3500, 42.0000, 12.6500)},
+    {"name": "Sydney, Australia", "bbox": (-33.9500, 151.0500, -33.7500, 151.3000)},
+)
 PLAYWRIGHT_SETUP_MESSAGE = (
     "Playwright browser automation is not ready. Install the BuildingManager requirements and run "
     "`python -m playwright install chromium` in the same Python environment as Redbot."
@@ -4830,6 +4855,10 @@ class BuildingManager(commands.Cog):
             "auto_candidate_time": AUTO_CANDIDATE_DEFAULT_TIME,
             "auto_candidate_timezone": AUTO_CANDIDATE_DEFAULT_TIMEZONE,
             "auto_candidate_duplicate_radius_m": AUTO_CANDIDATE_DUPLICATE_RADIUS_METERS,
+            "auto_candidate_refill_enabled": True,
+            "auto_candidate_refill_min_available": AUTO_CANDIDATE_REFILL_MIN_AVAILABLE,
+            "auto_candidate_refill_regions_per_run": AUTO_CANDIDATE_REFILL_REGIONS_PER_RUN,
+            "auto_candidate_refill_next_region_index": 0,
         }
         default_global = {
             "google_api_key": None,
@@ -7429,6 +7458,134 @@ class BuildingManager(commands.Cog):
         except Exception as exc:
             return [], f"duplicate check unavailable: {type(exc).__name__}: {_truncate_text(exc, 180)}", max(0, radius)
 
+    @staticmethod
+    def _available_auto_candidate_count(stats: Dict[str, int], building_type: str) -> int:
+        """Return locally available candidate count for one building type."""
+        return int(stats.get(f"{building_type}:available", 0) or 0)
+
+    async def _fetch_auto_candidate_refill_region(
+        self,
+        region: Dict[str, Any],
+        building_type: str,
+    ) -> Tuple[Dict[str, int], Dict[str, int]]:
+        """Fetch one automatic candidate refill region from public OSM/Overpass."""
+        south, west, north, east = region["bbox"]
+        query = build_overpass_candidate_query(
+            float(south),
+            float(west),
+            float(north),
+            float(east),
+            building_type,
+        )
+        timeout = aiohttp.ClientTimeout(total=AUTO_CANDIDATE_REFILL_TIMEOUT_SECONDS)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(OVERPASS_API_URL, data={"data": query}) as response:
+                if response.status != 200:
+                    text = await response.text()
+                    raise RuntimeError(format_overpass_http_error(response.status, text, building_type=building_type))
+                data = await response.json(content_type=None)
+        candidates, parse_stats = parse_overpass_auto_build_candidates(data)
+        db_stats = self.db.upsert_auto_candidates(candidates)
+        return parse_stats, db_stats
+
+    async def _refill_auto_candidates_if_needed(
+        self,
+        guild: discord.Guild,
+        building_types: Iterable[str],
+    ) -> List[str]:
+        """Autonomously refill local OSM candidates when the local stock is low."""
+        try:
+            conf = await self.config.guild(guild).all()
+        except Exception:
+            conf = {}
+        if not conf.get("auto_candidate_refill_enabled", True):
+            return []
+
+        normalized_types = [
+            building_type
+            for building_type in dict.fromkeys(str(item) for item in building_types)
+            if building_type in ALLIANCE_BUILDING_TYPE_IDS
+        ]
+        if not normalized_types:
+            return []
+
+        try:
+            minimum_available = max(
+                0,
+                int(conf.get("auto_candidate_refill_min_available") or AUTO_CANDIDATE_REFILL_MIN_AVAILABLE),
+            )
+        except (TypeError, ValueError):
+            minimum_available = AUTO_CANDIDATE_REFILL_MIN_AVAILABLE
+        if minimum_available <= 0:
+            return []
+
+        stats = self.db.get_auto_candidate_stats()
+        needed = [
+            building_type
+            for building_type in normalized_types
+            if self._available_auto_candidate_count(stats, building_type) < minimum_available
+        ]
+        if not needed:
+            return []
+
+        try:
+            regions_per_run = max(
+                1,
+                int(conf.get("auto_candidate_refill_regions_per_run") or AUTO_CANDIDATE_REFILL_REGIONS_PER_RUN),
+            )
+        except (TypeError, ValueError):
+            regions_per_run = AUTO_CANDIDATE_REFILL_REGIONS_PER_RUN
+        regions_per_run = min(regions_per_run, len(AUTO_CANDIDATE_REFILL_REGIONS))
+
+        try:
+            next_index = int(conf.get("auto_candidate_refill_next_region_index") or 0)
+        except (TypeError, ValueError):
+            next_index = 0
+
+        lines = [
+            f"Automatic candidate refill started: {', '.join(needed)} below {minimum_available} available."
+        ]
+        for _ in range(regions_per_run):
+            region = AUTO_CANDIDATE_REFILL_REGIONS[next_index % len(AUTO_CANDIDATE_REFILL_REGIONS)]
+            next_index += 1
+            region_name = str(region.get("name") or "Unnamed region")
+            for building_type in list(needed):
+                try:
+                    parse_stats, db_stats = await self._fetch_auto_candidate_refill_region(region, building_type)
+                    lines.append(
+                        (
+                            f"- {region_name} / {building_type}: "
+                            f"{parse_stats.get('accepted', 0):,} accepted, "
+                            f"{db_stats.get('inserted', 0):,} inserted, "
+                            f"{db_stats.get('updated', 0):,} updated."
+                        )
+                    )
+                except Exception as exc:
+                    lines.append(f"- {region_name} / {building_type}: refill failed: {_truncate_text(exc, 240)}")
+                await asyncio.sleep(1)
+
+            stats = self.db.get_auto_candidate_stats()
+            needed = [
+                building_type
+                for building_type in normalized_types
+                if self._available_auto_candidate_count(stats, building_type) < minimum_available
+            ]
+            if not needed:
+                break
+
+        await self.config.guild(guild).auto_candidate_refill_next_region_index.set(
+            next_index % len(AUTO_CANDIDATE_REFILL_REGIONS)
+        )
+        final_stats = self.db.get_auto_candidate_stats()
+        lines.append(
+            (
+                "Local candidate stock after refill: "
+                f"Hospitals {self._available_auto_candidate_count(final_stats, 'Hospital'):,}, "
+                f"Prisons {self._available_auto_candidate_count(final_stats, 'Prison'):,}."
+            )
+        )
+        return lines
+
     def _select_auto_candidate(
         self,
         building_type: str,
@@ -7473,10 +7630,16 @@ class BuildingManager(commands.Cog):
             duplicate_check_source=duplicate_source,
         )
 
-    async def _build_auto_candidate_plan(self, guild: discord.Guild) -> Tuple[Optional[int], str, int, List[AutoBuildPlan]]:
+    async def _build_auto_candidate_plan(
+        self,
+        guild: discord.Guild,
+    ) -> Tuple[Optional[int], str, int, List[AutoBuildPlan], List[str]]:
         """Build a dry-run plan for both daily automatic building slots."""
         minimum = await self._get_auto_candidate_min_funds(guild)
         funds, funds_source = await self._get_current_alliance_funds()
+        refill_lines: List[str] = []
+        if alliance_funds_allow_auto_build(funds, funds_source, minimum):
+            refill_lines = await self._refill_auto_candidates_if_needed(guild, ("Hospital", "Prison"))
         existing_buildings, duplicate_source, duplicate_radius = await self._candidate_duplicate_context(guild)
         plans = [
             self._select_auto_candidate(
@@ -7488,7 +7651,7 @@ class BuildingManager(commands.Cog):
             )
             for building_type in ("Hospital", "Prison")
         ]
-        return funds, funds_source, minimum, plans
+        return funds, funds_source, minimum, plans, refill_lines
 
     async def _get_auto_candidate_min_funds(self, guild: discord.Guild) -> int:
         """Return the funds minimum for autonomous daily candidate builds."""
@@ -7504,12 +7667,23 @@ class BuildingManager(commands.Cog):
             [
                 "Daily candidate auto-build",
                 "Candidate source: local SQLite database",
-                "Online imports: optional; daily dry-run/run does not call Overpass",
+                "Automatic refill: public OSM/Overpass in small rotating regions when local stock is low",
                 f"Enabled: {bool(conf.get('auto_candidate_build_enabled'))}",
                 f"Time: {conf.get('auto_candidate_time') or AUTO_CANDIDATE_DEFAULT_TIME}",
                 f"Timezone: {conf.get('auto_candidate_timezone') or AUTO_CANDIDATE_DEFAULT_TIMEZONE}",
                 f"Minimum funds: {int(conf.get('auto_candidate_min_funds') or AUTO_CANDIDATE_MIN_FUNDS):,} credits",
                 f"Duplicate radius: {int(conf.get('auto_candidate_duplicate_radius_m') or AUTO_CANDIDATE_DUPLICATE_RADIUS_METERS)}m",
+                f"Refill enabled: {bool(conf.get('auto_candidate_refill_enabled', True))}",
+                (
+                    "Refill minimum stock: "
+                    f"{int(conf.get('auto_candidate_refill_min_available') or AUTO_CANDIDATE_REFILL_MIN_AVAILABLE):,} "
+                    "available per type"
+                ),
+                (
+                    "Refill regions per run: "
+                    f"{int(conf.get('auto_candidate_refill_regions_per_run') or AUTO_CANDIDATE_REFILL_REGIONS_PER_RUN):,}"
+                ),
+                f"Refill region pool: {len(AUTO_CANDIDATE_REFILL_REGIONS):,} regions",
                 "",
                 "Candidates:",
                 f"- Hospitals available: {stats.get('Hospital:available', 0):,} / {stats.get('Hospital:total', 0):,}",
@@ -7569,6 +7743,7 @@ class BuildingManager(commands.Cog):
                 f"source: {funds_source}; required: {minimum:,} credits."
             )
 
+        refill_lines = await self._refill_auto_candidates_if_needed(guild, (building_type,))
         existing_buildings, duplicate_source, duplicate_radius = await self._candidate_duplicate_context(guild)
         plan = self._select_auto_candidate(
             building_type,
@@ -7578,6 +7753,8 @@ class BuildingManager(commands.Cog):
         )
         if not plan.candidate:
             reason = plan.blocked_reason or "No candidate selected."
+            if refill_lines:
+                reason = f"{reason} Automatic refill result: {' | '.join(refill_lines[-3:])}"
             self.db.record_auto_run(
                 guild_id=guild.id,
                 run_date=run_date,
@@ -8580,7 +8757,7 @@ class BuildingManager(commands.Cog):
             "Overpass candidate import complete.",
             "Network source: public Overpass API",
             "Stored result: local SQLite candidate database",
-            "Daily dry-run/run uses local data and does not call Overpass.",
+            "Automatic dry-run/run uses local data first and refills from OSM only when local stock is low.",
             f"Source elements: {parse_stats['source_elements']:,}",
             f"Accepted candidates: {parse_stats['accepted']:,}",
             f"Rejected source elements: {parse_stats['rejected']:,}",
@@ -8604,7 +8781,7 @@ class BuildingManager(commands.Cog):
     async def candidate_autobuild_dryrun(self, ctx: commands.Context):
         """Show what daily candidate auto-build would do without creating buildings."""
         async with ctx.typing():
-            funds, funds_source, minimum, plans = await self._build_auto_candidate_plan(ctx.guild)
+            funds, funds_source, minimum, plans, refill_lines = await self._build_auto_candidate_plan(ctx.guild)
         funds_text = f"{funds:,} credits" if funds is not None else "unknown"
         allowed = alliance_funds_allow_auto_build(funds, funds_source, minimum)
         lines = [
@@ -8615,6 +8792,10 @@ class BuildingManager(commands.Cog):
             f"Funds check: {'PASS' if allowed else 'BLOCKED'}",
             "",
         ]
+        if refill_lines:
+            lines.append("Automatic candidate refill:")
+            lines.extend(refill_lines)
+            lines.append("")
         for plan in plans:
             lines.append(f"{plan.building_type}:")
             if not plan.candidate:

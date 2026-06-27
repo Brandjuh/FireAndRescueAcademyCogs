@@ -1118,6 +1118,7 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
                 return {
                     "log_channel_id": None,
                     "admin_channel_id": None,
+                    "auto_candidate_refill_enabled": False,
                 }
 
         class FakeConfig:
@@ -1171,6 +1172,73 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
             self.assertEqual(run["missionchief_building_id"], 12345)
             counts = manager.db.get_auto_candidate_stats()
             self.assertEqual(counts["Hospital:used"], 1)
+
+    def test_auto_candidate_plan_refills_empty_local_stock(self):
+        class FakeValue:
+            def __init__(self):
+                self.value = None
+
+            async def set(self, value):
+                self.value = value
+
+        class FakeGuildConfig:
+            def __init__(self):
+                self.auto_candidate_refill_next_region_index = FakeValue()
+
+            async def auto_candidate_min_funds(self):
+                return 5_000_000
+
+            async def all(self):
+                return {
+                    "auto_candidate_refill_enabled": True,
+                    "auto_candidate_refill_min_available": 1,
+                    "auto_candidate_refill_regions_per_run": 1,
+                    "auto_candidate_refill_next_region_index": 0,
+                    "auto_candidate_duplicate_radius_m": 250,
+                }
+
+        class FakeConfig:
+            def __init__(self):
+                self.guild_config = FakeGuildConfig()
+
+            def guild(self, _guild):
+                return self.guild_config
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = BuildingManager.__new__(BuildingManager)
+            manager.db = BuildingDatabase(f"{temp_dir}/building_manager.db")
+            manager.config = FakeConfig()
+            manager._get_current_alliance_funds = AsyncMock(return_value=(6_000_000, "live MissionChief"))
+            manager._candidate_duplicate_context = AsyncMock(return_value=([], "test duplicate check", 250))
+
+            async def fake_refill(_region, building_type):
+                db_stats = manager.db.upsert_auto_candidates(
+                    [
+                        {
+                            "source": "openstreetmap",
+                            "source_id": f"node/{building_type.lower()}-101",
+                            "building_type": building_type,
+                            "name": f"Example {building_type}",
+                            "lat": 40.1 if building_type == "Hospital" else 41.1,
+                            "lon": -73.9 if building_type == "Hospital" else -74.9,
+                            "raw_tags_json": "{}",
+                        }
+                    ]
+                )
+                return {"source_elements": 1, "accepted": 1, "rejected": 0}, db_stats
+
+            manager._fetch_auto_candidate_refill_region = AsyncMock(side_effect=fake_refill)
+
+            funds, funds_source, minimum, plans, refill_lines = asyncio.run(
+                manager._build_auto_candidate_plan(types.SimpleNamespace(id=1))
+            )
+
+            self.assertEqual(funds, 6_000_000)
+            self.assertEqual(funds_source, "live MissionChief")
+            self.assertEqual(minimum, 5_000_000)
+            self.assertTrue(refill_lines)
+            self.assertTrue(all(plan.candidate is not None for plan in plans))
+            self.assertEqual(manager.config.guild_config.auto_candidate_refill_next_region_index.value, 1)
 
     def test_auto_candidate_build_blocks_below_autonomous_threshold(self):
         class FakeGuildConfig:
