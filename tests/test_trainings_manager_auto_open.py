@@ -423,6 +423,24 @@ def test_board_wildland_mobile_command_does_not_open_mobile_command_too():
     ]
 
 
+def test_board_fire_ems_mobile_command_does_not_open_extra_mobile_command_courses():
+    matches = extract_board_training_matches("Fire Station - EMS Mobile Command")
+
+    assert [(match.discipline, match.training) for match in matches] == [
+        ("Fire", "EMS Mobile Command")
+    ]
+
+
+def test_board_unprefixed_ems_mobile_command_is_ambiguous_not_mobile_command():
+    assert extract_board_training_matches("EMS Mobile Command") == []
+
+    explanation = describe_ambiguous_board_training_request("EMS Mobile Command")
+    assert explanation is not None
+    assert "EMS Mobile Command exists in multiple academy types" in explanation
+    assert "Fire Station - EMS Mobile Command" in explanation
+    assert "EMS / Rescue - EMS Mobile Command" in explanation
+
+
 def test_board_fire_wildland_mobile_command_typo_matches_wildland_training():
     matches = extract_board_training_matches("Requesting please FIRE Wildland Mobile Comand Center 1 class")
 
