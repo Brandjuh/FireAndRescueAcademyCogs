@@ -4,6 +4,7 @@ from pathlib import Path
 
 import discord
 import yaml
+from PIL import Image
 
 from FireStationCommand.fire_station_command import (
     AlertChoiceView,
@@ -300,6 +301,30 @@ def test_imported_equipment_catalog_has_images_and_progression_depth():
         assert 1 <= int(item.get("unlock_level", 0)) <= FireStationCommand.MAX_COMMAND_LEVEL
         assert item.get("capabilities")
         assert (_FSC_ROOT / item["image"]).exists()
+
+
+def test_catalog_images_use_consistent_generated_png_canvas():
+    prefix_by_catalog = {
+        "missions": "Images/Missions/",
+        "vehicles": "Images/Vehicles/",
+        "equipment": "Images/Equipment/",
+    }
+    image_refs = [
+        (catalog_name, item["id"], item["image"])
+        for catalog_name in prefix_by_catalog
+        for item in _load_yaml_catalog(catalog_name)
+        if item.get("image")
+    ]
+
+    assert len(image_refs) >= 1300
+    for catalog_name, item_id, image_ref in image_refs:
+        assert image_ref.startswith(prefix_by_catalog[catalog_name])
+        path = _FSC_ROOT / image_ref
+        assert path.exists(), (catalog_name, item_id, image_ref)
+        with Image.open(path) as image:
+            assert image.format == "PNG", (catalog_name, item_id, image_ref)
+            assert image.size == (1024, 1024), (catalog_name, item_id, image_ref)
+            assert image.mode in {"RGB", "RGBA"}, (catalog_name, item_id, image_ref)
 
 
 def test_imported_missions_have_equipment_depth_without_losing_quantities():
