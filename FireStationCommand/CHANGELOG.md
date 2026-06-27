@@ -73,6 +73,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added a FireStationCommand image canvas normalizer and full image-tree canvas consistency test.
 - Added shared PixelArt image processing for generated and imported FireStationCommand image assets.
 - Added a FireStationCommand asset guide for future PixelArt image imports and generated art.
+- Added developer menu controls to force an active mission to success, partial success, or failure for testing.
 
 ### Changed
 
