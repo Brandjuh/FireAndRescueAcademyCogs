@@ -62,6 +62,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added categorized dashboard menus for Incidents, Staff, Station, and Vehicle actions.
 - Added developer testing mode for user ID `132620654087241729`, including `[p]fsc devmode`, `[p]fsc devmenu`, a developer dashboard category, unlock bypasses, resource grants, max station setup, and active mission clearing.
 - Added `[p]fsc daily` and a dashboard daily reward action with configurable daily credits, XP, and cooldown balance fields.
+- Added vehicle selling from the dashboard vehicle menu, including configurable refunds based on value and condition.
 - Added regenerated 1024px illustrated mission images for every configured mission, with category-specific fire, traffic, EMS, police, hazmat, water, wildland, aircraft, rescue, collapse, and animal scenes.
 - Added a deterministic mission image generator for keeping future mission art in the same flat illustrated style.
 - Added full-catalog generated images for all configured missions, vehicles, and equipment using the same clean 2D cartoon game-asset style.

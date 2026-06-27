@@ -5,7 +5,6 @@ This document tracks larger gameplay systems that should be implemented after th
 ## Requested Gameplay TODOs
 
 - Improve purchase-blocked feedback for vehicles, equipment, expansions, and upgrades with clear reasons such as missing credits, missing level, missing extension, full capacity, or already owned.
-- Add vehicle selling so players can recover part of the vehicle value, free station capacity, and cleanly remove equipment or unavailable state attached to that vehicle.
 - Add a developer menu toggle for user ID `132620654087241729` that enables a testing mode with all unlocks, unrestricted actions, and fast access to credits, XP, station levels, vehicles, equipment, missions, and outcome controls.
 - Add level-up messaging that clearly lists newly unlocked missions, vehicles, equipment, trainings, expansions, station upgrades, and feature buttons when a player reaches a new command level.
 - Add a repeatable parking lot upgrade that adds extra vehicle parking capacity. It should be purchasable indefinitely, with each additional parking lot upgrade becoming more expensive than the previous one.

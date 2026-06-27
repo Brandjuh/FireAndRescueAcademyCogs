@@ -4,6 +4,7 @@
     "daily_credits_reward": 10000,
     "daily_xp_reward": 40,
     "daily_cooldown_hours": 24,
+    "vehicle_sale_refund_rate": 0.5,
     "credits_reward_multiplier": 1.0,
     "maintenance_cost_multiplier": 1.0,
     "economy_cost_scaling_threshold_multiplier": 10.0,

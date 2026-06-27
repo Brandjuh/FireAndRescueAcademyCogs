@@ -11,6 +11,7 @@ from FireStationCommand.fire_station_command import (
     ConfirmCareerView,
     ConfirmUpgradeView,
     ConfirmVehiclePurchaseView,
+    ConfirmVehicleSaleView,
     EquipmentShopSelect,
     EquipmentShopView,
     FireStationCommand,
@@ -23,6 +24,7 @@ from FireStationCommand.fire_station_command import (
     RecruitmentView,
     TurnoutTakeoverView,
     BackupVehicleSelect,
+    VehicleSaleSelect,
     VehicleSelect,
     VehicleShopSelect,
     VehicleShopView,
@@ -556,6 +558,7 @@ def test_balance_helpers_read_values_with_fallbacks():
                     "daily_credits_reward": 12000,
                     "daily_xp_reward": 75,
                     "daily_cooldown_hours": 12,
+                    "vehicle_sale_refund_rate": 0.4,
                 }
             }
         }
@@ -567,6 +570,7 @@ def test_balance_helpers_read_values_with_fallbacks():
     assert FireStationCommand._daily_credits_reward(cog) == 12000
     assert FireStationCommand._daily_xp_reward(cog) == 75
     assert FireStationCommand._daily_cooldown_hours(cog) == 12
+    assert FireStationCommand._vehicle_sale_refund_rate(cog) == 0.4
     assert FireStationCommand._balance_int(cog, "missing", 7) == 7
 
 
@@ -1435,6 +1439,7 @@ def test_dashboard_categories_and_actions_are_alphabetized():
         "Buy equipment",
         "Buy vehicle",
         "Maintenance bay",
+        "Sell vehicle",
     ]
     assert [view.ACTION_LABELS[action] for action in view._category_actions("Staff", data)] == [
         "Hire staff",
@@ -1573,8 +1578,9 @@ def test_dashboard_category_view_uses_action_dropdown():
         "Buy equipment",
         "Buy vehicle",
         "Maintenance bay",
+        "Sell vehicle",
     ]
-    assert [option.value for option in selects[0].options] == ["equipment", "shop", "maintenance"]
+    assert [option.value for option in selects[0].options] == ["equipment", "shop", "maintenance", "sell_vehicle"]
 
 
 def test_dashboard_start_mission_handles_missing_channel_id():
@@ -1830,6 +1836,7 @@ def test_vehicle_purchase_confirm_edits_message_and_stores_vehicle():
                 "crew_capacity": 4,
                 "image": "Images/Vehicles/engine_basic.png",
                 "condition": 100,
+                "purchase_price": 50000,
             }
         ]
     assert user_data["next_vehicle_id"] == 2
@@ -1878,6 +1885,156 @@ def test_vehicle_purchase_confirm_button_disables_message_before_purchase():
     assert all(child.disabled for child in view.children)
     assert interaction.response.edited["embed"].kwargs["title"] == "Vehicle purchased"
     assert user_data["vehicles"][0]["catalog_id"] == "engine_basic"
+
+
+def test_vehicle_sale_select_edits_message_to_confirm_sale():
+    user = type("User", (), {"id": 123})()
+    user_data = {
+        "vehicles": [
+            {
+                "id": 7,
+                "catalog_id": "engine_basic",
+                "name": "Standard Fire Engine",
+                "condition": 80,
+                "purchase_price": 50000,
+            }
+        ],
+        "active_mission": {},
+    }
+    cog = _cog_with_game_data(
+        {
+            "balance": {"balance": {"vehicle_sale_refund_rate": 0.5}},
+            "vehicles": {
+                "vehicles": [
+                    {
+                        "id": "engine_basic",
+                        "name": "Standard Fire Engine",
+                        "base_cost": 50000,
+                        "crew_capacity": 4,
+                        "image": "Images/Vehicles/engine_basic.png",
+                    }
+                ]
+            },
+        }
+    )
+    cog.config = _Config(user_data, {})
+    select = VehicleSaleSelect(cog, object(), user, object(), data=user_data)
+    select.values = ["7"]
+    interaction = _Interaction(user)
+
+    asyncio.run(select.callback(interaction))
+
+    edited = interaction.response.edited
+    assert edited["embed"].kwargs["title"] == "Confirm vehicle sale"
+    assert isinstance(edited["view"], ConfirmVehicleSaleView)
+    assert edited["view"].vehicle_instance_id == "7"
+    assert edited["view"].edit_message is True
+
+
+def test_vehicle_sale_confirm_removes_vehicle_status_and_grants_refund():
+    user = type("User", (), {"id": 123})()
+    user_data = {
+        "started": True,
+        "station_level": 2,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "vehicles": [
+            {
+                "id": 7,
+                "catalog_id": "engine_basic",
+                "name": "Standard Fire Engine",
+                "crew_capacity": 4,
+                "image": "Images/Vehicles/engine_basic.png",
+                "condition": 80,
+                "purchase_price": 50000,
+                "out_of_service_until": "2026-06-12T12:30:00Z",
+            }
+        ],
+        "active_mission": {},
+        "credits": 1000,
+    }
+    cog = _cog_with_game_data(
+        {
+            "balance": {"balance": {"vehicle_sale_refund_rate": 0.5}},
+            "vehicles": {
+                "vehicles": [
+                    {
+                        "id": "engine_basic",
+                        "name": "Standard Fire Engine",
+                        "base_cost": 50000,
+                        "crew_capacity": 4,
+                        "image": "Images/Vehicles/engine_basic.png",
+                    }
+                ]
+            },
+        }
+    )
+    cog.config = _Config(user_data, {})
+    interaction = _Interaction(user)
+
+    asyncio.run(
+        cog._confirm_vehicle_sale(
+            interaction,
+            object(),
+            user,
+            "7",
+            edit_message=True,
+            guild=object(),
+        )
+    )
+
+    edited = interaction.response.edited
+    assert edited["embed"].kwargs["title"] == "Vehicle sold"
+    assert isinstance(edited["view"], FscDashboardView)
+    assert user_data["vehicles"] == []
+    assert user_data["credits"] == 21000
+    fields = {field["name"]: field["value"] for field in edited["embed"].fields}
+    assert fields["Refund"] == "20,000 credits"
+    assert fields["Vehicle capacity"] == "0 / 2"
+
+
+def test_vehicle_sale_blocks_when_mission_is_active():
+    user = type("User", (), {"id": 123})()
+    user_data = {
+        "started": True,
+        "station_level": 2,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "vehicles": [
+            {
+                "id": 7,
+                "catalog_id": "engine_basic",
+                "name": "Standard Fire Engine",
+                "condition": 100,
+                "purchase_price": 50000,
+            }
+        ],
+        "active_mission": {"id": "bin_fire"},
+        "credits": 1000,
+    }
+    cog = _cog_with_game_data({})
+    cog.config = _Config(user_data, {})
+    interaction = _Interaction(user)
+
+    asyncio.run(
+        cog._confirm_vehicle_sale(
+            interaction,
+            object(),
+            user,
+            "7",
+            edit_message=True,
+            guild=object(),
+        )
+    )
+
+    edited = interaction.response.edited
+    assert edited["embed"].kwargs["title"] == "Sell vehicle"
+    fields = {field["name"]: field["value"] for field in edited["embed"].fields}
+    assert fields["Sale blocked"] == "Finish or cancel the active incident before selling vehicles."
+    assert len(user_data["vehicles"]) == 1
+    assert user_data["credits"] == 1000
 
 
 def test_vehicle_shop_select_paginates_large_catalog():
