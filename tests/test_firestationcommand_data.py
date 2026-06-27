@@ -21,6 +21,7 @@ from FireStationCommand.fire_station_command import (
     FscDeveloperView,
     FscTimedView,
     MaintenanceView,
+    ParkingLotView,
     RecruitmentView,
     TurnoutTakeoverView,
     BackupVehicleSelect,
@@ -559,6 +560,9 @@ def test_balance_helpers_read_values_with_fallbacks():
                     "daily_xp_reward": 75,
                     "daily_cooldown_hours": 12,
                     "vehicle_sale_refund_rate": 0.4,
+                    "parking_lot_base_cost": 30000,
+                    "parking_lot_cost_growth": 1.5,
+                    "parking_lot_slots": 2,
                 }
             }
         }
@@ -571,6 +575,9 @@ def test_balance_helpers_read_values_with_fallbacks():
     assert FireStationCommand._daily_xp_reward(cog) == 75
     assert FireStationCommand._daily_cooldown_hours(cog) == 12
     assert FireStationCommand._vehicle_sale_refund_rate(cog) == 0.4
+    assert FireStationCommand._parking_lot_base_cost(cog) == 30000
+    assert FireStationCommand._parking_lot_cost_growth(cog) == 1.5
+    assert FireStationCommand._parking_lot_slots_per_upgrade(cog) == 2
     assert FireStationCommand._balance_int(cog, "missing", 7) == 7
 
 
@@ -1439,6 +1446,7 @@ def test_dashboard_categories_and_actions_are_alphabetized():
         "Buy equipment",
         "Buy vehicle",
         "Maintenance bay",
+        "Parking lot",
         "Sell vehicle",
     ]
     assert [view.ACTION_LABELS[action] for action in view._category_actions("Staff", data)] == [
@@ -1513,6 +1521,35 @@ def test_dashboard_action_dropdown_routes_to_handler():
     assert isinstance(interaction.response.edited["view"], EquipmentShopView)
 
 
+def test_dashboard_parking_action_opens_parking_lot_view():
+    user = type("User", (), {"id": 123})()
+    cog = _cog_with_game_data({})
+    data = {
+        "started": True,
+        "station_level": 2,
+        "command_level": 2,
+        "xp": 100,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "credits": 5000,
+        "vehicles": [],
+        "equipment": [],
+        "trainings": [],
+        "expansions": [],
+        "active_mission": {},
+        "parking_lots": 0,
+    }
+    cog.config = _Config(data, {})
+    view = FscDashboardView(cog, user, object(), object(), data=data)
+    interaction = _Interaction(user)
+
+    asyncio.run(view.parking(interaction, None))
+
+    assert interaction.response.edited["embed"].kwargs["title"] == "Parking lot"
+    assert isinstance(interaction.response.edited["view"], ParkingLotView)
+
+
 def test_dashboard_daily_action_claims_reward_and_refreshes_view():
     user = type("User", (), {"id": 123})()
     cog = _cog_with_game_data(
@@ -1578,9 +1615,16 @@ def test_dashboard_category_view_uses_action_dropdown():
         "Buy equipment",
         "Buy vehicle",
         "Maintenance bay",
+        "Parking lot",
         "Sell vehicle",
     ]
-    assert [option.value for option in selects[0].options] == ["equipment", "shop", "maintenance", "sell_vehicle"]
+    assert [option.value for option in selects[0].options] == [
+        "equipment",
+        "shop",
+        "maintenance",
+        "parking",
+        "sell_vehicle",
+    ]
 
 
 def test_dashboard_start_mission_handles_missing_channel_id():
@@ -2276,6 +2320,78 @@ def test_expansion_effects_add_vehicle_capacity():
         cog,
         {"station_level": 2, "expansions": ["extra_bay"]},
     ) == 3
+
+
+def test_parking_lots_add_repeatable_capacity_and_increasing_cost():
+    cog = _cog_with_game_data(
+        {
+            "balance": {
+                "balance": {
+                    "parking_lot_base_cost": 1000,
+                    "parking_lot_cost_growth": 2.0,
+                    "parking_lot_slots": 2,
+                }
+            }
+        }
+    )
+
+    assert FireStationCommand._parking_lot_base_cost_for_count(cog, 0) == 1000
+    assert FireStationCommand._parking_lot_base_cost_for_count(cog, 1) == 2000
+    assert FireStationCommand._parking_lot_base_cost_for_count(cog, 2) == 4000
+    assert FireStationCommand._max_vehicles_for_data(
+        cog,
+        {"station_level": 2, "expansions": [], "parking_lots": 3},
+    ) == 8
+
+
+def test_parking_lot_purchase_spends_credits_and_increases_capacity():
+    user = type("User", (), {"id": 123})()
+    user_data = {
+        "started": True,
+        "station_level": 2,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "vehicles": [],
+        "equipment": [],
+        "trainings": [],
+        "expansions": [],
+        "active_mission": {},
+        "credits": 5000,
+        "parking_lots": 1,
+    }
+    cog = _cog_with_game_data(
+        {
+            "balance": {
+                "balance": {
+                    "parking_lot_base_cost": 1000,
+                    "parking_lot_cost_growth": 2.0,
+                    "parking_lot_slots": 2,
+                }
+            }
+        }
+    )
+    cog.config = _Config(user_data, {})
+    interaction = _Interaction(user)
+
+    asyncio.run(
+        cog._confirm_parking_lot_purchase(
+            interaction,
+            object(),
+            user,
+            edit_message=True,
+            guild=object(),
+        )
+    )
+
+    edited = interaction.response.edited
+    assert edited["embed"].kwargs["title"] == "Parking lot built"
+    assert isinstance(edited["view"], ParkingLotView)
+    assert user_data["parking_lots"] == 2
+    assert user_data["credits"] == 3000
+    fields = {field["name"]: field["value"] for field in edited["embed"].fields}
+    assert fields["Spent"] == "2,000 credits"
+    assert fields["Vehicle capacity"] == "6"
 
 
 def test_expansion_embed_shows_available_locked_and_capacity():
