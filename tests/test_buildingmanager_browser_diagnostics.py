@@ -1077,8 +1077,10 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
             {"osm_id": "101", "code": "2110", "fclass": "hospital", "name": "Example Hospital"},
             {"osm_id": "202", "code": "2201", "fclass": "prison", "name": "Example Prison"},
             {"osm_id": "303", "code": "2301", "fclass": "cafe", "name": "Example Cafe"},
+            {"osm_id": "404", "code": "2110", "fclass": "hospital", "name": "Centro de Salud Planta de Gas"},
+            {"osm_id": "505", "code": "2201", "fclass": "prison", "name": "Example Police Station"},
         ]
-        points = [(40.1, -73.9), (41.1, -74.9), (42.1, -75.9)]
+        points = [(40.1, -73.9), (41.1, -74.9), (42.1, -75.9), (43.1, -76.9), (44.1, -77.9)]
 
         with tempfile.TemporaryDirectory() as temp_dir:
             zip_path = Path(temp_dir) / "test-free.shp.zip"
@@ -1093,10 +1095,53 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
             )
 
         self.assertEqual(stats["accepted"], 2)
-        self.assertEqual(stats["source_elements"], 3)
+        self.assertEqual(stats["source_elements"], 5)
+        self.assertEqual(stats["rejected"], 3)
         self.assertEqual([candidate["building_type"] for candidate in candidates], ["Hospital", "Prison"])
         self.assertEqual(candidates[0]["source"], "geofabrik")
         self.assertEqual(candidates[0]["source_id"], "test-extract:gis_osm_pois_free_1:101")
+
+    def test_purge_geofabrik_candidates_removes_polluted_unused_imports(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = BuildingDatabase(f"{temp_dir}/building_manager.db")
+            db.upsert_auto_candidates(
+                [
+                    {
+                        "source": "geofabrik",
+                        "source_id": "argentina:gis_osm_pois_free_1:3097228668",
+                        "building_type": "Hospital",
+                        "name": "Centro de Salud Planta de Gas",
+                        "lat": -43.2443311,
+                        "lon": -65.2848401,
+                        "raw_tags_json": "{}",
+                    },
+                    {
+                        "source": "openstreetmap",
+                        "source_id": "node/101",
+                        "building_type": "Hospital",
+                        "name": "Manual Hospital",
+                        "lat": 40.1,
+                        "lon": -73.9,
+                        "raw_tags_json": "{}",
+                    },
+                ]
+            )
+            db.record_auto_extract_import(
+                extract_id="argentina",
+                extract_name="Argentina",
+                url="https://download.geofabrik.de/south-america/argentina-latest-free.shp.zip",
+                status="completed",
+                inserted=1,
+                accepted=1,
+            )
+
+            stats = db.purge_geofabrik_auto_candidates()
+            remaining = db.get_auto_candidate_stats()
+
+            self.assertEqual(stats["deleted_candidates"], 1)
+            self.assertEqual(stats["deleted_extract_imports"], 1)
+            self.assertEqual(remaining["Hospital:available"], 1)
+            self.assertIsNone(db.get_auto_extract_import_statuses().get("argentina"))
 
     def test_candidate_database_tracks_available_used_and_duplicate_status(self):
         with tempfile.TemporaryDirectory() as temp_dir:

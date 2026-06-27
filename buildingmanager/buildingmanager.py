@@ -1410,6 +1410,136 @@ def _read_geofabrik_shp_points(data: bytes) -> List[Optional[Tuple[float, float]
             points.append(None)
     return points
 
+def _normalize_candidate_facility_text(value: Any) -> str:
+    """Normalize a facility name for conservative Geofabrik filtering."""
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = re.sub(r"[^a-zA-Z0-9]+", " ", text.casefold())
+    return re.sub(r"\s+", " ", text).strip()
+
+def _candidate_name_contains(text: str, terms: Iterable[str]) -> bool:
+    searchable = f" {text} "
+    return any(f" {_normalize_candidate_facility_text(term)} " in searchable for term in terms)
+
+GEOFABRIK_STRONG_HOSPITAL_TERMS = {
+    "hospital",
+    "hospitals",
+    "hopital",
+    "hopital general",
+    "hospicio",
+    "ospedale",
+    "ziekenhuis",
+    "krankenhaus",
+    "klinikum",
+    "universitatsklinikum",
+    "universitaetsklinikum",
+    "sairaala",
+    "sjukhus",
+    "sygehus",
+    "nosocomio",
+    "lazarett",
+    "centre hospitalier",
+    "centro hospitalario",
+    "hospital universitario",
+    "regional hospital",
+    "general hospital",
+    "medical center",
+    "medical centre",
+    "university medical center",
+}
+
+GEOFABRIK_HOSPITAL_REJECT_TERMS = {
+    "centro de salud",
+    "centro salud",
+    "centre de sante",
+    "centre de santé",
+    "health center",
+    "health centre",
+    "health post",
+    "health station",
+    "clinic",
+    "clinique",
+    "clinica",
+    "kliniek",
+    "polyclinic",
+    "policlinico",
+    "poli clinico",
+    "dispensary",
+    "pharmacy",
+    "farmacia",
+    "doctor",
+    "doctors",
+    "medical office",
+    "physician",
+    "dentist",
+    "veterinary",
+    "rehab center",
+    "rehabilitation center",
+    "planta de gas",
+    "gas plant",
+    "plant",
+    "factory",
+    "fabrica",
+}
+
+GEOFABRIK_STRONG_PRISON_TERMS = {
+    "prison",
+    "jail",
+    "gaol",
+    "correctional",
+    "correctional facility",
+    "correctional institution",
+    "detention",
+    "detention center",
+    "detention centre",
+    "penitentiary",
+    "penal",
+    "penal unit",
+    "unidad penal",
+    "carcel",
+    "prision",
+    "prisao",
+    "presidio",
+    "penitenciario",
+    "gevangenis",
+    "justizvollzugsanstalt",
+    "jva",
+    "centre penitentiaire",
+    "maison d arret",
+}
+
+GEOFABRIK_PRISON_REJECT_TERMS = {
+    "courthouse",
+    "court house",
+    "police station",
+    "sheriff office",
+    "sheriff s office",
+    "police department",
+    "law office",
+    "museum",
+    "historic",
+    "historical",
+}
+
+def _geofabrik_candidate_building_type(fclass: str, name: str) -> Optional[str]:
+    """Return a supported building type only when the Geofabrik name is clear enough."""
+    normalized_name = _normalize_candidate_facility_text(name)
+    if not normalized_name:
+        return None
+    if fclass == "hospital":
+        if _candidate_name_contains(normalized_name, GEOFABRIK_HOSPITAL_REJECT_TERMS):
+            return None
+        if _candidate_name_contains(normalized_name, GEOFABRIK_STRONG_HOSPITAL_TERMS):
+            return "Hospital"
+        return None
+    if fclass == "prison":
+        if _candidate_name_contains(normalized_name, GEOFABRIK_PRISON_REJECT_TERMS):
+            return None
+        if _candidate_name_contains(normalized_name, GEOFABRIK_STRONG_PRISON_TERMS):
+            return "Prison"
+        return None
+    return None
+
 def parse_geofabrik_shp_auto_build_candidates(
     zip_path: str,
     *,
@@ -1436,14 +1566,12 @@ def parse_geofabrik_shp_auto_build_candidates(
             for index, row in enumerate(rows):
                 stats["source_elements"] += 1
                 fclass = str(row.get("fclass") or "").casefold().strip()
-                if fclass == "hospital":
-                    building_type = "Hospital"
-                elif fclass == "prison":
-                    building_type = "Prison"
-                else:
-                    continue
                 point = points[index] if index < len(points) else None
                 name = _clean_building_name(row.get("name") or "")
+                building_type = _geofabrik_candidate_building_type(fclass, name)
+                if not building_type:
+                    stats["rejected"] += 1
+                    continue
                 if not point or not name:
                     stats["rejected"] += 1
                     continue
@@ -3725,6 +3853,34 @@ class BuildingDatabase:
         )
         conn.commit()
         conn.close()
+
+    def purge_geofabrik_auto_candidates(self, *, include_used: bool = False) -> Dict[str, int]:
+        """Remove imported Geofabrik candidates and reset extract import history."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT status, COUNT(*)
+            FROM building_auto_candidates
+            WHERE source = 'geofabrik'
+            GROUP BY status
+            '''
+        )
+        before = {f"candidates_{status}": int(count) for status, count in cursor.fetchall()}
+        if include_used:
+            cursor.execute("DELETE FROM building_auto_candidates WHERE source = 'geofabrik'")
+        else:
+            cursor.execute("DELETE FROM building_auto_candidates WHERE source = 'geofabrik' AND status != 'used'")
+        deleted_candidates = int(cursor.rowcount if cursor.rowcount is not None else 0)
+        cursor.execute("DELETE FROM building_auto_extract_imports")
+        deleted_extracts = int(cursor.rowcount if cursor.rowcount is not None else 0)
+        conn.commit()
+        conn.close()
+        return {
+            **before,
+            "deleted_candidates": deleted_candidates,
+            "deleted_extract_imports": deleted_extracts,
+        }
 
     def mark_auto_candidate(
         self,
@@ -9146,6 +9302,42 @@ class BuildingManager(commands.Cog):
                 f"- Prisons available: {stats.get('Prison:available', 0):,} / {stats.get('Prison:total', 0):,}",
             ]
         )
+        await ctx.send(box("\n".join(lines), lang="text"))
+
+    @candidate_autobuild.command(name="purgegeofabrik")
+    @commands.admin()
+    @commands.guild_only()
+    async def candidate_autobuild_purge_geofabrik(
+        self,
+        ctx: commands.Context,
+        confirmation: str = "",
+        include_used: bool = False,
+    ):
+        """Remove Geofabrik candidates and reset extract import history."""
+        if str(confirmation or "").casefold() != "confirm":
+            await ctx.send(
+                "This removes non-used Geofabrik candidates and resets Geofabrik extract import history. "
+                f"Run `{ctx.clean_prefix}buildset autobuild purgegeofabrik confirm` to continue."
+            )
+            return
+        stats = self.db.purge_geofabrik_auto_candidates(include_used=bool(include_used))
+        remaining = self.db.get_auto_candidate_stats()
+        lines = [
+            "Geofabrik candidate cleanup complete.",
+            f"Deleted candidates: {stats.get('deleted_candidates', 0):,}",
+            f"Deleted extract import records: {stats.get('deleted_extract_imports', 0):,}",
+            f"Included used candidates: {bool(include_used)}",
+            "",
+            "Before cleanup:",
+            f"- Available: {stats.get('candidates_available', 0):,}",
+            f"- Duplicate: {stats.get('candidates_duplicate', 0):,}",
+            f"- Failed: {stats.get('candidates_failed', 0):,}",
+            f"- Used: {stats.get('candidates_used', 0):,}",
+            "",
+            "Remaining local candidate stock:",
+            f"- Hospitals available: {remaining.get('Hospital:available', 0):,} / {remaining.get('Hospital:total', 0):,}",
+            f"- Prisons available: {remaining.get('Prison:available', 0):,} / {remaining.get('Prison:total', 0):,}",
+        ]
         await ctx.send(box("\n".join(lines), lang="text"))
 
     @candidate_autobuild.command(name="dryrun")
