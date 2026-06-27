@@ -7,6 +7,9 @@ import difflib
 import hashlib
 import html as html_lib
 import math
+import os
+import struct
+import tempfile
 from html.parser import HTMLParser
 from io import BytesIO
 import json
@@ -15,6 +18,7 @@ import re
 import sqlite3
 import time
 import unicodedata
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -75,32 +79,12 @@ AUTO_CANDIDATE_DEFAULT_TIMEZONE = "America/New_York"
 AUTO_CANDIDATE_DUPLICATE_RADIUS_METERS = 250
 AUTO_CANDIDATE_SELECTION_POOL = 50
 AUTO_CANDIDATE_REFILL_MIN_AVAILABLE = 10
-AUTO_CANDIDATE_REFILL_REGIONS_PER_RUN = 4
-AUTO_CANDIDATE_REFILL_TIMEOUT_SECONDS = 120
+AUTO_CANDIDATE_REFILL_REGIONS_PER_RUN = 2
+AUTO_CANDIDATE_REFILL_TIMEOUT_SECONDS = 300
+AUTO_CANDIDATE_REFILL_MAX_EXTRACT_BYTES = 350 * 1024 * 1024
+GEOFABRIK_INDEX_URL = "https://download.geofabrik.de/index-v1.json"
 OVERPASS_API_URL = "https://overpass-api.de/api/interpreter"
 OVERPASS_IMPORT_AREA_WARNING_DEGREES = 0.35
-AUTO_CANDIDATE_REFILL_REGIONS: Tuple[Dict[str, Any], ...] = (
-    {"name": "Portland, Oregon, USA", "bbox": (45.4300, -122.8000, 45.6500, -122.4500)},
-    {"name": "Sacramento, California, USA", "bbox": (38.4500, -121.6000, 38.7000, -121.3500)},
-    {"name": "San Francisco, California, USA", "bbox": (37.7000, -122.5500, 37.8500, -122.3500)},
-    {"name": "Los Angeles, California, USA", "bbox": (33.9000, -118.4500, 34.1500, -118.1500)},
-    {"name": "Houma, Louisiana, USA", "bbox": (29.5000, -90.8500, 29.7500, -90.5500)},
-    {"name": "Bermuda Islands", "bbox": (32.2000, -64.9500, 32.4000, -64.6500)},
-    {"name": "Glasgow, United Kingdom", "bbox": (55.7800, -4.4000, 55.9500, -4.1000)},
-    {"name": "Copenhagen, Denmark", "bbox": (55.6000, 12.4500, 55.7800, 12.7000)},
-    {"name": "Beersheba, Israel", "bbox": (31.1500, 34.6500, 31.3500, 34.9000)},
-    {"name": "New York City, New York, USA", "bbox": (40.6000, -74.0500, 40.8500, -73.7500)},
-    {"name": "Miami, Florida, USA", "bbox": (25.6500, -80.3500, 25.9000, -80.1000)},
-    {"name": "Dallas, Texas, USA", "bbox": (32.6500, -97.0000, 32.9500, -96.6500)},
-    {"name": "Chicago, Illinois, USA", "bbox": (41.7500, -87.8500, 42.0000, -87.5500)},
-    {"name": "Toronto, Ontario, Canada", "bbox": (43.5500, -79.6500, 43.8500, -79.2500)},
-    {"name": "Amsterdam, Netherlands", "bbox": (52.2500, 4.7500, 52.4500, 5.0500)},
-    {"name": "Madrid, Spain", "bbox": (40.3000, -3.8500, 40.5500, -3.5500)},
-    {"name": "Paris, France", "bbox": (48.7500, 2.2000, 48.9500, 2.5000)},
-    {"name": "Berlin, Germany", "bbox": (52.4000, 13.2500, 52.6000, 13.5500)},
-    {"name": "Rome, Italy", "bbox": (41.7500, 12.3500, 42.0000, 12.6500)},
-    {"name": "Sydney, Australia", "bbox": (-33.9500, 151.0500, -33.7500, 151.3000)},
-)
 PLAYWRIGHT_SETUP_MESSAGE = (
     "Playwright browser automation is not ready. Install the BuildingManager requirements and run "
     "`python -m playwright install chromium` in the same Python environment as Redbot."
@@ -1348,6 +1332,152 @@ def format_overpass_http_error(status: int, body: str, *, building_type: str) ->
     detail = f" Detail: {_truncate_discord_text(text, 300)}" if text else ""
     return f"Overpass returned HTTP {int(status)} while importing `{building_type}` candidates.{detail}"
 
+def _decode_dbf_text(value: bytes) -> str:
+    """Decode DBF text from Geofabrik shapefile extracts."""
+    raw = bytes(value or b"").replace(b"\x00", b"").strip()
+    if not raw:
+        return ""
+    for encoding in ("utf-8", "cp1252", "latin-1"):
+        try:
+            return raw.decode(encoding).strip()
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", "ignore").strip()
+
+def _read_geofabrik_dbf_rows(data: bytes) -> List[Dict[str, str]]:
+    """Read the small DBF subset needed from a Geofabrik shapefile layer."""
+    if len(data) < 33:
+        return []
+    record_count = struct.unpack("<I", data[4:8])[0]
+    header_length = struct.unpack("<H", data[8:10])[0]
+    record_length = struct.unpack("<H", data[10:12])[0]
+    fields: List[Tuple[str, int, int]] = []
+    pos = 32
+    offset = 1
+    while pos + 32 <= len(data) and data[pos] != 0x0D:
+        descriptor = data[pos : pos + 32]
+        name = descriptor[:11].split(b"\x00", 1)[0].decode("ascii", "ignore").strip()
+        length = int(descriptor[16])
+        if name and length:
+            fields.append((name, offset, length))
+        offset += length
+        pos += 32
+    rows: List[Dict[str, str]] = []
+    for index in range(int(record_count)):
+        start = header_length + index * record_length
+        end = start + record_length
+        if end > len(data):
+            break
+        record = data[start:end]
+        if not record or record[:1] == b"*":
+            continue
+        rows.append(
+            {
+                name: _decode_dbf_text(record[field_offset : field_offset + field_length])
+                for name, field_offset, field_length in fields
+            }
+        )
+    return rows
+
+def _read_geofabrik_shp_points(data: bytes) -> List[Optional[Tuple[float, float]]]:
+    """Read point or polygon-center coordinates from a Geofabrik SHP layer."""
+    points: List[Optional[Tuple[float, float]]] = []
+    if len(data) < 100:
+        return points
+    pos = 100
+    while pos + 8 <= len(data):
+        try:
+            _record_number, content_words = struct.unpack(">2i", data[pos : pos + 8])
+        except struct.error:
+            break
+        pos += 8
+        content_length = int(content_words) * 2
+        content = data[pos : pos + content_length]
+        pos += content_length
+        if len(content) < 4:
+            points.append(None)
+            continue
+        shape_type = struct.unpack("<i", content[:4])[0]
+        if shape_type == 0:
+            points.append(None)
+        elif shape_type == 1 and len(content) >= 20:
+            lon, lat = struct.unpack("<2d", content[4:20])
+            points.append((float(lat), float(lon)))
+        elif shape_type in {3, 5, 13, 15, 23, 25, 31} and len(content) >= 36:
+            xmin, ymin, xmax, ymax = struct.unpack("<4d", content[4:36])
+            points.append((float((ymin + ymax) / 2), float((xmin + xmax) / 2)))
+        else:
+            points.append(None)
+    return points
+
+def parse_geofabrik_shp_auto_build_candidates(
+    zip_path: str,
+    *,
+    extract_id: str,
+    extract_name: str,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """Parse Geofabrik free shapefile ZIP into local auto-build candidates."""
+    candidates: List[Dict[str, Any]] = []
+    stats = {
+        "source_elements": 0,
+        "accepted": 0,
+        "rejected": 0,
+    }
+    layers = ("gis_osm_pois_free_1", "gis_osm_pois_a_free_1")
+    with zipfile.ZipFile(zip_path) as archive:
+        names = set(archive.namelist())
+        for layer in layers:
+            dbf_name = f"{layer}.dbf"
+            shp_name = f"{layer}.shp"
+            if dbf_name not in names or shp_name not in names:
+                continue
+            rows = _read_geofabrik_dbf_rows(archive.read(dbf_name))
+            points = _read_geofabrik_shp_points(archive.read(shp_name))
+            for index, row in enumerate(rows):
+                stats["source_elements"] += 1
+                fclass = str(row.get("fclass") or "").casefold().strip()
+                if fclass == "hospital":
+                    building_type = "Hospital"
+                elif fclass == "prison":
+                    building_type = "Prison"
+                else:
+                    continue
+                point = points[index] if index < len(points) else None
+                name = _clean_building_name(row.get("name") or "")
+                if not point or not name:
+                    stats["rejected"] += 1
+                    continue
+                lat, lon = point
+                if not -90 <= lat <= 90 or not -180 <= lon <= 180:
+                    stats["rejected"] += 1
+                    continue
+                osm_id = str(row.get("osm_id") or "").strip()
+                source_id = f"{extract_id}:{layer}:{osm_id or index}"
+                raw_tags = {
+                    "source": "geofabrik",
+                    "extract_id": extract_id,
+                    "extract_name": extract_name,
+                    "layer": layer,
+                    "osm_id": osm_id,
+                    "fclass": fclass,
+                }
+                candidates.append(
+                    {
+                        "source": "geofabrik",
+                        "source_id": source_id,
+                        "building_type": building_type,
+                        "name": name,
+                        "lat": lat,
+                        "lon": lon,
+                        "address": None,
+                        "country": extract_name,
+                        "region": extract_name,
+                        "raw_tags_json": json.dumps(raw_tags, ensure_ascii=False, sort_keys=True),
+                    }
+                )
+                stats["accepted"] += 1
+    return candidates, stats
+
 def extract_missionchief_building_id(*values: Any) -> Optional[int]:
     """Extract a MissionChief building id from URLs, response text, or snapshots."""
     for value in values:
@@ -1864,7 +1994,7 @@ class AutoBuildCandidate:
         element_type, _, element_id = self.source_id.partition("/")
         if element_type and element_id:
             return f"https://www.openstreetmap.org/{element_type}/{element_id}"
-        return "https://www.openstreetmap.org/"
+        return f"https://www.openstreetmap.org/?mlat={self.lat:.7f}&mlon={self.lon:.7f}#map=18/{self.lat:.7f}/{self.lon:.7f}"
 
 
 @dataclass
@@ -3234,6 +3364,24 @@ class BuildingDatabase:
                 UNIQUE(guild_id, run_date, building_type)
             )
         ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS building_auto_extract_imports (
+                extract_id TEXT PRIMARY KEY,
+                extract_name TEXT,
+                url TEXT,
+                status TEXT NOT NULL,
+                bytes_downloaded INTEGER,
+                inserted INTEGER NOT NULL DEFAULT 0,
+                updated INTEGER NOT NULL DEFAULT 0,
+                skipped INTEGER NOT NULL DEFAULT 0,
+                accepted INTEGER NOT NULL DEFAULT 0,
+                rejected INTEGER NOT NULL DEFAULT 0,
+                reason TEXT,
+                imported_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+        ''')
         
         conn.commit()
         conn.close()
@@ -3511,6 +3659,72 @@ class BuildingDatabase:
         row = cursor.fetchone()
         conn.close()
         return self._candidate_row_to_model(row) if row else None
+
+    def get_auto_extract_import_statuses(self) -> Dict[str, str]:
+        """Return Geofabrik extract import status by extract id."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT extract_id, status FROM building_auto_extract_imports")
+        rows = cursor.fetchall()
+        conn.close()
+        return {str(extract_id): str(status) for extract_id, status in rows}
+
+    def record_auto_extract_import(
+        self,
+        *,
+        extract_id: str,
+        extract_name: str,
+        url: str,
+        status: str,
+        bytes_downloaded: Optional[int] = None,
+        inserted: int = 0,
+        updated: int = 0,
+        skipped: int = 0,
+        accepted: int = 0,
+        rejected: int = 0,
+        reason: Optional[str] = None,
+    ) -> None:
+        """Record one Geofabrik extract import attempt."""
+        now = ts()
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            INSERT INTO building_auto_extract_imports
+            (extract_id, extract_name, url, status, bytes_downloaded, inserted, updated,
+             skipped, accepted, rejected, reason, imported_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(extract_id) DO UPDATE SET
+                extract_name = excluded.extract_name,
+                url = excluded.url,
+                status = excluded.status,
+                bytes_downloaded = excluded.bytes_downloaded,
+                inserted = excluded.inserted,
+                updated = excluded.updated,
+                skipped = excluded.skipped,
+                accepted = excluded.accepted,
+                rejected = excluded.rejected,
+                reason = excluded.reason,
+                updated_at = excluded.updated_at
+            ''',
+            (
+                str(extract_id),
+                str(extract_name or extract_id),
+                str(url or ""),
+                str(status),
+                bytes_downloaded,
+                int(inserted),
+                int(updated),
+                int(skipped),
+                int(accepted),
+                int(rejected),
+                _truncate_text(reason, 900) if reason else None,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        conn.close()
 
     def mark_auto_candidate(
         self,
@@ -4858,6 +5072,7 @@ class BuildingManager(commands.Cog):
             "auto_candidate_refill_enabled": True,
             "auto_candidate_refill_min_available": AUTO_CANDIDATE_REFILL_MIN_AVAILABLE,
             "auto_candidate_refill_regions_per_run": AUTO_CANDIDATE_REFILL_REGIONS_PER_RUN,
+            "auto_candidate_refill_max_extract_mb": AUTO_CANDIDATE_REFILL_MAX_EXTRACT_BYTES // (1024 * 1024),
             "auto_candidate_refill_next_region_index": 0,
         }
         default_global = {
@@ -7463,30 +7678,188 @@ class BuildingManager(commands.Cog):
         """Return locally available candidate count for one building type."""
         return int(stats.get(f"{building_type}:available", 0) or 0)
 
-    async def _fetch_auto_candidate_refill_region(
-        self,
-        region: Dict[str, Any],
-        building_type: str,
-    ) -> Tuple[Dict[str, int], Dict[str, int]]:
-        """Fetch one automatic candidate refill region from public OSM/Overpass."""
-        south, west, north, east = region["bbox"]
-        query = build_overpass_candidate_query(
-            float(south),
-            float(west),
-            float(north),
-            float(east),
-            building_type,
-        )
-        timeout = aiohttp.ClientTimeout(total=AUTO_CANDIDATE_REFILL_TIMEOUT_SECONDS)
+    async def _fetch_geofabrik_extract_index(self) -> List[Dict[str, str]]:
+        """Fetch the public Geofabrik extract index and return shapefile-capable extracts."""
+        timeout = aiohttp.ClientTimeout(total=60)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(OVERPASS_API_URL, data={"data": query}) as response:
+            async with session.get(GEOFABRIK_INDEX_URL) as response:
                 if response.status != 200:
-                    text = await response.text()
-                    raise RuntimeError(format_overpass_http_error(response.status, text, building_type=building_type))
+                    raise RuntimeError(f"Geofabrik index returned HTTP {response.status}.")
                 data = await response.json(content_type=None)
-        candidates, parse_stats = parse_overpass_auto_build_candidates(data)
-        db_stats = self.db.upsert_auto_candidates(candidates)
-        return parse_stats, db_stats
+        extracts: List[Dict[str, str]] = []
+        for feature in data.get("features") or []:
+            if not isinstance(feature, dict):
+                continue
+            props = feature.get("properties") or {}
+            urls = props.get("urls") or {}
+            extract_id = str(props.get("id") or "").strip()
+            url = str(urls.get("shp") or "").strip()
+            if not extract_id or not url:
+                continue
+            extracts.append(
+                {
+                    "id": extract_id,
+                    "name": str(props.get("name") or extract_id).strip(),
+                    "url": url,
+                }
+            )
+        return extracts
+
+    @staticmethod
+    def _extract_content_length(headers: Any) -> Optional[int]:
+        """Return Content-Length from aiohttp headers when available."""
+        value = None
+        with contextlib.suppress(Exception):
+            value = headers.get("Content-Length")
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    async def _download_and_import_geofabrik_extract(
+        self,
+        extract: Dict[str, str],
+        *,
+        max_bytes: int,
+    ) -> str:
+        """Download one Geofabrik shapefile extract, import candidates, then delete the ZIP."""
+        extract_id = str(extract.get("id") or "").strip()
+        extract_name = str(extract.get("name") or extract_id).strip()
+        url = str(extract.get("url") or "").strip()
+        if not extract_id or not url:
+            return "Skipped malformed Geofabrik extract record."
+
+        temp_path = None
+        downloaded = 0
+        try:
+            timeout = aiohttp.ClientTimeout(total=AUTO_CANDIDATE_REFILL_TIMEOUT_SECONDS)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        reason = f"Geofabrik returned HTTP {response.status}."
+                        self.db.record_auto_extract_import(
+                            extract_id=extract_id,
+                            extract_name=extract_name,
+                            url=url,
+                            status="failed",
+                            reason=reason,
+                        )
+                        return f"- {extract_name}: failed: {reason}"
+                    content_length = self._extract_content_length(response.headers)
+                    if content_length is not None and content_length > max_bytes:
+                        reason = f"extract is {content_length / (1024 * 1024):.1f} MB; limit is {max_bytes / (1024 * 1024):.1f} MB."
+                        self.db.record_auto_extract_import(
+                            extract_id=extract_id,
+                            extract_name=extract_name,
+                            url=url,
+                            status="skipped_large",
+                            bytes_downloaded=content_length,
+                            reason=reason,
+                        )
+                        return f"- {extract_name}: skipped large extract ({reason})"
+
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".shp.zip") as handle:
+                        temp_path = handle.name
+                        async for chunk in response.content.iter_chunked(1024 * 1024):
+                            if not chunk:
+                                continue
+                            downloaded += len(chunk)
+                            if downloaded > max_bytes:
+                                reason = f"download exceeded {max_bytes / (1024 * 1024):.1f} MB."
+                                self.db.record_auto_extract_import(
+                                    extract_id=extract_id,
+                                    extract_name=extract_name,
+                                    url=url,
+                                    status="skipped_large",
+                                    bytes_downloaded=downloaded,
+                                    reason=reason,
+                                )
+                                return f"- {extract_name}: skipped large extract ({reason})"
+                            handle.write(chunk)
+
+            candidates, parse_stats = await asyncio.to_thread(
+                parse_geofabrik_shp_auto_build_candidates,
+                temp_path,
+                extract_id=extract_id,
+                extract_name=extract_name,
+            )
+            db_stats = self.db.upsert_auto_candidates(candidates)
+            status = "completed"
+            self.db.record_auto_extract_import(
+                extract_id=extract_id,
+                extract_name=extract_name,
+                url=url,
+                status=status,
+                bytes_downloaded=downloaded,
+                inserted=db_stats.get("inserted", 0),
+                updated=db_stats.get("updated", 0),
+                skipped=db_stats.get("skipped", 0),
+                accepted=parse_stats.get("accepted", 0),
+                rejected=parse_stats.get("rejected", 0),
+                reason=None,
+            )
+            return (
+                f"- {extract_name}: {parse_stats.get('accepted', 0):,} accepted, "
+                f"{db_stats.get('inserted', 0):,} inserted, {db_stats.get('updated', 0):,} updated "
+                f"({downloaded / (1024 * 1024):.1f} MB downloaded)."
+            )
+        except Exception as exc:
+            reason = _truncate_text(exc, 500)
+            self.db.record_auto_extract_import(
+                extract_id=extract_id,
+                extract_name=extract_name,
+                url=url,
+                status="failed",
+                bytes_downloaded=downloaded or None,
+                reason=reason,
+            )
+            return f"- {extract_name}: failed: {reason}"
+        finally:
+            if temp_path:
+                with contextlib.suppress(OSError):
+                    os.unlink(temp_path)
+
+    async def _import_next_geofabrik_extracts(self, guild: discord.Guild, *, max_extracts: int) -> List[str]:
+        """Import the next unprocessed Geofabrik extracts into the local candidate database."""
+        conf = await self.config.guild(guild).all()
+        try:
+            max_mb = max(1, int(conf.get("auto_candidate_refill_max_extract_mb") or (AUTO_CANDIDATE_REFILL_MAX_EXTRACT_BYTES // (1024 * 1024))))
+        except (TypeError, ValueError):
+            max_mb = AUTO_CANDIDATE_REFILL_MAX_EXTRACT_BYTES // (1024 * 1024)
+        max_bytes = max_mb * 1024 * 1024
+        extracts = await self._fetch_geofabrik_extract_index()
+        statuses = self.db.get_auto_extract_import_statuses()
+        if not extracts:
+            return ["Geofabrik index returned no shapefile extracts."]
+
+        try:
+            next_index = int(conf.get("auto_candidate_refill_next_region_index") or 0)
+        except (TypeError, ValueError):
+            next_index = 0
+
+        lines = [
+            (
+                "Automatic candidate refill source: Geofabrik OSM extracts "
+                f"({len(extracts):,} extracts indexed, max {max_mb:,} MB per extract)."
+            )
+        ]
+        imported = 0
+        scanned = 0
+        while imported < max(1, int(max_extracts)) and scanned < len(extracts):
+            extract = extracts[next_index % len(extracts)]
+            next_index += 1
+            scanned += 1
+            status = statuses.get(str(extract.get("id") or ""))
+            if status in {"completed", "skipped_large"}:
+                continue
+            lines.append(await self._download_and_import_geofabrik_extract(extract, max_bytes=max_bytes))
+            imported += 1
+            await asyncio.sleep(1)
+
+        await self.config.guild(guild).auto_candidate_refill_next_region_index.set(next_index % len(extracts))
+        if imported == 0:
+            lines.append("No unprocessed Geofabrik extracts were available within this scan window.")
+        return lines
 
     async def _refill_auto_candidates_if_needed(
         self,
@@ -7529,53 +7902,17 @@ class BuildingManager(commands.Cog):
             return []
 
         try:
-            regions_per_run = max(
+            extracts_per_run = max(
                 1,
                 int(conf.get("auto_candidate_refill_regions_per_run") or AUTO_CANDIDATE_REFILL_REGIONS_PER_RUN),
             )
         except (TypeError, ValueError):
-            regions_per_run = AUTO_CANDIDATE_REFILL_REGIONS_PER_RUN
-        regions_per_run = min(regions_per_run, len(AUTO_CANDIDATE_REFILL_REGIONS))
-
-        try:
-            next_index = int(conf.get("auto_candidate_refill_next_region_index") or 0)
-        except (TypeError, ValueError):
-            next_index = 0
+            extracts_per_run = AUTO_CANDIDATE_REFILL_REGIONS_PER_RUN
 
         lines = [
             f"Automatic candidate refill started: {', '.join(needed)} below {minimum_available} available."
         ]
-        for _ in range(regions_per_run):
-            region = AUTO_CANDIDATE_REFILL_REGIONS[next_index % len(AUTO_CANDIDATE_REFILL_REGIONS)]
-            next_index += 1
-            region_name = str(region.get("name") or "Unnamed region")
-            for building_type in list(needed):
-                try:
-                    parse_stats, db_stats = await self._fetch_auto_candidate_refill_region(region, building_type)
-                    lines.append(
-                        (
-                            f"- {region_name} / {building_type}: "
-                            f"{parse_stats.get('accepted', 0):,} accepted, "
-                            f"{db_stats.get('inserted', 0):,} inserted, "
-                            f"{db_stats.get('updated', 0):,} updated."
-                        )
-                    )
-                except Exception as exc:
-                    lines.append(f"- {region_name} / {building_type}: refill failed: {_truncate_text(exc, 240)}")
-                await asyncio.sleep(1)
-
-            stats = self.db.get_auto_candidate_stats()
-            needed = [
-                building_type
-                for building_type in normalized_types
-                if self._available_auto_candidate_count(stats, building_type) < minimum_available
-            ]
-            if not needed:
-                break
-
-        await self.config.guild(guild).auto_candidate_refill_next_region_index.set(
-            next_index % len(AUTO_CANDIDATE_REFILL_REGIONS)
-        )
+        lines.extend(await self._import_next_geofabrik_extracts(guild, max_extracts=extracts_per_run))
         final_stats = self.db.get_auto_candidate_stats()
         lines.append(
             (
@@ -7667,7 +8004,7 @@ class BuildingManager(commands.Cog):
             [
                 "Daily candidate auto-build",
                 "Candidate source: local SQLite database",
-                "Automatic refill: public OSM/Overpass in small rotating regions when local stock is low",
+                "Automatic refill: Geofabrik OSM extracts when local stock is low",
                 f"Enabled: {bool(conf.get('auto_candidate_build_enabled'))}",
                 f"Time: {conf.get('auto_candidate_time') or AUTO_CANDIDATE_DEFAULT_TIME}",
                 f"Timezone: {conf.get('auto_candidate_timezone') or AUTO_CANDIDATE_DEFAULT_TIMEZONE}",
@@ -7680,10 +8017,13 @@ class BuildingManager(commands.Cog):
                     "available per type"
                 ),
                 (
-                    "Refill regions per run: "
+                    "Refill extracts per run: "
                     f"{int(conf.get('auto_candidate_refill_regions_per_run') or AUTO_CANDIDATE_REFILL_REGIONS_PER_RUN):,}"
                 ),
-                f"Refill region pool: {len(AUTO_CANDIDATE_REFILL_REGIONS):,} regions",
+                (
+                    "Refill max extract size: "
+                    f"{int(conf.get('auto_candidate_refill_max_extract_mb') or (AUTO_CANDIDATE_REFILL_MAX_EXTRACT_BYTES // (1024 * 1024))):,} MB"
+                ),
                 "",
                 "Candidates:",
                 f"- Hospitals available: {stats.get('Hospital:available', 0):,} / {stats.get('Hospital:total', 0):,}",
@@ -8675,6 +9015,17 @@ class BuildingManager(commands.Cog):
         await self.config.guild(ctx.guild).auto_candidate_duplicate_radius_m.set(int(meters))
         await ctx.send(f"Duplicate radius set to {int(meters):,} meters.")
 
+    @candidate_autobuild.command(name="maxextractmb")
+    @commands.admin()
+    @commands.guild_only()
+    async def candidate_autobuild_max_extract_mb(self, ctx: commands.Context, megabytes: int = 350):
+        """Set the maximum Geofabrik extract ZIP size for automatic refill."""
+        if megabytes < 1:
+            await ctx.send("Maximum extract size must be at least 1 MB.")
+            return
+        await self.config.guild(ctx.guild).auto_candidate_refill_max_extract_mb.set(int(megabytes))
+        await ctx.send(f"Automatic candidate refill max extract size set to {int(megabytes):,} MB.")
+
     @candidate_autobuild.command(name="importjson")
     @commands.admin()
     @commands.guild_only()
@@ -8774,6 +9125,28 @@ class BuildingManager(commands.Cog):
                 lang="text",
             )
         )
+
+    @candidate_autobuild.command(name="importextracts")
+    @commands.admin()
+    @commands.guild_only()
+    async def candidate_autobuild_import_extracts(self, ctx: commands.Context, max_extracts: int = 1):
+        """Import the next unprocessed Geofabrik extracts into the local candidate database."""
+        if max_extracts < 1:
+            await ctx.send("Import at least one extract.")
+            return
+        max_extracts = min(int(max_extracts), 10)
+        async with ctx.typing():
+            lines = await self._import_next_geofabrik_extracts(ctx.guild, max_extracts=max_extracts)
+            stats = self.db.get_auto_candidate_stats()
+        lines.extend(
+            [
+                "",
+                "Local candidate stock:",
+                f"- Hospitals available: {stats.get('Hospital:available', 0):,} / {stats.get('Hospital:total', 0):,}",
+                f"- Prisons available: {stats.get('Prison:available', 0):,} / {stats.get('Prison:total', 0):,}",
+            ]
+        )
+        await ctx.send(box("\n".join(lines), lang="text"))
 
     @candidate_autobuild.command(name="dryrun")
     @commands.admin()
