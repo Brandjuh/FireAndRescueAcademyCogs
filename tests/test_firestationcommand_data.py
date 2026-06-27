@@ -303,7 +303,7 @@ def test_imported_equipment_catalog_has_images_and_progression_depth():
         assert (_FSC_ROOT / item["image"]).exists()
 
 
-def test_catalog_images_use_consistent_generated_png_canvas():
+def test_catalog_images_use_expected_generated_asset_paths():
     prefix_by_catalog = {
         "missions": "Images/Missions/",
         "vehicles": "Images/Vehicles/",
@@ -321,10 +321,18 @@ def test_catalog_images_use_consistent_generated_png_canvas():
         assert image_ref.startswith(prefix_by_catalog[catalog_name])
         path = _FSC_ROOT / image_ref
         assert path.exists(), (catalog_name, item_id, image_ref)
+
+
+def test_all_firestationcommand_images_use_consistent_png_canvas():
+    image_paths = sorted((_FSC_ROOT / "Images").rglob("*.png"))
+
+    assert len(image_paths) >= 1300
+    for path in image_paths:
+        relative_path = path.relative_to(_FSC_ROOT).as_posix()
         with Image.open(path) as image:
-            assert image.format == "PNG", (catalog_name, item_id, image_ref)
-            assert image.size == (1024, 1024), (catalog_name, item_id, image_ref)
-            assert image.mode in {"RGB", "RGBA"}, (catalog_name, item_id, image_ref)
+            assert image.format == "PNG", relative_path
+            assert image.size == (1024, 1024), relative_path
+            assert image.mode in {"RGB", "RGBA"}, relative_path
 
 
 def test_imported_missions_have_equipment_depth_without_losing_quantities():
