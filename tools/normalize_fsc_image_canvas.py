@@ -20,7 +20,7 @@ def normalize_image(path, dry_run: bool = False) -> bool:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Normalize FireStationCommand PNG assets to the shared PixelArt canvas.")
+    parser = argparse.ArgumentParser(description="Normalize FireStationCommand PNG assets to the shared game-asset canvas.")
     parser.add_argument("--dry-run", action="store_true", help="List files that would be normalized without writing them.")
     args = parser.parse_args()
 

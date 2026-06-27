@@ -8,8 +8,7 @@ from PIL import Image, ImageOps
 ROOT = Path(__file__).resolve().parents[1]
 FSC_IMAGES = ROOT / "FireStationCommand" / "Images"
 CANVAS_SIZE = (1024, 1024)
-PIXEL_SOURCE_SIZE = (256, 256)
-PALETTE_COLORS = 128
+PALETTE_COLORS = 192
 
 
 def background_for(image: Image.Image) -> tuple[int, int, int]:
@@ -30,12 +29,11 @@ def normalize_canvas(image: Image.Image) -> Image.Image:
     return canvas
 
 
-def apply_pixel_art_style(image: Image.Image) -> Image.Image:
+def apply_game_asset_style(image: Image.Image) -> Image.Image:
     canvas = normalize_canvas(image)
-    source = canvas.resize(PIXEL_SOURCE_SIZE, Image.Resampling.BOX)
-    pixel_palette = source.quantize(colors=PALETTE_COLORS, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
-    return pixel_palette.convert("RGB").resize(CANVAS_SIZE, Image.Resampling.NEAREST)
+    palette = canvas.quantize(colors=PALETTE_COLORS, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
+    return palette.convert("RGB")
 
 
 def prepare_fsc_image(image: Image.Image) -> Image.Image:
-    return apply_pixel_art_style(image)
+    return apply_game_asset_style(image)

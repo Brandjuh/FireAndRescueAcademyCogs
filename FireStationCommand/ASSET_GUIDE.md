@@ -1,6 +1,6 @@
 # FireStationCommand Asset Guide
 
-FireStationCommand uses a consistent PixelArt game-asset style for all in-game images. This guide defines the required format so new generated, imported, or hand-edited assets stay compatible with the dashboard, mission, shop, station, and result embeds.
+FireStationCommand uses a consistent clean 2D cartoon game-asset style for all in-game images. This guide defines the required format so new generated, imported, or hand-edited assets stay compatible with the dashboard, mission, shop, station, and result embeds.
 
 ## Scope
 
@@ -20,10 +20,9 @@ Every FireStationCommand image must be:
 - PNG format
 - `1024x1024` pixels
 - RGB or RGBA mode
-- Built from a `256x256` visual grid and scaled to `1024x1024` with nearest-neighbor scaling
-- Limited to no more than `128` colors
+- Limited to no more than `192` colors
 
-The result should read as a clean PixelArt game asset: simplified shapes, crisp hard edges, clear silhouettes, limited colors, and no photorealistic rendering.
+The result should read as a clean illustrated game asset: simplified geometry, crisp hard edges, thick dark outlines, clear silhouettes, limited colors, and no photorealistic rendering.
 
 ## Style Rules
 
@@ -33,6 +32,7 @@ Use:
 - Clear emergency-service subject matter
 - Strong outlines and blocky shapes
 - Simple readable backgrounds
+- Flat color fills, hard cel-shading, and subtle texture from controlled palette variation
 - Limited color palettes with consistent red, dark gray, light blue, white, yellow, and safety-orange accents
 
 Avoid:
@@ -40,7 +40,7 @@ Avoid:
 - Photorealistic images
 - Soft painterly gradients
 - Blurred details
-- High-resolution texture noise
+- High-resolution texture noise or painterly effects
 - Tiny unreadable text
 - Arbitrary canvas sizes
 - High-color imported images without normalization
@@ -53,7 +53,7 @@ Regenerate mission, vehicle, and equipment catalog images:
 python tools/generate_fsc_mission_images.py
 ```
 
-Normalize any existing FireStationCommand PNG assets to the shared PixelArt canvas:
+Normalize any existing FireStationCommand PNG assets to the shared game-asset canvas:
 
 ```powershell
 python tools/normalize_fsc_image_canvas.py
@@ -65,7 +65,7 @@ Check whether all assets are already normalized without writing changes:
 python tools/normalize_fsc_image_canvas.py --dry-run
 ```
 
-Both tools use `tools/fsc_image_style.py`, which applies the shared canvas, palette, and PixelArt processing.
+Both tools use `tools/fsc_image_style.py`, which applies the shared canvas and limited-palette cartoon game-asset processing.
 
 ## Validation
 
@@ -75,7 +75,7 @@ Run the FireStationCommand data tests before committing asset changes:
 python -m pytest tests/test_firestationcommand_data.py
 ```
 
-The test suite checks that configured mission, vehicle, and equipment image references exist and that every FireStationCommand image follows the PixelArt asset contract.
+The test suite checks that configured mission, vehicle, and equipment image references exist and that every FireStationCommand image follows the shared asset contract.
 
 ## Contributor Workflow
 
