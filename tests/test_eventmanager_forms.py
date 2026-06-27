@@ -15,6 +15,7 @@ from eventmanager.event_manager import (
     EVENT_RADIO_FIELD,
     fields_for_selection,
     field_options_for_kind,
+    find_type_option,
     MISSION_TYPE_FIELD,
     normalize_kind,
     normalize_optional_profile_arg,
@@ -35,7 +36,9 @@ from eventmanager.event_manager import (
     profile_with_selected_type,
     random_location_for_region,
     RANDOM_TYPE_KEY,
+    TYPE_SEARCH_KEY,
     route_profile_for_location,
+    route_locations_for_kind,
     route_profile_names,
     safe_debug_mapping,
     safe_debug_payload,
@@ -403,11 +406,15 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertEqual(config["amount"], "0")
 
     def test_route_profiles_use_fixed_locations_and_random_live_types(self):
-        names = route_profile_names()
+        names = route_profile_names("event")
+        large_names = route_profile_names("large")
 
         self.assertEqual(len(names), 10)
+        self.assertEqual(len(large_names), 11)
         self.assertEqual(names[0], "route_new_york_city")
         self.assertEqual(names[-1], "route_beersheba_israel")
+        self.assertIn("route_yakima_wildfire_wa", large_names)
+        self.assertNotIn("route_yakima_wildfire_wa", names)
 
         large_profile = route_profile_for_location("large", EVENT_ROUTE_LOCATIONS[0])
         event_profile = route_profile_for_location("event", EVENT_ROUTE_LOCATIONS[0])
@@ -448,6 +455,29 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertEqual(resolved["fields"][EVENT_RADIO_FIELD], "1")
         self.assertEqual(resolved["fields"][MISSION_TYPE_FIELD], "1")
         self.assertEqual(resolved["selected_type_label"], "Civil Unrest")
+
+    def test_yakima_wildfire_profile_is_large_only_with_type_search(self):
+        yakima = next(location for location in route_locations_for_kind("large") if location["label"] == "Yakima Wildfire, WA")
+
+        profile = route_profile_for_location("large", yakima)
+
+        self.assertEqual(profile[TYPE_SEARCH_KEY], "Wildfire")
+        self.assertNotIn(RANDOM_TYPE_KEY, profile)
+        self.assertIn("Yakima", profile["fields"][ADDRESS_FIELD])
+        self.assertEqual(profile_type_summary("large", profile), "Wildfire")
+
+    def test_find_type_option_matches_wildfire_without_hardcoded_id(self):
+        options = [
+            type("Option", (), {"value": "41", "label": "Major fire"})(),
+            type("Option", (), {"value": "999", "label": "Wildfire"})(),
+            type("Option", (), {"value": "61", "label": "Unannounced demonstration"})(),
+        ]
+
+        selected = find_type_option(options, "wild fire")
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.value, "999")
+        self.assertEqual(selected.label, "Wildfire")
 
     def test_build_browser_start_config_resolves_large_profile(self):
         profile = fields_for_selection("large", "41", random_region="nyc")
@@ -674,7 +704,8 @@ class EventManagerFormTests(unittest.TestCase):
 
 class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
     async def test_next_scheduled_profile_summary_uses_profile_after_current(self):
-        profile_names = route_profile_names()
+        profile_names = route_profile_names("event")
+        event_locations = route_locations_for_kind("event")
         fake = type("FakeEventManager", (), {})()
         fake.config = FakeEventManagerConfig(
             schedules={
@@ -686,8 +717,8 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
             },
             profiles={
                 "event": {
-                    route_profile_names()[index]: route_profile_for_location("event", location)
-                    for index, location in enumerate(EVENT_ROUTE_LOCATIONS)
+                    route_profile_names("event")[index]: route_profile_for_location("event", location)
+                    for index, location in enumerate(event_locations)
                 }
             },
         )
@@ -698,7 +729,8 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Type: Surprise Alliance event type", summary)
 
     async def test_notification_context_exposes_next_route_profile(self):
-        profile_names = route_profile_names()
+        profile_names = route_profile_names("large")
+        large_locations = route_locations_for_kind("large")
         fake = type("FakeEventManager", (), {})()
         fake.config = FakeEventManagerConfig(
             schedules={
@@ -710,8 +742,8 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
             },
             profiles={
                 "large": {
-                    route_profile_names()[index]: route_profile_for_location("large", location)
-                    for index, location in enumerate(EVENT_ROUTE_LOCATIONS)
+                    route_profile_names("large")[index]: route_profile_for_location("large", location)
+                    for index, location in enumerate(large_locations)
                 }
             },
         )
@@ -734,7 +766,8 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Type: Surprise Large scale alliance mission type", summary)
 
     async def test_next_notification_details_include_location_type_and_schedule_time(self):
-        profile_names = route_profile_names()
+        profile_names = route_profile_names("event")
+        event_locations = route_locations_for_kind("event")
         fake = type("FakeEventManager", (), {})()
         fake.config = FakeEventManagerConfig(
             schedules={
@@ -749,8 +782,8 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
             },
             profiles={
                 "event": {
-                    route_profile_names()[index]: route_profile_for_location("event", location)
-                    for index, location in enumerate(EVENT_ROUTE_LOCATIONS)
+                    route_profile_names("event")[index]: route_profile_for_location("event", location)
+                    for index, location in enumerate(event_locations)
                 }
             },
             last_started_at={"event": "2099-06-20T19:08:30+00:00"},
