@@ -9,6 +9,8 @@ from typing import Any
 import yaml
 from PIL import Image, ImageDraw
 
+from fsc_image_style import prepare_fsc_image
+
 
 ROOT = Path(__file__).resolve().parents[1]
 FSC_ROOT = ROOT / "FireStationCommand"
@@ -774,7 +776,7 @@ def write_catalog_images(items: list[dict[str, Any]], image_prefix: str, rendere
             raise SystemExit(f"Unexpected image path: {image_path}")
         output = FSC_ROOT / image_path
         output.parent.mkdir(parents=True, exist_ok=True)
-        renderer(item).save(output, "PNG", compress_level=6)
+        prepare_fsc_image(renderer(item)).save(output, "PNG", compress_level=6)
         written += 1
     return written
 
