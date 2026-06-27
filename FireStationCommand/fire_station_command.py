@@ -66,6 +66,7 @@ class FireStationCommand(commands.Cog):
             "active_mission": {},
             "developer_mode": False,
             "last_daily_at": None,
+            "parking_lots": 0,
         }
 
         self.config.register_global(**default_global)
@@ -201,6 +202,15 @@ class FireStationCommand(commands.Cog):
 
     def _vehicle_sale_refund_rate(self) -> float:
         return max(0.0, min(1.0, self._balance_float("vehicle_sale_refund_rate", 0.5)))
+
+    def _parking_lot_base_cost(self) -> int:
+        return max(0, self._balance_int("parking_lot_base_cost", 25000))
+
+    def _parking_lot_cost_growth(self) -> float:
+        return max(1.0, self._balance_float("parking_lot_cost_growth", 1.35))
+
+    def _parking_lot_slots_per_upgrade(self) -> int:
+        return max(1, self._balance_int("parking_lot_slots", 1))
 
     def _maintenance_multiplier(self) -> float:
         return max(0.0, self._balance_float("maintenance_cost_multiplier", 1.0))
@@ -1539,7 +1549,23 @@ class FireStationCommand(commands.Cog):
         level = int(data.get("station_level", 1))
         base = self._max_vehicles(level)
         effects = self._expansion_effect_totals(data.get("expansions", []))
-        return base + int(effects.get("extra_vehicle_slots", 0))
+        parking_slots = self._parking_lot_count(data) * self._parking_lot_slots_per_upgrade()
+        return base + int(effects.get("extra_vehicle_slots", 0)) + parking_slots
+
+    @staticmethod
+    def _parking_lot_count(data: Dict[str, Any]) -> int:
+        try:
+            return max(0, int(data.get("parking_lots", 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def _parking_lot_base_cost_for_count(self, current_count: int) -> int:
+        count = max(0, int(current_count))
+        return int(math.ceil(self._parking_lot_base_cost() * (self._parking_lot_cost_growth() ** count)))
+
+    def _parking_lot_cost(self, data: Dict[str, Any], credits: int) -> int:
+        base_cost = self._parking_lot_base_cost_for_count(self._parking_lot_count(data))
+        return self._economy_scaled_cost(base_cost, credits)
 
     def _xp_progress_text(self, xp: int, command_level: int) -> str:
         next_xp = self._xp_for_next_command_level(command_level)
@@ -2229,6 +2255,27 @@ class FireStationCommand(commands.Cog):
             value=f"{int(self._vehicle_sale_refund_rate() * 100)}% of vehicle value, adjusted by condition.",
             inline=False,
         )
+        return embed
+
+    def _build_parking_lot_embed(self, data: Dict[str, Any], credits: int | None = None) -> discord.Embed:
+        count = self._parking_lot_count(data)
+        slots_per_upgrade = self._parking_lot_slots_per_upgrade()
+        current_capacity = self._max_vehicles_for_data(data)
+        base_cost = self._parking_lot_base_cost_for_count(count)
+        display_cost = base_cost if credits is None else self._economy_scaled_cost(base_cost, credits)
+
+        embed = discord.Embed(
+            title="Parking lot",
+            description="Build another parking lot to add permanent vehicle capacity to this station.",
+            color=discord.Color.dark_gray(),
+        )
+        embed.add_field(name="Built parking lots", value=str(count), inline=True)
+        embed.add_field(name="Extra vehicle slots", value=str(count * slots_per_upgrade), inline=True)
+        embed.add_field(name="Current vehicle capacity", value=str(current_capacity), inline=True)
+        embed.add_field(name="Next parking lot", value=f"{display_cost:,} credits", inline=True)
+        embed.add_field(name="Capacity gain", value=f"+{slots_per_upgrade} vehicle slot", inline=True)
+        if credits is not None:
+            self._add_economy_pricing_note(embed, base_cost, display_cost, credits)
         return embed
 
     def _build_equipment_shop_embed(self, data: Dict[str, Any]) -> discord.Embed:
@@ -3046,6 +3093,19 @@ class FireStationCommand(commands.Cog):
             return
         embed = self._build_maintenance_embed(data)
         view = MaintenanceView(self, ctx.channel, ctx.author, ctx.guild)
+        message = await ctx.send(embed=embed, view=view)
+        view.message = message
+
+    @fsc_group.command(name="parking")
+    async def fsc_parking(self, ctx: commands.Context):
+        """Build repeatable parking lot upgrades for extra vehicle capacity."""
+        if not await self._ensure_started(ctx):
+            return
+
+        data = await self.config.user(ctx.author).all()
+        credits = await self._get_credits(ctx.author)
+        embed = self._build_parking_lot_embed(data, credits)
+        view = ParkingLotView(self, ctx.channel, ctx.author, ctx.guild, data=data)
         message = await ctx.send(embed=embed, view=view)
         view.message = message
 
@@ -4057,6 +4117,54 @@ class FireStationCommand(commands.Cog):
             return
         await interaction.response.send_message(embed=embed, ephemeral=False)
 
+    async def _confirm_parking_lot_purchase(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        *,
+        edit_message: bool = False,
+        guild: discord.Guild | None = None,
+    ):
+        user_conf = self.config.user(user)
+        data = await user_conf.all()
+        credits = await self._get_credits(user)
+        base_cost = self._parking_lot_base_cost_for_count(self._parking_lot_count(data))
+        cost = self._economy_scaled_cost(base_cost, credits)
+        if credits < cost or not await self._spend(user, cost):
+            embed = self._build_parking_lot_embed(data, credits)
+            embed.add_field(
+                name="Parking lot",
+                value=f"Build failed: this parking lot costs {cost:,} credits, but you only have {credits:,}.",
+                inline=False,
+            )
+            if edit_message:
+                view = ParkingLotView(self, channel, user, guild or interaction.guild, data=data)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        new_count = self._parking_lot_count(data) + 1
+        await user_conf.parking_lots.set(new_count)
+        fresh_data = await user_conf.all()
+        total_credits = await self._get_credits(user)
+        embed = discord.Embed(
+            title="Parking lot built",
+            description="The station adds another parking area and updates the vehicle board with the new capacity.",
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="Spent", value=f"{cost:,} credits", inline=True)
+        embed.add_field(name="Balance", value=f"{total_credits:,} credits", inline=True)
+        embed.add_field(name="Parking lots", value=str(new_count), inline=True)
+        embed.add_field(name="Vehicle capacity", value=str(self._max_vehicles_for_data(fresh_data)), inline=True)
+        self._add_economy_pricing_note(embed, base_cost, cost, credits)
+        if edit_message:
+            view = ParkingLotView(self, channel, user, guild or interaction.guild, data=fresh_data)
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+            return
+        await interaction.response.send_message(embed=embed, ephemeral=False)
+
     async def _confirm_expansion_purchase(
         self,
         interaction: discord.Interaction,
@@ -4480,6 +4588,7 @@ class FscDashboardView(FscTimedView):
         "recruit": "Hire staff",
         "maintenance": "Maintenance bay",
         "mission": "Start mission",
+        "parking": "Parking lot",
         "refresh": "Refresh dashboard",
         "sell_vehicle": "Sell vehicle",
         "station": "Overview",
@@ -4491,7 +4600,7 @@ class FscDashboardView(FscTimedView):
         "Incidents": ("commands", "mission"),
         "Staff": ("recruit", "training"),
         "Station": ("daily", "expansions", "career", "station", "refresh", "upgrade"),
-        "Vehicle": ("equipment", "maintenance", "sell_vehicle", "shop"),
+        "Vehicle": ("equipment", "maintenance", "parking", "sell_vehicle", "shop"),
     }
     DASHBOARD_CATEGORY_LABELS = set(DASHBOARD_CATEGORIES)
     DASHBOARD_ACTION_LABELS = set(ACTION_LABELS.values()) | {
@@ -4685,6 +4794,27 @@ class FscDashboardView(FscTimedView):
             content=None,
             embed=embed,
             view=VehicleSaleView(
+                self.cog,
+                interaction.channel or self.channel,
+                self.user,
+                interaction.guild or self.guild,
+                data=data,
+            ),
+        )
+
+    async def parking(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.config.user(self.user).all()
+        if not data["started"]:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Action required", value="Create a station first.", inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=FscStartView(self.cog, self.user))
+            return
+        credits = await self.cog._get_credits(self.user)
+        embed = self.cog._build_parking_lot_embed(data, credits)
+        await interaction.response.edit_message(
+            content=None,
+            embed=embed,
+            view=ParkingLotView(
                 self.cog,
                 interaction.channel or self.channel,
                 self.user,
@@ -5005,6 +5135,7 @@ class FscDashboardView(FscTimedView):
         embed.add_field(name="Career station", value="`[p]fsc career`", inline=False)
         embed.add_field(name="Daily reward", value="`[p]fsc daily`", inline=False)
         embed.add_field(name="Equipment", value="`[p]fsc equipment`", inline=False)
+        embed.add_field(name="Parking lot", value="`[p]fsc parking`", inline=False)
         embed.add_field(name="Sell vehicle", value="Vehicle menu -> Sell vehicle", inline=False)
         embed.add_field(name="Training", value="`[p]fsc training`", inline=False)
         embed.add_field(name="Expansions", value="`[p]fsc expansions`", inline=False)
@@ -5979,6 +6110,47 @@ class VehicleSaleView(FscTimedView):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = await self.cog._build_dashboard_embed(self.user)
+        channel = interaction.channel or self.channel
+        guild = interaction.guild or self.guild
+        data = await self.cog.config.user(self.user).all()
+        view = FscDashboardView(self.cog, self.user, channel, guild, data=data)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+
+class ParkingLotView(FscTimedView):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        guild: discord.Guild | None = None,
+        data: Dict[str, Any] | None = None,
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+        self.guild = guild
+        self.data = data or {}
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Build parking lot", style=discord.ButtonStyle.success)
+    async def build(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel = interaction.channel or self.channel
+        guild = interaction.guild or self.guild
+        await self.cog._confirm_parking_lot_purchase(
+            interaction,
+            channel,
+            self.user,
+            edit_message=True,
+            guild=guild,
+        )
 
     @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
