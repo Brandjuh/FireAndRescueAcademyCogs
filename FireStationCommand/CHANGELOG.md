@@ -67,6 +67,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - Added catalog image consistency tests for mission, vehicle, and equipment assets.
 - Added a FireStationCommand image canvas normalizer and full image-tree canvas consistency test.
 - Added shared PixelArt image processing for generated and imported FireStationCommand image assets.
+- Added a FireStationCommand asset guide for future PixelArt image imports and generated art.
 
 ### Changed
 
