@@ -713,7 +713,6 @@ class MembersScraper(commands.Cog):
             for exit_data in exits:
                 mc_id = exit_data['member_id']
                 name = exit_data['username']
-                rank = exit_data['rank'] or "No rank"
                 credits = exit_data['earned_credits']
                 rate = exit_data['contribution_rate']
                 
@@ -725,7 +724,6 @@ class MembersScraper(commands.Cog):
                 
                 embed.add_field(name="Name", value=name, inline=True)
                 embed.add_field(name="MC ID", value=f"[{mc_id}](https://www.missionchief.com/users/{mc_id})", inline=True)
-                embed.add_field(name="Rank", value=rank, inline=True)
                 embed.add_field(name="Last Credits", value=f"{credits:,}", inline=True)
                 embed.add_field(name="Contribution Rate", value=f"{rate}%", inline=True)
                 

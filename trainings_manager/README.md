@@ -11,6 +11,8 @@ Laat gebruikers trainingsklassen aanvragen via een menu, laat admins goed- of af
 - Bij afwijzing: admin geeft reden op; aanvrager krijgt deze te zien.
 - Admin-queue bericht wordt opgeruimd; logging gaat naar een log-kanaal.
 - Herinneringen zijn persistent en overleven restarts (worden elke 30s gecheckt).
+- MissionChief board polling voor `/alliance_threads/5935`: elke 5 minuten worden nieuwe posts op de laatste pagina gelezen, bekende trainingen worden fuzzy herkend, en succesvolle auto-openings krijgen een reply op het board.
+- MissionChief board guide: de bot maakt beheerde guide-posts in het `[REQUESTS] Training` topic, vult deze met alle trainingen uit `DISCIPLINES`, request-instructies en actuele academy availability, en wijzigt die posts wanneer de inhoud verandert.
 
 ## Installatie
 1. Plaats deze map in je Red cogs directory of installeer via de zip:
@@ -27,6 +29,8 @@ Stel kanalen en admin-rol in:
 [p]tmset logchannel #training-log
 [p]tmset adminrole @TrainingAdmin
 [p]tmset post
+[p]tmset board status
+[p]tmset boardguide status
 ```
 
 ## Notities
@@ -34,3 +38,7 @@ Stel kanalen en admin-rol in:
 - Vergoedingen: Free, 100, 200, 300, 400, 500 credits per dag per trainee.
 - Het aantal trainees is expres niet nodig.
 - Trainingsduur is hardcoded op basis van je lijst. Pas `DISCIPLINES` aan indien nodig.
+- Board-requests gebruiken standaard gratis klassen en 1 klas per herkende opleiding.
+- Board-requests krijgen ook een reply in het MissionChief-topic als de training niet herkend wordt of niet automatisch geopend kan worden.
+- De eerste board-poll na load zet alleen een baseline op de nieuwste post, zodat oude posts niet alsnog worden geopend.
+- De board-guide wordt elk uur gesynchroniseerd in het request-topic en kan handmatig met `[p]tmset boardguide sync` worden ververst.

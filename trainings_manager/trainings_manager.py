@@ -1,8 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from difflib import SequenceMatcher
+import hashlib
 from html.parser import HTMLParser
 import logging
 import re
@@ -124,6 +126,27 @@ DISCIPLINES: Dict[str, List[Tuple[str, int]]] = {
     ],
 }
 
+BOARD_DISCIPLINE_REQUEST_PREFIXES = {
+    "Fire": "Fire Station",
+    "Coastal": "Water Rescue",
+    "Police": "Police",
+    "EMS": "EMS / Rescue",
+}
+BOARD_DISCIPLINE_SEARCH_PREFIXES = {
+    "Fire": ("fire", "fire station", "fire academy", "fire school"),
+    "Coastal": ("water rescue", "coastal", "coastal rescue"),
+    "Police": ("police", "police academy"),
+    "EMS": ("ems", "rescue", "rescue academy"),
+}
+BOARD_AMBIGUOUS_HELP_SKIP_TOKENS = {
+    "academy",
+    "course",
+    "license",
+    "management",
+    "operations",
+    "training",
+}
+
 FEE_CHOICES = [0, 100, 200, 300, 400, 500]
 MEMBER_PANEL_CHANNEL_ID = 1421627971831070730
 DEVELOPER_PANEL_CHANNEL_ID = 1421242306136113254
@@ -137,6 +160,21 @@ AUTO_ALLIANCE_DURATION_SECONDS = 3600
 AUTO_MIN_CONTRIBUTION_RATE = 5.0
 AUTO_MAX_CLASSES = 4
 AVAILABILITY_REFRESH_SECONDS = 60 * 60
+BOARD_THREAD_ID = 5935
+BOARD_POLL_SECONDS = 5 * 60
+BOARD_DEFAULT_FEE = 0
+BOARD_MATCH_THRESHOLD = 0.78
+BOARD_GUIDE_MARKER_PREFIX = "TM-GUIDE"
+BOARD_REPLY_MARKER = "[TM-REPLY]"
+BOARD_GUIDE_OVERVIEW_SECTION = "overview"
+BOARD_GUIDE_MAX_SCAN_PAGES = 25
+BOARD_GUIDE_SYNC_SECONDS = AVAILABILITY_REFRESH_SECONDS
+BOARD_POST_DELETE_AFTER_SECONDS = 12 * 60 * 60
+BOARD_CLEANUP_SECONDS = 10 * 60
+BOARD_PROCESSED_POST_ID_LIMIT = 1000
+BOARD_PENDING_DELETE_LIMIT = 1000
+AGENCY_ORDER = ("Fire", "Police", "EMS", "Coastal")
+BOARD_GUIDE_SECTIONS = (BOARD_GUIDE_OVERVIEW_SECTION, *AGENCY_ORDER)
 
 
 @dataclass
@@ -185,10 +223,556 @@ class DisciplineAvailability:
     errors: int = 0
 
 
+@dataclass
+class BoardTrainingPost:
+    post_id: int
+    author_id: Optional[str]
+    author_name: str
+    created_at: str
+    content: str
+
+
+@dataclass
+class BoardPage:
+    posts: List[BoardTrainingPost]
+    last_page: int = 1
+    current_user_id: Optional[str] = None
+    reply_action: Optional[str] = None
+    reply_token: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class TrainingCatalogEntry:
+    discipline: str
+    training: str
+    days: int
+    normalized: str
+    aliases: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class BoardTrainingMatch:
+    discipline: str
+    training: str
+    days: int
+    matched_text: str
+    score: float
+
+
+@dataclass
+class MissionChiefForm:
+    action: Optional[str]
+    method: str
+    fields: Dict[str, str]
+
+
 def _normalize_training_name(name: str) -> str:
     cleaned = re.sub(r"\(\s*\d+\s+days?\s*\)", "", str(name), flags=re.IGNORECASE)
     cleaned = cleaned.replace("’", "'")
     return re.sub(r"\s+", " ", cleaned).strip().casefold()
+
+
+def _normalize_training_search_text(value: str) -> str:
+    text = _normalize_training_name(value)
+    text = text.replace("&", " and ")
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _ambiguous_board_training_names() -> Dict[str, List[Tuple[str, str, int]]]:
+    grouped: Dict[str, List[Tuple[str, str, int]]] = {}
+    for discipline, trainings in DISCIPLINES.items():
+        if discipline == "OTHER":
+            continue
+        for training, days in trainings:
+            grouped.setdefault(_normalize_training_search_text(training), []).append(
+                (discipline, training, int(days))
+            )
+    return {
+        normalized: entries
+        for normalized, entries in grouped.items()
+        if len({discipline for discipline, _training, _days in entries}) > 1
+    }
+
+
+def _is_ambiguous_board_training(discipline: str, training: str) -> bool:
+    normalized = _normalize_training_search_text(training)
+    return any(
+        entry_discipline == discipline and entry_training == training
+        for entry_discipline, entry_training, _days in _ambiguous_board_training_names().get(normalized, [])
+    )
+
+
+def _board_training_request_label(discipline: str, training: str) -> str:
+    if not _is_ambiguous_board_training(discipline, training):
+        return training
+    prefix = BOARD_DISCIPLINE_REQUEST_PREFIXES.get(discipline, discipline)
+    return f"{prefix} - {training}"
+
+
+def _board_training_aliases(discipline: str, training: str) -> Tuple[str, ...]:
+    if not _is_ambiguous_board_training(discipline, training):
+        return _training_name_alias_variants(training)
+
+    aliases = {
+        _normalize_training_search_text(_board_training_request_label(discipline, training)),
+    }
+    for training_alias in _training_name_alias_variants(training):
+        for prefix in BOARD_DISCIPLINE_SEARCH_PREFIXES.get(discipline, (discipline,)):
+            aliases.add(_normalize_training_search_text(f"{prefix} {training_alias}"))
+    return tuple(sorted(alias for alias in aliases if alias))
+
+
+def _mentions_board_discipline_prefix(normalized_text: str, discipline: str) -> bool:
+    for prefix in BOARD_DISCIPLINE_SEARCH_PREFIXES.get(discipline, (discipline,)):
+        normalized_prefix = _normalize_training_search_text(prefix)
+        if normalized_prefix and re.search(rf"\b{re.escape(normalized_prefix)}\b", normalized_text):
+            return True
+    return False
+
+
+def _has_board_training_specific_tokens(normalized_text: str, training: str) -> bool:
+    tokens = [
+        token
+        for token in _normalize_training_search_text(training).split()
+        if len(token) >= 4 and token not in BOARD_AMBIGUOUS_HELP_SKIP_TOKENS
+    ]
+    return all(re.search(rf"\b{re.escape(token)}\b", normalized_text) for token in tokens)
+
+
+def _training_name_alias_variants(training: str) -> Tuple[str, ...]:
+    """Return searchable variants for a training name without changing its display label."""
+    normalized = _normalize_training_search_text(training)
+    aliases = {normalized}
+    for suffix in (" training", " course", " certification", " certificate"):
+        if normalized.endswith(suffix):
+            aliases.add(normalized[: -len(suffix)].strip())
+    return tuple(sorted(alias for alias in aliases if alias))
+
+
+def _candidate_training_score(chunk: str, candidate: str) -> float:
+    """Score a free-form chunk against one training candidate."""
+    normalized_chunk = _normalize_training_search_text(chunk)
+    normalized_candidate = _normalize_training_search_text(candidate)
+    if not normalized_chunk or not normalized_candidate:
+        return 0.0
+
+    score = SequenceMatcher(None, normalized_chunk, normalized_candidate).ratio()
+    candidate_tokens = [
+        token
+        for token in normalized_candidate.split()
+        if token not in BOARD_AMBIGUOUS_HELP_SKIP_TOKENS
+    ]
+    chunk_tokens = normalized_chunk.split()
+    if len(candidate_tokens) >= 2 and chunk_tokens:
+        token_scores = [
+            max(SequenceMatcher(None, candidate_token, chunk_token).ratio() for chunk_token in chunk_tokens)
+            for candidate_token in candidate_tokens
+        ]
+        token_score = sum(token_scores) / len(token_scores)
+        if token_score >= 0.86:
+            score = max(score, token_score)
+    return score
+
+
+def _training_match_tokens(training: str) -> set[str]:
+    """Return significant tokens used to identify overlapping training names."""
+    return {
+        token
+        for token in _normalize_training_search_text(training).split()
+        if len(token) >= 4 and token not in BOARD_AMBIGUOUS_HELP_SKIP_TOKENS
+    }
+
+
+def _prune_contained_board_training_matches(matches: List[BoardTrainingMatch]) -> List[BoardTrainingMatch]:
+    """Remove accidental short matches contained in a longer training name."""
+    if len(matches) <= 1:
+        return matches
+
+    keep: List[BoardTrainingMatch] = []
+    token_cache = {index: _training_match_tokens(match.training) for index, match in enumerate(matches)}
+    for index, match in enumerate(matches):
+        tokens = token_cache[index]
+        remove = False
+        if len(tokens) >= 2:
+            for other_index, other in enumerate(matches):
+                if index == other_index:
+                    continue
+                other_tokens = token_cache[other_index]
+                if len(other_tokens) <= len(tokens):
+                    continue
+                if not tokens.issubset(other_tokens):
+                    continue
+                if other.score >= 0.90 or other.score >= match.score - 0.05:
+                    remove = True
+                    break
+        if not remove:
+            keep.append(match)
+    return keep
+
+
+def _training_catalog() -> List[TrainingCatalogEntry]:
+    entries: List[TrainingCatalogEntry] = []
+    seen: set[Tuple[str, str]] = set()
+    for discipline, trainings in DISCIPLINES.items():
+        if discipline == "OTHER":
+            continue
+        for training, days in trainings:
+            key = (discipline, training)
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append(
+                TrainingCatalogEntry(
+                    discipline=discipline,
+                    training=training,
+                    days=int(days),
+                    normalized=_normalize_training_search_text(training),
+                    aliases=_board_training_aliases(discipline, training),
+                )
+            )
+    return entries
+
+
+def extract_board_training_matches(text: str) -> List[BoardTrainingMatch]:
+    """Extract one or more training requests from free-form board text."""
+    normalized_text = _normalize_training_search_text(text)
+    if not normalized_text:
+        return []
+
+    matches: List[BoardTrainingMatch] = []
+    seen_trainings: set[Tuple[str, str]] = set()
+    catalog = _training_catalog()
+    ambiguous_names = set(_ambiguous_board_training_names())
+
+    for entry in catalog:
+        exact_candidates = set(entry.aliases)
+        if entry.normalized not in ambiguous_names:
+            exact_candidates.add(entry.normalized)
+        matched_candidate = next(
+            (
+                candidate
+                for candidate in sorted(exact_candidates, key=len, reverse=True)
+                if candidate and re.search(rf"\b{re.escape(candidate)}\b", normalized_text)
+            ),
+            None,
+        )
+        if matched_candidate:
+            seen_trainings.add((entry.discipline, entry.training))
+            matches.append(
+                BoardTrainingMatch(
+                    discipline=entry.discipline,
+                    training=entry.training,
+                    days=entry.days,
+                    matched_text=matched_candidate,
+                    score=1.0,
+                )
+            )
+
+    chunks = [
+        _normalize_training_search_text(chunk)
+        for chunk in re.split(r"[\n;,/|]+|\band\b|&|\+", str(text), flags=re.IGNORECASE)
+    ]
+    chunks = [chunk for chunk in chunks if len(chunk) >= 3]
+    for chunk in chunks:
+        best: Tuple[float, Optional[TrainingCatalogEntry]] = (0.0, None)
+        for entry in catalog:
+            key = (entry.discipline, entry.training)
+            if key in seen_trainings:
+                continue
+            if entry.normalized in ambiguous_names:
+                if not _mentions_board_discipline_prefix(chunk, entry.discipline):
+                    continue
+                if not _has_board_training_specific_tokens(chunk, entry.training):
+                    continue
+            candidates = list(entry.aliases)
+            if entry.normalized not in ambiguous_names:
+                candidates.append(entry.normalized)
+            candidates = [candidate for candidate in candidates if candidate]
+            if not candidates:
+                continue
+            score = max(_candidate_training_score(chunk, candidate) for candidate in candidates)
+            if any(candidate in chunk for candidate in candidates):
+                score = max(score, 0.88)
+            if score > best[0]:
+                best = (score, entry)
+
+        score, entry = best
+        if entry and score >= BOARD_MATCH_THRESHOLD:
+            seen_trainings.add((entry.discipline, entry.training))
+            matches.append(
+                BoardTrainingMatch(
+                    discipline=entry.discipline,
+                    training=entry.training,
+                    days=entry.days,
+                    matched_text=chunk,
+                    score=score,
+                )
+            )
+
+    return _prune_contained_board_training_matches(matches)
+
+
+def describe_ambiguous_board_training_request(text: str) -> Optional[str]:
+    normalized_text = _normalize_training_search_text(text)
+    if not normalized_text:
+        return None
+
+    exact_descriptions: List[str] = []
+    token_descriptions: List[str] = []
+    for normalized, entries in _ambiguous_board_training_names().items():
+        significant_tokens = [
+            token
+            for token in normalized.split()
+            if len(token) >= 5 and token not in BOARD_AMBIGUOUS_HELP_SKIP_TOKENS
+        ]
+        exact_match = re.search(rf"\b{re.escape(normalized)}\b", normalized_text) is not None
+        token_match = (
+            len(significant_tokens) == 1
+            and re.search(rf"\b{re.escape(significant_tokens[0])}\b", normalized_text) is not None
+        )
+        if not exact_match and not token_match:
+            continue
+
+        options = ", ".join(
+            _board_training_request_label(discipline, training)
+            for discipline, training, _days in entries
+        )
+        description = f"{entries[0][1]} exists in multiple academy types. Use one of: {options}."
+        if exact_match:
+            exact_descriptions.append(description)
+        else:
+            token_descriptions.append(description)
+
+    descriptions = exact_descriptions or token_descriptions
+    if not descriptions:
+        return None
+    return " ".join(descriptions[:3])
+
+
+class TrainingBoardPageParser(HTMLParser):
+    """Parse MissionChief alliance board pages for training requests and reply form data."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.posts: List[BoardTrainingPost] = []
+        self.page_numbers: List[int] = []
+        self.current_user_id: Optional[str] = None
+        self.reply_action: Optional[str] = None
+        self.reply_token: Optional[str] = None
+        self._post: Optional[dict] = None
+        self._post_depth = 0
+        self._content_depth = 0
+        self._capture_author = False
+        self._capture_content = False
+        self._capture_page_number = False
+        self._capture_active_page = False
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]):
+        attr = {key: value for key, value in attrs}
+
+        if tag == "div" and str(attr.get("id") or "").startswith("post-on-page-"):
+            self._post = {
+                "post_id": None,
+                "author_id": None,
+                "author_name": "",
+                "created_at": "",
+                "content": [],
+            }
+            self._post_depth = 1
+            return
+
+        if self._post is not None and tag == "div":
+            self._post_depth += 1
+            classes = str(attr.get("class") or "")
+            if "col-md-11" in classes:
+                self._content_depth = self._post_depth
+                self._capture_content = True
+
+        if self._post is not None and tag == "a":
+            href = str(attr.get("href") or "")
+            profile_match = re.search(r"/profile/(\d+)", href)
+            if profile_match and not self._post.get("author_id"):
+                self._post["author_id"] = profile_match.group(1)
+                self._capture_author = True
+
+            post_match = re.search(r"/alliance_posts/(\d+)", href)
+            if post_match:
+                self._post["post_id"] = int(post_match.group(1))
+
+        if self._post is not None and tag == "span":
+            title = attr.get("title")
+            if title and not self._post.get("created_at"):
+                self._post["created_at"] = str(title)
+
+        if self._post is not None and self._capture_content and tag == "br":
+            self._post["content"].append("\n")
+
+        if tag == "a":
+            href = str(attr.get("href") or "")
+            page_match = re.search(r"[?&]page=(\d+)", href)
+            if page_match:
+                self.page_numbers.append(int(page_match.group(1)))
+            self._capture_page_number = bool(page_match)
+
+        if tag == "li" and "active" in str(attr.get("class") or ""):
+            self._capture_active_page = True
+
+        if tag == "form" and str(attr.get("id") or "") == "new_alliance_post":
+            self.reply_action = attr.get("action")
+
+        if tag == "input" and attr.get("name") == "authenticity_token":
+            token = attr.get("value")
+            if token:
+                self.reply_token = token
+
+    def handle_data(self, data: str):
+        if "user_id =" in data:
+            match = re.search(r"user_id\s*=\s*(\d+)", data)
+            if match:
+                self.current_user_id = match.group(1)
+
+        if self._post is not None and self._capture_author:
+            text = re.sub(r"\s+", " ", data).strip()
+            if text:
+                self._post["author_name"] = text
+
+        if self._post is not None and self._capture_content:
+            self._post["content"].append(data)
+
+        if self._capture_page_number:
+            try:
+                self.page_numbers.append(int(data.strip()))
+            except ValueError:
+                pass
+
+        if self._capture_active_page:
+            try:
+                self.page_numbers.append(int(data.strip()))
+            except ValueError:
+                pass
+
+    def handle_endtag(self, tag: str):
+        if self._capture_author and tag == "a":
+            self._capture_author = False
+
+        if self._capture_page_number and tag == "a":
+            self._capture_page_number = False
+
+        if self._capture_active_page and tag == "li":
+            self._capture_active_page = False
+
+        if self._post is not None and tag == "div":
+            if self._capture_content and self._post_depth == self._content_depth:
+                self._capture_content = False
+                self._content_depth = 0
+
+            self._post_depth -= 1
+            if self._post_depth <= 0:
+                self._finish_post()
+
+    def _finish_post(self) -> None:
+        if self._post is None:
+            return
+
+        post_id = self._post.get("post_id")
+        if post_id is None:
+            self._post = None
+            return
+
+        content = "".join(self._post.get("content") or [])
+        content = re.sub(r"\n\s*\n+", "\n", content)
+        content = re.sub(r"[ \t]+", " ", content).strip()
+        self.posts.append(
+            BoardTrainingPost(
+                post_id=int(post_id),
+                author_id=self._post.get("author_id"),
+                author_name=str(self._post.get("author_name") or "Unknown"),
+                created_at=str(self._post.get("created_at") or ""),
+                content=content,
+            )
+        )
+        self._post = None
+
+    def page(self) -> BoardPage:
+        return BoardPage(
+            posts=self.posts,
+            last_page=max(self.page_numbers or [1]),
+            current_user_id=self.current_user_id,
+            reply_action=self.reply_action,
+            reply_token=self.reply_token,
+        )
+
+
+def parse_training_board_page(html: str) -> BoardPage:
+    parser = TrainingBoardPageParser()
+    parser.feed(html or "")
+    return parser.page()
+
+
+class MissionChiefFormParser(HTMLParser):
+    """Small generic parser for MissionChief Rails forms."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.forms: List[MissionChiefForm] = []
+        self._form: Optional[dict] = None
+        self._textarea_name: Optional[str] = None
+        self._textarea_text: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]):
+        attr = {key: value for key, value in attrs}
+        if tag == "form":
+            self._form = {
+                "action": attr.get("action"),
+                "method": str(attr.get("method") or "get").lower(),
+                "fields": {},
+            }
+            return
+
+        if self._form is None:
+            return
+
+        if tag == "input":
+            name = attr.get("name")
+            if name:
+                self._form["fields"][name] = attr.get("value") or ""
+        elif tag == "textarea":
+            name = attr.get("name")
+            if name:
+                self._textarea_name = name
+                self._textarea_text = []
+        elif tag == "select":
+            name = attr.get("name")
+            if name and name not in self._form["fields"]:
+                self._form["fields"][name] = ""
+
+    def handle_data(self, data: str):
+        if self._form is not None and self._textarea_name:
+            self._textarea_text.append(data)
+
+    def handle_endtag(self, tag: str):
+        if self._form is None:
+            return
+        if tag == "textarea" and self._textarea_name:
+            self._form["fields"][self._textarea_name] = "".join(self._textarea_text)
+            self._textarea_name = None
+            self._textarea_text = []
+        elif tag == "form":
+            self.forms.append(
+                MissionChiefForm(
+                    action=self._form.get("action"),
+                    method=str(self._form.get("method") or "get").lower(),
+                    fields=dict(self._form.get("fields") or {}),
+                )
+            )
+            self._form = None
+
+
+def parse_missionchief_forms(html: str) -> List[MissionChiefForm]:
+    parser = MissionChiefFormParser()
+    parser.feed(html or "")
+    return parser.forms
 
 
 class AcademyPageParser(HTMLParser):
@@ -861,8 +1445,8 @@ class ReminderOnlySummaryView(discord.ui.View):
             )
             return
 
-        log_channel = guild.get_channel(log_channel_id)
-        request_channel = guild.get_channel(request_channel_id)
+        log_channel = await self.cog._resolve_channel(guild, log_channel_id)
+        request_channel = await self.cog._resolve_channel(guild, request_channel_id)
 
         if not log_channel or not request_channel:
             await interaction.response.send_message("One or more configured channels could not be found.", ephemeral=True)
@@ -1018,9 +1602,9 @@ class SubmitButton(discord.ui.Button):
             )
             return
 
-        admin_channel = guild.get_channel(admin_channel_id)
-        log_channel = guild.get_channel(log_channel_id)
-        request_channel = guild.get_channel(request_channel_id)
+        admin_channel = await cog._resolve_channel(guild, admin_channel_id)
+        log_channel = await cog._resolve_channel(guild, log_channel_id)
+        request_channel = await cog._resolve_channel(guild, request_channel_id)
 
         if not admin_channel or not log_channel or not request_channel:
             self.parent_view.processing = False
@@ -1390,7 +1974,7 @@ class ApproveModal(discord.ui.Modal, title="Approve training request"):
             return
             
         conf = await self.cog.config.guild(guild).all()
-        log_channel = guild.get_channel(conf["log_channel_id"]) if conf.get("log_channel_id") else None
+        log_channel = await self.cog._get_training_log_channel(guild, conf)
 
         user = guild.get_member(self.requester_id) if guild else None
         end_at = datetime.now(AMS) + timedelta(days=self.req.days)
@@ -1503,7 +2087,7 @@ class RejectModal(discord.ui.Modal, title="Rejection reason"):
             await interaction.response.send_message("Internal error: no guild.", ephemeral=True)
             return
         conf = await self.cog.config.guild(guild).all()
-        log_channel = guild.get_channel(conf["log_channel_id"]) if conf.get("log_channel_id") else None
+        log_channel = await self.cog._get_training_log_channel(guild, conf)
 
         user = guild.get_member(self.requester_id)
         
@@ -1567,8 +2151,21 @@ class TrainingManager(commands.Cog):
             "availability_channel_id": MEMBER_PANEL_CHANNEL_ID,
             "availability_message_id": None,
             "availability_enabled": False,
+            "availability_last_refreshed_at": None,
+            "board_poll_enabled": True,
+            "board_thread_id": BOARD_THREAD_ID,
+            "board_last_seen_post_id": None,
+            "board_processed_post_ids": [],
+            "board_pending_deletions": [],
+            "board_guide_enabled": True,
+            "board_guide_thread_id": None,
+            "board_guide_post_id": None,
+            "board_guide_post_ids": {},
+            "board_guide_content_hash": None,
+            "board_guide_content_hashes": {},
         }
         self.config.register_guild(**default_guild)
+        self.config.register_global(board_thread_states={})
 
         self.bot.add_view(StartView(self))
         self.bot.add_view(DeveloperTrainingPanelView(self))
@@ -1577,6 +2174,9 @@ class TrainingManager(commands.Cog):
         self._panel_task = self.bot.loop.create_task(self._ensure_member_panels())
         self._developer_panel_task = self.bot.loop.create_task(self._ensure_developer_panels())
         self._availability_task = self.bot.loop.create_task(self._availability_loop())
+        self._board_poll_task = self.bot.loop.create_task(self._board_poll_loop())
+        self._board_guide_task = self.bot.loop.create_task(self._board_guide_loop())
+        self._board_cleanup_task = self.bot.loop.create_task(self._board_cleanup_loop())
 
     def cog_unload(self):
         if self._reminder_task:
@@ -1587,6 +2187,12 @@ class TrainingManager(commands.Cog):
             self._developer_panel_task.cancel()
         if self._availability_task:
             self._availability_task.cancel()
+        if self._board_poll_task:
+            self._board_poll_task.cancel()
+        if self._board_guide_task:
+            self._board_guide_task.cancel()
+        if self._board_cleanup_task:
+            self._board_cleanup_task.cancel()
 
     @asynccontextmanager
     async def _bot_status(self, detail: str, *, priority: int = 70):
@@ -1878,6 +2484,52 @@ class TrainingManager(commands.Cog):
                 contribution_rate=contribution_rate,
             )
 
+        return await self._open_training_course(
+            req,
+            mc_user_id=mc_user_id,
+            mc_username=mc_username,
+            contribution_rate=contribution_rate,
+        )
+
+    async def _try_auto_open_board_training(
+        self,
+        post: BoardTrainingPost,
+        req: TrainingRequest,
+    ) -> AutoTrainingResult:
+        fallback_academy_id = AUTO_ACADEMY_BUILDINGS.get(req.discipline)
+
+        if req.num_classes < 1 or req.num_classes > AUTO_MAX_CLASSES:
+            return AutoTrainingResult(False, f"Requested class count must be between 1 and {AUTO_MAX_CLASSES}")
+
+        mc_user_id = str(post.author_id) if post.author_id else None
+        mc_username = post.author_name
+        contribution_rate = await self._get_latest_contribution_rate(mc_user_id)
+        if contribution_rate is not None and contribution_rate < AUTO_MIN_CONTRIBUTION_RATE:
+            return AutoTrainingResult(
+                False,
+                f"Latest contribution rate is {contribution_rate:.1f}%, below {AUTO_MIN_CONTRIBUTION_RATE:.1f}%",
+                academy_id=fallback_academy_id,
+                mc_user_id=mc_user_id,
+                mc_username=mc_username,
+                contribution_rate=contribution_rate,
+            )
+
+        return await self._open_training_course(
+            req,
+            mc_user_id=mc_user_id,
+            mc_username=mc_username,
+            contribution_rate=contribution_rate,
+        )
+
+    async def _open_training_course(
+        self,
+        req: TrainingRequest,
+        *,
+        mc_user_id: Optional[str],
+        mc_username: Optional[str],
+        contribution_rate: Optional[float],
+    ) -> AutoTrainingResult:
+        fallback_academy_id = AUTO_ACADEMY_BUILDINGS.get(req.discipline)
         cookie_manager = self.bot.get_cog("CookieManager")
         if not cookie_manager or not hasattr(cookie_manager, "get_session"):
             return AutoTrainingResult(
@@ -1961,7 +2613,7 @@ class TrainingManager(commands.Cog):
 
         post_url = f"https://www.missionchief.com{page.action}" if page.action.startswith("/") else page.action
         payload = {
-            "utf8": "✓",
+            "utf8": "\u2713",
             "authenticity_token": page.authenticity_token,
             "building_rooms_use": str(req.num_classes),
             "education_select": course.value,
@@ -1996,6 +2648,913 @@ class TrainingManager(commands.Cog):
             classes_opened=req.num_classes,
             status=post_status,
         )
+
+    async def _board_poll_loop(self) -> None:
+        await self.bot.wait_until_red_ready()
+        while True:
+            try:
+                poll_targets: Dict[int, Tuple[discord.Guild, dict]] = {}
+                for guild in self.bot.guilds:
+                    conf = await self.config.guild(guild).all()
+                    if not conf.get("board_poll_enabled"):
+                        continue
+                    thread_id = int(conf.get("board_thread_id") or BOARD_THREAD_ID)
+                    poll_targets.setdefault(thread_id, (guild, conf))
+
+                for guild, conf in poll_targets.values():
+                    async with self._bot_status(f"checking training board in {guild.name}", priority=55):
+                        await self._poll_training_board_for_guild(guild, conf)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.exception("Training board poll loop error: %s", exc)
+            await asyncio.sleep(BOARD_POLL_SECONDS)
+
+    async def _poll_training_board_for_guild(self, guild: discord.Guild, conf: dict) -> None:
+        cookie_manager = self.bot.get_cog("CookieManager")
+        if not cookie_manager or not hasattr(cookie_manager, "get_session"):
+            log.info("Training board poll skipped: CookieManager is not loaded")
+            return
+
+        thread_id = int(conf.get("board_thread_id") or BOARD_THREAD_ID)
+        session = await cookie_manager.get_session()
+        page, status = await self._fetch_training_board_latest_page(session, thread_id)
+        if status is not None and int(status) >= 400:
+            log.warning("Training board poll failed: thread %s returned HTTP %s", thread_id, status)
+            return
+
+        if not page.posts:
+            return
+
+        latest_post_id = max(post.post_id for post in page.posts)
+        thread_state = await self._get_board_thread_state(thread_id)
+        last_seen_raw = thread_state.get("last_seen_post_id") or conf.get("board_last_seen_post_id")
+        if not last_seen_raw:
+            await self._set_board_thread_last_seen(thread_id, latest_post_id)
+            await self.config.guild(guild).board_last_seen_post_id.set(latest_post_id)
+            log.info("Training board baseline set to post %s for guild %s", latest_post_id, guild.id)
+            return
+
+        try:
+            last_seen = int(last_seen_raw)
+        except (TypeError, ValueError):
+            last_seen = latest_post_id
+            await self._set_board_thread_last_seen(thread_id, latest_post_id)
+            await self.config.guild(guild).board_last_seen_post_id.set(latest_post_id)
+            return
+
+        guild_processed_post_ids = self._normalize_board_post_ids(conf.get("board_processed_post_ids") or [])
+        processed_post_ids = self._normalize_board_post_ids(thread_state.get("processed_post_ids") or [])
+        if guild_processed_post_ids:
+            await self._merge_board_thread_processed_ids(thread_id, guild_processed_post_ids)
+            processed_post_ids = list(dict.fromkeys([*processed_post_ids, *guild_processed_post_ids]))
+        new_posts = [
+            post
+            for post in sorted(page.posts, key=lambda item: item.post_id)
+            if post.post_id > last_seen
+            and post.post_id not in processed_post_ids
+            and post.author_id != page.current_user_id
+            and not self._is_board_system_post(post)
+        ]
+        for post in new_posts:
+            if not await self._mark_board_post_processing(thread_id, post.post_id):
+                continue
+            try:
+                await self._handle_training_board_post(guild, session, thread_id, page, post)
+            except Exception as exc:
+                log.exception("Training board post %s processing failed: %s", post.post_id, exc)
+                await self._send_board_processing_error_log(guild, conf, post, exc)
+                reply = self._build_training_board_error_reply(
+                    post,
+                    "An internal error occurred while processing this request. Staff has been notified.",
+                )
+                try:
+                    _status, reply_post_id = await self._post_training_board_reply_with_id(
+                        session,
+                        thread_id,
+                        page,
+                        reply,
+                    )
+                    await self._schedule_board_post_deletion(guild, thread_id, post.post_id, "failed request")
+                    if reply_post_id:
+                        await self._schedule_board_post_deletion(guild, thread_id, reply_post_id, "failure reply")
+                except Exception as reply_exc:
+                    log.exception(
+                        "Could not post TrainingManager board error reply for post %s: %s",
+                        post.post_id,
+                        reply_exc,
+                    )
+
+        if latest_post_id > last_seen:
+            await self._set_board_thread_last_seen(thread_id, latest_post_id)
+            await self.config.guild(guild).board_last_seen_post_id.set(latest_post_id)
+
+    async def _fetch_training_board_latest_page(self, session, thread_id: int) -> Tuple[BoardPage, Optional[int]]:
+        base_url = f"https://www.missionchief.com/alliance_threads/{thread_id}"
+        async with session.get(base_url, allow_redirects=True) as response:
+            status = getattr(response, "status", None)
+            html = await response.text()
+        page = parse_training_board_page(html)
+        if status is not None and int(status) >= 400:
+            return page, status
+
+        if page.last_page > 1:
+            last_url = f"{base_url}?page={page.last_page}"
+            async with session.get(last_url, allow_redirects=True) as response:
+                status = getattr(response, "status", None)
+                html = await response.text()
+            page = parse_training_board_page(html)
+        return page, status
+
+    def _normalize_board_post_ids(self, values) -> List[int]:
+        post_ids: List[int] = []
+        for value in values or []:
+            try:
+                post_ids.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        return post_ids
+
+    async def _get_board_thread_state(self, thread_id: int) -> dict:
+        states = await self.config.board_thread_states()
+        return dict((states or {}).get(str(int(thread_id))) or {})
+
+    async def _merge_board_thread_processed_ids(self, thread_id: int, post_ids: List[int]) -> None:
+        if not post_ids:
+            return
+        key = str(int(thread_id))
+        async with self.config.board_thread_states() as states:
+            state = dict(states.get(key) or {})
+            current = self._normalize_board_post_ids(state.get("processed_post_ids") or [])
+            merged = list(dict.fromkeys([*current, *post_ids]))
+            del merged[:-BOARD_PROCESSED_POST_ID_LIMIT]
+            state["processed_post_ids"] = merged
+            states[key] = state
+
+    async def _set_board_thread_last_seen(self, thread_id: int, post_id: int) -> None:
+        key = str(int(thread_id))
+        async with self.config.board_thread_states() as states:
+            state = dict(states.get(key) or {})
+            state["last_seen_post_id"] = int(post_id)
+            states[key] = state
+
+    async def _mark_board_post_processing(self, thread_id: int, post_id: int) -> bool:
+        key = str(int(thread_id))
+        post_id = int(post_id)
+        async with self.config.board_thread_states() as states:
+            state = dict(states.get(key) or {})
+            current = self._normalize_board_post_ids(state.get("processed_post_ids") or [])
+            if post_id in current:
+                return False
+            current.append(post_id)
+            del current[:-BOARD_PROCESSED_POST_ID_LIMIT]
+            state["processed_post_ids"] = current
+            states[key] = state
+        return True
+
+    async def _handle_training_board_post(
+        self,
+        guild: discord.Guild,
+        session,
+        thread_id: int,
+        page: BoardPage,
+        post: BoardTrainingPost,
+    ) -> None:
+        if self._is_board_system_post(post):
+            return
+
+        matches = extract_board_training_matches(post.content)
+        conf = await self.config.guild(guild).all()
+        log_channel = await self._get_training_log_channel(guild, conf)
+
+        if not matches:
+            if log_channel:
+                await self._send_board_training_log(
+                    log_channel,
+                    post,
+                    [],
+                    f"No known training name found in board post `{post.post_id}`.",
+                )
+            reason = describe_ambiguous_board_training_request(post.content) or (
+                "No known training name was found. Please use one of the training names listed in the guide posts."
+            )
+            reply = self._build_training_board_error_reply(
+                post,
+                reason,
+            )
+            _status, reply_post_id = await self._post_training_board_reply_with_id(session, thread_id, page, reply)
+            await self._schedule_board_post_deletion(guild, thread_id, post.post_id, "unrecognized request")
+            if reply_post_id:
+                await self._schedule_board_post_deletion(guild, thread_id, reply_post_id, "unrecognized reply")
+            return
+
+        results: List[Tuple[BoardTrainingMatch, AutoTrainingResult]] = []
+        for match in matches:
+            req = TrainingRequest(
+                user_id=0,
+                discipline=match.discipline,
+                training=match.training,
+                days=match.days,
+                fee_per_day=BOARD_DEFAULT_FEE,
+                num_classes=1,
+                references=[f"MissionChief board post #{post.post_id}"],
+                want_reminder=False,
+                request_channel_id=0,
+            )
+            result = await self._try_auto_open_board_training(post, req)
+            results.append((match, result))
+
+        if log_channel:
+            await self._send_board_training_log(log_channel, post, results, None)
+        else:
+            log.warning(
+                "Training board post %s processed but no Discord log channel is configured or reachable",
+                post.post_id,
+            )
+
+        reply = self._build_training_board_reply(post, results)
+        reply_status, reply_post_id = await self._post_training_board_reply_with_id(session, thread_id, page, reply)
+        if reply_status is None or int(reply_status) >= 400:
+            log.warning(
+                "Training board reply for post %s returned HTTP %s",
+                post.post_id,
+                reply_status,
+            )
+        await self._schedule_board_post_deletion(guild, thread_id, post.post_id, "processed request")
+        if reply_post_id:
+            await self._schedule_board_post_deletion(guild, thread_id, reply_post_id, "processed reply")
+
+    async def _send_board_processing_error_log(
+        self,
+        guild: discord.Guild,
+        conf: dict,
+        post: BoardTrainingPost,
+        error: Exception,
+    ) -> None:
+        log_channel = await self._get_training_log_channel(guild, conf)
+        if not log_channel:
+            return
+
+        embed = discord.Embed(
+            title="MissionChief board training request failed",
+            color=discord.Color.red(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(
+            name="Requester",
+            value=f"{post.author_name} ({post.author_id or 'unknown ID'})",
+            inline=False,
+        )
+        embed.add_field(name="Board post", value=f"#{post.post_id}", inline=True)
+        if post.created_at:
+            embed.add_field(name="Posted at", value=post.created_at, inline=True)
+        embed.add_field(name="Error", value=str(error)[:1024], inline=False)
+        embed.add_field(name="Original text", value=(post.content or "-")[:1024], inline=False)
+        try:
+            await log_channel.send(embed=embed)
+        except Exception as exc:
+            log.exception("Could not send TrainingManager board error log for post %s: %s", post.post_id, exc)
+
+    async def _post_training_board_reply(
+        self,
+        session,
+        thread_id: int,
+        page: BoardPage,
+        content: str,
+    ) -> Optional[int]:
+        action = page.reply_action or f"/alliance_posts?alliance_thread_id={thread_id}"
+        post_url = urljoin("https://www.missionchief.com", action)
+        payload = {
+            "utf8": "\u2713",
+            "alliance_post[content]": content,
+            "commit": "Save",
+        }
+        if page.reply_token:
+            payload["authenticity_token"] = page.reply_token
+
+        async with session.post(post_url, data=payload, allow_redirects=True) as response:
+            status = getattr(response, "status", None)
+            await response.text()
+        return status
+
+    async def _post_training_board_reply_with_id(
+        self,
+        session,
+        thread_id: int,
+        page: BoardPage,
+        content: str,
+    ) -> Tuple[Optional[int], Optional[int]]:
+        status = await self._post_training_board_reply(session, thread_id, page, content)
+        if status is None or int(status) >= 400:
+            return status, None
+
+        refreshed_page, refreshed_status = await self._fetch_training_board_latest_page(session, thread_id)
+        if refreshed_status is not None and int(refreshed_status) >= 400:
+            return status, None
+
+        for post in sorted(refreshed_page.posts, key=lambda item: item.post_id, reverse=True):
+            if BOARD_REPLY_MARKER not in str(post.content or ""):
+                continue
+            if refreshed_page.current_user_id and post.author_id and post.author_id != refreshed_page.current_user_id:
+                continue
+            return status, int(post.post_id)
+        return status, None
+
+    async def _schedule_board_post_deletion(
+        self,
+        guild: discord.Guild,
+        thread_id: int,
+        post_id: int,
+        reason: str,
+    ) -> None:
+        due_ts = int(datetime.now(timezone.utc).timestamp()) + BOARD_POST_DELETE_AFTER_SECONDS
+        post_id = int(post_id)
+        thread_id = int(thread_id)
+        async with self.config.guild(guild).board_pending_deletions() as pending:
+            normalized = []
+            exists = False
+            for item in pending or []:
+                try:
+                    item_thread_id = int(item.get("thread_id"))
+                    item_post_id = int(item.get("post_id"))
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                if item_thread_id == thread_id and item_post_id == post_id:
+                    exists = True
+                    item = dict(item)
+                    item["due_ts"] = min(int(item.get("due_ts") or due_ts), due_ts)
+                    item["reason"] = str(item.get("reason") or reason)
+                normalized.append(item)
+
+            if not exists:
+                normalized.append(
+                    {
+                        "thread_id": thread_id,
+                        "post_id": post_id,
+                        "due_ts": due_ts,
+                        "reason": str(reason),
+                        "attempts": 0,
+                    }
+                )
+
+            normalized = sorted(normalized, key=lambda item: int(item.get("due_ts") or 0))
+            del normalized[:-BOARD_PENDING_DELETE_LIMIT]
+            pending.clear()
+            pending.extend(normalized)
+
+    async def _board_cleanup_loop(self) -> None:
+        await self.bot.wait_until_red_ready()
+        while True:
+            try:
+                for guild in self.bot.guilds:
+                    await self._cleanup_board_deletions_for_guild(guild)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.exception("TrainingManager board cleanup loop error: %s", exc)
+            await asyncio.sleep(BOARD_CLEANUP_SECONDS)
+
+    async def _cleanup_board_deletions_for_guild(self, guild: discord.Guild) -> None:
+        conf = await self.config.guild(guild).all()
+        pending = list(conf.get("board_pending_deletions") or [])
+        if not pending:
+            return
+
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        due_items = []
+        remaining = []
+        for item in pending:
+            try:
+                due_ts = int(item.get("due_ts") or 0)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if due_ts <= now_ts:
+                due_items.append(dict(item))
+            else:
+                remaining.append(dict(item))
+
+        if not due_items:
+            return
+
+        cookie_manager = self.bot.get_cog("CookieManager")
+        if not cookie_manager or not hasattr(cookie_manager, "get_session"):
+            log.info("Training board cleanup skipped: CookieManager is not loaded")
+            return
+
+        session = await cookie_manager.get_session()
+        for item in due_items:
+            try:
+                thread_id = int(item.get("thread_id"))
+                post_id = int(item.get("post_id"))
+            except (TypeError, ValueError):
+                continue
+
+            deleted, reason = await self._delete_board_post(session, thread_id, post_id)
+            if deleted:
+                await asyncio.sleep(1)
+                continue
+
+            attempts = int(item.get("attempts") or 0) + 1
+            if attempts < 6:
+                item["attempts"] = attempts
+                item["last_error"] = reason[:200]
+                item["due_ts"] = now_ts + min(BOARD_CLEANUP_SECONDS * attempts, 60 * 60)
+                remaining.append(item)
+            else:
+                log.warning("Dropping board post cleanup for %s after %s attempts: %s", post_id, attempts, reason)
+
+        remaining = sorted(remaining, key=lambda item: int(item.get("due_ts") or 0))
+        del remaining[:-BOARD_PENDING_DELETE_LIMIT]
+        await self.config.guild(guild).board_pending_deletions.set(remaining)
+
+    async def _delete_board_post(self, session, thread_id: int, post_id: int) -> Tuple[bool, str]:
+        page, status = await self._fetch_training_board_latest_page(session, int(thread_id))
+        if status is not None and int(status) >= 400:
+            return False, f"thread returned HTTP {status}"
+
+        payload = {
+            "utf8": "\u2713",
+            "_method": "delete",
+            "commit": "Delete",
+        }
+        if page.reply_token:
+            payload["authenticity_token"] = page.reply_token
+
+        url = f"https://www.missionchief.com/alliance_posts/{int(post_id)}"
+        async with session.post(url, data=payload, allow_redirects=True) as response:
+            delete_status = getattr(response, "status", None)
+            await response.text()
+        if delete_status is None:
+            return False, "delete returned no HTTP status"
+        if int(delete_status) in {404, 410}:
+            return True, "already deleted"
+        if int(delete_status) >= 400:
+            return False, f"delete returned HTTP {delete_status}"
+        return True, "deleted"
+
+    def _build_training_board_reply(
+        self,
+        post: BoardTrainingPost,
+        results: List[Tuple[BoardTrainingMatch, AutoTrainingResult]],
+    ) -> str:
+        opened = [
+            f"- {match.training}: opened {result.classes_opened or 1} class(es)"
+            + (f" in academy {result.academy_id}" if result.academy_id else "")
+            for match, result in results
+            if result.success
+        ]
+        failed = [
+            f"- {match.training}: {self._format_board_failure_reason(match, result)}"
+            for match, result in results
+            if not result.success
+        ]
+
+        lines = [
+            BOARD_REPLY_MARKER,
+            f"Training request processed for {post.author_name}.",
+        ]
+        if opened:
+            lines.append("")
+            lines.append("Opened:")
+            lines.extend(opened)
+        if failed:
+            lines.append("")
+            lines.append("Could not open automatically:")
+            lines.extend(failed)
+        return "\n".join(lines)
+
+    def _format_board_failure_reason(
+        self,
+        match: BoardTrainingMatch,
+        result: AutoTrainingResult,
+    ) -> str:
+        reason = str(result.reason or "Unknown error")
+        if reason.startswith(f"No available {match.discipline} academies found"):
+            return (
+                f"No free {match.discipline} classrooms are available right now. "
+                "The current classes are likely full. Please try again later."
+            )
+        room_match = re.search(r"has only (\d+) classroom\(s\), request needs (\d+)", reason)
+        if room_match:
+            return (
+                f"Not enough free classrooms are available right now "
+                f"({room_match.group(1)} available, {room_match.group(2)} needed). "
+                "Please try again later."
+            )
+        return reason
+
+    def _build_training_board_error_reply(self, post: BoardTrainingPost, reason: str) -> str:
+        return "\n".join(
+            [
+                BOARD_REPLY_MARKER,
+                f"Training request could not be processed for {post.author_name}.",
+                "",
+                f"Reason: {reason}",
+            ]
+        )
+
+    async def _send_board_training_log(
+        self,
+        log_channel: discord.abc.Messageable,
+        post: BoardTrainingPost,
+        results: List[Tuple[BoardTrainingMatch, AutoTrainingResult]],
+        note: Optional[str],
+    ) -> None:
+        embed = discord.Embed(
+            title="MissionChief board training request",
+            color=discord.Color.green() if results and any(result.success for _, result in results) else discord.Color.orange(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(
+            name="Requester",
+            value=f"{post.author_name} ({post.author_id or 'unknown ID'})",
+            inline=False,
+        )
+        embed.add_field(name="Board post", value=f"#{post.post_id}", inline=True)
+        if post.created_at:
+            embed.add_field(name="Posted at", value=post.created_at, inline=True)
+        if note:
+            embed.add_field(name="Status", value=note, inline=False)
+        if results:
+            lines = []
+            for match, result in results:
+                status = "opened" if result.success else f"failed: {result.reason}"
+                academy = f" | academy {result.academy_id}" if result.academy_id else ""
+                lines.append(f"- {match.training}: {status}{academy}")
+            embed.add_field(name="Detected trainings", value="\n".join(lines)[:1024], inline=False)
+        embed.add_field(name="Original text", value=(post.content or "-")[:1024], inline=False)
+        try:
+            await log_channel.send(embed=embed)
+        except Exception as exc:
+            log.exception("Could not send TrainingManager board log for post %s: %s", post.post_id, exc)
+
+    def _build_board_guide_content(
+        self,
+        availability: Dict[str, DisciplineAvailability],
+        error: Optional[str],
+        request_thread_id: int,
+        refreshed_at: Optional[datetime] = None,
+    ) -> str:
+        return "\n\n".join(
+            self._build_board_guide_contents(availability, error, request_thread_id, refreshed_at).values()
+        )
+
+    def _build_board_guide_contents(
+        self,
+        availability: Dict[str, DisciplineAvailability],
+        error: Optional[str],
+        request_thread_id: int,
+        refreshed_at: Optional[datetime] = None,
+    ) -> Dict[str, str]:
+        updated_at = self._format_availability_last_updated(refreshed_at)
+        overview_lines = [
+            self._board_guide_marker(BOARD_GUIDE_OVERVIEW_SECTION),
+            "[b]Training Request Guide[/b]",
+            "",
+            "This post is maintained automatically by the Fire & Rescue Academy.",
+            "",
+            "[b]Request in this topic[/b]",
+            f"Thread: https://www.missionchief.com/alliance_threads/{request_thread_id}",
+            "",
+            "[b]Discord requests[/b]",
+            "Verified Discord members can also request training through Discord. Discord requests support automatic reminders when the class is expected to finish.",
+            "",
+            "[b]How to request[/b]",
+            "- Type one or more training names from the list below.",
+            "- You can request multiple classes in one post, one per line or separated by commas.",
+            "- Small typos are supported, but the exact names below work best.",
+            "- Some trainings exist in more than one academy type. For those, use the prefixed text shown in the agency guide.",
+            "- Example: use Fire Station - Lifeguard Training or Water Rescue - Lifeguard Training, not only Lifeguard Training.",
+            "- Board requests are opened as free alliance classes.",
+            "- The bot opens 1 class for each recognized training.",
+            "- If current data shows your alliance donation is below 5%, the class will not be opened automatically.",
+            "",
+            "[b]Current academy availability[/b]",
+            f"Last updated: {updated_at}",
+        ]
+        if error:
+            overview_lines.append(f"Availability could not be refreshed: {error}")
+        for discipline in AGENCY_ORDER:
+            stats = availability.get(discipline, DisciplineAvailability(discipline=discipline))
+            overview_lines.append(f"- {discipline}: {stats.available_classrooms} classes")
+
+        overview_lines.extend(
+            [
+                "",
+                "[b]Guide posts[/b]",
+                "The bot keeps one extra post per agency below. Use the training name exactly as shown there when possible.",
+                "",
+                "[b]Examples[/b]",
+                "HazMat",
+                "Hotshot Crew Training, K-9",
+                "Fire Station - Lifeguard Training",
+                "Water Rescue - Lifeguard Training",
+            ]
+        )
+
+        contents: Dict[str, str] = {
+            BOARD_GUIDE_OVERVIEW_SECTION: "\n".join(overview_lines),
+        }
+        for discipline in AGENCY_ORDER:
+            trainings = DISCIPLINES.get(discipline, [])
+            if not trainings:
+                continue
+            lines = [
+                self._board_guide_marker(discipline),
+                f"[b]{discipline} training request text[/b]",
+                "",
+                "Use one of these names in this topic to request a class:",
+            ]
+            for training, days in trainings:
+                day_label = "day" if int(days) == 1 else "days"
+                request_label = _board_training_request_label(discipline, training)
+                if request_label == training:
+                    lines.append(f"- {training} ({int(days)} {day_label})")
+                else:
+                    lines.append(f"- {request_label} ({int(days)} {day_label}) - opens {training}")
+            contents[discipline] = "\n".join(lines)
+        return contents
+
+    def _board_guide_marker(self, section: str) -> str:
+        return f"[{BOARD_GUIDE_MARKER_PREFIX}:{section}]"
+
+    def _board_guide_section_from_text(self, text: str) -> Optional[str]:
+        match = re.search(rf"\[{re.escape(BOARD_GUIDE_MARKER_PREFIX)}:([^\]]+)\]", str(text or ""))
+        return match.group(1) if match else None
+
+    def _is_board_guide_post(self, post: BoardTrainingPost) -> bool:
+        return self._board_guide_section_from_text(post.content) is not None
+
+    def _is_board_system_post(self, post: BoardTrainingPost) -> bool:
+        text = str(post.content or "").strip()
+        if self._is_board_guide_post(post):
+            return True
+        if BOARD_REPLY_MARKER in text:
+            return True
+        lowered = text.casefold()
+        return (
+            lowered.startswith("training request processed for ")
+            or lowered.startswith("training request could not be processed for ")
+            or "\nopened:\n" in lowered
+            or "\ncould not open automatically:\n" in lowered
+        )
+
+    def _format_availability_last_updated(self, refreshed_at: Optional[datetime] = None) -> str:
+        if refreshed_at is None:
+            refreshed_at = datetime.now(timezone.utc)
+        if refreshed_at.tzinfo is None:
+            refreshed_at = refreshed_at.replace(tzinfo=timezone.utc)
+        return refreshed_at.astimezone(AMS).strftime("%Y-%m-%d %H:%M %Z")
+
+    async def _resolve_channel(self, guild: discord.Guild, channel_id: Optional[int]) -> Optional[discord.abc.Messageable]:
+        if not channel_id:
+            return None
+        try:
+            numeric_id = int(channel_id)
+        except (TypeError, ValueError):
+            return None
+
+        channel = guild.get_channel(numeric_id)
+        if channel is not None:
+            return channel
+
+        get_channel = getattr(self.bot, "get_channel", None)
+        if get_channel:
+            channel = get_channel(numeric_id)
+            if channel is not None:
+                return channel
+
+        fetch_channel = getattr(self.bot, "fetch_channel", None)
+        if fetch_channel:
+            try:
+                return await fetch_channel(numeric_id)
+            except Exception as exc:
+                log.info("Could not fetch configured channel %s: %s", numeric_id, exc)
+        return None
+
+    async def _get_training_log_channel(self, guild: discord.Guild, conf: dict) -> Optional[discord.abc.Messageable]:
+        return await self._resolve_channel(guild, conf.get("log_channel_id"))
+
+    def _board_guide_hash(self, content: str) -> str:
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    def _set_form_value(
+        self,
+        payload: Dict[str, str],
+        candidates: Tuple[str, ...],
+        value: str,
+        fallback_name: str,
+    ) -> None:
+        for name in list(payload.keys()):
+            lowered = name.casefold()
+            if any(candidate in lowered for candidate in candidates):
+                payload[name] = value
+                return
+        payload[fallback_name] = value
+
+    def _select_post_edit_form(self, forms: List[MissionChiefForm], post_id: int) -> Optional[MissionChiefForm]:
+        wanted = f"/alliance_posts/{post_id}"
+        for form in forms:
+            if wanted in str(form.action or ""):
+                return form
+        for form in forms:
+            if "/alliance_posts" in str(form.action or ""):
+                return form
+        return forms[0] if forms else None
+
+    async def _submit_missionchief_form(self, session, form: MissionChiefForm, payload: Dict[str, str]) -> Tuple[Optional[int], str, str]:
+        action = form.action or ""
+        url = urljoin("https://www.missionchief.com", action)
+        if form.method == "get":
+            async with session.get(url, params=payload, allow_redirects=True) as response:
+                status = getattr(response, "status", None)
+                html = await response.text()
+                final_url = str(getattr(response, "url", url))
+        else:
+            async with session.post(url, data=payload, allow_redirects=True) as response:
+                status = getattr(response, "status", None)
+                html = await response.text()
+                final_url = str(getattr(response, "url", url))
+        return status, html, final_url
+
+    async def _find_existing_board_guide_posts(self, session, thread_id: int) -> Dict[str, int]:
+        found: Dict[str, int] = {}
+        base_url = f"https://www.missionchief.com/alliance_threads/{thread_id}"
+        async with session.get(base_url, allow_redirects=True) as response:
+            status = getattr(response, "status", None)
+            html = await response.text()
+        if status is not None and int(status) >= 400:
+            return found
+
+        first_page = parse_training_board_page(html)
+        max_page = min(first_page.last_page, BOARD_GUIDE_MAX_SCAN_PAGES)
+        for page_number in range(1, max_page + 1):
+            page_url = f"{base_url}?page={page_number}"
+            async with session.get(page_url, allow_redirects=True) as response:
+                status = getattr(response, "status", None)
+                page_html = await response.text()
+            if status is not None and int(status) >= 400:
+                continue
+            page = parse_training_board_page(page_html)
+
+            for post in page.posts:
+                section = self._board_guide_section_from_text(post.content)
+                if section and section in BOARD_GUIDE_SECTIONS:
+                    found[section] = post.post_id
+        return found
+
+    async def _create_board_guide_post(self, session, thread_id: int, section: str, content: str) -> Tuple[Optional[int], str]:
+        page, status = await self._fetch_training_board_latest_page(session, thread_id)
+        if status is not None and int(status) >= 400:
+            return None, f"request thread returned HTTP {status}"
+
+        post_status = await self._post_training_board_reply(session, thread_id, page, content)
+        if post_status is None or int(post_status) >= 400:
+            return None, f"create guide post returned HTTP {post_status}"
+
+        page, status = await self._fetch_training_board_latest_page(session, thread_id)
+        if status is not None and int(status) >= 400:
+            return None, f"could not refetch request thread after create: HTTP {status}"
+
+        for post in sorted(page.posts, key=lambda item: item.post_id, reverse=True):
+            if self._board_guide_section_from_text(post.content) == section:
+                return post.post_id, "created"
+        return None, "created guide post but could not resolve new post ID"
+
+    async def _edit_board_guide_post(self, session, post_id: int, content: str) -> Tuple[bool, str]:
+        edit_url = f"https://www.missionchief.com/alliance_posts/{post_id}/edit"
+        async with session.get(edit_url, allow_redirects=True) as response:
+            status = getattr(response, "status", None)
+            html = await response.text()
+        if status is not None and int(status) >= 400:
+            return False, f"edit form returned HTTP {status}"
+
+        form = self._select_post_edit_form(parse_missionchief_forms(html), post_id)
+        if not form:
+            return False, "edit form not found"
+
+        payload = dict(form.fields)
+        payload.setdefault("utf8", "\u2713")
+        payload.setdefault("commit", "Save")
+        if "_method" not in payload and f"/alliance_posts/{post_id}" in str(form.action or ""):
+            payload["_method"] = "patch"
+        self._set_form_value(
+            payload,
+            ("[content]", "[text]", "[body]", "content", "text", "body"),
+            content,
+            "alliance_post[content]",
+        )
+        status, _html, _final_url = await self._submit_missionchief_form(session, form, payload)
+        if status is None or int(status) >= 400:
+            return False, f"edit post returned HTTP {status}"
+        return True, "updated"
+
+    async def _sync_training_board_guide_for_guild(
+        self,
+        guild: discord.Guild,
+        *,
+        force: bool = False,
+        availability: Optional[Dict[str, DisciplineAvailability]] = None,
+        error: Optional[str] = None,
+        refreshed_at: Optional[datetime] = None,
+    ) -> bool:
+        conf = await self.config.guild(guild).all()
+        if not conf.get("board_guide_enabled"):
+            return False
+
+        cookie_manager = self.bot.get_cog("CookieManager")
+        if not cookie_manager or not hasattr(cookie_manager, "get_session"):
+            log.info("Training board guide skipped: CookieManager is not loaded")
+            return False
+
+        request_thread_id = int(conf.get("board_thread_id") or BOARD_THREAD_ID)
+        if availability is None:
+            availability, error = await self._collect_training_availability()
+        if refreshed_at is None:
+            refreshed_at = datetime.now(timezone.utc)
+        contents = self._build_board_guide_contents(availability, error, request_thread_id, refreshed_at)
+        content_hashes = {
+            section: self._board_guide_hash(content)
+            for section, content in contents.items()
+        }
+
+        post_ids = {
+            str(section): int(post_id)
+            for section, post_id in dict(conf.get("board_guide_post_ids") or {}).items()
+            if str(post_id).isdigit()
+        }
+        legacy_thread_id = int(conf["board_guide_thread_id"]) if conf.get("board_guide_thread_id") else None
+        legacy_post_id = int(conf["board_guide_post_id"]) if conf.get("board_guide_post_id") else None
+        if legacy_thread_id == request_thread_id and legacy_post_id and BOARD_GUIDE_OVERVIEW_SECTION not in post_ids:
+            post_ids[BOARD_GUIDE_OVERVIEW_SECTION] = legacy_post_id
+
+        stored_hashes = dict(conf.get("board_guide_content_hashes") or {})
+        if (
+            not force
+            and post_ids
+            and all(section in post_ids for section in contents)
+            and all(stored_hashes.get(section) == content_hashes.get(section) for section in contents)
+        ):
+            return False
+
+        session = await cookie_manager.get_session()
+        discovered_post_ids = await self._find_existing_board_guide_posts(session, request_thread_id)
+        post_ids.update(discovered_post_ids)
+
+        changed = False
+        for section in BOARD_GUIDE_SECTIONS:
+            content = contents.get(section)
+            if content is None:
+                continue
+            post_id = post_ids.get(section)
+            section_hash = content_hashes[section]
+            if post_id and not force and stored_hashes.get(section) == section_hash:
+                continue
+
+            if post_id:
+                updated, reason = await self._edit_board_guide_post(session, int(post_id), content)
+                if updated:
+                    changed = True
+                    await asyncio.sleep(1)
+                    continue
+                log.warning("Training board guide post %s update failed: %s", post_id, reason)
+
+            created_post_id, reason = await self._create_board_guide_post(session, request_thread_id, section, content)
+            if not created_post_id:
+                log.warning("Training board guide section %s could not be created: %s", section, reason)
+                continue
+            post_ids[section] = int(created_post_id)
+            changed = True
+            await asyncio.sleep(1)
+
+        if not post_ids:
+            return False
+
+        overview_id = post_ids.get(BOARD_GUIDE_OVERVIEW_SECTION)
+        await self.config.guild(guild).board_guide_thread_id.set(int(request_thread_id))
+        await self.config.guild(guild).board_guide_post_ids.set({section: int(post_id) for section, post_id in post_ids.items()})
+        await self.config.guild(guild).board_guide_content_hashes.set(content_hashes)
+        await self.config.guild(guild).board_guide_post_id.set(int(overview_id) if overview_id else None)
+        await self.config.guild(guild).board_guide_content_hash.set(
+            self._board_guide_hash("\n\n".join(contents.values()))
+        )
+        return changed
+
+    async def _board_guide_loop(self) -> None:
+        await self.bot.wait_until_red_ready()
+        while True:
+            try:
+                for guild in self.bot.guilds:
+                    conf = await self.config.guild(guild).all()
+                    if conf.get("availability_enabled"):
+                        continue
+                    async with self._bot_status(f"syncing training board guide in {guild.name}", priority=45):
+                        await self._sync_training_board_guide_for_guild(guild)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.exception("TrainingManager board guide loop error: %s", exc)
+            await asyncio.sleep(BOARD_GUIDE_SYNC_SECONDS)
 
     async def _send_auto_open_success(
         self,
@@ -2032,7 +3591,10 @@ class TrainingManager(commands.Cog):
         embed.add_field(name="Expected end time", value=fmt_dt(end_at), inline=False)
         embed.set_footer(text=f"Course value: {result.course_value} • HTTP {result.status}")
 
-        await log_channel.send(embed=embed)
+        try:
+            await log_channel.send(embed=embed)
+        except Exception as exc:
+            log.exception("Could not send TrainingManager automatic-open log: %s", exc)
 
         if req.want_reminder:
             ref_text = ""
@@ -2114,16 +3676,27 @@ class TrainingManager(commands.Cog):
         self,
         availability: Dict[str, DisciplineAvailability],
         error: Optional[str] = None,
+        refreshed_at: Optional[datetime] = None,
     ) -> discord.Embed:
-        description = "\n".join(
+        refreshed_at = refreshed_at or datetime.now(timezone.utc)
+        if refreshed_at.tzinfo is None:
+            refreshed_at = refreshed_at.replace(tzinfo=timezone.utc)
+        class_lines = [
             f"**{discipline}:** {availability.get(discipline, DisciplineAvailability(discipline=discipline)).available_classrooms} classes"
-            for discipline in ("Fire", "Police", "EMS", "Coastal")
+            for discipline in AGENCY_ORDER
+        ]
+        description = "\n".join(
+            [
+                *class_lines,
+                "",
+                f"Last updated: {self._format_availability_last_updated(refreshed_at)}",
+            ]
         )
         embed = discord.Embed(
             title="Academy Availability",
             description=description,
             color=discord.Color.blurple() if not error else discord.Color.orange(),
-            timestamp=datetime.now(timezone.utc),
+            timestamp=refreshed_at,
         )
         if error:
             embed.add_field(name="Status", value=f"Could not refresh automatically: {error}", inline=False)
@@ -2141,13 +3714,22 @@ class TrainingManager(commands.Cog):
             log.warning("TrainingManager availability channel not found: %s", channel_id)
             return None
 
+        refreshed_at = datetime.now(timezone.utc)
         availability, error = await self._collect_training_availability()
-        embed = self._build_availability_embed(availability, error)
+        embed = self._build_availability_embed(availability, error, refreshed_at)
         message_id = conf.get("availability_message_id")
         if message_id:
             try:
                 message = await channel.fetch_message(int(message_id))
                 await message.edit(embed=embed)
+                await self.config.guild(guild).availability_last_refreshed_at.set(int(refreshed_at.timestamp()))
+                await self._sync_training_board_guide_for_guild(
+                    guild,
+                    force=True,
+                    availability=availability,
+                    error=error,
+                    refreshed_at=refreshed_at,
+                )
                 return message
             except Exception as exc:
                 log.info("TrainingManager availability message missing; reposting: %s", exc)
@@ -2156,6 +3738,14 @@ class TrainingManager(commands.Cog):
         await self.config.guild(guild).availability_message_id.set(message.id)
         await self.config.guild(guild).availability_channel_id.set(channel.id)
         await self.config.guild(guild).availability_enabled.set(True)
+        await self.config.guild(guild).availability_last_refreshed_at.set(int(refreshed_at.timestamp()))
+        await self._sync_training_board_guide_for_guild(
+            guild,
+            force=True,
+            availability=availability,
+            error=error,
+            refreshed_at=refreshed_at,
+        )
         return message
 
     async def _availability_loop(self) -> None:
@@ -2194,6 +3784,48 @@ class TrainingManager(commands.Cog):
         await self.config.guild(guild).panel_message_id.set(message.id)
         return message
 
+    async def _refresh_or_send_member_panel(
+        self,
+        guild: discord.Guild,
+        channel: discord.TextChannel,
+        *,
+        allow_send: bool = True,
+    ) -> Tuple[Optional[discord.Message], str]:
+        """Update an existing member panel when possible, otherwise post a new one."""
+        embed = await self._build_member_panel_embed(guild)
+        panel_message_id = await self.config.guild(guild).panel_message_id()
+        if panel_message_id:
+            try:
+                message = await channel.fetch_message(int(panel_message_id))
+                await message.edit(embed=embed, view=StartView(self))
+                await self.config.guild(guild).panel_message_id.set(message.id)
+                return message, "updated"
+            except discord.NotFound:
+                await self.config.guild(guild).panel_message_id.set(None)
+            except Exception as exc:
+                log.info("TrainingManager stored member panel could not be refreshed; scanning channel: %s", exc)
+
+        history = getattr(channel, "history", None)
+        bot_user_id = getattr(getattr(self.bot, "user", None), "id", None)
+        if callable(history):
+            try:
+                async for message in channel.history(limit=50):
+                    if bot_user_id and getattr(getattr(message, "author", None), "id", None) != bot_user_id:
+                        continue
+                    if any(getattr(existing, "title", None) == "Training Request System" for existing in getattr(message, "embeds", [])):
+                        await message.edit(embed=embed, view=StartView(self))
+                        await self.config.guild(guild).panel_message_id.set(message.id)
+                        return message, "refreshed"
+            except Exception as exc:
+                log.info("TrainingManager member panel history scan failed; posting new panel: %s", exc)
+
+        if not allow_send:
+            return None, "missing"
+
+        message = await channel.send(embed=embed, view=StartView(self))
+        await self.config.guild(guild).panel_message_id.set(message.id)
+        return message, "posted"
+
     async def _ensure_member_panel_for_guild(self, guild: discord.Guild) -> None:
         conf = await self.config.guild(guild).all()
         configured_channel_id = int(conf.get("request_channel_id") or MEMBER_PANEL_CHANNEL_ID)
@@ -2205,6 +3837,10 @@ class TrainingManager(commands.Cog):
 
         if configured_channel_id != MEMBER_PANEL_CHANNEL_ID:
             await self.config.guild(guild).request_channel_id.set(MEMBER_PANEL_CHANNEL_ID)
+
+        _message, action = await self._refresh_or_send_member_panel(guild, channel, allow_send=False)
+        if action != "missing":
+            return
 
         now = datetime.now(timezone.utc)
         last_post = conf.get("panel_last_auto_post_at")
@@ -2218,7 +3854,9 @@ class TrainingManager(commands.Cog):
             except ValueError:
                 pass
 
-        await self._send_member_panel(guild, channel)
+        _message, action = await self._refresh_or_send_member_panel(guild, channel, allow_send=True)
+        if action != "posted":
+            return
         await self.config.guild(guild).panel_last_auto_post_at.set(now.isoformat())
 
     async def _ensure_member_panels(self) -> None:
@@ -2306,6 +3944,31 @@ class TrainingManager(commands.Cog):
         await self.config.guild(ctx.guild).log_channel_id.set(channel.id)
         await ctx.tick()
 
+    @tmset.command(name="logtest")
+    @commands.admin()
+    async def logtest(self, ctx: commands.Context):
+        """Send a test message to the configured TrainingManager log channel."""
+        conf = await self.config.guild(ctx.guild).all()
+        log_channel = await self._get_training_log_channel(ctx.guild, conf)
+        if not log_channel:
+            await ctx.send("TrainingManager log channel is not configured or could not be reached.")
+            return
+
+        embed = discord.Embed(
+            title="TrainingManager log test",
+            description="If you can see this message, TrainingManager log posting is working.",
+            color=discord.Color.green(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="Requested by", value=f"{ctx.author.mention} ({ctx.author.id})", inline=False)
+        try:
+            await log_channel.send(embed=embed)
+        except Exception as exc:
+            log.exception("TrainingManager log test failed: %s", exc)
+            await ctx.send(f"TrainingManager log test failed: {exc}")
+            return
+        await ctx.tick()
+
     @tmset.command()
     @commands.admin()
     async def adminrole(self, ctx: commands.Context, role: discord.Role):
@@ -2341,8 +4004,8 @@ class TrainingManager(commands.Cog):
             await ctx.send("The configured request channel was not found.")
             return
         
-        await self._send_member_panel(ctx.guild, ch)
-        await ctx.send(f"TrainingManager panel posted in {ch.mention}.")
+        _message, action = await self._refresh_or_send_member_panel(ctx.guild, ch)
+        await ctx.send(f"TrainingManager panel {action} in {ch.mention}.")
 
     @tmset.command(name="devpost")
     @commands.admin()
@@ -2375,3 +4038,80 @@ class TrainingManager(commands.Cog):
         """Stop automatic refreshes for the training classroom availability overview."""
         await self.config.guild(ctx.guild).availability_enabled.set(False)
         await ctx.send("Training availability overview refresh stopped.")
+
+    @tmset.command(name="board")
+    @commands.admin()
+    async def board_polling(self, ctx: commands.Context, state: str = "status"):
+        """Manage MissionChief board training request polling. Use on/off/status/reset."""
+        normalized = str(state or "status").casefold().strip()
+        if normalized in {"on", "enable", "enabled"}:
+            await self.config.guild(ctx.guild).board_poll_enabled.set(True)
+            await ctx.send("Training board polling enabled.")
+            return
+        if normalized in {"off", "disable", "disabled"}:
+            await self.config.guild(ctx.guild).board_poll_enabled.set(False)
+            await ctx.send("Training board polling disabled.")
+            return
+        if normalized == "reset":
+            await self.config.guild(ctx.guild).board_last_seen_post_id.set(None)
+            await ctx.send("Training board baseline reset. The next poll will baseline the latest post without processing older posts.")
+            return
+
+        conf = await self.config.guild(ctx.guild).all()
+        await ctx.send(
+            "Training board polling status\n"
+            f"Enabled: {bool(conf.get('board_poll_enabled'))}\n"
+            f"Thread ID: {conf.get('board_thread_id') or BOARD_THREAD_ID}\n"
+            f"Last seen post ID: {conf.get('board_last_seen_post_id') or 'not set'}\n"
+            f"Interval: {BOARD_POLL_SECONDS // 60} minutes"
+        )
+
+    @tmset.command(name="boardthread")
+    @commands.admin()
+    async def board_thread(self, ctx: commands.Context, thread_id: int = BOARD_THREAD_ID):
+        """Set the MissionChief alliance thread ID used for board training requests."""
+        await self.config.guild(ctx.guild).board_thread_id.set(int(thread_id))
+        await self.config.guild(ctx.guild).board_last_seen_post_id.set(None)
+        await ctx.send(
+            f"Training board thread set to `{int(thread_id)}`. "
+            "The next poll will baseline the latest post without processing older posts."
+        )
+
+    @tmset.command(name="boardguide")
+    @commands.admin()
+    async def board_guide(self, ctx: commands.Context, state: str = "status"):
+        """Manage the MissionChief board training guide topic. Use on/off/status/reset/sync."""
+        normalized = str(state or "status").casefold().strip()
+        if normalized in {"on", "enable", "enabled"}:
+            await self.config.guild(ctx.guild).board_guide_enabled.set(True)
+            await ctx.send("Training board guide sync enabled.")
+            return
+        if normalized in {"off", "disable", "disabled"}:
+            await self.config.guild(ctx.guild).board_guide_enabled.set(False)
+            await ctx.send("Training board guide sync disabled.")
+            return
+        if normalized == "reset":
+            await self.config.guild(ctx.guild).board_guide_thread_id.set(None)
+            await self.config.guild(ctx.guild).board_guide_post_id.set(None)
+            await self.config.guild(ctx.guild).board_guide_post_ids.set({})
+            await self.config.guild(ctx.guild).board_guide_content_hash.set(None)
+            await self.config.guild(ctx.guild).board_guide_content_hashes.set({})
+            await ctx.send("Training board guide tracking reset. The next sync will find or create managed guide posts in the request topic.")
+            return
+        if normalized in {"sync", "refresh", "now"}:
+            updated = await self._sync_training_board_guide_for_guild(ctx.guild, force=True)
+            await ctx.send("Training board guide synced." if updated else "Training board guide sync did not change anything.")
+            return
+
+        conf = await self.config.guild(ctx.guild).all()
+        thread_id = conf.get("board_guide_thread_id")
+        post_ids = dict(conf.get("board_guide_post_ids") or {})
+        request_thread_id = conf.get("board_thread_id") or BOARD_THREAD_ID
+        await ctx.send(
+            "Training board guide status\n"
+            f"Enabled: {bool(conf.get('board_guide_enabled'))}\n"
+            f"Request thread ID: {request_thread_id}\n"
+            f"Managed thread ID: {thread_id or 'not set'}\n"
+            f"Managed guide posts: {len(post_ids)} / {len(BOARD_GUIDE_SECTIONS)}\n"
+            f"Sync interval: {BOARD_GUIDE_SYNC_SECONDS // 60} minutes"
+        )

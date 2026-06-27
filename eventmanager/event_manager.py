@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
+import random
 import re
+import time
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
@@ -19,6 +22,7 @@ from redbot.core.utils.chat_formatting import box
 log = logging.getLogger("red.cog.eventmanager")
 
 BASE_URL = "https://www.missionchief.com"
+MISSIONCHIEF_HOME_URL = f"{BASE_URL}/"
 REVERSE_ADDRESS_URL = f"{BASE_URL}/reverse_address"
 EVENT_KINDS = {
     "large": {
@@ -35,6 +39,13 @@ EVENT_KINDS = {
 DEFAULT_TIMEZONE = "America/New_York"
 DEFAULT_PANEL_CHANNEL_ID = 1421256548977606827
 PANEL_TITLE = "EventManager Control Panel"
+REQUEST_PANEL_TITLE = "Event Requests"
+SCHEDULE_RETRY_SECONDS = 90
+COOLDOWN_GRACE_SECONDS = 75
+PLAYWRIGHT_SETUP_MESSAGE = (
+    "Playwright browser automation is not ready. Install the EventManager requirements and run "
+    "`python -m playwright install chromium` in the same Python environment as Redbot."
+)
 BROWSER_CAPTURE_SCRIPT = r"""
 (() => {
   const form = document.querySelector("#new_mission_position")
@@ -96,6 +107,332 @@ BROWSER_CAPTURE_SCRIPT = r"""
   }
 })();
 """.strip()
+BROWSER_EVENT_START_SCRIPT = r"""
+(() => {
+  const config = __CONFIG__;
+  const fail = (message) => {
+    console.error(`EventManager browser start: ${message}`);
+    alert(`EventManager browser start failed:\n${message}`);
+    throw new Error(message);
+  };
+  const dispatch = (field) => {
+    for (const eventName of ["input", "change"]) {
+      field.dispatchEvent(new Event(eventName, { bubbles: true }));
+    }
+  };
+  const cssEscape = (value) => {
+    if (window.CSS && typeof CSS.escape === "function") return CSS.escape(value);
+    return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  };
+  const setValue = (name, value, required = false) => {
+    const field = document.querySelector(`[name="${cssEscape(name)}"]`);
+    if (!field) {
+      if (required) fail(`Required field not found: ${name}`);
+      return false;
+    }
+    field.value = value;
+    dispatch(field);
+    return true;
+  };
+  const visibleText = (element) => [element.value, element.textContent, element.getAttribute("title")]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!location.pathname.includes("/missionAllianceEventNew")) {
+    fail("Open https://www.missionchief.com/missionAllianceEventNew first.");
+  }
+
+  const form = document.querySelector("#new_mission_position")
+    || [...document.querySelectorAll("form")].find((item) => (item.action || "").includes("missionAllianceEventCreate"));
+  if (!form) {
+    fail("MissionChief alliance event form was not found.");
+  }
+  if (!(form.action || "").includes("missionAllianceEventCreate")) {
+    fail(`Unexpected form action: ${form.action || "unknown"}`);
+  }
+
+  const eventValue = String(config.fields["event_radio_group"] || config.fields["mission_position[mission_type_id]"] || "");
+  if (!eventValue) {
+    fail("No event type was configured.");
+  }
+
+  const radios = [...form.querySelectorAll('input[name="event_radio_group"]')];
+  const eventRadio = radios.find((radio) => {
+    const candidates = [
+      radio.value,
+      radio.dataset.eventId,
+      (radio.id || "").replace(/^event_/, ""),
+    ].filter(Boolean).map(String);
+    return candidates.includes(eventValue);
+  });
+  if (!eventRadio) {
+    fail(`Could not find event option ${eventValue} on this page.`);
+  }
+  eventRadio.checked = true;
+  eventRadio.click();
+  dispatch(eventRadio);
+
+  if (!document.querySelector('[name="mission_position[mission_type_id]"]')?.value) {
+    setValue("mission_position[mission_type_id]", eventRadio.dataset.eventId || eventValue, true);
+  }
+  for (const [name, value] of Object.entries(config.fields)) {
+    if (name === "event_radio_group" || name === "mission_position[mission_type_id]") continue;
+    setValue(name, String(value), false);
+  }
+
+  const allowCoins = config.allowCoins === true;
+  const coinValue = document.querySelector('[name="mission_position[coins]"]')?.value || "0";
+  if (!allowCoins && !["", "0"].includes(String(coinValue))) {
+    fail(`Refusing to continue because coins is ${coinValue}.`);
+  }
+
+  const buttons = [...form.querySelectorAll('input[type="submit"], button[type="submit"], button:not([type])')];
+  const startButton = buttons.find((button) => {
+    const text = visibleText(button).toLowerCase();
+    if (button.disabled) return false;
+    if (allowCoins) return text.includes("start") && text.includes("event") && (text.includes("free") || text.includes("coin"));
+    return text.includes("free") && !text.includes("coin");
+  });
+  if (!startButton) {
+    const wanted = allowCoins ? "free or coin Start Event" : "free Start Event";
+    fail(`The enabled ${wanted} button was not found.`);
+  }
+
+  const buttonText = visibleText(startButton);
+  const usesCoins = buttonText.toLowerCase().includes("coin") || !["", "0"].includes(String(coinValue));
+  if (usesCoins && !allowCoins) {
+    fail(`Refusing to click coin action: ${buttonText}.`);
+  }
+  const summary = [
+    `Event: ${config.label}`,
+    `Latitude: ${config.fields["mission_position[latitude]"] || "not set"}`,
+    `Longitude: ${config.fields["mission_position[longitude]"] || "not set"}`,
+    `Address: ${config.fields["mission_position[address]"] || "not set"}`,
+    `Button: ${buttonText}`,
+  ].join("\n");
+
+  if (!confirm(`Start this MissionChief alliance event?\n\n${summary}`)) {
+    console.log("EventManager browser start cancelled by user.");
+    return;
+  }
+
+  if (usesCoins) {
+    const confirmation = prompt(
+      `This action can spend MissionChief coins.\n\n${summary}\n\nType SPEND COINS to continue.`
+    );
+    if (confirmation !== "SPEND COINS") {
+      console.log("EventManager browser start cancelled before spending coins.");
+      return;
+    }
+  }
+
+  startButton.click();
+})();
+""".strip()
+BROWSER_PREPARE_START_SCRIPT = r"""
+async (config) => {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const visibleText = (element) => [element?.value, element?.textContent, element?.getAttribute?.("title")]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const fieldByName = (name) => document.querySelector(`[name="${window.CSS.escape(name)}"]`);
+  const fieldValue = (name) => fieldByName(name)?.value || "";
+  const dispatch = (field) => {
+    if (!field) return;
+    for (const eventName of ["input", "change"]) {
+      field.dispatchEvent(new Event(eventName, { bubbles: true }));
+    }
+  };
+  const buttons = () => [...document.querySelectorAll('input[type="submit"], button[type="submit"], button:not([type])')];
+  const buttonDiagnostics = () => buttons().map((button, index) => ({
+    index,
+    text: visibleText(button) || "(blank)",
+    disabled: Boolean(button.disabled || button.hasAttribute("disabled")),
+    id: button.id || "",
+    name: button.name || "",
+    className: button.className || "",
+  }));
+  const lastFreeText = () => {
+    const candidates = [
+      document.querySelector("#alliance_event_last_free_mission"),
+      ...document.querySelectorAll(".alert, .alert-info, .well"),
+    ].filter(Boolean);
+    const node = candidates.find((item) => visibleText(item).toLowerCase().includes("last free mission"));
+    return visibleText(node);
+  };
+  const snapshot = () => ({
+    url: location.href,
+    latitude: fieldValue("mission_position[latitude]"),
+    longitude: fieldValue("mission_position[longitude]"),
+    address: fieldValue("mission_position[address]"),
+    missionType: fieldValue("mission_position[mission_type_id]"),
+    eventRadio: [...document.querySelectorAll('input[name="event_radio_group"]')]
+      .find((radio) => radio.checked)?.dataset?.eventId || "",
+    coins: fieldValue("mission_position[coins]"),
+    lastFreeText: lastFreeText(),
+    submitButtons: buttonDiagnostics(),
+  });
+  const fail = (reason) => ({ ok: false, reason, snapshot: snapshot() });
+  const clickIfPresent = (selector) => {
+    const element = document.querySelector(selector);
+    if (!element) return false;
+    element.click();
+    return true;
+  };
+  const setField = (name, value) => {
+    const field = fieldByName(name);
+    if (!field) return false;
+    field.value = String(value);
+    dispatch(field);
+    return true;
+  };
+
+  const form = document.querySelector("#new_mission_position");
+  if (!form) return fail("MissionChief start form was not loaded.");
+
+  if (config.kind === "event") {
+    const eventValue = String(config.eventValue || "");
+    const radios = [...form.querySelectorAll('input[name="event_radio_group"]')];
+    const radio = radios.find((item) => {
+      const candidates = [item.value, item.dataset.eventId, (item.id || "").replace(/^event_/, "")]
+        .filter(Boolean)
+        .map(String);
+      return candidates.includes(eventValue);
+    });
+    if (!radio) return fail(`Could not find event option ${eventValue}.`);
+    radio.checked = true;
+    radio.click();
+    dispatch(radio);
+    if (!fieldValue("mission_position[mission_type_id]")) {
+      setField("mission_position[mission_type_id]", radio.dataset.eventId || eventValue);
+    }
+    clickIfPresent(`.btn-event_expansion[expansion_id="${config.size || "2"}"]`);
+    clickIfPresent(`.btn-event_shape[data-shape="${config.shape || "circle"}"]`);
+    clickIfPresent(`.btn-event_amount[amount_id="${config.amount || "0"}"]`);
+    if (config.duration !== undefined && config.duration !== null && config.duration !== "") {
+      clickIfPresent(`.btn-event_duration[duration_id="${config.duration}"]`);
+    }
+  } else {
+    const missionValue = String(config.missionType || "");
+    const radios = [...form.querySelectorAll('input[name="mission_position[mission_type_id]"]')];
+    const radio = radios.find((item) => String(item.value || "") === missionValue);
+    if (!radio) return fail(`Could not find large mission option ${missionValue}.`);
+    radio.checked = true;
+    radio.click();
+    dispatch(radio);
+    if (config.amount) {
+      clickIfPresent(`.btn-event_amount[data-amount="${config.amount}"]`);
+    }
+    if (config.size) {
+      clickIfPresent(`.btn-event_expansion[expansion_id="${config.size}"]`);
+    }
+    if (config.shape) {
+      clickIfPresent(`.btn-event_shape[data-shape="${config.shape}"]`);
+    }
+  }
+
+  const latitude = Number(config.latitude);
+  const longitude = Number(config.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return fail("No valid latitude/longitude was configured.");
+  }
+
+  if (typeof mission_position_new_marker === "undefined") {
+    if (typeof isLeaflet === "function" && isLeaflet() && typeof L !== "undefined" && typeof map !== "undefined") {
+      mission_position_new_marker = L.marker([latitude, longitude], { draggable: true, zIndexOffset: 100000 }).addTo(map);
+    } else if (typeof mapkit !== "undefined" && typeof map !== "undefined") {
+      mission_position_new_marker = new mapkit.MarkerAnnotation(new mapkit.Coordinate(latitude, longitude), {
+        draggable: true,
+        color: "#000000",
+      });
+      map.addAnnotation(mission_position_new_marker);
+    } else {
+      return fail("MissionChief map marker is not available.");
+    }
+  }
+
+  if (typeof isLeaflet === "function" && isLeaflet()) {
+    if (typeof mission_position_new_marker.setLatLng !== "function") {
+      return fail("Leaflet marker cannot be moved.");
+    }
+    mission_position_new_marker.setLatLng([latitude, longitude]);
+    if (typeof map !== "undefined" && typeof map.setView === "function") {
+      map.setView([latitude, longitude], map.getZoom ? map.getZoom() : undefined);
+    }
+  } else if (typeof mapkit !== "undefined") {
+    mission_position_new_marker.coordinate = new mapkit.Coordinate(latitude, longitude);
+  }
+
+  if (typeof mission_position_new_dragend === "function") {
+    mission_position_new_dragend();
+  } else {
+    setField("mission_position[latitude]", latitude);
+    setField("mission_position[longitude]", longitude);
+    if (typeof updateAddress === "function") updateAddress();
+  }
+
+  const expectedLatitude = String(latitude);
+  const expectedLongitude = String(longitude);
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    if (fieldValue("mission_position[latitude]") && fieldValue("mission_position[longitude]")) break;
+    await sleep(100);
+  }
+  if (!fieldValue("mission_position[latitude]") || !fieldValue("mission_position[longitude]")) {
+    return fail("MissionChief did not accept the marker coordinates.");
+  }
+  if (!fieldValue("mission_position[address]") && typeof updateAddress === "function") {
+    updateAddress();
+  }
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (fieldValue("mission_position[address]")) break;
+    await sleep(100);
+  }
+  if (!fieldValue("mission_position[address]")) {
+    return fail("MissionChief did not resolve an address for the marker.");
+  }
+
+  const availableButtons = buttons();
+  const startIndex = availableButtons.findIndex((button) => {
+    const text = visibleText(button).toLowerCase();
+    if (button.disabled || button.hasAttribute("disabled")) return false;
+    if (!text.includes("start")) return false;
+    if (config.allowCoins) return text.includes("free") || text.includes("coin");
+    return text.includes("free") && !text.includes("coin");
+  });
+  if (startIndex < 0) {
+    return fail(`No enabled ${config.allowCoins ? "free or coin" : "free"} start button was found.`);
+  }
+
+  const buttonText = visibleText(availableButtons[startIndex]);
+  const usesCoins = buttonText.toLowerCase().includes("coin") || fieldValue("mission_position[coins]") !== "0";
+  if (usesCoins && !config.allowCoins) {
+    return fail(`Refusing to spend coins with button: ${buttonText}`);
+  }
+
+  return {
+    ok: true,
+    submitIndex: startIndex,
+    usesCoins,
+    buttonText,
+    expectedLatitude,
+    expectedLongitude,
+    snapshot: snapshot(),
+  };
+}
+""".strip()
+BROWSER_CLICK_START_SCRIPT = r"""
+(submitIndex) => {
+  const buttons = [...document.querySelectorAll('input[type="submit"], button[type="submit"], button:not([type])')];
+  const button = buttons[submitIndex];
+  if (!button) return false;
+  button.click();
+  return true;
+}
+""".strip()
 WEEKDAYS = {
     "monday": 0,
     "tuesday": 1,
@@ -140,6 +477,7 @@ class EventStartResult:
     reason: str
     status: Optional[int] = None
     post_url: Optional[str] = None
+    details: Dict[str, Any] = field(default_factory=dict)
 
 
 Payload = List[Tuple[str, str]]
@@ -167,6 +505,9 @@ EVENT_DEFAULT_OVERRIDES = {
     AMOUNT_FIELD: "0",
 }
 RANDOM_LOCATION_KEY = "random_location"
+RANDOM_TYPE_KEY = "random_type"
+EVENT_ROUTE_PROFILE_PREFIX = "route_"
+EVENT_NOTIFICATION_CONTEXT_TTL_SECONDS = 10 * 60
 RANDOM_LOCATION_ANCHORS = {
     "nyc": [
         (40.7295, -73.9972, "70 Washington Square South, 10012 New York, Manhattan"),
@@ -194,6 +535,70 @@ CUSTOM_LOCATION_LABELS = {
     "bermuda": "Fixed Bermuda",
     "nyc_or_bermuda": "Fixed New York City",
 }
+EVENT_ROUTE_LOCATIONS = [
+    {
+        "label": "New York City",
+        "latitude": "40.712800",
+        "longitude": "-74.006000",
+        "address": "New York City, NY, USA",
+    },
+    {
+        "label": "Portland, OR",
+        "latitude": "45.515200",
+        "longitude": "-122.678400",
+        "address": "Portland, OR, USA",
+    },
+    {
+        "label": "Los Angeles",
+        "latitude": "34.052200",
+        "longitude": "-118.243700",
+        "address": "Los Angeles, CA, USA",
+    },
+    {
+        "label": "Houma, Louisiana",
+        "input_note": "User request said Houba, Louisiana; configured as Houma, Louisiana.",
+        "latitude": "29.587614",
+        "longitude": "-90.716108",
+        "address": "Houma, LA, USA",
+    },
+    {
+        "label": "San Francisco",
+        "latitude": "37.774900",
+        "longitude": "-122.419400",
+        "address": "San Francisco, CA, USA",
+    },
+    {
+        "label": "Sacramento",
+        "latitude": "38.581600",
+        "longitude": "-121.494400",
+        "address": "Sacramento, CA, USA",
+    },
+    {
+        "label": "Bermuda Islands",
+        "latitude": "32.294800",
+        "longitude": "-64.781400",
+        "address": "Hamilton, Bermuda",
+    },
+    {
+        "label": "Glasgow, UK",
+        "input_note": "User request said Glowglow UK; configured as Glasgow, UK.",
+        "latitude": "55.864200",
+        "longitude": "-4.251800",
+        "address": "Glasgow, Scotland, UK",
+    },
+    {
+        "label": "Kobenhavn, Denmark",
+        "latitude": "55.676100",
+        "longitude": "12.568300",
+        "address": "Copenhagen, Denmark",
+    },
+    {
+        "label": "Beersheba, Israel",
+        "latitude": "31.252973",
+        "longitude": "34.791462",
+        "address": "Beersheba, Israel",
+    },
+]
 
 
 def normalize_kind(kind: str) -> str:
@@ -316,6 +721,94 @@ def fields_for_selection(
         profile["fields"][LONGITUDE_FIELD] = longitude
         profile["fields"][ADDRESS_FIELD] = address or "Custom EventManager location"
     return profile
+
+
+def route_profile_name(location: Dict[str, str]) -> str:
+    """Return a stable profile name for a configured route location."""
+    return profile_name_from_label(location.get("label", "location"), prefix=EVENT_ROUTE_PROFILE_PREFIX)
+
+
+def route_profile_for_location(kind: str, location: Dict[str, str]) -> dict:
+    """Build a saved profile that keeps location fixed and chooses MissionChief type at runtime."""
+    kind = normalize_kind(kind)
+    fields = {
+        LATITUDE_FIELD: str(location["latitude"]),
+        LONGITUDE_FIELD: str(location["longitude"]),
+        ADDRESS_FIELD: str(location["address"]),
+    }
+    if kind == "event":
+        fields.update(EVENT_DEFAULT_OVERRIDES)
+    return {
+        RANDOM_TYPE_KEY: True,
+        "location_label": str(location["label"]),
+        "fields": fields,
+    }
+
+
+def route_profile_names() -> List[str]:
+    """Return route profile names in the exact rotation order."""
+    return [route_profile_name(location) for location in EVENT_ROUTE_LOCATIONS]
+
+
+def profile_with_selected_type(kind: str, profile: dict, option: FormOption) -> dict:
+    """Return a copy of a profile with a concrete live MissionChief option selected."""
+    kind = normalize_kind(kind)
+    selected = dict(profile)
+    fields = dict(selected.get("fields", {}))
+    fields[MISSION_TYPE_FIELD] = option.value
+    if kind == "event":
+        fields[EVENT_RADIO_FIELD] = option.value
+        fields.update(EVENT_DEFAULT_OVERRIDES)
+    selected["fields"] = fields
+    selected.pop(RANDOM_TYPE_KEY, None)
+    selected["selected_type_label"] = option.label
+    return selected
+
+
+def profile_location_summary(profile: dict) -> str:
+    """Return a compact human-readable location summary for a profile."""
+    fields = profile_fields_for_start(profile)
+    address = str(fields.get(ADDRESS_FIELD) or "").strip()
+    label = str(profile.get("location_label") or "").strip()
+    if address:
+        if label and label.casefold() not in address.casefold():
+            return f"{label} ({address})"
+        return address
+    return label or "Unknown location"
+
+
+def profile_type_summary(kind: str, profile: dict) -> str:
+    """Return the configured MissionChief type summary for a profile."""
+    kind = normalize_kind(kind)
+    selected_label = str(profile.get("selected_type_label") or "").strip()
+    if selected_label:
+        return selected_label
+    if profile.get(RANDOM_TYPE_KEY):
+        return f"Surprise {EVENT_KINDS[kind]['label']} type"
+    fields = dict(profile.get("fields", {}))
+    type_value = fields.get(EVENT_RADIO_FIELD) if kind == "event" else fields.get(MISSION_TYPE_FIELD)
+    type_value = type_value or fields.get(MISSION_TYPE_FIELD)
+    if type_value:
+        return f"MissionChief type ID {type_value}"
+    return "Unknown type"
+
+
+def profile_start_summary(kind: str, profile: dict) -> str:
+    """Return a two-line summary of where and what a profile will start."""
+    return "\n".join(
+        [
+            f"Location: {profile_location_summary(profile)}",
+            f"Type: {profile_type_summary(kind, profile)}",
+        ]
+    )
+
+
+def profile_run_details(kind: str, profile: dict) -> Dict[str, str]:
+    """Return non-sensitive profile details for run logs."""
+    return {
+        "configured_location": profile_location_summary(profile),
+        "configured_type": profile_type_summary(kind, profile),
+    }
 
 
 def parse_event_form(html: str, page_url: str) -> EventForm:
@@ -623,6 +1116,266 @@ def safe_debug_payload(payload: Payload) -> str:
     return "\n".join(f"{name}={_redact_debug_value(name, value)}" for name, value in payload)
 
 
+def summarize_browser_snapshot(snapshot: Optional[Dict[str, Any]], *, limit: int = 900) -> str:
+    """Summarize non-sensitive browser state after a Playwright start attempt."""
+    if not snapshot:
+        return ""
+    lines = []
+    for key in ["url", "missionType", "eventRadio", "latitude", "longitude", "address", "coins", "lastFreeText"]:
+        value = snapshot.get(key)
+        if value:
+            lines.append(f"{key}: {value}")
+    buttons = snapshot.get("submitButtons") or []
+    if buttons:
+        lines.append("buttons:")
+        for button in buttons[:5]:
+            lines.append(
+                "- {text} | disabled={disabled}".format(
+                    text=button.get("text") or "(blank)",
+                    disabled=button.get("disabled"),
+                )
+            )
+    text = "; ".join(lines)
+    if len(text) > limit:
+        return text[: max(0, limit - 1)] + "..."
+    return text
+
+
+LAST_FREE_RE = re.compile(
+    r"Last free mission:\s*([A-Za-z]{3},\s+\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{2}:\d{2}:\d{2}\s+[+-]\d{4})",
+    re.IGNORECASE,
+)
+
+
+def parse_last_free_mission_time(value: str) -> Optional[datetime]:
+    """Parse MissionChief's visible `Last free mission` timestamp."""
+    match = LAST_FREE_RE.search(value or "")
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%a, %d %b %Y %H:%M:%S %z")
+    except ValueError:
+        return None
+
+
+def next_free_start_from_text(kind: str, value: str) -> Optional[datetime]:
+    """Return the next free start time implied by MissionChief's last-free text."""
+    last_free = parse_last_free_mission_time(value)
+    if not last_free:
+        return None
+    interval = timedelta(days=7 if normalize_kind(kind) == "event" else 1)
+    return last_free + interval + timedelta(seconds=COOLDOWN_GRACE_SECONDS)
+
+
+def parse_config_datetime(value: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO datetime from Config as an aware UTC datetime."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def config_datetime(value: datetime) -> str:
+    """Serialize a datetime for Config storage in UTC."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def schedule_run_key(kind: str, when: datetime) -> str:
+    """Return the daily/weekly run key used to prevent duplicate scheduled starts."""
+    if normalize_kind(kind) == "event":
+        return f"{when:%G-W%V}"
+    return when.strftime("%Y-%m-%d")
+
+
+def next_nominal_schedule_time(kind: str, schedule: dict, last_runs: dict, now: datetime) -> Optional[datetime]:
+    """Return the next intended scheduler attempt before cooldown retry overrides."""
+    kind = normalize_kind(kind)
+    if not schedule.get("enabled"):
+        return None
+    profile_name, _ = select_scheduled_profile(schedule)
+    if not profile_name:
+        return None
+
+    hour, minute = valid_time(schedule.get("time") or "23:55")
+    target_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    if kind == "large":
+        current_key = schedule_run_key(kind, now)
+        if now < target_today:
+            return target_today
+        if last_runs.get(kind) != current_key:
+            return now
+        return target_today + timedelta(days=1)
+
+    weekday = WEEKDAYS.get((schedule.get("weekday") or "monday").lower(), 0)
+    days_since_target = (now.weekday() - weekday) % 7
+    current_week_target = (now - timedelta(days=days_since_target)).replace(
+        hour=hour,
+        minute=minute,
+        second=0,
+        microsecond=0,
+    )
+    current_key = schedule_run_key(kind, current_week_target)
+    if now.date() == current_week_target.date():
+        if now < current_week_target:
+            return current_week_target
+        if last_runs.get(kind) != current_key:
+            return now
+    days_until_target = (weekday - now.weekday()) % 7
+    if days_until_target == 0:
+        days_until_target = 7
+    return target_today + timedelta(days=days_until_target)
+
+
+def next_schedule_attempt_time(
+    kind: str,
+    schedule: dict,
+    last_runs: dict,
+    retry_after: dict,
+    now: datetime,
+) -> Optional[datetime]:
+    """Return the next scheduler attempt, including cooldown retry throttling."""
+    nominal = next_nominal_schedule_time(kind, schedule, last_runs, now)
+    if not nominal:
+        return None
+    retry_at = parse_config_datetime(retry_after.get(kind))
+    if retry_at and retry_at > now.astimezone(timezone.utc):
+        retry_local = retry_at.astimezone(now.tzinfo)
+        if retry_local > nominal:
+            return retry_local
+    return nominal
+
+
+def build_browser_event_start_script(
+    fields: Dict[str, str],
+    *,
+    label: str = "EventManager event",
+    allow_coins: bool = False,
+) -> str:
+    """Build a browser-console script that starts an event through the live MissionChief DOM."""
+    allowed_fields = {
+        EVENT_RADIO_FIELD,
+        MISSION_TYPE_FIELD,
+        LATITUDE_FIELD,
+        LONGITUDE_FIELD,
+        ADDRESS_FIELD,
+        POI_TYPE_FIELD,
+        SIZE_FIELD,
+        SHAPE_FIELD,
+        AMOUNT_FIELD,
+        COINS_FIELD,
+    }
+    safe_fields = {
+        str(name): str(value)
+        for name, value in fields.items()
+        if str(name) in allowed_fields
+    }
+    safe_fields.setdefault(COINS_FIELD, "0")
+    config = {
+        "label": str(label or "EventManager event"),
+        "fields": safe_fields,
+        "allowCoins": bool(allow_coins),
+    }
+    return BROWSER_EVENT_START_SCRIPT.replace("__CONFIG__", json.dumps(config, ensure_ascii=False, indent=2))
+
+
+def build_browser_start_config(
+    kind: str,
+    profile: dict,
+    *,
+    label: str,
+    allow_coins: bool = False,
+) -> Dict[str, Any]:
+    """Build the Playwright start configuration from an EventManager profile."""
+    kind = normalize_kind(kind)
+    fields = profile_fields_for_start(profile)
+    latitude = fields.get(LATITUDE_FIELD)
+    longitude = fields.get(LONGITUDE_FIELD)
+    if not latitude or not longitude:
+        raise ValueError("Browser starts require latitude and longitude.")
+
+    config: Dict[str, Any] = {
+        "kind": kind,
+        "label": str(label or "EventManager"),
+        "allowCoins": bool(allow_coins),
+        "latitude": str(latitude),
+        "longitude": str(longitude),
+        "address": str(fields.get(ADDRESS_FIELD) or ""),
+        "size": str(fields.get(SIZE_FIELD) or ""),
+        "shape": str(fields.get(SHAPE_FIELD) or ""),
+        "amount": str(fields.get(AMOUNT_FIELD) or ""),
+        "duration": str(fields.get("mission_position[duration]") or ""),
+    }
+    if kind == "event":
+        event_value = fields.get(EVENT_RADIO_FIELD) or fields.get(MISSION_TYPE_FIELD)
+        if not event_value:
+            raise ValueError("Browser event starts require an event type.")
+        config["eventValue"] = str(event_value)
+        config["missionType"] = str(fields.get(MISSION_TYPE_FIELD) or event_value)
+        config["size"] = config["size"] or EVENT_DEFAULT_OVERRIDES[SIZE_FIELD]
+        config["shape"] = config["shape"] or EVENT_DEFAULT_OVERRIDES[SHAPE_FIELD]
+        config["amount"] = config["amount"] or EVENT_DEFAULT_OVERRIDES[AMOUNT_FIELD]
+    else:
+        mission_type = fields.get(MISSION_TYPE_FIELD)
+        if not mission_type:
+            raise ValueError("Browser large mission starts require a mission type.")
+        config["missionType"] = str(mission_type)
+        config["size"] = config["size"] or MISSION_POSITION_DEFAULT_OVERRIDES[SIZE_FIELD]
+        config["shape"] = config["shape"] or MISSION_POSITION_DEFAULT_OVERRIDES[SHAPE_FIELD]
+        config["amount"] = config["amount"] or MISSION_POSITION_DEFAULT_OVERRIDES[AMOUNT_FIELD]
+    return config
+
+
+def browser_result_details(
+    kind: str,
+    profile_name: str,
+    prepare_result: Optional[Dict[str, Any]],
+    *,
+    status: Optional[int] = None,
+    post_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build non-sensitive details from the browser start result for logs and scheduling."""
+    prepare_result = prepare_result or {}
+    snapshot = prepare_result.get("snapshot") or {}
+    last_free_text = str(snapshot.get("lastFreeText") or "")
+    next_eligible_at = next_free_start_from_text(kind, last_free_text)
+    details: Dict[str, Any] = {
+        "kind": normalize_kind(kind),
+        "profile": profile_name,
+        "status": status,
+        "post_url": post_url,
+        "button_text": prepare_result.get("buttonText"),
+        "uses_coins": prepare_result.get("usesCoins"),
+        "latitude": snapshot.get("latitude") or prepare_result.get("expectedLatitude"),
+        "longitude": snapshot.get("longitude") or prepare_result.get("expectedLongitude"),
+        "address": snapshot.get("address"),
+        "mission_type": snapshot.get("missionType"),
+        "event_radio": snapshot.get("eventRadio"),
+        "last_free_text": last_free_text,
+        "snapshot_summary": summarize_browser_snapshot(snapshot),
+    }
+    if next_eligible_at:
+        details["next_eligible_at"] = next_eligible_at
+    return {key: value for key, value in details.items() if value not in (None, "", [])}
+
+
+def normalize_optional_profile_arg(value: Optional[str]) -> Optional[str]:
+    """Normalize optional command profile arguments and ignore documented placeholders."""
+    if not value:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"", "profile", "[profile]", "<profile>", "{profile}"}:
+        return None
+    return normalized
+
+
 def summarize_response_for_debug(text: str, *, limit: int = 350) -> str:
     """Summarize a MissionChief error response without leaking form tokens."""
     text = re.sub(r"<script\b[^>]*>.*?</script>", " ", str(text or ""), flags=re.IGNORECASE | re.DOTALL)
@@ -796,6 +1549,72 @@ class EventManagerPanelView(discord.ui.View):
     )
     async def large_custom(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._custom_start(interaction, "large")
+
+
+class EventRequestPanelView(discord.ui.View):
+    """Persistent member entry point for requesting an alliance event or mission."""
+
+    def __init__(self, cog: "EventManager"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(
+        label="Request Event / Mission",
+        style=discord.ButtonStyle.primary,
+        custom_id="eventmanager:request:create",
+    )
+    async def request_item(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None:
+            await interaction.response.send_message("Event requests can only be created in the server.", ephemeral=True)
+            return
+        await interaction.response.send_modal(EventRequestModal(self.cog))
+
+
+class EventRequestModal(discord.ui.Modal, title="Request Event / Mission"):
+    """Collect a lightweight member request without starting anything automatically."""
+
+    request_type = discord.ui.TextInput(
+        label="Request type",
+        placeholder="Alliance event or large scale mission",
+        required=True,
+        max_length=80,
+    )
+    preferred_type = discord.ui.TextInput(
+        label="Preferred MissionChief type",
+        placeholder="Example: Storm, Major fire, Bomb Explosion",
+        required=False,
+        max_length=100,
+    )
+    location = discord.ui.TextInput(
+        label="Location preference",
+        placeholder="Example: New York City, Bermuda, no preference",
+        required=False,
+        max_length=160,
+    )
+    notes = discord.ui.TextInput(
+        label="Reason / timing notes",
+        placeholder="Optional details for admins",
+        required=False,
+        style=discord.TextStyle.paragraph,
+        max_length=700,
+    )
+
+    def __init__(self, cog: "EventManager"):
+        super().__init__()
+        self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction):
+        request_id = await self.cog.create_event_request(
+            interaction,
+            request_type=str(self.request_type.value or "").strip(),
+            preferred_type=str(self.preferred_type.value or "").strip(),
+            location=str(self.location.value or "").strip(),
+            notes=str(self.notes.value or "").strip(),
+        )
+        await interaction.response.send_message(
+            f"Your event request has been submitted for admin review. Reference: `{request_id}`",
+            ephemeral=True,
+        )
 
 
 class CustomTypeSelect(discord.ui.Select):
@@ -1019,16 +1838,23 @@ class EventManager(commands.Cog):
                 },
             },
             last_runs={},
+            schedule_retry_after={},
             log_channel_id=None,
             panel_channel_id=DEFAULT_PANEL_CHANNEL_ID,
             panel_message_id=None,
+            request_panel_channel_id=None,
+            request_panel_message_id=None,
+            request_log_channel_id=None,
+            event_requests=[],
         )
         self._task: Optional[asyncio.Task] = None
         self._panel_task: Optional[asyncio.Task] = None
         self._start_lock = asyncio.Lock()
+        self._notification_contexts: Dict[str, Dict[str, Any]] = {}
 
     async def cog_load(self):
         self.bot.add_view(EventManagerPanelView(self))
+        self.bot.add_view(EventRequestPanelView(self))
         self._task = asyncio.create_task(self._scheduler_loop())
         self._panel_task = asyncio.create_task(self._ensure_panels_after_ready())
 
@@ -1180,11 +2006,155 @@ class EventManager(commands.Cog):
         ]
         return "\n".join(lines), f"eventmanager-{kind}-diagnostics.txt"
 
-    async def _start_profile_data(self, kind: str, profile_name: str, profile: dict) -> EventStartResult:
+    async def _playwright_cookies(self) -> List[Dict[str, str]]:
+        """Copy CookieManager's aiohttp cookies into Playwright cookie format."""
+        session = await self._get_session()
+        cookie_jar = getattr(session, "cookie_jar", None)
+        if not cookie_jar:
+            return []
+        cookies = cookie_jar.filter_cookies(BASE_URL)
+        playwright_cookies = []
+        for name, morsel in cookies.items():
+            value = getattr(morsel, "value", str(morsel))
+            if not name or not value:
+                continue
+            playwright_cookies.append({"name": str(name), "value": str(value), "url": BASE_URL})
+        return playwright_cookies
+
+    async def _resolve_profile_runtime_options(self, kind: str, profile: dict) -> dict:
+        """Resolve runtime markers like random MissionChief type before starting."""
+        kind = normalize_kind(kind)
+        if not profile.get(RANDOM_TYPE_KEY):
+            return profile
+        form = await self._fetch_form(kind)
+        options = field_options_for_kind(form, kind)
+        if not options:
+            raise RuntimeError(f"No {EVENT_KINDS[kind]['label']} options were found on the live MissionChief form.")
+        return profile_with_selected_type(kind, profile, random.choice(options))
+
+    async def _start_profile_data_browser(
+        self,
+        kind: str,
+        profile_name: str,
+        profile: dict,
+        *,
+        allow_coins: bool = False,
+    ) -> EventStartResult:
+        """Start a MissionChief item by driving the live map/form in a headless browser."""
+        kind = normalize_kind(kind)
+        try:
+            profile = await self._resolve_profile_runtime_options(kind, profile)
+            config = build_browser_start_config(kind, profile, label=profile_name, allow_coins=allow_coins)
+        except Exception as exc:
+            return EventStartResult(False, str(exc))
+
+        try:
+            from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+            from playwright.async_api import async_playwright
+        except Exception:
+            return EventStartResult(False, PLAYWRIGHT_SETUP_MESSAGE)
+
+        async with self._start_lock:
+            try:
+                cookies = await self._playwright_cookies()
+            except Exception as exc:
+                return EventStartResult(False, f"Could not load MissionChief cookies: {exc}")
+            if not cookies:
+                return EventStartResult(False, "No MissionChief cookies are available from CookieManager.")
+
+            open_selector = "#btn-alliance-new-event" if kind == "event" else "#btn-alliance-new-mission"
+            create_path = "missionAllianceEventCreate" if kind == "event" else "missionAllianceCreate"
+            status: Optional[int] = None
+            response_text = ""
+            prepare_result: Dict[str, Any] = {}
+            try:
+                async with async_playwright() as playwright:
+                    browser = await playwright.chromium.launch(headless=True)
+                    try:
+                        context = await browser.new_context(viewport={"width": 1440, "height": 1000})
+                        await context.add_cookies(cookies)
+                        page = await context.new_page()
+                        page.set_default_timeout(30000)
+                        await page.goto(MISSIONCHIEF_HOME_URL, wait_until="domcontentloaded")
+
+                        open_button = page.locator(open_selector)
+                        if await open_button.count() == 0:
+                            login_fields = await page.locator("input[type='password']").count()
+                            if login_fields:
+                                return EventStartResult(False, "MissionChief session is not logged in.")
+                            return EventStartResult(False, f"MissionChief start button `{open_selector}` was not found.")
+
+                        await open_button.nth(0).click()
+                        await page.wait_for_selector("#new_mission_position", state="attached")
+                        with suppress(Exception):
+                            await page.wait_for_function(
+                                "typeof mission_position_new_marker !== 'undefined' || typeof map !== 'undefined'",
+                                timeout=15000,
+                            )
+
+                        prepare_result = await page.evaluate(BROWSER_PREPARE_START_SCRIPT, config)
+                        if not prepare_result.get("ok"):
+                            snapshot = summarize_browser_snapshot(prepare_result.get("snapshot"))
+                            suffix = f" Snapshot: {snapshot}" if snapshot else ""
+                            details = browser_result_details(kind, profile_name, prepare_result, post_url=f"{BASE_URL}/{create_path}")
+                            return EventStartResult(False, f"{prepare_result.get('reason')}{suffix}", details=details)
+
+                        await self._remember_notification_context(kind, profile_name, profile)
+                        async with page.expect_response(lambda response: create_path in response.url, timeout=30000) as response_info:
+                            clicked = await page.evaluate(BROWSER_CLICK_START_SCRIPT, prepare_result.get("submitIndex"))
+                            if not clicked:
+                                self._clear_notification_context(kind)
+                                details = browser_result_details(kind, profile_name, prepare_result, post_url=f"{BASE_URL}/{create_path}")
+                                return EventStartResult(False, "Browser could not click the MissionChief start button.", details=details)
+                        response = await response_info.value
+                        status = response.status
+                        with suppress(Exception):
+                            response_text = await response.text()
+                    finally:
+                        await browser.close()
+            except PlaywrightTimeoutError as exc:
+                self._clear_notification_context(kind)
+                snapshot = summarize_browser_snapshot(prepare_result.get("snapshot"))
+                suffix = f" Snapshot: {snapshot}" if snapshot else ""
+                details = browser_result_details(kind, profile_name, prepare_result, status=status, post_url=f"{BASE_URL}/{create_path}")
+                return EventStartResult(False, f"MissionChief browser flow timed out: {exc}{suffix}", status=status, post_url=f"{BASE_URL}/{create_path}", details=details)
+            except Exception as exc:
+                self._clear_notification_context(kind)
+                message = str(exc)
+                if "Executable doesn't exist" in message or "playwright install" in message:
+                    return EventStartResult(False, PLAYWRIGHT_SETUP_MESSAGE)
+                return EventStartResult(False, f"MissionChief browser flow failed: {message}")
+
+        if status is None or int(status) >= 400:
+            self._clear_notification_context(kind)
+            response_debug = summarize_response_for_debug(response_text)
+            response_suffix = f" Response: {response_debug}" if response_debug else ""
+            details = browser_result_details(kind, profile_name, prepare_result, status=status, post_url=f"{BASE_URL}/{create_path}")
+            return EventStartResult(
+                False,
+                f"MissionChief returned HTTP {status} from browser start.{response_suffix}",
+                status=status,
+                post_url=f"{BASE_URL}/{create_path}",
+                details=details,
+            )
+
+        details = browser_result_details(kind, profile_name, prepare_result, status=status, post_url=f"{BASE_URL}/{create_path}")
+        details.update(profile_run_details(kind, profile))
+        await self._log_run(kind, profile_name, status, details=details)
+        return EventStartResult(
+            True,
+            "Started successfully through browser automation.",
+            status=status,
+            post_url=f"{BASE_URL}/{create_path}",
+            details=details,
+        )
+
+    async def _start_profile_data_http(self, kind: str, profile_name: str, profile: dict) -> EventStartResult:
         kind = normalize_kind(kind)
         async with self._start_lock:
-            start_fields = profile_fields_for_start(profile)
             try:
+                profile = await self._resolve_profile_runtime_options(kind, profile)
+                start_fields = profile_fields_for_start(profile)
                 form = await self._fetch_form(kind, start_fields)
             except Exception as exc:
                 return EventStartResult(False, f"Could not fetch form: {exc}")
@@ -1229,16 +2199,22 @@ class EventManager(commands.Cog):
                 post_url=form.action,
             )
 
-        await self._log_run(kind, profile_name, status)
-        return EventStartResult(True, "Started successfully.", status=status, post_url=form.action)
+        details = profile_run_details(kind, profile)
+        await self._log_run(kind, profile_name, status, details=details)
+        return EventStartResult(True, "Started successfully.", status=status, post_url=form.action, details=details)
 
-    async def _start_from_profile(self, kind: str, profile_name: str) -> EventStartResult:
+    async def _start_profile_data(self, kind: str, profile_name: str, profile: dict) -> EventStartResult:
+        return await self._start_profile_data_browser(kind, profile_name, profile)
+
+    async def _start_from_profile(self, kind: str, profile_name: str, *, allow_coins: bool = False) -> EventStartResult:
         kind = normalize_kind(kind)
         profile_name = profile_name.strip().lower()
         profiles = await self.config.profiles()
         profile = profiles.get(kind, {}).get(profile_name)
         if not profile:
             return EventStartResult(False, f"Profile `{profile_name}` was not found.")
+        if allow_coins:
+            return await self._start_profile_data_browser(kind, profile_name, profile, allow_coins=True)
         return await self._start_profile_data(kind, profile_name, profile)
 
     async def start_one_off(self, kind: str, profile: dict, label: str) -> EventStartResult:
@@ -1314,13 +2290,13 @@ class EventManager(commands.Cog):
         embed = discord.Embed(
             title=PANEL_TITLE,
             description=(
-                "Start free MissionChief alliance missions and events.\n\n"
+                "Start MissionChief alliance missions and events through the live map.\n\n"
                 "Quick uses configured/default settings. Custom lets admins choose the live MissionChief option "
                 "and location before starting."
             ),
             color=discord.Color.orange(),
         )
-        embed.add_field(name="Safety", value="Free starts only. Coin actions are refused.", inline=False)
+        embed.add_field(name="Safety", value="Default starts use the browser backend and refuse coin actions.", inline=False)
         embed.add_field(name="Visibility", value="Button actions are private to the admin using them.", inline=False)
         return embed
 
@@ -1365,7 +2341,218 @@ class EventManager(commands.Cog):
         await self.config.panel_message_id.set(message.id)
         return message
 
-    async def _log_run(self, kind: str, profile_name: str, status: Optional[int]):
+    async def request_panel_channel(self, guild: discord.Guild):
+        channel_id = await self.config.request_panel_channel_id()
+        if not channel_id:
+            channel_id = await self.config.panel_channel_id() or DEFAULT_PANEL_CHANNEL_ID
+        return guild.get_channel(int(channel_id)) or self.bot.get_channel(int(channel_id))
+
+    def is_request_panel_message(self, message: discord.Message) -> bool:
+        bot_user_id = getattr(getattr(self.bot, "user", None), "id", None)
+        if bot_user_id and getattr(getattr(message, "author", None), "id", None) != bot_user_id:
+            return False
+        for embed in getattr(message, "embeds", []) or []:
+            if getattr(embed, "title", None) == REQUEST_PANEL_TITLE:
+                return True
+        return False
+
+    async def build_request_panel_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title=REQUEST_PANEL_TITLE,
+            description=(
+                "Request a large scale alliance mission or alliance event for admin review.\n\n"
+                "This does not start anything automatically. Staff will review the request first."
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(name="Privacy", value="Your request confirmation is private to you.", inline=False)
+        return embed
+
+    async def find_existing_request_panel_message(self, channel: Any):
+        history = getattr(channel, "history", None)
+        if not history:
+            return None
+        found = []
+        with suppress(discord.Forbidden, discord.HTTPException):
+            async for message in channel.history(limit=50):
+                if self.is_request_panel_message(message):
+                    found.append(message)
+        if not found:
+            return None
+        keep = found[0]
+        for duplicate in found[1:]:
+            with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                await duplicate.delete()
+        return keep
+
+    async def ensure_request_panel_message(self, guild: discord.Guild, *, create: bool = True):
+        channel = await self.request_panel_channel(guild)
+        if not channel:
+            return None
+        embed = await self.build_request_panel_embed()
+        view = EventRequestPanelView(self)
+        message_id = await self.config.request_panel_message_id()
+        if message_id and hasattr(channel, "fetch_message"):
+            with suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                message = await channel.fetch_message(int(message_id))
+                await message.edit(embed=embed, view=view)
+                return message
+
+        existing = await self.find_existing_request_panel_message(channel)
+        if existing:
+            await existing.edit(embed=embed, view=view)
+            await self.config.request_panel_message_id.set(existing.id)
+            return existing
+        if not create:
+            return None
+        message = await channel.send(embed=embed, view=view)
+        await self.config.request_panel_message_id.set(message.id)
+        return message
+
+    async def create_event_request(
+        self,
+        interaction: discord.Interaction,
+        *,
+        request_type: str,
+        preferred_type: str,
+        location: str,
+        notes: str,
+    ) -> str:
+        created_at = datetime.now(timezone.utc)
+        user = interaction.user
+        request_id = f"EVT-{created_at:%Y%m%d%H%M%S}-{getattr(user, 'id', 0) % 10000:04d}"
+        record = {
+            "id": request_id,
+            "created_at": config_datetime(created_at),
+            "status": "pending",
+            "discord_user_id": getattr(user, "id", None),
+            "discord_name": str(user),
+            "display_name": getattr(user, "display_name", str(user)),
+            "request_type": request_type,
+            "preferred_type": preferred_type,
+            "location": location,
+            "notes": notes,
+        }
+        async with self.config.event_requests() as requests:
+            requests.append(record)
+        await self._log_event_request(interaction.guild, record)
+        return request_id
+
+    async def _request_log_channel(self, guild: Optional[discord.Guild]):
+        channel_id = await self.config.request_log_channel_id()
+        if not channel_id:
+            channel_id = await self.config.log_channel_id()
+        if not channel_id:
+            return None
+        if guild:
+            return guild.get_channel(int(channel_id)) or self.bot.get_channel(int(channel_id))
+        return self.bot.get_channel(int(channel_id))
+
+    async def _log_event_request(self, guild: Optional[discord.Guild], record: Dict[str, Any]):
+        channel = await self._request_log_channel(guild)
+        if not channel:
+            return
+        embed = discord.Embed(
+            title="New EventManager request",
+            color=discord.Color.blurple(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        user_id = record.get("discord_user_id")
+        requested_by = f"<@{user_id}>" if user_id else record.get("display_name") or "Unknown"
+        embed.add_field(name="Reference", value=str(record.get("id")), inline=True)
+        embed.add_field(name="Requested by", value=requested_by, inline=True)
+        embed.add_field(name="Request type", value=truncate_discord_text(record.get("request_type") or "Not specified", 1024), inline=False)
+        embed.add_field(name="Preferred type", value=truncate_discord_text(record.get("preferred_type") or "No preference", 1024), inline=False)
+        embed.add_field(name="Location", value=truncate_discord_text(record.get("location") or "No preference", 1024), inline=False)
+        if record.get("notes"):
+            embed.add_field(name="Notes", value=truncate_discord_text(record["notes"], 1024), inline=False)
+        await channel.send(embed=embed)
+
+    async def _remember_notification_context(self, kind: str, profile_name: str, profile: dict) -> None:
+        """Remember the next scheduled profile for the MissionChief announcement ping."""
+        summary = await self._next_scheduled_profile_summary(kind, profile_name)
+        if not summary:
+            self._clear_notification_context(kind)
+            return
+        self._notification_contexts[normalize_kind(kind)] = {
+            "next_summary": summary,
+            "current_profile": str(profile_name or ""),
+            "current_location": profile_location_summary(profile),
+            "current_type": profile_type_summary(kind, profile),
+            "expires_at": time.monotonic() + EVENT_NOTIFICATION_CONTEXT_TTL_SECONDS,
+        }
+
+    def _clear_notification_context(self, kind: str) -> None:
+        """Clear stale notification context after a failed start."""
+        with suppress(Exception):
+            self._notification_contexts.pop(normalize_kind(kind), None)
+
+    async def get_next_notification_summary(self, kind: str) -> Optional[str]:
+        """Return the next scheduled location/type for EventPinger notifications."""
+        kind = normalize_kind(kind)
+        context = self._notification_contexts.get(kind)
+        if context:
+            if float(context.get("expires_at") or 0) > time.monotonic():
+                summary = str(context.get("next_summary") or "").strip()
+                if summary:
+                    return summary
+            self._notification_contexts.pop(kind, None)
+
+        schedules = await self.config.schedules()
+        schedule = schedules.get(kind, {})
+        if not schedule.get("enabled"):
+            return None
+
+        profile_names = schedule.get("profiles") or []
+        if not profile_names and schedule.get("profile"):
+            profile_names = [schedule["profile"]]
+        profile_names = [str(profile).strip().lower() for profile in profile_names if str(profile).strip()]
+        if not profile_names:
+            return None
+
+        index = int(schedule.get("rotation_index") or 0) % len(profile_names)
+        next_profile_name = profile_names[index]
+        profiles = await self.config.profiles()
+        profile = profiles.get(kind, {}).get(next_profile_name)
+        if not profile:
+            return f"Profile `{next_profile_name}` is configured next, but its profile data was not found."
+        return profile_start_summary(kind, profile)
+
+    async def _next_scheduled_profile_summary(self, kind: str, current_profile_name: str) -> Optional[str]:
+        """Return the next scheduled profile summary after the profile that just ran."""
+        kind = normalize_kind(kind)
+        schedules = await self.config.schedules()
+        schedule = schedules.get(kind, {})
+        if not schedule.get("enabled"):
+            return None
+
+        profile_names = schedule.get("profiles") or []
+        if not profile_names and schedule.get("profile"):
+            profile_names = [schedule["profile"]]
+        profile_names = [str(profile).strip().lower() for profile in profile_names if str(profile).strip()]
+        if not profile_names:
+            return None
+
+        current_profile_name = str(current_profile_name or "").strip().lower()
+        if current_profile_name not in profile_names:
+            return None
+
+        next_index = (profile_names.index(current_profile_name) + 1) % len(profile_names)
+        next_profile_name = profile_names[next_index]
+        profiles = await self.config.profiles()
+        profile = profiles.get(kind, {}).get(next_profile_name)
+        if not profile:
+            return f"Profile `{next_profile_name}` is configured next, but its profile data was not found."
+        return profile_start_summary(kind, profile)
+
+    async def _log_run(
+        self,
+        kind: str,
+        profile_name: str,
+        status: Optional[int],
+        *,
+        details: Optional[Dict[str, Any]] = None,
+    ):
         channel_id = await self.config.log_channel_id()
         if not channel_id:
             return
@@ -1380,12 +2567,38 @@ class EventManager(commands.Cog):
         embed.add_field(name="Type", value=EVENT_KINDS[kind]["label"], inline=True)
         embed.add_field(name="Profile", value=profile_name, inline=True)
         embed.add_field(name="HTTP Status", value=str(status), inline=True)
+        details = details or {}
+        configured_type = details.get("configured_type")
+        if configured_type:
+            embed.add_field(name="MissionChief Type", value=truncate_discord_text(str(configured_type), 1024), inline=False)
+        button_text = details.get("button_text")
+        if button_text:
+            embed.add_field(name="Button", value=truncate_discord_text(str(button_text), 1024), inline=False)
+        location = details.get("configured_location") or details.get("address") or "Unknown"
+        latitude = details.get("latitude")
+        longitude = details.get("longitude")
+        if latitude and longitude:
+            location = f"{location}\n`{latitude}, {longitude}`"
+        embed.add_field(name="Location", value=truncate_discord_text(str(location), 1024), inline=False)
+        uses_coins = details.get("uses_coins")
+        if uses_coins is not None:
+            embed.add_field(name="Used Coins", value="Yes" if uses_coins else "No", inline=True)
+        next_summary = await self._next_scheduled_profile_summary(kind, profile_name)
+        if next_summary:
+            embed.add_field(
+                name=f"Next {EVENT_KINDS[kind]['label']}",
+                value=truncate_discord_text(next_summary, 1024),
+                inline=False,
+            )
         await channel.send(embed=embed)
 
     async def _run_due_schedules(self):
         schedules = await self.config.schedules()
         last_runs = await self.config.last_runs()
-        changed = False
+        retry_after = await self.config.schedule_retry_after()
+        schedule_changed = False
+        last_runs_changed = False
+        retry_changed = False
 
         for kind, schedule in schedules.items():
             if not schedule.get("enabled"):
@@ -1410,17 +2623,33 @@ class EventManager(commands.Cog):
             if last_runs.get(kind) == run_key:
                 continue
 
+            retry_at = parse_config_datetime(retry_after.get(kind))
+            if retry_at and retry_at > datetime.now(timezone.utc):
+                continue
+
             result = await self._start_from_profile(kind, profile_name)
             if result.ok:
                 last_runs[kind] = run_key
                 schedule["profile"] = profile_name
                 schedule["rotation_index"] = next_rotation_index
-                changed = True
+                retry_after.pop(kind, None)
+                last_runs_changed = True
+                schedule_changed = True
+                retry_changed = True
             else:
+                next_retry = result.details.get("next_eligible_at") if result.details else None
+                if not isinstance(next_retry, datetime) or next_retry <= datetime.now(timezone.utc):
+                    next_retry = datetime.now(timezone.utc) + timedelta(seconds=SCHEDULE_RETRY_SECONDS)
+                retry_after[kind] = config_datetime(next_retry)
+                retry_changed = True
                 log.warning("Scheduled %s failed: %s", kind, result.reason)
 
-        if changed:
+        if last_runs_changed:
             await self.config.last_runs.set(last_runs)
+        if schedule_changed:
+            await self.config.schedules.set(schedules)
+        if retry_changed:
+            await self.config.schedule_retry_after.set(retry_after)
 
     @commands.group(name="eventmanager", aliases=["eventmgr"], invoke_without_command=True)
     @commands.admin()
@@ -1543,6 +2772,94 @@ class EventManager(commands.Cog):
             file=discord.File(data, filename="eventmanager-browser-capture.js"),
         )
 
+    async def _send_browser_event_start_script(
+        self,
+        ctx: commands.Context,
+        profile_name: Optional[str],
+        *,
+        allow_coins: bool,
+    ):
+        try:
+            form = await self._fetch_form("event")
+        except Exception as exc:
+            await ctx.send(f"Could not load the live MissionChief event form: {exc}")
+            return
+
+        label = "quick"
+        normalized_profile = normalize_optional_profile_arg(profile_name)
+        if normalized_profile:
+            label = normalized_profile
+            profiles = await self.config.profiles()
+            profile = profiles.get("event", {}).get(label)
+            if not profile:
+                await ctx.send(f"Event profile `{label}` was not found.")
+                return
+        else:
+            options = field_options_for_kind(form, "event")
+            if not options:
+                await ctx.send("No MissionChief event options were found on the live form.")
+                return
+            profile = fields_for_selection("event", options[0].value, random_region="nyc_or_bermuda")
+            label = f"quick:{options[0].label}"
+
+        start_fields = _normalize_overrides(form, profile_fields_for_start(profile))
+        script = build_browser_event_start_script(start_fields, label=label, allow_coins=allow_coins)
+        if allow_coins:
+            instructions = (
+                "Open https://www.missionchief.com/missionAllianceEventNew in the same MissionChief account, "
+                "paste this script in the browser console, and review every confirmation. "
+                "This script may click an enabled coin Start Event button, but only after you type SPEND COINS."
+            )
+            filename_suffix = f"{normalized_profile or 'quick'}-coins"
+        else:
+            instructions = (
+                "Open https://www.missionchief.com/missionAllianceEventNew in the same MissionChief account, "
+                "paste this script in the browser console, review the confirmation, and only then approve it. "
+                "This script clicks only the free Start Event button and refuses coin payloads."
+            )
+            filename_suffix = normalized_profile or "quick"
+        data = io.BytesIO(script.encode("utf-8"))
+        await ctx.send(
+            instructions,
+            file=discord.File(data, filename=f"eventmanager-browser-event-{filename_suffix}.js"),
+        )
+
+    @eventmanager.command(name="browsereventscript")
+    @commands.admin()
+    async def browser_event_start_script(self, ctx: commands.Context, profile_name: Optional[str] = None):
+        """Send a browser-console script that starts an alliance event through the live DOM."""
+        await self._send_browser_event_start_script(ctx, profile_name, allow_coins=False)
+
+    @eventmanager.command(name="browsereventcoinscript")
+    @commands.admin()
+    async def browser_event_coin_start_script(self, ctx: commands.Context, profile_name: Optional[str] = None):
+        """Send a browser-console script that may start an alliance event with coins."""
+        await self._send_browser_event_start_script(ctx, profile_name, allow_coins=True)
+
+    @eventmanager.command(name="browsercheck")
+    @commands.admin()
+    async def browser_backend_check(self, ctx: commands.Context):
+        """Check whether Playwright browser automation is installed and launchable."""
+        try:
+            from playwright.async_api import async_playwright
+        except Exception:
+            await ctx.send(PLAYWRIGHT_SETUP_MESSAGE)
+            return
+
+        try:
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(headless=True)
+                await browser.close()
+        except Exception as exc:
+            message = str(exc)
+            if "Executable doesn't exist" in message or "playwright install" in message:
+                await ctx.send(PLAYWRIGHT_SETUP_MESSAGE)
+                return
+            await ctx.send(f"Playwright is installed, but Chromium could not launch: {message}")
+            return
+
+        await ctx.send("EventManager browser backend is ready.")
+
     @eventmanager.command(name="panel")
     @commands.admin()
     @commands.guild_only()
@@ -1569,6 +2886,24 @@ class EventManager(commands.Cog):
         result = await self._start_from_profile(kind, profile_name)
         if result.ok:
             await ctx.send(f"Started {EVENT_KINDS[kind]['label']} with profile `{profile_name}`.")
+        else:
+            await ctx.send(f"Could not start {EVENT_KINDS[kind]['label']}: {result.reason}")
+
+    @eventmanager.command(name="startcoins")
+    @commands.admin()
+    async def start_profile_with_coins(self, ctx: commands.Context, kind: str, profile_name: str):
+        """Start a saved profile and explicitly allow MissionChief coin actions."""
+        try:
+            kind = normalize_kind(kind)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+        await ctx.send(
+            "Coin start requested. EventManager will only continue if MissionChief shows an enabled start button."
+        )
+        result = await self._start_from_profile(kind, profile_name, allow_coins=True)
+        if result.ok:
+            await ctx.send(f"Started {EVENT_KINDS[kind]['label']} with profile `{profile_name}` using the browser backend.")
         else:
             await ctx.send(f"Could not start {EVENT_KINDS[kind]['label']}: {result.reason}")
 
@@ -1713,6 +3048,72 @@ class EventManager(commands.Cog):
             + box(", ".join(created), lang="ini")
         )
 
+    @profile.command(name="seedrouteschedule")
+    @commands.admin()
+    async def profile_seed_route_schedule(
+        self,
+        ctx: commands.Context,
+        daily_time: str = "07:00",
+        weekly_day: str = "saturday",
+        weekly_time: str = "07:00",
+    ):
+        """Create the fixed location rotation for daily missions and weekly events."""
+        weekly_day = weekly_day.strip().lower()
+        try:
+            valid_time(daily_time)
+            valid_time(weekly_time)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+        if weekly_day not in WEEKDAYS:
+            await ctx.send(f"Weekday must be one of: {', '.join(WEEKDAYS)}")
+            return
+
+        profile_names = route_profile_names()
+        async with self.config.profiles() as profiles:
+            for kind in ("large", "event"):
+                kind_profiles = profiles.setdefault(kind, {})
+                for location in EVENT_ROUTE_LOCATIONS:
+                    kind_profiles[route_profile_name(location)] = route_profile_for_location(kind, location)
+
+        async with self.config.schedules() as schedules:
+            schedules["large"].update(
+                enabled=True,
+                profile=profile_names[0],
+                profiles=profile_names,
+                rotation_index=0,
+                time=daily_time,
+                timezone=DEFAULT_TIMEZONE,
+                weekday=None,
+            )
+            schedules["event"].update(
+                enabled=True,
+                profile=profile_names[0],
+                profiles=profile_names,
+                rotation_index=0,
+                time=weekly_time,
+                timezone=DEFAULT_TIMEZONE,
+                weekday=weekly_day,
+            )
+        async with self.config.schedule_retry_after() as retry_after:
+            retry_after.pop("large", None)
+            retry_after.pop("event", None)
+
+        notes = [location["input_note"] for location in EVENT_ROUTE_LOCATIONS if location.get("input_note")]
+        lines = [
+            "Created route profiles for both large missions and alliance events.",
+            f"Large scale mission schedule: daily at {daily_time} {DEFAULT_TIMEZONE}.",
+            f"Alliance event schedule: {weekly_day} at {weekly_time} {DEFAULT_TIMEZONE}.",
+            "Alliance event defaults: Large area, Circle, Every 30 seconds.",
+            "MissionChief type: random live option at start time.",
+            "",
+            "Rotation order:",
+            ", ".join(profile_names),
+        ]
+        if notes:
+            lines.extend(["", "Location notes:", *notes])
+        await ctx.send(box("\n".join(lines), lang="ini"))
+
     @profile.command(name="remove")
     @commands.admin()
     async def profile_remove(self, ctx: commands.Context, kind: str, profile_name: str, field_name: str):
@@ -1765,6 +3166,10 @@ class EventManager(commands.Cog):
         lines = [f"{kind}/{profile_name.strip().lower()}"]
         if profile.get(RANDOM_LOCATION_KEY):
             lines.append(f"{RANDOM_LOCATION_KEY} = {profile[RANDOM_LOCATION_KEY]}")
+        if profile.get(RANDOM_TYPE_KEY):
+            lines.append(f"{RANDOM_TYPE_KEY} = true")
+        if profile.get("location_label"):
+            lines.append(f"location_label = {profile['location_label']}")
         for field_name, value in sorted(profile.get("fields", {}).items()):
             lines.append(f"{field_name} = {value}")
         await ctx.send(box("\n".join(lines), lang="ini"))
@@ -1785,14 +3190,23 @@ class EventManager(commands.Cog):
     async def schedule(self, ctx: commands.Context):
         """Manage automatic schedules."""
         schedules = await self.config.schedules()
+        last_runs = await self.config.last_runs()
+        retry_after = await self.config.schedule_retry_after()
         lines = []
         for kind, schedule in schedules.items():
             profiles = schedule.get("profiles") or [schedule.get("profile")]
             profiles = [profile for profile in profiles if profile]
+            timezone_name = schedule.get("timezone") or DEFAULT_TIMEZONE
+            now = datetime.now(ZoneInfo(timezone_name))
+            next_attempt = next_schedule_attempt_time(kind, schedule, last_runs, retry_after, now)
+            next_attempt_text = next_attempt.isoformat() if next_attempt else "not scheduled"
+            retry_at = parse_config_datetime(retry_after.get(kind))
+            retry_text = retry_at.isoformat() if retry_at else "none"
             lines.append(
                 f"{kind}: enabled={schedule.get('enabled')} profiles={profiles or 'none'} "
                 f"time={schedule.get('time')} timezone={schedule.get('timezone')} "
-                f"weekday={schedule.get('weekday')} rotation_index={schedule.get('rotation_index', 0)}"
+                f"weekday={schedule.get('weekday')} rotation_index={schedule.get('rotation_index', 0)} "
+                f"last_run={last_runs.get(kind, 'none')} retry_after={retry_text} next_attempt={next_attempt_text}"
             )
         await ctx.send(box("\n".join(lines), lang="ini"))
 
@@ -1855,6 +3269,65 @@ class EventManager(commands.Cog):
             return
         async with self.config.schedules() as schedules:
             schedules[kind]["enabled"] = False
+        await ctx.tick()
+
+    @schedule.command(name="clearretry")
+    @commands.admin()
+    async def schedule_clear_retry(self, ctx: commands.Context, kind: str):
+        """Clear a stored cooldown retry for one automatic schedule."""
+        try:
+            kind = normalize_kind(kind)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+        async with self.config.schedule_retry_after() as retry_after:
+            retry_after.pop(kind, None)
+        await ctx.tick()
+
+    @eventmanager.group(name="request", invoke_without_command=True)
+    @commands.admin()
+    async def request(self, ctx: commands.Context):
+        """Manage member EventManager requests."""
+        requests = await self.config.event_requests()
+        pending = [item for item in requests if item.get("status") == "pending"]
+        if not pending:
+            await ctx.send("No pending EventManager requests.")
+            return
+        lines = []
+        for item in pending[-15:]:
+            lines.append(
+                "{id}: {display_name} | {request_type} | {preferred_type} | {location}".format(
+                    id=item.get("id", "unknown"),
+                    display_name=item.get("display_name") or item.get("discord_name") or "Unknown",
+                    request_type=item.get("request_type") or "not specified",
+                    preferred_type=item.get("preferred_type") or "no preference",
+                    location=item.get("location") or "no preference",
+                )
+            )
+        await ctx.send(box("\n".join(lines), lang="ini"))
+
+    @request.command(name="panel")
+    @commands.admin()
+    async def request_panel(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
+        """Post or refresh the member EventManager request panel."""
+        if channel is not None:
+            await self.config.request_panel_channel_id.set(channel.id)
+            await self.config.request_panel_message_id.set(None)
+        message = await self.ensure_request_panel_message(ctx.guild, create=True)
+        if message:
+            await ctx.send(f"EventManager request panel ready in {message.channel.mention}: {message.jump_url}")
+        else:
+            await ctx.send("Could not post the EventManager request panel. Check the configured channel and bot permissions.")
+
+    @request.command(name="logchannel")
+    @commands.admin()
+    async def request_logchannel(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
+        """Set or clear the EventManager request notification channel."""
+        if channel is None:
+            await self.config.request_log_channel_id.set(None)
+            await ctx.send("EventManager request log channel cleared.")
+            return
+        await self.config.request_log_channel_id.set(channel.id)
         await ctx.tick()
 
     @eventmanager.command(name="logchannel")

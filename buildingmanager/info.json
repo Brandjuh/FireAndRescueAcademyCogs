@@ -21,8 +21,11 @@
     "min_bot_version": "3.5.0",
     "hidden": false,
     "disabled": false,
-    "required_cogs": {},
+    "required_cogs": {
+        "CookieManager": "Provides authenticated MissionChief sessions for browser diagnostics and future alliance building automation"
+    },
     "requirements": [
-        "aiohttp"
+        "aiohttp",
+        "playwright"
     ]
 }

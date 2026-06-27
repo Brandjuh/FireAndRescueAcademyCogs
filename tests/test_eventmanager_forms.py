@@ -1,22 +1,44 @@
 import unittest
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from eventmanager.event_manager import (
+    BROWSER_CLICK_START_SCRIPT,
     BROWSER_CAPTURE_SCRIPT,
+    BROWSER_PREPARE_START_SCRIPT,
+    build_browser_start_config,
     build_payload,
+    EVENT_DEFAULT_OVERRIDES,
+    EVENT_ROUTE_LOCATIONS,
+    EVENT_RADIO_FIELD,
     fields_for_selection,
     field_options_for_kind,
+    MISSION_TYPE_FIELD,
     normalize_kind,
+    normalize_optional_profile_arg,
     normalize_random_location_region,
+    next_free_start_from_text,
+    next_schedule_attempt_time,
     parse_event_form,
+    parse_last_free_mission_time,
     parse_location_or_random_region,
     parse_location_value,
     parse_profile_names,
     profile_fields_for_start,
     profile_name_from_label,
+    profile_location_summary,
+    profile_start_summary,
+    profile_type_summary,
+    profile_with_selected_type,
     random_location_for_region,
+    RANDOM_TYPE_KEY,
+    route_profile_for_location,
+    route_profile_names,
     safe_debug_mapping,
     safe_debug_payload,
+    schedule_run_key,
     select_scheduled_profile,
+    summarize_browser_snapshot,
     summarize_payload_for_debug,
     summarize_response_for_debug,
     summarize_form,
@@ -25,6 +47,7 @@ from eventmanager.event_manager import (
     LATITUDE_FIELD,
     LONGITUDE_FIELD,
     ADDRESS_FIELD,
+    build_browser_event_start_script,
     _ajax_get_headers,
     _ajax_submit_headers,
     _form_position_params,
@@ -147,6 +170,18 @@ class FakeSession:
     def get(self, url, **kwargs):
         self.requests.append((url, kwargs))
         return self.response
+
+
+class FakeEventManagerConfig:
+    def __init__(self, schedules, profiles):
+        self._schedules = schedules
+        self._profiles = profiles
+
+    async def schedules(self):
+        return self._schedules
+
+    async def profiles(self):
+        return self._profiles
 
 
 class EventManagerFormTests(unittest.TestCase):
@@ -336,6 +371,89 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertEqual(profile["fields"]["mission_position[shape]"], "circle")
         self.assertEqual(profile["fields"]["mission_position[amount]"], "0")
 
+    def test_build_browser_start_config_resolves_event_profile(self):
+        profile = fields_for_selection("event", "1", random_region="nyc_or_bermuda")
+
+        config = build_browser_start_config("event", profile, label="weekly", allow_coins=False)
+
+        self.assertEqual(config["kind"], "event")
+        self.assertEqual(config["label"], "weekly")
+        self.assertFalse(config["allowCoins"])
+        self.assertEqual(config["eventValue"], "1")
+        self.assertEqual(config["missionType"], "1")
+        self.assertEqual(config["latitude"], "40.729500")
+        self.assertEqual(config["longitude"], "-73.997200")
+        self.assertEqual(config["size"], "2")
+        self.assertEqual(config["shape"], "circle")
+        self.assertEqual(config["amount"], "0")
+
+    def test_route_profiles_use_fixed_locations_and_random_live_types(self):
+        names = route_profile_names()
+
+        self.assertEqual(len(names), 10)
+        self.assertEqual(names[0], "route_new_york_city")
+        self.assertEqual(names[-1], "route_beersheba_israel")
+
+        large_profile = route_profile_for_location("large", EVENT_ROUTE_LOCATIONS[0])
+        event_profile = route_profile_for_location("event", EVENT_ROUTE_LOCATIONS[0])
+
+        self.assertTrue(large_profile[RANDOM_TYPE_KEY])
+        self.assertTrue(event_profile[RANDOM_TYPE_KEY])
+        self.assertEqual(large_profile["fields"]["mission_position[latitude]"], "40.712800")
+        self.assertEqual(event_profile["fields"]["mission_position[size]"], EVENT_DEFAULT_OVERRIDES["mission_position[size]"])
+        self.assertEqual(event_profile["fields"]["mission_position[shape]"], "circle")
+        self.assertEqual(event_profile["fields"]["mission_position[amount]"], "0")
+
+    def test_profile_start_summary_shows_next_route_location_and_random_type(self):
+        profile = route_profile_for_location("event", EVENT_ROUTE_LOCATIONS[1])
+
+        summary = profile_start_summary("event", profile)
+
+        self.assertIn("Location: Portland, OR, USA", summary)
+        self.assertIn("Type: Surprise Alliance event type", summary)
+
+    def test_profile_type_summary_shows_resolved_event_type_label(self):
+        profile = route_profile_for_location("event", EVENT_ROUTE_LOCATIONS[0])
+        form = parse_event_form(MISSIONCHIEF_EVENT_HTML, "https://www.missionchief.com/missionAllianceEventNew")
+        option = next(option for option in field_options_for_kind(form, "event") if option.label == "Civil Unrest")
+
+        resolved = profile_with_selected_type("event", profile, option)
+
+        self.assertEqual(profile_type_summary("event", resolved), "Civil Unrest")
+        self.assertEqual(profile_location_summary(resolved), "New York City, NY, USA")
+
+    def test_profile_with_selected_type_resolves_random_event_type(self):
+        profile = route_profile_for_location("event", EVENT_ROUTE_LOCATIONS[0])
+        form = parse_event_form(MISSIONCHIEF_EVENT_HTML, "https://www.missionchief.com/missionAllianceEventNew")
+        option = next(option for option in field_options_for_kind(form, "event") if option.label == "Civil Unrest")
+
+        resolved = profile_with_selected_type("event", profile, option)
+
+        self.assertNotIn(RANDOM_TYPE_KEY, resolved)
+        self.assertEqual(resolved["fields"][EVENT_RADIO_FIELD], "1")
+        self.assertEqual(resolved["fields"][MISSION_TYPE_FIELD], "1")
+        self.assertEqual(resolved["selected_type_label"], "Civil Unrest")
+
+    def test_build_browser_start_config_resolves_large_profile(self):
+        profile = fields_for_selection("large", "41", random_region="nyc")
+
+        config = build_browser_start_config("large", profile, label="daily", allow_coins=True)
+
+        self.assertEqual(config["kind"], "large")
+        self.assertTrue(config["allowCoins"])
+        self.assertEqual(config["missionType"], "41")
+        self.assertEqual(config["latitude"], "40.729500")
+        self.assertEqual(config["longitude"], "-73.997200")
+        self.assertEqual(config["amount"], "1")
+
+    def test_build_browser_start_config_requires_coordinates(self):
+        with self.assertRaises(ValueError):
+            build_browser_start_config(
+                "event",
+                {"fields": {"event_radio_group": "1", "mission_position[mission_type_id]": "1"}},
+                label="broken",
+            )
+
     def test_fields_for_selection_accepts_manual_large_coordinates_and_address(self):
         profile = fields_for_selection("large", "41", latitude="40.1", longitude="-73.9", address="Manual NYC")
 
@@ -412,6 +530,14 @@ class EventManagerFormTests(unittest.TestCase):
             ["daily", "storm", "backup"],
         )
 
+    def test_normalize_optional_profile_arg_ignores_placeholders(self):
+        self.assertIsNone(normalize_optional_profile_arg(None))
+        self.assertIsNone(normalize_optional_profile_arg(""))
+        self.assertIsNone(normalize_optional_profile_arg("[profile]"))
+        self.assertIsNone(normalize_optional_profile_arg("<profile>"))
+        self.assertIsNone(normalize_optional_profile_arg("profile"))
+        self.assertEqual(normalize_optional_profile_arg(" Storm_Surge "), "storm_surge")
+
     def test_select_scheduled_profile_rotates_profiles(self):
         profile, next_index = select_scheduled_profile(
             {"profiles": ["alpha", "bravo"], "rotation_index": 1}
@@ -420,8 +546,112 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertEqual(profile, "bravo")
         self.assertEqual(next_index, 0)
 
+    def test_last_free_time_parses_missionchief_cooldown_text(self):
+        parsed = parse_last_free_mission_time("Last free mission: Sat, 20 Jun 2026 14:09:10 -0400")
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.astimezone(timezone.utc).isoformat(), "2026-06-20T18:09:10+00:00")
+
+    def test_next_free_start_includes_grace_period(self):
+        next_free = next_free_start_from_text("event", "Last free mission: Sat, 20 Jun 2026 14:09:10 -0400")
+
+        self.assertIsNotNone(next_free)
+        self.assertEqual(next_free.isoformat(), "2026-06-27T14:10:25-04:00")
+
+    def test_next_weekly_schedule_attempt_retries_same_week_after_cooldown(self):
+        now = datetime(2026, 6, 27, 7, 0, 30, tzinfo=ZoneInfo("America/New_York"))
+        schedule = {
+            "enabled": True,
+            "profiles": ["weekly"],
+            "rotation_index": 0,
+            "time": "07:00",
+            "timezone": "America/New_York",
+            "weekday": "saturday",
+        }
+        retry_after = {"event": "2026-06-27T11:01:15+00:00"}
+
+        next_attempt = next_schedule_attempt_time("event", schedule, {}, retry_after, now)
+
+        self.assertEqual(next_attempt.isoformat(), "2026-06-27T07:01:15-04:00")
+
+    def test_due_weekly_schedule_attempt_is_now_before_run_key_is_written(self):
+        now = datetime(2026, 6, 27, 7, 0, 30, tzinfo=ZoneInfo("America/New_York"))
+        schedule = {
+            "enabled": True,
+            "profiles": ["weekly"],
+            "rotation_index": 0,
+            "time": "07:00",
+            "timezone": "America/New_York",
+            "weekday": "saturday",
+        }
+
+        next_attempt = next_schedule_attempt_time("event", schedule, {}, {}, now)
+
+        self.assertEqual(next_attempt, now)
+        self.assertEqual(schedule_run_key("event", now), "2026-W26")
+
 
 class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
+    async def test_next_scheduled_profile_summary_uses_profile_after_current(self):
+        profile_names = route_profile_names()
+        fake = type("FakeEventManager", (), {})()
+        fake.config = FakeEventManagerConfig(
+            schedules={
+                "event": {
+                    "enabled": True,
+                    "profiles": profile_names,
+                    "rotation_index": 0,
+                }
+            },
+            profiles={
+                "event": {
+                    route_profile_names()[index]: route_profile_for_location("event", location)
+                    for index, location in enumerate(EVENT_ROUTE_LOCATIONS)
+                }
+            },
+        )
+
+        summary = await EventManager._next_scheduled_profile_summary(fake, "event", "route_new_york_city")
+
+        self.assertIn("Location: Portland, OR, USA", summary)
+        self.assertIn("Type: Surprise Alliance event type", summary)
+
+    async def test_notification_context_exposes_next_route_profile(self):
+        profile_names = route_profile_names()
+        fake = type("FakeEventManager", (), {})()
+        fake.config = FakeEventManagerConfig(
+            schedules={
+                "large": {
+                    "enabled": True,
+                    "profiles": profile_names,
+                    "rotation_index": 0,
+                }
+            },
+            profiles={
+                "large": {
+                    route_profile_names()[index]: route_profile_for_location("large", location)
+                    for index, location in enumerate(EVENT_ROUTE_LOCATIONS)
+                }
+            },
+        )
+        fake._notification_contexts = {}
+
+        async def next_summary(kind, profile_name):
+            return await EventManager._next_scheduled_profile_summary(fake, kind, profile_name)
+
+        fake._next_scheduled_profile_summary = next_summary
+
+        await EventManager._remember_notification_context(
+            fake,
+            "large",
+            "route_new_york_city",
+            route_profile_for_location("large", EVENT_ROUTE_LOCATIONS[0]),
+        )
+        summary = await EventManager.get_next_notification_summary(fake, "large")
+
+        self.assertIn("Location: Portland, OR, USA", summary)
+        self.assertIn("Type: Surprise Large scale alliance mission type", summary)
+
     async def test_reverse_address_replaces_payload_address(self):
         session = FakeSession(FakeResponse("MissionChief Address"))
         payload = [
@@ -491,6 +721,86 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(".submit(", BROWSER_CAPTURE_SCRIPT)
         self.assertNotIn("fetch(", BROWSER_CAPTURE_SCRIPT)
         self.assertNotIn("XMLHttpRequest", BROWSER_CAPTURE_SCRIPT)
+
+    def test_browser_event_start_script_uses_dom_and_free_button_only(self):
+        script = build_browser_event_start_script(
+            {
+                "authenticity_token": "secret",
+                "event_radio_group": "2",
+                "mission_position[mission_type_id]": "2",
+                "mission_position[latitude]": "40.729500",
+                "mission_position[longitude]": "-73.997200",
+                "mission_position[address]": "70 Washington Square South, 10012 New York, Manhattan",
+                "mission_position[size]": "2",
+                "mission_position[shape]": "circle",
+                "mission_position[amount]": "0",
+                "mission_position[coins]": "0",
+            },
+            label="storm surge",
+        )
+
+        self.assertIn("/missionAllianceEventNew", script)
+        self.assertIn("missionAllianceEventCreate", script)
+        self.assertIn('"allowCoins": false', script)
+        self.assertIn("startButton.click()", script)
+        self.assertIn("Refusing to click coin action", script)
+        self.assertIn('"event_radio_group": "2"', script)
+        self.assertIn('"mission_position[shape]": "circle"', script)
+        self.assertIn("70 Washington Square South", script)
+        self.assertNotIn("secret", script)
+        self.assertNotIn("authenticity_token", script)
+        self.assertNotIn("event_identifier", script)
+        self.assertNotIn("fetch(", script)
+        self.assertNotIn("XMLHttpRequest", script)
+
+    def test_browser_event_start_script_can_explicitly_allow_coins(self):
+        script = build_browser_event_start_script(
+            {
+                "event_radio_group": "2",
+                "mission_position[mission_type_id]": "2",
+                "mission_position[coins]": "20",
+            },
+            label="storm surge",
+            allow_coins=True,
+        )
+
+        self.assertIn('"allowCoins": true', script)
+        self.assertIn('"mission_position[coins]": "20"', script)
+        self.assertIn("SPEND COINS", script)
+        self.assertIn("startButton.click()", script)
+        self.assertNotIn("fetch(", script)
+        self.assertNotIn("XMLHttpRequest", script)
+
+    def test_playwright_prepare_script_moves_missionchief_marker(self):
+        self.assertIn("mission_position_new_marker", BROWSER_PREPARE_START_SCRIPT)
+        self.assertIn("mission_position_new_dragend", BROWSER_PREPARE_START_SCRIPT)
+        self.assertIn("updateAddress", BROWSER_PREPARE_START_SCRIPT)
+        self.assertIn("No enabled", BROWSER_PREPARE_START_SCRIPT)
+        self.assertNotIn("fetch(", BROWSER_PREPARE_START_SCRIPT)
+        self.assertNotIn("XMLHttpRequest", BROWSER_PREPARE_START_SCRIPT)
+
+    def test_playwright_click_script_only_clicks_selected_submit_button(self):
+        self.assertIn("submitIndex", BROWSER_CLICK_START_SCRIPT)
+        self.assertIn("button.click()", BROWSER_CLICK_START_SCRIPT)
+        self.assertNotIn("fetch(", BROWSER_CLICK_START_SCRIPT)
+        self.assertNotIn("XMLHttpRequest", BROWSER_CLICK_START_SCRIPT)
+
+    def test_summarize_browser_snapshot_includes_buttons_without_tokens(self):
+        summary = summarize_browser_snapshot(
+            {
+                "url": "https://www.missionchief.com/",
+                "missionType": "41",
+                "latitude": "40.1",
+                "longitude": "-73.9",
+                "address": "NYC",
+                "coins": "0",
+                "submitButtons": [{"text": "Start Event ( Free )", "disabled": True}],
+            }
+        )
+
+        self.assertIn("missionType: 41", summary)
+        self.assertIn("Start Event", summary)
+        self.assertNotIn("authenticity_token", summary)
 
 
 if __name__ == "__main__":

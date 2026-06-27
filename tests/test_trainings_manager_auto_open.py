@@ -1,10 +1,13 @@
 import asyncio
+from datetime import datetime, timezone
 import types
 from unittest.mock import AsyncMock
 
 from trainings_manager.trainings_manager import (
     AUTO_BUILDING_LIST_PATH,
     AutoTrainingResult,
+    BoardTrainingPost,
+    BoardTrainingMatch,
     DEVELOPER_PANEL_CHANNEL_ID,
     MEMBER_PANEL_CHANNEL_ID,
     DeveloperTrainingPanelView,
@@ -14,11 +17,15 @@ from trainings_manager.trainings_manager import (
     TrainingManager,
     TrainingRequest,
     DisciplineAvailability,
+    describe_ambiguous_board_training_request,
+    extract_board_training_matches,
     infer_academy_discipline,
     parse_academy_page,
     parse_available_academies,
     parse_available_academies_page,
+    parse_missionchief_forms,
     parse_profile_username,
+    parse_training_board_page,
 )
 
 
@@ -138,6 +145,50 @@ BUILDING_LIST_ALL_ACADEMIES_HTML = """
   <td>Training courses currently running</td>
 </tr>
 </table>
+"""
+
+
+TRAINING_BOARD_HTML = """
+<script>
+  user_id = 88649;
+</script>
+<ul class="pagination pagination">
+  <li><a href="/alliance_threads/5935?page=5">5</a></li>
+  <li class="active"><span>6</span></li>
+  <li class="next disabled"><span>Next</span></li>
+</ul>
+<div class="panel panel-default" id="post-on-page-1">
+  <div class="panel-body">
+    <div class="row">
+      <div class="col-md-1">
+        <strong><a href="/profile/123456">BoardUser</a></strong>
+        <br>
+        <span title="June 24, 2026 15:47">June 24, 2026 15:47</span>
+      </div>
+      <div class="col-md-11">
+        <p>Can I get hotshot crew traning and HazMat?</p>
+      </div>
+    </div>
+  </div>
+  <div class="panel-footer">
+    <a href="/alliance_posts/179134/edit">Edit</a>
+  </div>
+</div>
+<form action="/alliance_posts?alliance_thread_id=5935" id="new_alliance_post" method="post">
+  <input name="authenticity_token" type="hidden" value="token-board" />
+  <textarea name="alliance_post[content]"></textarea>
+</form>
+"""
+
+
+NEW_THREAD_FORM_HTML = """
+<form action="/alliance_threads" method="post" id="new_alliance_thread">
+  <input name="utf8" type="hidden" value="&#x2713;" />
+  <input name="authenticity_token" type="hidden" value="token-thread" />
+  <input name="alliance_thread[caption]" type="text" />
+  <textarea name="alliance_post[content]">old</textarea>
+  <input name="commit" type="submit" value="Save" />
+</form>
 """
 
 
@@ -326,6 +377,298 @@ def test_parse_academy_page_extracts_form_rooms_costs_and_courses():
     ]
 
 
+def test_parse_training_board_page_extracts_last_page_post_and_reply_form():
+    page = parse_training_board_page(TRAINING_BOARD_HTML)
+
+    assert page.last_page == 6
+    assert page.current_user_id == "88649"
+    assert page.reply_action == "/alliance_posts?alliance_thread_id=5935"
+    assert page.reply_token == "token-board"
+    assert len(page.posts) == 1
+    assert page.posts[0].post_id == 179134
+    assert page.posts[0].author_id == "123456"
+    assert page.posts[0].author_name == "BoardUser"
+    assert page.posts[0].content == "Can I get hotshot crew traning and HazMat?"
+
+
+def test_extract_board_training_matches_handles_typos_and_multiple_requests():
+    matches = extract_board_training_matches("Can I get hotshot crew traning and HazMat?")
+
+    assert {(match.discipline, match.training) for match in matches} == {
+        ("Fire", "Hotshot Crew Training"),
+        ("Fire", "HazMat"),
+    }
+
+
+def test_board_lifeguard_training_requires_explicit_academy_type():
+    assert extract_board_training_matches("Lifeguard Training") == []
+
+    fire_matches = extract_board_training_matches("Fire Station - Lifeguard Training")
+    coastal_matches = extract_board_training_matches("Water Rescue - Lifeguard Training")
+
+    assert [(match.discipline, match.training) for match in fire_matches] == [
+        ("Fire", "Lifeguard Training")
+    ]
+    assert [(match.discipline, match.training) for match in coastal_matches] == [
+        ("Coastal", "Lifeguard Training")
+    ]
+
+
+def test_board_wildland_mobile_command_does_not_open_mobile_command_too():
+    matches = extract_board_training_matches("Wildland Mobile Command Center")
+
+    assert [(match.discipline, match.training) for match in matches] == [
+        ("Fire", "Wildland Mobile Command Center Training")
+    ]
+
+
+def test_board_fire_wildland_mobile_command_typo_matches_wildland_training():
+    matches = extract_board_training_matches("Requesting please FIRE Wildland Mobile Comand Center 1 class")
+
+    assert [(match.discipline, match.training) for match in matches] == [
+        ("Fire", "Wildland Mobile Command Center Training")
+    ]
+    assert describe_ambiguous_board_training_request(
+        "Requesting please FIRE Wildland Mobile Comand Center 1 class"
+    ) is None
+
+
+def test_ambiguous_board_training_request_explains_lifeguard_options():
+    explanation = describe_ambiguous_board_training_request("Lifeguard Training")
+
+    assert explanation is not None
+    assert "Lifeguard Training exists in multiple academy types" in explanation
+    assert "Fire Station - Lifeguard Training" in explanation
+    assert "Water Rescue - Lifeguard Training" in explanation
+
+
+def test_parse_missionchief_forms_extracts_thread_form_fields():
+    forms = parse_missionchief_forms(NEW_THREAD_FORM_HTML)
+
+    assert len(forms) == 1
+    assert forms[0].action == "/alliance_threads"
+    assert forms[0].method == "post"
+    assert forms[0].fields["authenticity_token"] == "token-thread"
+    assert forms[0].fields["alliance_thread[caption]"] == ""
+    assert forms[0].fields["alliance_post[content]"] == "old"
+
+
+def test_build_board_guide_content_lists_availability_and_training_names():
+    manager = TrainingManager.__new__(TrainingManager)
+    availability = {
+        "Fire": DisciplineAvailability(discipline="Fire", available_classrooms=3),
+        "Police": DisciplineAvailability(discipline="Police", available_classrooms=2),
+    }
+
+    content = manager._build_board_guide_content(
+        availability,
+        None,
+        request_thread_id=5935,
+        refreshed_at=datetime(2026, 6, 25, 10, 0, tzinfo=timezone.utc),
+    )
+
+    assert "[b]Training Request Guide[/b]" in content
+    assert "https://www.missionchief.com/alliance_threads/5935" in content
+    assert "[b]Current academy availability[/b]\nLast updated: 2026-06-25 12:00 CEST" in content
+    assert "- Fire: 3 classes" in content
+    assert "- Police: 2 classes" in content
+    assert "[b]Fire training request text[/b]" in content
+    assert "Fire Station - Lifeguard Training" in content
+    assert "Water Rescue - Lifeguard Training" in content
+    assert "Hotshot Crew Training" in content
+    assert "Small typos are supported" in content
+    assert "Fire & Rescue Academy bot" not in content
+    assert "Discord requests support automatic reminders" in content
+
+
+def test_build_board_guide_contents_splits_sections_and_marks_posts():
+    manager = TrainingManager.__new__(TrainingManager)
+    availability = {"Fire": DisciplineAvailability(discipline="Fire", available_classrooms=3)}
+
+    contents = manager._build_board_guide_contents(
+        availability,
+        None,
+        request_thread_id=5935,
+        refreshed_at=datetime(2026, 6, 25, 10, 0, tzinfo=timezone.utc),
+    )
+
+    assert set(contents) == {"overview", "Fire", "Police", "EMS", "Coastal"}
+    assert contents["overview"].startswith("[TM-GUIDE:overview]")
+    assert contents["Fire"].startswith("[TM-GUIDE:Fire]")
+    assert "Hotshot Crew Training" in contents["Fire"]
+
+
+def test_training_board_guide_posts_are_not_treated_as_requests():
+    manager = TrainingManager.__new__(TrainingManager)
+    post = BoardTrainingPost(
+        post_id=1,
+        author_id="88649",
+        author_name="BotUser",
+        created_at="June 24, 2026 15:47",
+        content="[TM-GUIDE:Fire]\n- Hotshot Crew Training",
+    )
+
+    assert manager._is_board_guide_post(post) is True
+
+
+def test_training_board_bot_replies_are_not_treated_as_requests():
+    manager = TrainingManager.__new__(TrainingManager)
+    marked = BoardTrainingPost(
+        post_id=1,
+        author_id="88649",
+        author_name="BotUser",
+        created_at="June 24, 2026 15:47",
+        content="[TM-REPLY]\nTraining request processed for BoardUser.\n\nOpened:\n- Lifeguard Training: opened 1 class(es)",
+    )
+    legacy = BoardTrainingPost(
+        post_id=2,
+        author_id="88649",
+        author_name="BotUser",
+        created_at="June 24, 2026 15:48",
+        content="Training request processed for BoardUser.\n\nOpened:\n- Lifeguard Training: opened 1 class(es)",
+    )
+
+    assert manager._is_board_system_post(marked) is True
+    assert manager._is_board_system_post(legacy) is True
+
+
+def test_training_board_post_ids_are_normalized_for_duplicate_protection():
+    manager = TrainingManager.__new__(TrainingManager)
+
+    assert manager._normalize_board_post_ids(["10", 11, None, "bad", "12"]) == [10, 11, 12]
+
+
+def test_training_board_reply_with_id_returns_new_bot_reply_post_id():
+    manager = TrainingManager.__new__(TrainingManager)
+    reply_page_html = TRAINING_BOARD_HTML.replace(
+        "</form>",
+        """
+<div class="panel panel-default" id="post-on-page-2">
+  <div class="panel-body">
+    <div class="row">
+      <div class="col-md-1">
+        <strong>FireAndRescueAcademy</strong>
+        <br>
+        <span title="June 24, 2026 15:48">June 24, 2026 15:48</span>
+      </div>
+      <div class="col-md-11">
+        <p>[TM-REPLY]<br>Training request processed for BoardUser.</p>
+      </div>
+    </div>
+  </div>
+  <div class="panel-footer">
+    <a href="/alliance_posts/179135/edit">Edit</a>
+  </div>
+</div>
+</form>
+""",
+    )
+    session = _Session(
+        {
+            "https://www.missionchief.com/alliance_threads/5935": TRAINING_BOARD_HTML,
+            "https://www.missionchief.com/alliance_threads/5935?page=6": reply_page_html,
+        }
+    )
+    page = parse_training_board_page(TRAINING_BOARD_HTML)
+
+    status, post_id = asyncio.run(
+        manager._post_training_board_reply_with_id(
+            session,
+            5935,
+            page,
+            "[TM-REPLY]\nTraining request processed for BoardUser.",
+        )
+    )
+
+    assert status == 200
+    assert post_id == 179135
+
+
+def test_delete_board_post_submits_delete_method_with_reply_token():
+    manager = TrainingManager.__new__(TrainingManager)
+    session = _Session(
+        {
+            "https://www.missionchief.com/alliance_threads/5935": TRAINING_BOARD_HTML,
+            "https://www.missionchief.com/alliance_threads/5935?page=6": TRAINING_BOARD_HTML,
+        }
+    )
+
+    deleted, reason = asyncio.run(manager._delete_board_post(session, 5935, 179134))
+
+    assert deleted is True
+    assert reason == "deleted"
+    assert session.posts[-1][0] == "https://www.missionchief.com/alliance_posts/179134"
+    assert session.posts[-1][1]["data"]["_method"] == "delete"
+    assert session.posts[-1][1]["data"]["authenticity_token"] == "token-board"
+
+
+def test_training_board_reply_reports_failed_auto_open_to_board_user():
+    manager = TrainingManager.__new__(TrainingManager)
+    post = BoardTrainingPost(
+        post_id=179134,
+        author_id="123456",
+        author_name="BoardUser",
+        created_at="June 24, 2026 15:47",
+        content="Hotshot Crew Training",
+    )
+    match = BoardTrainingMatch(
+        discipline="Fire",
+        training="Hotshot Crew Training",
+        days=3,
+        matched_text="hotshot crew training",
+        score=1.0,
+    )
+    result = AutoTrainingResult(False, "No available Fire academies found on the alliance building list")
+
+    reply = manager._build_training_board_reply(post, [(match, result)])
+
+    assert reply.startswith("[TM-REPLY]")
+    assert "Training request processed for BoardUser." in reply
+    assert "Could not open automatically:" in reply
+    assert "No free Fire classrooms are available right now" in reply
+    assert "Please try again later" in reply
+
+
+def test_training_board_error_reply_explains_unrecognized_request():
+    manager = TrainingManager.__new__(TrainingManager)
+    post = BoardTrainingPost(
+        post_id=179134,
+        author_id="123456",
+        author_name="BoardUser",
+        created_at="June 24, 2026 15:47",
+        content="Can I have something?",
+    )
+
+    reply = manager._build_training_board_error_reply(post, "No known training name was found.")
+
+    assert reply.startswith("[TM-REPLY]")
+    assert "Training request could not be processed for BoardUser." in reply
+    assert "Reason: No known training name was found." in reply
+
+
+def test_training_board_processing_error_is_logged_to_discord():
+    log_channel = types.SimpleNamespace(send=AsyncMock())
+    manager = TrainingManager.__new__(TrainingManager)
+    manager._get_training_log_channel = AsyncMock(return_value=log_channel)
+    guild = types.SimpleNamespace()
+    post = BoardTrainingPost(
+        post_id=179134,
+        author_id="123456",
+        author_name="BoardUser",
+        created_at="June 25, 2026 18:54",
+        content="Hotshot Crew Training",
+    )
+
+    asyncio.run(manager._send_board_processing_error_log(guild, {"log_channel_id": 12}, post, RuntimeError("boom")))
+
+    log_channel.send.assert_awaited_once()
+    embed = log_channel.send.await_args.kwargs["embed"]
+    assert embed.kwargs["title"] == "MissionChief board training request failed"
+    fields = {field["name"]: field["value"] for field in embed.fields}
+    assert fields["Board post"] == "#179134"
+    assert "boom" in fields["Error"]
+
+
 def test_parse_available_academies_extracts_open_training_links():
     academies = parse_available_academies(BUILDING_LIST_HTML)
 
@@ -409,6 +752,35 @@ def test_auto_open_training_posts_missionchief_education_form():
     assert kwargs["data"]["education_select"] == "hotshot:17"
     assert kwargs["data"]["alliance[duration]"] == str(AUTO_ALLIANCE_DURATION_SECONDS)
     assert kwargs["data"]["alliance[cost]"] == "100"
+
+
+def test_board_training_request_opens_without_discord_member_verification():
+    session = _Session(
+        {
+            f"https://www.missionchief.com{AUTO_BUILDING_LIST_PATH}": BUILDING_LIST_HTML,
+            "https://www.missionchief.com/buildings/100": ACADEMY_HTML.replace("4951748", "100"),
+        }
+    )
+    manager, _guild, _user, _ = _manager(session=session, contribution_rate=6.0)
+    post = BoardTrainingPost(
+        post_id=179134,
+        author_id="456",
+        author_name="BoardUser",
+        created_at="June 24, 2026 15:47",
+        content="Hotshot Crew Training",
+    )
+    req = _training_request(user_id=0, fee_per_day=0, num_classes=1)
+
+    result = asyncio.run(manager._try_auto_open_board_training(post, req))
+
+    assert result.success is True
+    assert result.mc_user_id == "456"
+    assert result.mc_username == "BoardUser"
+    assert result.contribution_rate == 6.0
+    post_url, kwargs = session.posts[0]
+    assert post_url == "https://www.missionchief.com/buildings/100/education"
+    assert kwargs["data"]["alliance[cost]"] == "0"
+    assert kwargs["data"]["building_rooms_use"] == "1"
 
 
 def test_auto_open_training_finds_dynamic_academy_with_available_rooms():
@@ -527,7 +899,8 @@ def test_training_availability_embed_uses_simple_class_counts():
         "Coastal": DisciplineAvailability(discipline="Coastal", available_classrooms=1, academies_checked=1),
     }
 
-    embed = manager._build_availability_embed(availability)
+    refreshed_at = datetime(2026, 6, 25, 10, 0, tzinfo=timezone.utc)
+    embed = manager._build_availability_embed(availability, refreshed_at=refreshed_at)
 
     assert embed.kwargs["title"] == "Academy Availability"
     assert embed.kwargs["description"] == "\n".join(
@@ -536,8 +909,11 @@ def test_training_availability_embed_uses_simple_class_counts():
             "**Police:** 4 classes",
             "**EMS:** 0 classes",
             "**Coastal:** 1 classes",
+            "",
+            "Last updated: 2026-06-25 12:00 CEST",
         ]
     )
+    assert embed.kwargs["timestamp"] == refreshed_at
     assert not embed.fields
 
 
@@ -705,10 +1081,12 @@ def test_member_panel_auto_repost_uses_member_channel_and_updates_config():
         send=AsyncMock(side_effect=lambda **kwargs: sent_messages.append(kwargs) or types.SimpleNamespace(id=987)),
     )
     guild = types.SimpleNamespace(id=1, get_channel=lambda channel_id: channel if channel_id == MEMBER_PANEL_CHANNEL_ID else None)
-    panel_id_set = AsyncMock()
+    panel_message_id = AsyncMock(return_value=456)
+    panel_message_id.set = AsyncMock()
     request_channel_set = AsyncMock()
     last_auto_post_set = AsyncMock()
     manager = TrainingManager.__new__(TrainingManager)
+    manager.bot = types.SimpleNamespace(user=types.SimpleNamespace(id=999))
     manager.config = types.SimpleNamespace(
         guild=lambda guild: types.SimpleNamespace(
             all=AsyncMock(
@@ -720,7 +1098,7 @@ def test_member_panel_auto_repost_uses_member_channel_and_updates_config():
                 }
             ),
             request_channel_id=types.SimpleNamespace(set=request_channel_set),
-            panel_message_id=types.SimpleNamespace(set=panel_id_set),
+            panel_message_id=panel_message_id,
             panel_last_auto_post_at=types.SimpleNamespace(set=last_auto_post_set),
             button_message=AsyncMock(return_value=None),
         )
@@ -730,5 +1108,33 @@ def test_member_panel_auto_repost_uses_member_channel_and_updates_config():
 
     request_channel_set.assert_awaited_once_with(MEMBER_PANEL_CHANNEL_ID)
     channel.send.assert_awaited_once()
-    panel_id_set.assert_awaited_once_with(987)
+    panel_message_id.set.assert_awaited_once_with(987)
     last_auto_post_set.assert_awaited_once()
+
+
+def test_member_panel_refresh_updates_existing_message_before_posting_new_one():
+    existing_message = types.SimpleNamespace(id=456, edit=AsyncMock())
+    channel = types.SimpleNamespace(
+        id=MEMBER_PANEL_CHANNEL_ID,
+        fetch_message=AsyncMock(return_value=existing_message),
+        send=AsyncMock(),
+    )
+    guild = types.SimpleNamespace(id=1)
+    panel_message_id = AsyncMock(return_value=456)
+    panel_message_id.set = AsyncMock()
+    manager = TrainingManager.__new__(TrainingManager)
+    manager.bot = types.SimpleNamespace(user=types.SimpleNamespace(id=999))
+    manager.config = types.SimpleNamespace(
+        guild=lambda guild: types.SimpleNamespace(
+            panel_message_id=panel_message_id,
+            button_message=AsyncMock(return_value=None),
+        )
+    )
+
+    _message, action = asyncio.run(manager._refresh_or_send_member_panel(guild, channel))
+
+    assert action == "updated"
+    channel.fetch_message.assert_awaited_once_with(456)
+    existing_message.edit.assert_awaited_once()
+    channel.send.assert_not_awaited()
+    panel_message_id.set.assert_awaited_once_with(456)
