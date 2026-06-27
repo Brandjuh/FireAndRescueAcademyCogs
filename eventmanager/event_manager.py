@@ -10,6 +10,7 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
@@ -510,6 +511,7 @@ EVENT_DEFAULT_OVERRIDES = {
 }
 RANDOM_LOCATION_KEY = "random_location"
 RANDOM_TYPE_KEY = "random_type"
+TYPE_SEARCH_KEY = "type_search"
 EVENT_ROUTE_PROFILE_PREFIX = "route_"
 EVENT_NOTIFICATION_CONTEXT_TTL_SECONDS = 10 * 60
 RANDOM_LOCATION_ANCHORS = {
@@ -601,6 +603,14 @@ EVENT_ROUTE_LOCATIONS = [
         "latitude": "31.252973",
         "longitude": "34.791462",
         "address": "Beersheba, Israel",
+    },
+    {
+        "label": "Yakima Wildfire, WA",
+        "kinds": ["large"],
+        "large_type_search": "Wildfire",
+        "latitude": "46.793900",
+        "longitude": "-121.074000",
+        "address": "Okanogan-Wenatchee National Forest near Yakima, WA, USA",
     },
 ]
 
@@ -694,6 +704,39 @@ def field_options_for_kind(form: EventForm, kind: str) -> List[FormOption]:
     return field_info.options
 
 
+def normalize_type_search_value(value: str) -> str:
+    """Normalize a MissionChief type label for reliable matching."""
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+
+def find_type_option(options: List[FormOption], query: str) -> Optional[FormOption]:
+    """Find the best live MissionChief type option for a configured query."""
+    query_text = str(query or "").strip()
+    query_key = normalize_type_search_value(query_text)
+    if not query_key:
+        return None
+
+    keyed_options = [(normalize_type_search_value(option.label), option) for option in options]
+    for option_key, option in keyed_options:
+        if option_key == query_key:
+            return option
+    for option_key, option in keyed_options:
+        if query_key in option_key or option_key in query_key:
+            return option
+
+    scored = [
+        (SequenceMatcher(None, query_key, option_key).ratio(), option)
+        for option_key, option in keyed_options
+        if option_key
+    ]
+    if not scored:
+        return None
+    score, option = max(scored, key=lambda item: item[0])
+    if score >= 0.78:
+        return option
+    return None
+
+
 def truncate_discord_text(value: str, limit: int) -> str:
     """Trim text to a Discord component limit."""
     value = str(value or "")
@@ -742,16 +785,37 @@ def route_profile_for_location(kind: str, location: Dict[str, str]) -> dict:
     }
     if kind == "event":
         fields.update(EVENT_DEFAULT_OVERRIDES)
-    return {
-        RANDOM_TYPE_KEY: True,
+    type_search = str(location.get(f"{kind}_type_search") or location.get("type_search") or "").strip()
+    profile = {
         "location_label": str(location["label"]),
         "fields": fields,
     }
+    if type_search:
+        profile[TYPE_SEARCH_KEY] = type_search
+        return profile
+    return {
+        RANDOM_TYPE_KEY: True,
+        **profile,
+    }
 
 
-def route_profile_names() -> List[str]:
+def route_locations_for_kind(kind: Optional[str] = None) -> List[Dict[str, str]]:
+    """Return configured route locations, optionally filtered by schedule kind."""
+    if kind is None:
+        return list(EVENT_ROUTE_LOCATIONS)
+    kind = normalize_kind(kind)
+    locations = []
+    for location in EVENT_ROUTE_LOCATIONS:
+        kinds = location.get("kinds")
+        if kinds and kind not in {str(item).strip().lower() for item in kinds}:
+            continue
+        locations.append(location)
+    return locations
+
+
+def route_profile_names(kind: Optional[str] = None) -> List[str]:
     """Return route profile names in the exact rotation order."""
-    return [route_profile_name(location) for location in EVENT_ROUTE_LOCATIONS]
+    return [route_profile_name(location) for location in route_locations_for_kind(kind)]
 
 
 def profile_with_selected_type(kind: str, profile: dict, option: FormOption) -> dict:
@@ -765,6 +829,7 @@ def profile_with_selected_type(kind: str, profile: dict, option: FormOption) -> 
         fields.update(EVENT_DEFAULT_OVERRIDES)
     selected["fields"] = fields
     selected.pop(RANDOM_TYPE_KEY, None)
+    selected.pop(TYPE_SEARCH_KEY, None)
     selected["selected_type_label"] = option.label
     return selected
 
@@ -787,6 +852,9 @@ def profile_type_summary(kind: str, profile: dict) -> str:
     selected_label = str(profile.get("selected_type_label") or "").strip()
     if selected_label:
         return selected_label
+    type_search = str(profile.get(TYPE_SEARCH_KEY) or "").strip()
+    if type_search:
+        return type_search
     if profile.get(RANDOM_TYPE_KEY):
         return f"Surprise {EVENT_KINDS[kind]['label']} type"
     fields = dict(profile.get("fields", {}))
@@ -1895,6 +1963,7 @@ class EventManager(commands.Cog):
         self.bot.add_view(EventManagerPanelView(self))
         self.bot.add_view(EventRequestPanelView(self))
         await self._migrate_default_event_schedule_time()
+        await self._migrate_route_profiles()
         self._task = asyncio.create_task(self._scheduler_loop())
         self._panel_task = asyncio.create_task(self._ensure_panels_after_ready())
 
@@ -1907,6 +1976,53 @@ class EventManager(commands.Cog):
     async def _migrate_default_event_schedule_time(self):
         async with self.config.schedules() as schedules:
             migrate_default_event_schedule_time(schedules)
+
+    async def _migrate_route_profiles(self):
+        """Add newly configured route profiles to existing route schedules without resetting them."""
+        desired_profiles = {
+            kind: {
+                route_profile_name(location): route_profile_for_location(kind, location)
+                for location in route_locations_for_kind(kind)
+            }
+            for kind in ("large", "event")
+        }
+        async with self.config.profiles() as profiles:
+            for kind, kind_profiles in desired_profiles.items():
+                saved = profiles.setdefault(kind, {})
+                for profile_name, profile_data in kind_profiles.items():
+                    saved.setdefault(profile_name, profile_data)
+
+        async with self.config.schedules() as schedules:
+            for kind, kind_desired_profiles in desired_profiles.items():
+                schedule = schedules.get(kind)
+                if not schedule:
+                    continue
+                configured = schedule.get("profiles") or []
+                if not configured and schedule.get("profile"):
+                    configured = [schedule["profile"]]
+                configured = [
+                    str(profile).strip().lower()
+                    for profile in configured
+                    if str(profile).strip()
+                ]
+                if not any(profile.startswith(EVENT_ROUTE_PROFILE_PREFIX) for profile in configured):
+                    continue
+
+                desired_names = list(kind_desired_profiles.keys())
+                filtered = [
+                    profile
+                    for profile in configured
+                    if not profile.startswith(EVENT_ROUTE_PROFILE_PREFIX) or profile in kind_desired_profiles
+                ]
+                for profile_name in desired_names:
+                    if profile_name not in filtered:
+                        filtered.append(profile_name)
+                if not filtered:
+                    continue
+                rotation_index = int(schedule.get("rotation_index") or 0) % len(filtered)
+                schedule["profiles"] = filtered
+                schedule["rotation_index"] = rotation_index
+                schedule["profile"] = filtered[rotation_index]
 
     async def _scheduler_loop(self):
         await self.bot.wait_until_ready()
@@ -2068,6 +2184,18 @@ class EventManager(commands.Cog):
     async def _resolve_profile_runtime_options(self, kind: str, profile: dict) -> dict:
         """Resolve runtime markers like random MissionChief type before starting."""
         kind = normalize_kind(kind)
+        type_search = str(profile.get(TYPE_SEARCH_KEY) or "").strip()
+        if type_search:
+            form = await self._fetch_form(kind)
+            options = field_options_for_kind(form, kind)
+            option = find_type_option(options, type_search)
+            if not option:
+                available = ", ".join(option.label for option in options[:12]) or "none"
+                raise RuntimeError(
+                    f"MissionChief type matching `{type_search}` was not found on the live "
+                    f"{EVENT_KINDS[kind]['label']} form. Available examples: {available}"
+                )
+            return profile_with_selected_type(kind, profile, option)
         if not profile.get(RANDOM_TYPE_KEY):
             return profile
         form = await self._fetch_form(kind)
@@ -3187,18 +3315,19 @@ class EventManager(commands.Cog):
             await ctx.send(f"Weekday must be one of: {', '.join(WEEKDAYS)}")
             return
 
-        profile_names = route_profile_names()
         async with self.config.profiles() as profiles:
             for kind in ("large", "event"):
                 kind_profiles = profiles.setdefault(kind, {})
-                for location in EVENT_ROUTE_LOCATIONS:
+                for location in route_locations_for_kind(kind):
                     kind_profiles[route_profile_name(location)] = route_profile_for_location(kind, location)
 
+        large_profile_names = route_profile_names("large")
+        event_profile_names = route_profile_names("event")
         async with self.config.schedules() as schedules:
             schedules["large"].update(
                 enabled=True,
-                profile=profile_names[0],
-                profiles=profile_names,
+                profile=large_profile_names[0],
+                profiles=large_profile_names,
                 rotation_index=0,
                 time=daily_time,
                 timezone=DEFAULT_TIMEZONE,
@@ -3206,8 +3335,8 @@ class EventManager(commands.Cog):
             )
             schedules["event"].update(
                 enabled=True,
-                profile=profile_names[0],
-                profiles=profile_names,
+                profile=event_profile_names[0],
+                profiles=event_profile_names,
                 rotation_index=0,
                 time=weekly_time,
                 timezone=DEFAULT_TIMEZONE,
@@ -3227,10 +3356,13 @@ class EventManager(commands.Cog):
             f"Alliance event first-start schedule: {weekly_day} at {weekly_time} {DEFAULT_TIMEZONE}.",
             "After a successful scheduled or manual scheduled start, future attempts use the actual start time.",
             "Alliance event defaults: Large area, Circle, Every 30 seconds.",
-            "MissionChief type: random live option at start time.",
+            "MissionChief type: random live option at start time, except profiles with a configured type search.",
             "",
-            "Rotation order:",
-            ", ".join(profile_names),
+            "Large mission rotation order:",
+            ", ".join(large_profile_names),
+            "",
+            "Alliance event rotation order:",
+            ", ".join(event_profile_names),
         ]
         if notes:
             lines.extend(["", "Location notes:", *notes])
@@ -3290,6 +3422,8 @@ class EventManager(commands.Cog):
             lines.append(f"{RANDOM_LOCATION_KEY} = {profile[RANDOM_LOCATION_KEY]}")
         if profile.get(RANDOM_TYPE_KEY):
             lines.append(f"{RANDOM_TYPE_KEY} = true")
+        if profile.get(TYPE_SEARCH_KEY):
+            lines.append(f"{TYPE_SEARCH_KEY} = {profile[TYPE_SEARCH_KEY]}")
         if profile.get("location_label"):
             lines.append(f"location_label = {profile['location_label']}")
         for field_name, value in sorted(profile.get("fields", {}).items()):
