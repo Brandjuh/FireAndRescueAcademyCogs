@@ -176,15 +176,27 @@ class FakeSession:
 
 
 class FakeEventManagerConfig:
-    def __init__(self, schedules, profiles):
+    def __init__(self, schedules, profiles, last_runs=None, retry_after=None, last_started_at=None):
         self._schedules = schedules
         self._profiles = profiles
+        self._last_runs = last_runs or {}
+        self._retry_after = retry_after or {}
+        self._last_started_at = last_started_at or {}
 
     async def schedules(self):
         return self._schedules
 
     async def profiles(self):
         return self._profiles
+
+    async def last_runs(self):
+        return self._last_runs
+
+    async def schedule_retry_after(self):
+        return self._retry_after
+
+    async def last_started_at(self):
+        return self._last_started_at
 
 
 class EventManagerFormTests(unittest.TestCase):
@@ -720,6 +732,36 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("Location: Portland, OR, USA", summary)
         self.assertIn("Type: Surprise Large scale alliance mission type", summary)
+
+    async def test_next_notification_details_include_location_type_and_schedule_time(self):
+        profile_names = route_profile_names()
+        fake = type("FakeEventManager", (), {})()
+        fake.config = FakeEventManagerConfig(
+            schedules={
+                "event": {
+                    "enabled": True,
+                    "profiles": profile_names,
+                    "rotation_index": 1,
+                    "time": DEFAULT_EVENT_ROUTE_TIME,
+                    "timezone": DEFAULT_TIMEZONE,
+                    "weekday": "saturday",
+                }
+            },
+            profiles={
+                "event": {
+                    route_profile_names()[index]: route_profile_for_location("event", location)
+                    for index, location in enumerate(EVENT_ROUTE_LOCATIONS)
+                }
+            },
+            last_started_at={"event": "2099-06-20T19:08:30+00:00"},
+        )
+        fake._notification_contexts = {}
+
+        details = await EventManager.get_next_notification_details(fake, "event")
+
+        self.assertEqual(details["location"], "Portland, OR, USA")
+        self.assertEqual(details["type"], "Surprise Alliance event type")
+        self.assertEqual(details["scheduled_at"].isoformat(), "2099-06-27T15:08:30-04:00")
 
     async def test_reverse_address_replaces_payload_address(self):
         session = FakeSession(FakeResponse("MissionChief Address"))

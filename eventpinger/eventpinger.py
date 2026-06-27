@@ -5,6 +5,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 import aiohttp
@@ -485,31 +486,90 @@ def find_region_role(guild: Any, region: RegionMatch | str | None):
     return None
 
 
-def format_notification(
-    announcement: EventAnnouncement,
-    region: RegionMatch | None,
+def format_notification_mentions(
     notify_role_mention: str,
     region_role_mention: str | None,
-    next_summary: str | None = None,
 ) -> str:
     mentions = [notify_role_mention]
     if region_role_mention:
         mentions.append(region_role_mention)
+    return " ".join(mentions)
 
-    label = "Alliance mission" if announcement.kind == "mission" else "Alliance event"
-    lines = [
-        " ".join(mentions),
-        f"{label}: {announcement.name or 'Unknown'}",
-        f"Location: {announcement.address or 'Unknown'}",
-    ]
-    if region:
-        lines.append(f"Region: {region.name}")
+
+def announcement_label(kind: str) -> str:
+    return "Alliance Mission" if kind == "mission" else "Alliance Event"
+
+
+def default_next_type(kind: str) -> str:
+    return "Surprise mission" if kind == "mission" else "Surprise event"
+
+
+def parse_next_summary(summary: str | None, kind: str) -> dict[str, str]:
+    details: dict[str, str] = {}
+    for raw_line in str(summary or "").splitlines():
+        line = raw_line.strip()
+        if not line or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        normalized_key = key.strip().casefold()
+        if normalized_key in {"location", "type"}:
+            details[normalized_key] = value.strip()
+    if summary and "type" not in details:
+        details["type"] = default_next_type(kind)
+    return details
+
+
+def discord_timestamp(value: Any) -> str:
+    if not value:
+        return "Unknown"
+    if isinstance(value, datetime):
+        parsed = value
     else:
-        lines.append("Region: Unresolved, Notify-Event only")
-    if next_summary:
-        next_label = "Next scheduled alliance mission" if announcement.kind == "mission" else "Next scheduled alliance event"
-        lines.extend(["", f"{next_label}:", str(next_summary).strip()])
-    return "\n".join(lines)
+        try:
+            parsed = datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return str(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    unix_timestamp = int(parsed.timestamp())
+    return f"<t:{unix_timestamp}:F>"
+
+
+def build_notification_embed(
+    announcement: EventAnnouncement,
+    region: RegionMatch | None,
+    next_details: dict[str, Any] | None = None,
+) -> discord.Embed:
+    label = announcement_label(announcement.kind)
+    embed = discord.Embed(
+        title=f"MissionChief {label}",
+        color=discord.Color.orange() if announcement.kind == "event" else discord.Color.blue(),
+    )
+    embed.add_field(name=label, value=announcement.name or "Unknown", inline=False)
+    embed.add_field(name="Location", value=announcement.address or "Unknown", inline=False)
+    embed.add_field(
+        name="Region",
+        value=region.name if region else "Unresolved, Notify-Event only",
+        inline=False,
+    )
+
+    if next_details:
+        next_label = f"Next {label}"
+        next_location = str(next_details.get("location") or "").strip() or "Unknown"
+        next_type = str(next_details.get("type") or "").strip() or default_next_type(announcement.kind)
+        scheduled_time = discord_timestamp(next_details.get("scheduled_at"))
+        embed.add_field(
+            name=next_label,
+            value="\n".join(
+                [
+                    f"Location: {next_location}",
+                    f"Type: {next_type}",
+                    f"Scheduled time: {scheduled_time}",
+                ]
+            ),
+            inline=False,
+        )
+    return embed
 
 
 class EventPinger(commands.Cog):
@@ -565,39 +625,68 @@ class EventPinger(commands.Cog):
 
         notify_mention = getattr(notify_role, "mention", f"<@&{NOTIFY_EVENT_ROLE_ID}>")
         region_mention = getattr(region_role, "mention", None)
-        next_summary = await self._eventmanager_next_summary(announcement)
-        content = format_notification(announcement, region, notify_mention, region_mention, next_summary)
+        next_details = await self._eventmanager_next_details(announcement)
+        content = format_notification_mentions(notify_mention, region_mention)
+        embed = build_notification_embed(announcement, region, next_details)
 
         kwargs = {}
         if hasattr(discord, "AllowedMentions"):
             kwargs["allowed_mentions"] = discord.AllowedMentions(roles=True, users=False, everyone=False)
 
         try:
-            await channel.send(content, **kwargs)
+            await channel.send(content, embed=embed, **kwargs)
         except (discord.Forbidden, discord.HTTPException):
             log.exception("Failed to send event notification for MissionChief announcement")
 
     async def _eventmanager_next_summary(self, announcement: EventAnnouncement) -> str | None:
         """Read EventManager's next route summary when that cog started this item."""
+        details = await self._eventmanager_next_details(announcement)
+        summary = str((details or {}).get("summary") or "").strip()
+        return summary or None
+
+    async def _eventmanager_next_details(self, announcement: EventAnnouncement) -> dict[str, Any] | None:
+        """Read EventManager's next route details when that cog started this item."""
         get_cog = getattr(self.bot, "get_cog", None)
         if not callable(get_cog):
             return None
         event_manager = get_cog("EventManager")
         if not event_manager:
             return None
-        method = getattr(event_manager, "get_next_notification_summary", None)
-        if not callable(method):
-            return None
         kind = "large" if announcement.kind == "mission" else "event"
+
+        detail_method = getattr(event_manager, "get_next_notification_details", None)
+        if callable(detail_method):
+            try:
+                result = detail_method(kind)
+                if asyncio.iscoroutine(result):
+                    result = await result
+            except Exception:
+                log.exception("Could not read EventManager next notification details")
+                return None
+            if isinstance(result, dict):
+                details = dict(result)
+                if not details.get("location") or not details.get("type"):
+                    parsed = parse_next_summary(details.get("summary"), announcement.kind)
+                    details.setdefault("location", parsed.get("location", ""))
+                    details.setdefault("type", parsed.get("type", ""))
+                return details
+
+        summary_method = getattr(event_manager, "get_next_notification_summary", None)
+        if not callable(summary_method):
+            return None
         try:
-            result = method(kind)
+            result = summary_method(kind)
             if asyncio.iscoroutine(result):
                 result = await result
         except Exception:
             log.exception("Could not read EventManager next notification summary")
             return None
         summary = str(result or "").strip()
-        return summary or None
+        if not summary:
+            return None
+        details = parse_next_summary(summary, announcement.kind)
+        details["summary"] = summary
+        return details
 
     async def resolve_region_for_address(self, address: str) -> RegionMatch | None:
         geocode_outcome = await self._resolve_region_with_geocode(address)
