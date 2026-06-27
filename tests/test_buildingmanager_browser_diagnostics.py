@@ -47,6 +47,7 @@ from buildingmanager.buildingmanager import (
     parse_building_board_page,
     parse_alliance_funds_from_html,
     parse_overpass_auto_build_candidates,
+    format_overpass_http_error,
     send_ephemeral_followup,
 )
 
@@ -999,6 +1000,26 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertIn('nwr["healthcare"="hospital"]', query)
         self.assertIn('nwr["amenity"="prison"]', query)
         self.assertIn("out center tags;", query)
+
+    def test_overpass_query_can_limit_to_one_candidate_type(self):
+        hospital_query = build_overpass_candidate_query(40.0, -74.0, 41.0, -73.0, "hospital")
+        prison_query = build_overpass_candidate_query(40.0, -74.0, 41.0, -73.0, "prison")
+
+        self.assertIn('nwr["amenity"="hospital"]', hospital_query)
+        self.assertNotIn('nwr["amenity"="prison"]', hospital_query)
+        self.assertNotIn('nwr["amenity"="hospital"]', prison_query)
+        self.assertIn('nwr["amenity"="prison"]', prison_query)
+
+    def test_overpass_504_error_is_short_and_actionable(self):
+        body = """<?xml version="1.0"?><html><head><title>OSM3S Response</title></head>
+        <body><p>The data included in this document is from www.openstreetmap.org.</p></body></html>"""
+
+        message = format_overpass_http_error(504, body, building_type="both")
+
+        self.assertIn("HTTP 504", message)
+        self.assertIn("smaller bounding box", message)
+        self.assertNotIn("<?xml", message)
+        self.assertLess(len(message), 350)
 
     def test_candidate_database_tracks_available_used_and_duplicate_status(self):
         with tempfile.TemporaryDirectory() as temp_dir:

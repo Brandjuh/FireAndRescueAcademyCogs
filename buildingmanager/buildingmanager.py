@@ -75,6 +75,7 @@ AUTO_CANDIDATE_DEFAULT_TIMEZONE = "America/New_York"
 AUTO_CANDIDATE_DUPLICATE_RADIUS_METERS = 250
 AUTO_CANDIDATE_SELECTION_POOL = 50
 OVERPASS_API_URL = "https://overpass-api.de/api/interpreter"
+OVERPASS_IMPORT_AREA_WARNING_DEGREES = 0.35
 PLAYWRIGHT_SETUP_MESSAGE = (
     "Playwright browser automation is not ready. Install the BuildingManager requirements and run "
     "`python -m playwright install chromium` in the same Python environment as Redbot."
@@ -1256,7 +1257,13 @@ def parse_overpass_auto_build_candidates(data: Dict[str, Any]) -> Tuple[List[Dic
             stats["rejected"] += 1
     return candidates, stats
 
-def build_overpass_candidate_query(south: float, west: float, north: float, east: float) -> str:
+def build_overpass_candidate_query(
+    south: float,
+    west: float,
+    north: float,
+    east: float,
+    building_type: str = "both",
+) -> str:
     """Build an Overpass query for hospitals and prisons in a bounding box."""
     if south >= north:
         raise ValueError("South latitude must be lower than north latitude.")
@@ -1269,17 +1276,52 @@ def build_overpass_candidate_query(south: float, west: float, north: float, east
         if not -180 <= longitude <= 180:
             raise ValueError("Longitude must be between -180 and 180.")
     bbox = f"{south:.7f},{west:.7f},{north:.7f},{east:.7f}"
+    normalized = str(building_type or "both").casefold().strip()
+    clauses = []
+    if normalized in {"both", "all", "hospital", "hospitals"}:
+        clauses.extend(
+            [
+                f'  nwr["amenity"="hospital"]({bbox});',
+                f'  nwr["healthcare"="hospital"]({bbox});',
+            ]
+        )
+    if normalized in {"both", "all", "prison", "prisons", "jail", "jails"}:
+        clauses.append(f'  nwr["amenity"="prison"]({bbox});')
+    if not clauses:
+        raise ValueError("Building type must be `hospital`, `prison`, or `both`.")
     return "\n".join(
         [
             "[out:json][timeout:180];",
             "(",
-            f'  nwr["amenity"="hospital"]({bbox});',
-            f'  nwr["healthcare"="hospital"]({bbox});',
-            f'  nwr["amenity"="prison"]({bbox});',
+            *clauses,
             ");",
             "out center tags;",
         ]
     )
+
+def overpass_import_area_notice(south: float, west: float, north: float, east: float) -> Optional[str]:
+    """Return a warning when a bounding box is likely too large for public Overpass."""
+    height = abs(float(north) - float(south))
+    width = abs(float(east) - float(west))
+    if height > OVERPASS_IMPORT_AREA_WARNING_DEGREES or width > OVERPASS_IMPORT_AREA_WARNING_DEGREES:
+        return (
+            "This area is fairly large for the public Overpass server. If it returns HTTP 504, "
+            "split the import into smaller boxes or import `hospital` and `prison` separately."
+        )
+    return None
+
+def format_overpass_http_error(status: int, body: str, *, building_type: str) -> str:
+    """Return a short admin-facing error for an Overpass failure."""
+    text = html_lib.unescape(re.sub(r"<[^>]+>", " ", str(body or "")))
+    text = re.sub(r"\s+", " ", text).strip()
+    if int(status) == 504:
+        return (
+            f"Overpass returned HTTP 504 while importing `{building_type}` candidates. "
+            "The public Overpass server timed out or rejected the query as too heavy. "
+            "Try a smaller bounding box, or import `hospital` and `prison` separately."
+        )
+    detail = f" Detail: {_truncate_discord_text(text, 300)}" if text else ""
+    return f"Overpass returned HTTP {int(status)} while importing `{building_type}` candidates.{detail}"
 
 def extract_missionchief_building_id(*values: Any) -> Optional[int]:
     """Extract a MissionChief building id from URLs, response text, or snapshots."""
@@ -8467,14 +8509,22 @@ class BuildingManager(commands.Cog):
         west: float,
         north: float,
         east: float,
+        building_type: str = "both",
     ):
         """Download OSM hospital/prison candidates for one bounding box."""
         try:
-            query = build_overpass_candidate_query(float(south), float(west), float(north), float(east))
+            query = build_overpass_candidate_query(
+                float(south),
+                float(west),
+                float(north),
+                float(east),
+                building_type,
+            )
         except ValueError as exc:
             await ctx.send(str(exc))
             return
 
+        notice = overpass_import_area_notice(float(south), float(west), float(north), float(east))
         async with ctx.typing():
             try:
                 timeout = aiohttp.ClientTimeout(total=240)
@@ -8482,9 +8532,7 @@ class BuildingManager(commands.Cog):
                     async with session.post(OVERPASS_API_URL, data={"data": query}) as response:
                         if response.status != 200:
                             text = await response.text()
-                            await ctx.send(
-                                f"Overpass returned HTTP {response.status}: {_truncate_discord_text(text, 500)}"
-                            )
+                            await ctx.send(format_overpass_http_error(response.status, text, building_type=building_type))
                             return
                         data = await response.json(content_type=None)
             except Exception as exc:
@@ -8494,19 +8542,21 @@ class BuildingManager(commands.Cog):
             candidates, parse_stats = parse_overpass_auto_build_candidates(data)
             db_stats = self.db.upsert_auto_candidates(candidates)
 
+        lines = [
+            "Overpass candidate import complete.",
+            f"Source elements: {parse_stats['source_elements']:,}",
+            f"Accepted candidates: {parse_stats['accepted']:,}",
+            f"Rejected source elements: {parse_stats['rejected']:,}",
+            f"Inserted: {db_stats['inserted']:,}",
+            f"Updated: {db_stats['updated']:,}",
+            f"Skipped: {db_stats['skipped']:,}",
+            f"Import type: {building_type}",
+        ]
+        if notice:
+            lines.append(f"Note: {notice}")
         await ctx.send(
             box(
-                "\n".join(
-                    [
-                        "Overpass candidate import complete.",
-                        f"Source elements: {parse_stats['source_elements']:,}",
-                        f"Accepted candidates: {parse_stats['accepted']:,}",
-                        f"Rejected source elements: {parse_stats['rejected']:,}",
-                        f"Inserted: {db_stats['inserted']:,}",
-                        f"Updated: {db_stats['updated']:,}",
-                        f"Skipped: {db_stats['skipped']:,}",
-                    ]
-                ),
+                "\n".join(lines),
                 lang="text",
             )
         )
