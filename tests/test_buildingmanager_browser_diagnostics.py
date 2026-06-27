@@ -18,7 +18,6 @@ from buildingmanager.buildingmanager import (
     BUILDING_FETCH_ALLIANCE_LOGS_SCRIPT,
     AUTO_CANDIDATE_DUPLICATE_RADIUS_METERS,
     BuildingAutomationResult,
-    BuildingAutomationJob,
     BoardBuildingPost,
     BoardPage,
     BuildingCreateResult,
@@ -1173,13 +1172,10 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
             counts = manager.db.get_auto_candidate_stats()
             self.assertEqual(counts["Hospital:used"], 1)
 
-    def test_auto_candidate_automation_uses_autonomous_funds_threshold(self):
+    def test_auto_candidate_build_blocks_below_autonomous_threshold(self):
         class FakeGuildConfig:
             async def auto_candidate_min_funds(self):
                 return 5_000_000
-
-            async def min_alliance_funds(self):
-                return 2_000_000
 
         class FakeConfig:
             def guild(self, _guild):
@@ -1189,91 +1185,23 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
             manager = BuildingManager.__new__(BuildingManager)
             manager.db = BuildingDatabase(f"{temp_dir}/building_manager.db")
             manager.config = FakeConfig()
-            request_id = manager.db.add_request(
-                guild_id=1,
-                user_id=0,
-                username="BuildingManager AutoBuild",
-                building_type="Hospital",
-                building_name="Example Hospital",
-                location_input="https://www.openstreetmap.org/node/101",
-                coordinates="40.1, -73.9",
-                address="Example Address",
-                notes="Automatic daily alliance building candidate. Source: openstreetmap node/101.",
-            )
-            job = BuildingAutomationJob(
-                job_id=1,
-                request_id=request_id,
-                guild_id=1,
-                building_id=12345,
-                building_type="Hospital",
-                building_name="Example Hospital",
-                status="queued",
-                target_tax=20,
-                tax_complete=False,
-                level_complete=False,
-                extensions_complete=False,
-                extensions_started=0,
-                attempts=0,
-                next_run_at=1,
+            manager._get_current_alliance_funds = AsyncMock(return_value=(4_999_999, "live MissionChief"))
+            manager._candidate_duplicate_context = AsyncMock()
+            manager._create_and_queue_approved_building = AsyncMock()
+
+            result = asyncio.run(
+                manager._run_auto_candidate_build(
+                    types.SimpleNamespace(id=1),
+                    "Hospital",
+                    run_date="2026-06-27",
+                    scheduled=False,
+                )
             )
 
-            minimum, reason = asyncio.run(
-                manager._get_min_funds_for_automation_job(types.SimpleNamespace(id=1), job)
-            )
-
-            self.assertEqual(minimum, 5_000_000)
-            self.assertEqual(reason, "autonomous daily build")
-
-    def test_member_request_automation_keeps_member_request_funds_threshold(self):
-        class FakeGuildConfig:
-            async def auto_candidate_min_funds(self):
-                return 5_000_000
-
-            async def min_alliance_funds(self):
-                return 2_000_000
-
-        class FakeConfig:
-            def guild(self, _guild):
-                return FakeGuildConfig()
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            manager = BuildingManager.__new__(BuildingManager)
-            manager.db = BuildingDatabase(f"{temp_dir}/building_manager.db")
-            manager.config = FakeConfig()
-            request_id = manager.db.add_request(
-                guild_id=1,
-                user_id=200,
-                username="Requester",
-                building_type="Prison",
-                building_name="Example Prison",
-                location_input="https://maps.example/request",
-                coordinates="40.1, -73.9",
-                address="Example Address",
-                notes=None,
-            )
-            job = BuildingAutomationJob(
-                job_id=1,
-                request_id=request_id,
-                guild_id=1,
-                building_id=12345,
-                building_type="Prison",
-                building_name="Example Prison",
-                status="queued",
-                target_tax=20,
-                tax_complete=False,
-                level_complete=False,
-                extensions_complete=False,
-                extensions_started=0,
-                attempts=0,
-                next_run_at=1,
-            )
-
-            minimum, reason = asyncio.run(
-                manager._get_min_funds_for_automation_job(types.SimpleNamespace(id=1), job)
-            )
-
-            self.assertEqual(minimum, 2_000_000)
-            self.assertEqual(reason, "member/admin request")
+            self.assertIn("blocked by funds safety rule", result)
+            self.assertIn("5,000,000 credits", result)
+            manager._candidate_duplicate_context.assert_not_awaited()
+            manager._create_and_queue_approved_building.assert_not_awaited()
 
     def test_browser_diagnostics_report_formats_controls_and_redacted_fields(self):
         report = build_browser_diagnostics_report(
