@@ -4,7 +4,7 @@ This document tracks larger gameplay systems that should be implemented after th
 
 ## Requested Gameplay TODOs
 
-- Extend the existing developer menu for user ID `132620654087241729` with mission outcome controls, so active incidents can be forced to success, partial success, or failure during testing.
+No small requested gameplay TODOs are currently tracked here. Larger systems remain below.
 
 ## Mutual Aid
 

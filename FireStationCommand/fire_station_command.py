@@ -1519,7 +1519,7 @@ class FireStationCommand(commands.Cog):
             name="Available test actions",
             value=(
                 "Grant credits and XP, max out the test station, clear active missions, "
-                "and refresh the dashboard with unlock checks bypassed."
+                "force active mission outcomes, and refresh the dashboard with unlock checks bypassed."
             ),
             inline=False,
         )
@@ -3924,17 +3924,27 @@ class FireStationCommand(commands.Cog):
             await asyncio.sleep(int(minutes * 60))
             await self._resolve_incident(channel, user)
 
-    async def _resolve_incident(self, channel: discord.abc.Messageable, user: discord.abc.User):
+    async def _resolve_incident(
+        self,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        *,
+        forced_outcome_key: str | None = None,
+    ) -> bool:
         user_conf = self.config.user(user)
         data = await user_conf.all()
         mission = data.get("active_mission", {}) or {}
-        if self._mission_stage(mission) not in {
+        valid_forced_outcomes = {"success", "partial", "failure"}
+        forced_outcome = forced_outcome_key if forced_outcome_key in valid_forced_outcomes else None
+        if not mission:
+            return False
+        if forced_outcome is None and self._mission_stage(mission) not in {
             self.STAGE_TRAVEL,
             self.STAGE_VEHICLE_SELECT,
             self.STAGE_SCENE_BACKUP,
             self.STAGE_SCENE_WORK,
         }:
-            return
+            return False
         self._clear_mission_due(mission)
 
         required = int(mission.get("required_staff", 0))
@@ -3957,6 +3967,9 @@ class FireStationCommand(commands.Cog):
         success_score = (ratio_staff * 0.6) + (ratio_capacity * 0.4)
         success_score = max(0.0, min(1.5, success_score))
         base_reward = int(mission.get("base_credits", 1000) * self._reward_multiplier())
+
+        if forced_outcome is not None:
+            success_score = {"success": 1.0, "partial": 0.75, "failure": 0.0}[forced_outcome]
 
         if success_score >= 1.0:
             outcome = "✅ Incident successfully handled."
@@ -3998,6 +4011,8 @@ class FireStationCommand(commands.Cog):
             embed.add_field(name="Backup vehicles", value=str(len(backup_ids)), inline=True)
         elif mission.get("backup_status") == "missed":
             embed.add_field(name="Backup", value="Requested but not assigned in time.", inline=True)
+        if forced_outcome is not None:
+            embed.add_field(name="Developer override", value=f"Forced outcome: {outcome_key}.", inline=False)
         embed.add_field(name="Outcome", value=outcome, inline=False)
         embed.add_field(name="Narrative", value=narrative, inline=False)
         embed.add_field(name="Reward", value=f"{reward:,} credits", inline=True)
@@ -4026,6 +4041,21 @@ class FireStationCommand(commands.Cog):
                 await user.send(embed=embed)
             except Exception:
                 pass
+        return True
+
+    async def _force_developer_mission_outcome(
+        self,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        outcome_key: str,
+    ) -> str:
+        data = await self.config.user(user).all()
+        if not data.get("active_mission"):
+            return "No active mission to resolve."
+        handled = await self._resolve_incident(channel, user, forced_outcome_key=outcome_key)
+        if not handled:
+            return "No active mission could be resolved."
+        return f"Forced active mission outcome: {outcome_key}."
 
     async def _repair_fleet(
         self,
@@ -5519,6 +5549,33 @@ class FscDeveloperView(FscTimedView):
     async def clear_mission(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.config.user(self.user).active_mission.set({})
         await self._refresh(interaction, "Cleared the active mission.")
+
+    @discord.ui.button(label="Force success", style=discord.ButtonStyle.success, row=1)
+    async def force_success(self, interaction: discord.Interaction, button: discord.ui.Button):
+        message = await self.cog._force_developer_mission_outcome(
+            interaction.channel or self.channel,
+            self.user,
+            "success",
+        )
+        await self._refresh(interaction, message)
+
+    @discord.ui.button(label="Force partial", style=discord.ButtonStyle.primary, row=1)
+    async def force_partial(self, interaction: discord.Interaction, button: discord.ui.Button):
+        message = await self.cog._force_developer_mission_outcome(
+            interaction.channel or self.channel,
+            self.user,
+            "partial",
+        )
+        await self._refresh(interaction, message)
+
+    @discord.ui.button(label="Force failure", style=discord.ButtonStyle.danger, row=1)
+    async def force_failure(self, interaction: discord.Interaction, button: discord.ui.Button):
+        message = await self.cog._force_developer_mission_outcome(
+            interaction.channel or self.channel,
+            self.user,
+            "failure",
+        )
+        await self._refresh(interaction, message)
 
     @discord.ui.button(label="Toggle off", style=discord.ButtonStyle.danger)
     async def toggle_off(self, interaction: discord.Interaction, button: discord.ui.Button):

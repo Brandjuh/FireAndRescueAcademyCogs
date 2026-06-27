@@ -1503,6 +1503,88 @@ def test_developer_view_toggle_off_disables_developer_mode():
     assert interaction.response.edited["embed"].fields[-1]["name"] == "Developer mode"
 
 
+def test_developer_view_force_success_resolves_active_mission():
+    user = type("User", (), {"id": FireStationCommand.DEVELOPER_USER_ID})()
+    data = {
+        "developer_mode": True,
+        "started": True,
+        "station_level": 1,
+        "command_level": 1,
+        "xp": 0,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "vehicles": [],
+        "equipment": [],
+        "expansions": [],
+        "active_mission": {
+            "stage": FireStationCommand.STAGE_ALERT_CHOICE,
+            "title": "Test Incident",
+            "required_staff": 4,
+            "turnout_total_arrived": 0,
+            "selected_vehicle_ids": [],
+            "backup_vehicle_ids": [],
+            "base_credits": 1000,
+            "base_xp": 50,
+            "recommended_level": 1,
+            "success_narrative": "Developer forced a clean outcome.",
+            "partial_narrative": "Developer forced a stretched outcome.",
+            "failure_narrative": "Developer forced a failed outcome.",
+        },
+        "missions_completed": 0,
+        "reputation": 0,
+        "credits": 0,
+    }
+    cog = _cog_with_game_data({})
+    cog.config = _Config(data, {})
+    channel = _Channel()
+    view = FscDeveloperView(cog, user, channel, object(), data=data)
+    interaction = _Interaction(user, channel=channel)
+
+    asyncio.run(view.force_success(interaction, None))
+
+    assert data["active_mission"] == {}
+    assert data["missions_completed"] == 1
+    assert data["credits"] == 1000
+    assert channel.sent
+    result_embed = channel.sent[0]["embed"]
+    fields = {field["name"]: field["value"] for field in result_embed.fields}
+    assert fields["Developer override"] == "Forced outcome: success."
+    assert fields["Outcome"] == "✅ Incident successfully handled."
+    refreshed_fields = {field["name"]: field["value"] for field in interaction.response.edited["embed"].fields}
+    assert refreshed_fields["Developer action"] == "Forced active mission outcome: success."
+
+
+def test_developer_view_force_failure_without_active_mission_reports_status():
+    user = type("User", (), {"id": FireStationCommand.DEVELOPER_USER_ID})()
+    data = {
+        "developer_mode": True,
+        "started": True,
+        "station_level": 1,
+        "command_level": 1,
+        "xp": 0,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "vehicles": [],
+        "equipment": [],
+        "expansions": [],
+        "active_mission": {},
+        "credits": 0,
+    }
+    cog = _cog_with_game_data({})
+    cog.config = _Config(data, {})
+    channel = _Channel()
+    view = FscDeveloperView(cog, user, channel, object(), data=data)
+    interaction = _Interaction(user, channel=channel)
+
+    asyncio.run(view.force_failure(interaction, None))
+
+    assert channel.sent == []
+    refreshed_fields = {field["name"]: field["value"] for field in interaction.response.edited["embed"].fields}
+    assert refreshed_fields["Developer action"] == "No active mission to resolve."
+
+
 def test_dashboard_categories_and_actions_are_alphabetized():
     user = type("User", (), {"id": 123})()
     cog = _cog_with_game_data({})
