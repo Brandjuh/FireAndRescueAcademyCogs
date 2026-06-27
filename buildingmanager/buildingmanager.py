@@ -7498,25 +7498,6 @@ class BuildingManager(commands.Cog):
         except (TypeError, ValueError):
             return AUTO_CANDIDATE_MIN_FUNDS
 
-    def _is_auto_candidate_request_row(self, row: Optional[Dict[str, Any]]) -> bool:
-        """Return whether a stored request was created by autonomous candidate building."""
-        if not row:
-            return False
-        username = str(row.get("username") or "")
-        notes = str(row.get("notes") or "")
-        return username == "BuildingManager AutoBuild" or "Automatic daily alliance building candidate" in notes
-
-    async def _get_min_funds_for_automation_job(
-        self,
-        guild: discord.Guild,
-        job: BuildingAutomationJob,
-    ) -> Tuple[int, str]:
-        """Return the correct funds threshold for one post-creation automation job."""
-        request = self.db.get_request_by_id(job.request_id)
-        if self._is_auto_candidate_request_row(request):
-            return await self._get_auto_candidate_min_funds(guild), "autonomous daily build"
-        return await self._get_min_alliance_funds(guild), "member/admin request"
-
     def _format_candidate_autobuild_status(self, conf: Dict[str, Any], stats: Dict[str, int]) -> str:
         """Format candidate auto-build configuration and counts."""
         return "\n".join(
@@ -7757,7 +7738,7 @@ class BuildingManager(commands.Cog):
             self.db.update_automation_job(job.job_id, result)
             return result
 
-        minimum_funds, minimum_reason = await self._get_min_funds_for_automation_job(guild, job)
+        minimum_funds = await self._get_min_alliance_funds(guild)
         current_funds, funds_source = await self._get_current_alliance_funds()
         if not alliance_funds_allow_auto_build(current_funds, funds_source, minimum_funds):
             current = f"{current_funds:,} credits" if current_funds is not None else "unknown"
@@ -7768,7 +7749,7 @@ class BuildingManager(commands.Cog):
                 reason=(
                     "Alliance funds safety hold: "
                     f"current funds are {current} from {funds_source}; "
-                    f"required live minimum is {minimum_funds:,} credits for {minimum_reason}."
+                    f"required live minimum is {minimum_funds:,} credits."
                 ),
                 actions=[],
             )
