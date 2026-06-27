@@ -1,7 +1,9 @@
 import asyncio
+import struct
 import tempfile
 import types
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -46,6 +48,7 @@ from buildingmanager.buildingmanager import (
     find_new_created_alliance_building_id_from_list,
     parse_building_board_page,
     parse_alliance_funds_from_html,
+    parse_geofabrik_shp_auto_build_candidates,
     parse_overpass_auto_build_candidates,
     format_overpass_http_error,
     send_ephemeral_followup,
@@ -1021,6 +1024,80 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("<?xml", message)
         self.assertLess(len(message), 350)
 
+    @staticmethod
+    def _test_dbf(rows):
+        fields = [
+            ("osm_id", "C", 12),
+            ("code", "N", 4),
+            ("fclass", "C", 28),
+            ("name", "C", 100),
+        ]
+        header_length = 32 + 32 * len(fields) + 1
+        record_length = 1 + sum(length for _name, _kind, length in fields)
+        header = bytearray(32)
+        header[0] = 0x03
+        header[4:8] = struct.pack("<I", len(rows))
+        header[8:10] = struct.pack("<H", header_length)
+        header[10:12] = struct.pack("<H", record_length)
+        descriptors = bytearray()
+        for name, kind, length in fields:
+            descriptor = bytearray(32)
+            descriptor[: len(name)] = name.encode("ascii")
+            descriptor[11] = ord(kind)
+            descriptor[16] = length
+            descriptors.extend(descriptor)
+        records = bytearray()
+        for row in rows:
+            records.extend(b" ")
+            for name, _kind, length in fields:
+                value = str(row.get(name, "")).encode("utf-8")[:length]
+                records.extend(value.ljust(length, b" "))
+        return bytes(header + descriptors + b"\r" + records + b"\x1a")
+
+    @staticmethod
+    def _test_point_shp(points):
+        records = bytearray()
+        xs = [lon for lat, lon in points]
+        ys = [lat for lat, lon in points]
+        for index, (lat, lon) in enumerate(points, start=1):
+            content = struct.pack("<i2d", 1, lon, lat)
+            records.extend(struct.pack(">2i", index, len(content) // 2))
+            records.extend(content)
+        file_length_words = (100 + len(records)) // 2
+        header = bytearray(100)
+        header[:4] = struct.pack(">i", 9994)
+        header[24:28] = struct.pack(">i", file_length_words)
+        header[28:32] = struct.pack("<i", 1000)
+        header[32:36] = struct.pack("<i", 1)
+        header[36:68] = struct.pack("<4d", min(xs), min(ys), max(xs), max(ys))
+        return bytes(header + records)
+
+    def test_geofabrik_shapefile_parser_accepts_hospital_and_prison_candidates(self):
+        rows = [
+            {"osm_id": "101", "code": "2110", "fclass": "hospital", "name": "Example Hospital"},
+            {"osm_id": "202", "code": "2201", "fclass": "prison", "name": "Example Prison"},
+            {"osm_id": "303", "code": "2301", "fclass": "cafe", "name": "Example Cafe"},
+        ]
+        points = [(40.1, -73.9), (41.1, -74.9), (42.1, -75.9)]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            zip_path = Path(temp_dir) / "test-free.shp.zip"
+            with zipfile.ZipFile(zip_path, "w") as archive:
+                archive.writestr("gis_osm_pois_free_1.dbf", self._test_dbf(rows))
+                archive.writestr("gis_osm_pois_free_1.shp", self._test_point_shp(points))
+
+            candidates, stats = parse_geofabrik_shp_auto_build_candidates(
+                str(zip_path),
+                extract_id="test-extract",
+                extract_name="Test Extract",
+            )
+
+        self.assertEqual(stats["accepted"], 2)
+        self.assertEqual(stats["source_elements"], 3)
+        self.assertEqual([candidate["building_type"] for candidate in candidates], ["Hospital", "Prison"])
+        self.assertEqual(candidates[0]["source"], "geofabrik")
+        self.assertEqual(candidates[0]["source_id"], "test-extract:gis_osm_pois_free_1:101")
+
     def test_candidate_database_tracks_available_used_and_duplicate_status(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db = BuildingDatabase(f"{temp_dir}/building_manager.db")
@@ -1174,17 +1251,7 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
             self.assertEqual(counts["Hospital:used"], 1)
 
     def test_auto_candidate_plan_refills_empty_local_stock(self):
-        class FakeValue:
-            def __init__(self):
-                self.value = None
-
-            async def set(self, value):
-                self.value = value
-
         class FakeGuildConfig:
-            def __init__(self):
-                self.auto_candidate_refill_next_region_index = FakeValue()
-
             async def auto_candidate_min_funds(self):
                 return 5_000_000
 
@@ -1192,8 +1259,6 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
                 return {
                     "auto_candidate_refill_enabled": True,
                     "auto_candidate_refill_min_available": 1,
-                    "auto_candidate_refill_regions_per_run": 1,
-                    "auto_candidate_refill_next_region_index": 0,
                     "auto_candidate_duplicate_radius_m": 250,
                 }
 
@@ -1211,23 +1276,33 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
             manager._get_current_alliance_funds = AsyncMock(return_value=(6_000_000, "live MissionChief"))
             manager._candidate_duplicate_context = AsyncMock(return_value=([], "test duplicate check", 250))
 
-            async def fake_refill(_region, building_type):
-                db_stats = manager.db.upsert_auto_candidates(
+            async def fake_refill(_guild, *, max_extracts):
+                self.assertEqual(max_extracts, 2)
+                manager.db.upsert_auto_candidates(
                     [
                         {
                             "source": "openstreetmap",
-                            "source_id": f"node/{building_type.lower()}-101",
-                            "building_type": building_type,
-                            "name": f"Example {building_type}",
-                            "lat": 40.1 if building_type == "Hospital" else 41.1,
-                            "lon": -73.9 if building_type == "Hospital" else -74.9,
+                            "source_id": "node/hospital-101",
+                            "building_type": "Hospital",
+                            "name": "Example Hospital",
+                            "lat": 40.1,
+                            "lon": -73.9,
+                            "raw_tags_json": "{}",
+                        },
+                        {
+                            "source": "openstreetmap",
+                            "source_id": "node/prison-101",
+                            "building_type": "Prison",
+                            "name": "Example Prison",
+                            "lat": 41.1,
+                            "lon": -74.9,
                             "raw_tags_json": "{}",
                         }
                     ]
                 )
-                return {"source_elements": 1, "accepted": 1, "rejected": 0}, db_stats
+                return ["Automatic candidate refill source: test", "- Test extract: 2 accepted, 2 inserted."]
 
-            manager._fetch_auto_candidate_refill_region = AsyncMock(side_effect=fake_refill)
+            manager._import_next_geofabrik_extracts = AsyncMock(side_effect=fake_refill)
 
             funds, funds_source, minimum, plans, refill_lines = asyncio.run(
                 manager._build_auto_candidate_plan(types.SimpleNamespace(id=1))
@@ -1238,7 +1313,7 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
             self.assertEqual(minimum, 5_000_000)
             self.assertTrue(refill_lines)
             self.assertTrue(all(plan.candidate is not None for plan in plans))
-            self.assertEqual(manager.config.guild_config.auto_candidate_refill_next_region_index.value, 1)
+            manager._import_next_geofabrik_extracts.assert_awaited_once()
 
     def test_auto_candidate_build_blocks_below_autonomous_threshold(self):
         class FakeGuildConfig:
