@@ -411,7 +411,8 @@ async (config) => {
   }
 
   const buttonText = visibleText(availableButtons[startIndex]);
-  const usesCoins = buttonText.toLowerCase().includes("coin") || fieldValue("mission_position[coins]") !== "0";
+  const coinValue = fieldValue("mission_position[coins]") || "0";
+  const usesCoins = buttonText.toLowerCase().includes("coin") || coinValue !== "0";
   if (usesCoins && !config.allowCoins) {
     return fail(`Refusing to spend coins with button: ${buttonText}`);
   }

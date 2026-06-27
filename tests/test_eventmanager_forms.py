@@ -848,6 +848,11 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("fetch(", BROWSER_PREPARE_START_SCRIPT)
         self.assertNotIn("XMLHttpRequest", BROWSER_PREPARE_START_SCRIPT)
 
+    def test_playwright_prepare_script_treats_missing_coins_field_as_free(self):
+        self.assertIn('const coinValue = fieldValue("mission_position[coins]") || "0";', BROWSER_PREPARE_START_SCRIPT)
+        self.assertIn('coinValue !== "0"', BROWSER_PREPARE_START_SCRIPT)
+        self.assertNotIn('fieldValue("mission_position[coins]") !== "0"', BROWSER_PREPARE_START_SCRIPT)
+
     def test_playwright_click_script_only_clicks_selected_submit_button(self):
         self.assertIn("submitIndex", BROWSER_CLICK_START_SCRIPT)
         self.assertIn("button.click()", BROWSER_CLICK_START_SCRIPT)
