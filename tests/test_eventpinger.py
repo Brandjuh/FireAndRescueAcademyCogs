@@ -7,8 +7,11 @@ from eventpinger.eventpinger import (
     NOTIFY_EVENT_ROLE_ID,
     RegionMatch,
     SOURCE_CHANNEL_ID,
+    build_notification_embed,
+    discord_timestamp,
     extract_announcement_from_message,
     find_region_role,
+    parse_next_summary,
     region_from_geocode_results,
     resolve_region,
     state_from_zip,
@@ -39,8 +42,18 @@ class FakeChannel:
     def __init__(self):
         self.sent = []
 
-    async def send(self, content, **kwargs):
+    async def send(self, content=None, **kwargs):
         self.sent.append((content, kwargs))
+
+
+def embed_field_values(embed):
+    values = {}
+    for field in embed.fields:
+        if isinstance(field, dict):
+            values[field["name"]] = field["value"]
+        else:
+            values[field.name] = field.value
+    return values
 
 
 def fake_message(*, title, description, author_id=MISSIONCHIEF_APP_ID, channel=None, guild=None):
@@ -183,9 +196,13 @@ def test_on_message_pings_notify_and_region_role():
         await cog.on_message(message)
 
         content, _ = channel.sent[0]
+        embed = channel.sent[0][1]["embed"]
+        fields = embed_field_values(embed)
         assert notify.mention in content
         assert state.mention in content
-        assert "Region: New York (NY)" in content
+        assert fields["Region"] == "New York (NY)"
+        assert fields["Alliance Mission"] == "Test Mission"
+        assert fields["Location"] == "71 East 153rd Street, 10451 New York, The Bronx"
 
     asyncio.run(run())
 
@@ -204,9 +221,14 @@ def test_on_message_includes_eventmanager_next_location_summary():
         )
 
         class FakeEventManager:
-            async def get_next_notification_summary(self, kind):
+            async def get_next_notification_details(self, kind):
                 assert kind == "large"
-                return "Location: Portland, OR, USA\nType: Surprise Large scale alliance mission type"
+                return {
+                    "location": "Portland, OR, USA",
+                    "type": "Surprise Large scale alliance mission type",
+                    "scheduled_at": "2026-06-28T19:08:30+00:00",
+                    "summary": "Location: Portland, OR, USA\nType: Surprise Large scale alliance mission type",
+                }
 
         bot = types.SimpleNamespace(
             get_cog=lambda name: FakeEventManager() if name == "EventManager" else None
@@ -215,10 +237,12 @@ def test_on_message_includes_eventmanager_next_location_summary():
 
         await cog.on_message(message)
 
-        content, _ = channel.sent[0]
-        assert "Next scheduled alliance mission:" in content
-        assert "Location: Portland, OR, USA" in content
-        assert "Type: Surprise Large scale alliance mission type" in content
+        content, kwargs = channel.sent[0]
+        fields = embed_field_values(kwargs["embed"])
+        assert content == f"{notify.mention} {state.mention}"
+        assert "Location: Portland, OR, USA" in fields["Next Alliance Mission"]
+        assert "Type: Surprise Large scale alliance mission type" in fields["Next Alliance Mission"]
+        assert "Scheduled time: <t:1782673710:F>" in fields["Next Alliance Mission"]
 
     asyncio.run(run())
 
@@ -239,11 +263,63 @@ def test_on_message_unresolved_address_pings_notify_only():
         await cog.on_message(message)
 
         content, _ = channel.sent[0]
+        embed = channel.sent[0][1]["embed"]
+        fields = embed_field_values(embed)
         assert notify.mention in content
         assert "<@&2>" not in content
-        assert "Unresolved" in content
+        assert fields["Region"] == "Unresolved, Notify-Event only"
 
     asyncio.run(run())
+
+
+def test_parse_next_summary_extracts_location_and_type():
+    details = parse_next_summary(
+        "Location: Portland, OR, USA\nType: Surprise Alliance event type",
+        "event",
+    )
+
+    assert details == {
+        "location": "Portland, OR, USA",
+        "type": "Surprise Alliance event type",
+    }
+
+
+def test_discord_timestamp_uses_full_timestamp_style():
+    assert discord_timestamp("2026-06-28T19:08:30+00:00") == "<t:1782673710:F>"
+    assert discord_timestamp(None) == "Unknown"
+
+
+def test_build_notification_embed_uses_requested_layout():
+    announcement = extract_announcement_from_message(
+        fake_message(
+            title="Alliance event started! Storm Surge",
+            description="FL 04 Flatts",
+        )
+    )
+    region = RegionMatch("BM", "Bermuda (BM)", "test")
+
+    embed = build_notification_embed(
+        announcement,
+        region,
+        {
+            "location": "New York City, NY, USA",
+            "type": "Surprise event",
+            "scheduled_at": "2026-06-28T19:08:30+00:00",
+        },
+    )
+
+    fields = embed_field_values(embed)
+    assert (getattr(embed, "title", None) or embed.kwargs["title"]) == "MissionChief Alliance Event"
+    assert fields["Alliance Event"] == "Storm Surge"
+    assert fields["Location"] == "FL 04 Flatts"
+    assert fields["Region"] == "Bermuda (BM)"
+    assert fields["Next Alliance Event"] == "\n".join(
+        [
+            "Location: New York City, NY, USA",
+            "Type: Surprise event",
+            "Scheduled time: <t:1782673710:F>",
+        ]
+    )
 
 
 def test_async_geocode_resolver_uses_api_before_local_fallback():

@@ -2561,12 +2561,14 @@ class EventManager(commands.Cog):
 
     async def _remember_notification_context(self, kind: str, profile_name: str, profile: dict) -> None:
         """Remember the next scheduled profile for the MissionChief announcement ping."""
-        summary = await self._next_scheduled_profile_summary(kind, profile_name)
-        if not summary:
+        details = await EventManager._next_scheduled_profile_details(self, kind, profile_name)
+        if not details:
             self._clear_notification_context(kind)
             return
         self._notification_contexts[normalize_kind(kind)] = {
-            "next_summary": summary,
+            "next_summary": details.get("summary"),
+            "next_location": details.get("location"),
+            "next_type": details.get("type"),
             "current_profile": str(profile_name or ""),
             "current_location": profile_location_summary(profile),
             "current_type": profile_type_summary(kind, profile),
@@ -2580,20 +2582,56 @@ class EventManager(commands.Cog):
 
     async def get_next_notification_summary(self, kind: str) -> Optional[str]:
         """Return the next scheduled location/type for EventPinger notifications."""
+        details = await EventManager.get_next_notification_details(self, kind)
+        summary = str((details or {}).get("summary") or "").strip()
+        return summary or None
+
+    async def get_next_notification_details(self, kind: str) -> Optional[Dict[str, Any]]:
+        """Return next scheduled details for EventPinger notifications."""
         kind = normalize_kind(kind)
         context = self._notification_contexts.get(kind)
         if context:
             if float(context.get("expires_at") or 0) > time.monotonic():
                 summary = str(context.get("next_summary") or "").strip()
                 if summary:
-                    return summary
+                    details = {
+                        "summary": summary,
+                        "location": str(context.get("next_location") or "").strip(),
+                        "type": str(context.get("next_type") or "").strip(),
+                    }
+                    scheduled_at = await EventManager._next_notification_scheduled_at(self, kind)
+                    if scheduled_at:
+                        details["scheduled_at"] = scheduled_at
+                    return details
             self._notification_contexts.pop(kind, None)
 
+        details = await EventManager._configured_next_notification_details(self, kind)
+        if not details:
+            return None
+        scheduled_at = await EventManager._next_notification_scheduled_at(self, kind)
+        if scheduled_at:
+            details["scheduled_at"] = scheduled_at
+        return details
+
+    async def _next_notification_scheduled_at(self, kind: str) -> Optional[datetime]:
+        """Return the next scheduled attempt time for EventPinger details."""
         schedules = await self.config.schedules()
         schedule = schedules.get(kind, {})
         if not schedule.get("enabled"):
             return None
+        last_runs = await self.config.last_runs()
+        retry_after = await self.config.schedule_retry_after()
+        last_started_at = await self.config.last_started_at()
+        timezone_name = schedule.get("timezone") or DEFAULT_TIMEZONE
+        now = datetime.now(ZoneInfo(timezone_name))
+        return next_schedule_attempt_time(kind, schedule, last_runs, retry_after, now, last_started_at)
 
+    async def _configured_next_notification_details(self, kind: str) -> Optional[Dict[str, str]]:
+        """Return the currently configured next profile details."""
+        schedules = await self.config.schedules()
+        schedule = schedules.get(kind, {})
+        if not schedule.get("enabled"):
+            return None
         profile_names = schedule.get("profiles") or []
         if not profile_names and schedule.get("profile"):
             profile_names = [schedule["profile"]]
@@ -2606,11 +2644,29 @@ class EventManager(commands.Cog):
         profiles = await self.config.profiles()
         profile = profiles.get(kind, {}).get(next_profile_name)
         if not profile:
-            return f"Profile `{next_profile_name}` is configured next, but its profile data was not found."
-        return profile_start_summary(kind, profile)
+            return {
+                "summary": f"Profile `{next_profile_name}` is configured next, but its profile data was not found.",
+                "location": "",
+                "type": "",
+            }
+        return {
+            "summary": profile_start_summary(kind, profile),
+            "location": profile_location_summary(profile),
+            "type": profile_type_summary(kind, profile),
+        }
 
     async def _next_scheduled_profile_summary(self, kind: str, current_profile_name: str) -> Optional[str]:
         """Return the next scheduled profile summary after the profile that just ran."""
+        details = await EventManager._next_scheduled_profile_details(self, kind, current_profile_name)
+        summary = str((details or {}).get("summary") or "").strip()
+        return summary or None
+
+    async def _next_scheduled_profile_details(
+        self,
+        kind: str,
+        current_profile_name: str,
+    ) -> Optional[Dict[str, str]]:
+        """Return the next scheduled profile details after the profile that just ran."""
         kind = normalize_kind(kind)
         schedules = await self.config.schedules()
         schedule = schedules.get(kind, {})
@@ -2633,8 +2689,16 @@ class EventManager(commands.Cog):
         profiles = await self.config.profiles()
         profile = profiles.get(kind, {}).get(next_profile_name)
         if not profile:
-            return f"Profile `{next_profile_name}` is configured next, but its profile data was not found."
-        return profile_start_summary(kind, profile)
+            return {
+                "summary": f"Profile `{next_profile_name}` is configured next, but its profile data was not found.",
+                "location": "",
+                "type": "",
+            }
+        return {
+            "summary": profile_start_summary(kind, profile),
+            "location": profile_location_summary(profile),
+            "type": profile_type_summary(kind, profile),
+        }
 
     async def _log_run(
         self,
