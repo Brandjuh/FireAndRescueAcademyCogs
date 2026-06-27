@@ -65,6 +65,7 @@ class FireStationCommand(commands.Cog):
             "staff_trained": 0,
             "active_mission": {},
             "developer_mode": False,
+            "last_daily_at": None,
         }
 
         self.config.register_global(**default_global)
@@ -188,6 +189,15 @@ class FireStationCommand(commands.Cog):
 
     def _reward_multiplier(self) -> float:
         return max(0.0, self._balance_float("credits_reward_multiplier", 1.0))
+
+    def _daily_credits_reward(self) -> int:
+        return max(0, self._balance_int("daily_credits_reward", 10000))
+
+    def _daily_xp_reward(self) -> int:
+        return max(0, self._balance_int("daily_xp_reward", 40))
+
+    def _daily_cooldown_hours(self) -> float:
+        return max(0.0, self._balance_float("daily_cooldown_hours", 24.0))
 
     def _maintenance_multiplier(self) -> float:
         return max(0.0, self._balance_float("maintenance_cost_multiplier", 1.0))
@@ -741,6 +751,25 @@ class FireStationCommand(commands.Cog):
         delay = max(0.0, minutes)
         return self._format_timestamp(self._utcnow() + timedelta(minutes=delay))
 
+    @staticmethod
+    def _format_remaining_time(delta: timedelta) -> str:
+        total_minutes = max(0, int(math.ceil(delta.total_seconds() / 60)))
+        if total_minutes <= 0:
+            return "now"
+        hours, minutes = divmod(total_minutes, 60)
+        parts = []
+        if hours:
+            parts.append(f"{hours} hour" if hours == 1 else f"{hours} hours")
+        if minutes:
+            parts.append(f"{minutes} minute" if minutes == 1 else f"{minutes} minutes")
+        return "in " + " ".join(parts)
+
+    def _daily_ready_at(self, data: Dict[str, Any]) -> datetime | None:
+        last_daily_at = self._parse_timestamp(data.get("last_daily_at"))
+        if last_daily_at is None:
+            return None
+        return last_daily_at + timedelta(hours=self._daily_cooldown_hours())
+
     def _new_mission_state(
         self,
         incident: Dict[str, Any],
@@ -1288,6 +1317,71 @@ class FireStationCommand(commands.Cog):
             "new_level": new_level,
             "leveled_up": new_level > old_level,
         }
+
+    async def _award_flat_xp(self, user_conf, data: Dict[str, Any], amount: int) -> Dict[str, Any]:
+        xp = int(data.get("xp", 0))
+        old_level = int(data.get("command_level", self._command_level_for_xp(xp)))
+        earned = max(0, int(amount))
+        new_xp = xp + earned
+        new_level = self._command_level_for_xp(new_xp)
+        await user_conf.xp.set(new_xp)
+        await user_conf.command_level.set(new_level)
+        return {
+            "earned": earned,
+            "total": new_xp,
+            "old_level": old_level,
+            "new_level": new_level,
+            "leveled_up": new_level > old_level,
+        }
+
+    async def _claim_daily_reward(self, user: discord.abc.User) -> discord.Embed:
+        user_conf = self.config.user(user)
+        data = await user_conf.all()
+        now = self._utcnow()
+        ready_at = self._daily_ready_at(data)
+        if ready_at is not None and ready_at > now:
+            embed = discord.Embed(
+                title="Daily reward",
+                description="The station stipend has already been collected for this cycle.",
+                color=discord.Color.orange(),
+            )
+            embed.add_field(
+                name="Ready",
+                value=self._format_remaining_time(ready_at - now),
+                inline=False,
+            )
+            return embed
+
+        credits_reward = self._daily_credits_reward()
+        xp_reward = self._daily_xp_reward()
+        await self._give(user, credits_reward)
+        xp_result = await self._award_flat_xp(user_conf, data, xp_reward)
+        await user_conf.last_daily_at.set(self._format_timestamp(now))
+        total_credits = await self._get_credits(user)
+
+        embed = discord.Embed(
+            title="Daily station reward",
+            description=(
+                "Dispatch confirms the daily readiness stipend. Supplies are logged, the crew board is "
+                "checked, and command experience is updated for another operational day."
+            ),
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="Credits", value=f"+{credits_reward:,}", inline=True)
+        embed.add_field(name="Command XP", value=f"+{xp_result['earned']:,}", inline=True)
+        embed.add_field(name="Balance", value=f"{total_credits:,} credits", inline=True)
+        embed.add_field(
+            name="Progress",
+            value=self._xp_progress_text(xp_result["total"], xp_result["new_level"]),
+            inline=False,
+        )
+        if xp_result["leveled_up"]:
+            embed.add_field(
+                name="Level up",
+                value=f"Command level {xp_result['old_level']} -> {xp_result['new_level']}.",
+                inline=False,
+            )
+        return embed
 
     async def _create_station(self, user: discord.abc.User) -> bool:
         user_conf = self.config.user(user)
@@ -2336,6 +2430,15 @@ class FireStationCommand(commands.Cog):
         view = FscDeveloperView(self, ctx.author, ctx.channel, ctx.guild, data=data)
         message = await ctx.send(embed=embed, view=view)
         view.message = message
+
+    @fsc_group.command(name="daily")
+    async def fsc_daily(self, ctx: commands.Context):
+        """Claim the daily FireStationCommand credit and XP reward."""
+        if not await self._ensure_started(ctx):
+            return
+
+        embed = await self._claim_daily_reward(ctx.author)
+        await ctx.send(embed=embed)
 
     @fsc_group.command(name="status")
     async def fsc_status(self, ctx: commands.Context):
@@ -4216,6 +4319,7 @@ class FscDashboardView(FscTimedView):
         "expansions": "Build expansions",
         "career": "Career station",
         "commands": "Command help",
+        "daily": "Daily reward",
         "devmenu": "Developer menu",
         "recruit": "Hire staff",
         "maintenance": "Maintenance bay",
@@ -4229,7 +4333,7 @@ class FscDashboardView(FscTimedView):
         "Developer": ("devmenu",),
         "Incidents": ("commands", "mission"),
         "Staff": ("recruit", "training"),
-        "Station": ("expansions", "career", "station", "refresh", "upgrade"),
+        "Station": ("daily", "expansions", "career", "station", "refresh", "upgrade"),
         "Vehicle": ("equipment", "maintenance", "shop"),
     }
     DASHBOARD_CATEGORY_LABELS = set(DASHBOARD_CATEGORIES)
@@ -4629,6 +4733,18 @@ class FscDashboardView(FscTimedView):
         )
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
+    async def daily(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.config.user(self.user).all()
+        if not data["started"]:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Action required", value="Create a station first.", inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=FscStartView(self.cog, self.user))
+            return
+
+        embed = await self.cog._claim_daily_reward(self.user)
+        refreshed = await self.cog.config.user(self.user).all()
+        await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view(refreshed))
+
     async def mission(self, interaction: discord.Interaction, button: discord.ui.Button):
         channel = interaction.channel or self.channel
         guild = interaction.guild or self.guild
@@ -4707,6 +4823,7 @@ class FscDashboardView(FscTimedView):
         embed.add_field(name="Recruit", value="`[p]fsc recruit <amount>`", inline=False)
         embed.add_field(name="Upgrade", value="`[p]fsc upgrade`", inline=False)
         embed.add_field(name="Career station", value="`[p]fsc career`", inline=False)
+        embed.add_field(name="Daily reward", value="`[p]fsc daily`", inline=False)
         embed.add_field(name="Equipment", value="`[p]fsc equipment`", inline=False)
         embed.add_field(name="Training", value="`[p]fsc training`", inline=False)
         embed.add_field(name="Expansions", value="`[p]fsc expansions`", inline=False)
