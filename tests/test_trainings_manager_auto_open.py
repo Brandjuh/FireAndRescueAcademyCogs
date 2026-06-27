@@ -648,6 +648,33 @@ def test_training_board_reply_reports_failed_auto_open_to_board_user():
     assert "Please try again later" in reply
 
 
+def test_training_board_reply_includes_academy_link_and_join_instructions():
+    manager = TrainingManager.__new__(TrainingManager)
+    post = BoardTrainingPost(
+        post_id=179134,
+        author_id="123456",
+        author_name="BoardUser",
+        created_at="June 24, 2026 15:47",
+        content="EMS Mobile Command",
+    )
+    match = BoardTrainingMatch(
+        discipline="Fire",
+        training="EMS Mobile Command",
+        days=7,
+        matched_text="fire station ems mobile command",
+        score=1.0,
+    )
+    result = AutoTrainingResult(True, "Opened", academy_id=927104, classes_opened=1)
+
+    reply = manager._build_training_board_reply(post, [(match, result)])
+
+    assert "EMS Mobile Command: opened 1 class(es) in academy 927104" in reply
+    assert "Where to find and join the class:" in reply
+    assert "https://www.missionchief.com/buildings/927104" in reply
+    assert "Browser/Desktop" in reply
+    assert "Phone" in reply
+
+
 def test_training_board_error_reply_explains_unrecognized_request():
     manager = TrainingManager.__new__(TrainingManager)
     post = BoardTrainingPost(
