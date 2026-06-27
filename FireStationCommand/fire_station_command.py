@@ -199,6 +199,9 @@ class FireStationCommand(commands.Cog):
     def _daily_cooldown_hours(self) -> float:
         return max(0.0, self._balance_float("daily_cooldown_hours", 24.0))
 
+    def _vehicle_sale_refund_rate(self) -> float:
+        return max(0.0, min(1.0, self._balance_float("vehicle_sale_refund_rate", 0.5)))
+
     def _maintenance_multiplier(self) -> float:
         return max(0.0, self._balance_float("maintenance_cost_multiplier", 1.0))
 
@@ -512,6 +515,28 @@ class FireStationCommand(commands.Cog):
         except (TypeError, ValueError):
             condition = 100
         return max(0, min(100, condition))
+
+    def _vehicle_display_name(self, vehicle: Dict[str, Any]) -> str:
+        catalog_id = str(vehicle.get("catalog_id", ""))
+        catalog_name = self.VEHICLE_CATALOG.get(catalog_id, {}).get("name")
+        name = vehicle.get("name") or catalog_name or "Vehicle"
+        instance_id = vehicle.get("id")
+        return f"{name} #{instance_id}" if instance_id is not None else str(name)
+
+    def _vehicle_base_value(self, vehicle: Dict[str, Any]) -> int:
+        value = vehicle.get("purchase_price")
+        if value is None:
+            catalog_id = str(vehicle.get("catalog_id", ""))
+            value = self.VEHICLE_CATALOG.get(catalog_id, {}).get("price", 0)
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
+    def _vehicle_sale_refund(self, vehicle: Dict[str, Any]) -> int:
+        base_value = self._vehicle_base_value(vehicle)
+        condition_factor = self._vehicle_condition(vehicle) / 100
+        return int(round(base_value * self._vehicle_sale_refund_rate() * condition_factor))
 
     def _vehicle_out_of_service_until(self, vehicle: Dict[str, Any]) -> datetime | None:
         return self._parse_timestamp(vehicle.get("out_of_service_until"))
@@ -2163,6 +2188,49 @@ class FireStationCommand(commands.Cog):
             )
         return embed
 
+    def _build_vehicle_sale_embed(self, data: Dict[str, Any]) -> discord.Embed:
+        vehicles = data.get("vehicles", [])
+        vehicle_list = vehicles if isinstance(vehicles, list) else []
+        max_veh = self._max_vehicles_for_data(data)
+        embed = discord.Embed(
+            title="Sell vehicle",
+            description="Select a station vehicle to sell from the menu below.",
+            color=discord.Color.dark_gold(),
+        )
+        embed.add_field(
+            name="Capacity",
+            value=f"{len(vehicle_list)} / {max_veh} vehicles currently in your station.",
+            inline=False,
+        )
+        if data.get("active_mission"):
+            embed.add_field(
+                name="Sales paused",
+                value="Vehicles cannot be sold while an incident is active.",
+                inline=False,
+            )
+            return embed
+        if not vehicle_list:
+            embed.add_field(name="Fleet", value="No vehicles available to sell.", inline=False)
+            return embed
+
+        rows = []
+        for vehicle in vehicle_list[:10]:
+            if not isinstance(vehicle, dict):
+                continue
+            rows.append(
+                f"- {self._vehicle_display_name(vehicle)}: "
+                f"{self._vehicle_sale_refund(vehicle):,} cr refund at {self._vehicle_condition(vehicle)}% condition"
+            )
+        if len(vehicle_list) > len(rows):
+            rows.append(f"- +{len(vehicle_list) - len(rows)} more")
+        embed.add_field(name="Estimated refunds", value="\n".join(rows) if rows else "No vehicles.", inline=False)
+        embed.add_field(
+            name="Refund policy",
+            value=f"{int(self._vehicle_sale_refund_rate() * 100)}% of vehicle value, adjusted by condition.",
+            inline=False,
+        )
+        return embed
+
     def _build_equipment_shop_embed(self, data: Dict[str, Any]) -> discord.Embed:
         command_level = self._command_level_from_data(data)
         counts = self._equipment_inventory_counts(data.get("equipment", []))
@@ -2917,7 +2985,9 @@ class FireStationCommand(commands.Cog):
         vehicles = data.get("vehicles", [])
         max_veh = self._max_vehicles_for_data(data)
         if len(vehicles) >= max_veh:
-            await ctx.send("You are at maximum vehicle capacity. Upgrade your station to buy more vehicles.")
+            await ctx.send(
+                "You are at maximum vehicle capacity. Upgrade your station or sell a vehicle to buy more vehicles."
+            )
             return
 
         view = VehicleShopView(self, ctx.channel, ctx.author, ctx.guild, data=data)
@@ -3875,6 +3945,7 @@ class FireStationCommand(commands.Cog):
             "crew_capacity": int(vdef["crew_capacity"]),
             "image": vdef.get("image"),
             "condition": 100,
+            "purchase_price": price,
         }
         vehicles.append(new_vehicle)
 
@@ -3897,6 +3968,91 @@ class FireStationCommand(commands.Cog):
                 view = FscDashboardView(self, user, channel, guild or interaction.guild, data=fresh_data)
             else:
                 view = VehicleShopView(self, channel, user, guild or interaction.guild, data=fresh_data)
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+            return
+        await interaction.response.send_message(embed=embed, ephemeral=False)
+
+    async def _confirm_vehicle_sale(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        vehicle_instance_id: str,
+        *,
+        edit_message: bool = False,
+        guild: discord.Guild | None = None,
+    ):
+        user_conf = self.config.user(user)
+        data = await user_conf.all()
+        if data.get("active_mission"):
+            embed = self._build_vehicle_sale_embed(data)
+            embed.add_field(
+                name="Sale blocked",
+                value="Finish or cancel the active incident before selling vehicles.",
+                inline=False,
+            )
+            if edit_message:
+                view = FscDashboardView(self, user, channel, guild or interaction.guild, data=data)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
+            await interaction.response.send_message(
+                "Finish or cancel the active incident before selling vehicles.",
+                ephemeral=True,
+            )
+            return
+
+        vehicles = data.get("vehicles", [])
+        vehicle_list = vehicles if isinstance(vehicles, list) else []
+        selected = None
+        for vehicle in vehicle_list:
+            if isinstance(vehicle, dict) and str(vehicle.get("id")) == str(vehicle_instance_id):
+                selected = vehicle
+                break
+
+        if selected is None:
+            embed = self._build_vehicle_sale_embed(data)
+            embed.add_field(name="Sale failed", value="That vehicle is no longer at this station.", inline=False)
+            if edit_message:
+                view = VehicleSaleView(self, channel, user, guild or interaction.guild, data=data)
+                await interaction.response.edit_message(content=None, embed=embed, view=view)
+                return
+            await interaction.response.send_message("That vehicle is no longer at this station.", ephemeral=True)
+            return
+
+        refund = self._vehicle_sale_refund(selected)
+        remaining = [
+            vehicle
+            for vehicle in vehicle_list
+            if not (isinstance(vehicle, dict) and str(vehicle.get("id")) == str(vehicle_instance_id))
+        ]
+        await user_conf.vehicles.set(remaining)
+        await self._give(user, refund)
+        fresh_data = await user_conf.all()
+        total_credits = await self._get_credits(user)
+
+        catalog_id = str(selected.get("catalog_id", ""))
+        vdef = self.VEHICLE_CATALOG.get(catalog_id, selected)
+        embed = discord.Embed(
+            title="Vehicle sold",
+            description=f"Sold **{self._vehicle_display_name(selected)}**.",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(name="Refund", value=f"{refund:,} credits", inline=True)
+        embed.add_field(name="Balance", value=f"{total_credits:,} credits", inline=True)
+        embed.add_field(
+            name="Vehicle capacity",
+            value=f"{len(remaining)} / {self._max_vehicles_for_data(fresh_data)}",
+            inline=True,
+        )
+        embed.add_field(name="Condition at sale", value=f"{self._vehicle_condition(selected)}%", inline=True)
+        self._apply_vehicle_image(embed, vdef)
+
+        if edit_message:
+            view = (
+                VehicleSaleView(self, channel, user, guild or interaction.guild, data=fresh_data)
+                if remaining
+                else FscDashboardView(self, user, channel, guild or interaction.guild, data=fresh_data)
+            )
             await interaction.response.edit_message(content=None, embed=embed, view=view)
             return
         await interaction.response.send_message(embed=embed, ephemeral=False)
@@ -4325,6 +4481,7 @@ class FscDashboardView(FscTimedView):
         "maintenance": "Maintenance bay",
         "mission": "Start mission",
         "refresh": "Refresh dashboard",
+        "sell_vehicle": "Sell vehicle",
         "station": "Overview",
         "training": "Train staff",
         "upgrade": "Upgrade station",
@@ -4334,7 +4491,7 @@ class FscDashboardView(FscTimedView):
         "Incidents": ("commands", "mission"),
         "Staff": ("recruit", "training"),
         "Station": ("daily", "expansions", "career", "station", "refresh", "upgrade"),
-        "Vehicle": ("equipment", "maintenance", "shop"),
+        "Vehicle": ("equipment", "maintenance", "sell_vehicle", "shop"),
     }
     DASHBOARD_CATEGORY_LABELS = set(DASHBOARD_CATEGORIES)
     DASHBOARD_ACTION_LABELS = set(ACTION_LABELS.values()) | {
@@ -4500,7 +4657,7 @@ class FscDashboardView(FscTimedView):
             embed = await self.cog._build_dashboard_embed(self.user)
             embed.add_field(
                 name="Vehicle shop",
-                value="You are at maximum vehicle capacity. Upgrade your station to buy more vehicles.",
+                value="You are at maximum vehicle capacity. Upgrade your station or sell a vehicle to buy more vehicles.",
                 inline=False,
             )
             await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
@@ -4511,6 +4668,29 @@ class FscDashboardView(FscTimedView):
             content=None,
             embed=embed,
             view=VehicleShopView(self.cog, self.channel, self.user, self.guild, data=data),
+        )
+
+    async def sell_vehicle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = await self.cog.config.user(self.user).all()
+        if not data["started"]:
+            embed = await self.cog._build_dashboard_embed(self.user)
+            embed.add_field(name="Action required", value="Create a station first.", inline=False)
+            await interaction.response.edit_message(content=None, embed=embed, view=FscStartView(self.cog, self.user))
+            return
+        embed = self.cog._build_vehicle_sale_embed(data)
+        if data.get("active_mission") or not data.get("vehicles"):
+            await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view(data))
+            return
+        await interaction.response.edit_message(
+            content=None,
+            embed=embed,
+            view=VehicleSaleView(
+                self.cog,
+                interaction.channel or self.channel,
+                self.user,
+                interaction.guild or self.guild,
+                data=data,
+            ),
         )
 
     async def equipment(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -4825,6 +5005,7 @@ class FscDashboardView(FscTimedView):
         embed.add_field(name="Career station", value="`[p]fsc career`", inline=False)
         embed.add_field(name="Daily reward", value="`[p]fsc daily`", inline=False)
         embed.add_field(name="Equipment", value="`[p]fsc equipment`", inline=False)
+        embed.add_field(name="Sell vehicle", value="Vehicle menu -> Sell vehicle", inline=False)
         embed.add_field(name="Training", value="`[p]fsc training`", inline=False)
         embed.add_field(name="Expansions", value="`[p]fsc expansions`", inline=False)
         await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
@@ -5678,6 +5859,137 @@ class VehicleShopView(FscTimedView):
         await interaction.response.edit_message(content=None, embed=embed, view=view)
 
 
+class VehicleSaleSelect(discord.ui.Select):
+    PAGE_SIZE = 25
+
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        guild: discord.Guild | None = None,
+        data: Dict[str, Any] | None = None,
+        page: int = 0,
+    ):
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+        self.guild = guild
+        self.data = data or {}
+        self.page = max(0, page)
+
+        vehicles = self.data.get("vehicles", [])
+        vehicle_list = vehicles if isinstance(vehicles, list) else []
+        options: List[discord.SelectOption] = []
+        start = self.page * self.PAGE_SIZE
+        for vehicle in vehicle_list[start:start + self.PAGE_SIZE]:
+            if not isinstance(vehicle, dict):
+                continue
+            refund = self.cog._vehicle_sale_refund(vehicle)
+            label = f"{self.cog._vehicle_display_name(vehicle)} ({refund:,} cr)"
+            options.append(
+                discord.SelectOption(
+                    label=label[:100],
+                    value=str(vehicle.get("id")),
+                    description=f"Condition {self.cog._vehicle_condition(vehicle)}%",
+                    default=False,
+                    emoji=None,
+                )
+            )
+
+        if not options:
+            options = [discord.SelectOption(label="No vehicles available", value="none")]
+
+        super().__init__(
+            placeholder=f"Select a vehicle to sell (page {self.page + 1})",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        choice = self.values[0]
+        if choice == "none":
+            await interaction.response.send_message("No vehicles are available to sell.", ephemeral=True)
+            return
+        data = await self.cog.config.user(self.user).all()
+        vehicle = next(
+            (
+                owned
+                for owned in data.get("vehicles", [])
+                if isinstance(owned, dict) and str(owned.get("id")) == str(choice)
+            ),
+            None,
+        )
+        if vehicle is None:
+            embed = self.cog._build_vehicle_sale_embed(data)
+            embed.add_field(name="Sale failed", value="That vehicle is no longer at this station.", inline=False)
+            await interaction.response.edit_message(
+                content=None,
+                embed=embed,
+                view=VehicleSaleView(
+                    self.cog,
+                    self.channel,
+                    self.user,
+                    interaction.guild or self.guild,
+                    data=data,
+                ),
+            )
+            return
+
+        refund = self.cog._vehicle_sale_refund(vehicle)
+        embed = discord.Embed(
+            title="Confirm vehicle sale",
+            description=f"Sell **{self.cog._vehicle_display_name(vehicle)}** for **{refund:,}** credits?",
+            color=discord.Color.dark_gold(),
+        )
+        embed.add_field(name="Condition", value=f"{self.cog._vehicle_condition(vehicle)}%", inline=True)
+        embed.add_field(name="Refund", value=f"{refund:,} credits", inline=True)
+        catalog_id = str(vehicle.get("catalog_id", ""))
+        self.cog._apply_vehicle_image(embed, self.cog.VEHICLE_CATALOG.get(catalog_id, vehicle))
+        view = ConfirmVehicleSaleView(
+            self.cog,
+            self.channel,
+            self.user,
+            choice,
+            guild=interaction.guild or self.guild,
+            edit_message=True,
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+
+class VehicleSaleView(FscTimedView):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        guild: discord.Guild | None = None,
+        data: Dict[str, Any] | None = None,
+        page: int = 0,
+    ):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+        self.guild = guild
+        self.data = data or {}
+        self.page = max(0, page)
+        self.add_item(VehicleSaleSelect(cog, channel, user, guild, data=self.data, page=self.page))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = await self.cog._build_dashboard_embed(self.user)
+        channel = interaction.channel or self.channel
+        guild = interaction.guild or self.guild
+        data = await self.cog.config.user(self.user).all()
+        view = FscDashboardView(self.cog, self.user, channel, guild, data=data)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+
 class MaintenanceView(FscTimedView):
     def __init__(
         self,
@@ -6439,6 +6751,72 @@ class ConfirmVehiclePurchaseView(FscTimedView):
             self.stop()
             return
         await interaction.response.send_message("Purchase cancelled.", ephemeral=True)
+        self.stop()
+
+
+class ConfirmVehicleSaleView(FscTimedView):
+    def __init__(
+        self,
+        cog: FireStationCommand,
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+        vehicle_instance_id: str,
+        *,
+        guild: discord.Guild | None = None,
+        edit_message: bool = False,
+    ):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.channel = channel
+        self.user = user
+        self.vehicle_instance_id = vehicle_instance_id
+        self.guild = guild
+        self.edit_message = edit_message
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user.id
+
+    @discord.ui.button(label="Confirm sale", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        await self.cog._confirm_vehicle_sale(
+            interaction,
+            self.channel,
+            self.user,
+            self.vehicle_instance_id,
+            edit_message=self.edit_message,
+            guild=self.guild,
+        )
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        if self.edit_message:
+            data = await self.cog.config.user(self.user).all()
+            embed = self.cog._build_vehicle_sale_embed(data)
+            embed.add_field(name="Sale cancelled", value="No vehicle was sold.", inline=False)
+            view = VehicleSaleView(
+                self.cog,
+                self.channel,
+                self.user,
+                interaction.guild or self.guild,
+                data=data,
+            )
+            await interaction.response.edit_message(content=None, embed=embed, view=view)
+            self.stop()
+            return
+        await interaction.response.send_message("Sale cancelled.", ephemeral=True)
         self.stop()
 
 
