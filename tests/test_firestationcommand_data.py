@@ -553,6 +553,9 @@ def test_balance_helpers_read_values_with_fallbacks():
                     "career_upgrade_cost": 250000,
                     "career_turnout_seconds": 30,
                     "credits_reward_multiplier": 1.25,
+                    "daily_credits_reward": 12000,
+                    "daily_xp_reward": 75,
+                    "daily_cooldown_hours": 12,
                 }
             }
         }
@@ -561,6 +564,9 @@ def test_balance_helpers_read_values_with_fallbacks():
     assert FireStationCommand._balance_int(cog, "career_upgrade_cost", 1) == 250000
     assert FireStationCommand._balance_seconds_as_minutes(cog, "career_turnout_seconds", 0) == 0.5
     assert FireStationCommand._reward_multiplier(cog) == 1.25
+    assert FireStationCommand._daily_credits_reward(cog) == 12000
+    assert FireStationCommand._daily_xp_reward(cog) == 75
+    assert FireStationCommand._daily_cooldown_hours(cog) == 12
     assert FireStationCommand._balance_int(cog, "missing", 7) == 7
 
 
@@ -826,6 +832,72 @@ def test_dashboard_embed_shows_station_image_for_started_station():
             "refs/heads/main/FireStationCommand/Images/Stations/station_level_04.png"
         )
     }
+
+
+def test_daily_command_grants_balance_rewards_and_blocks_until_cooldown():
+    cog = _cog_with_game_data(
+        {
+            "balance": {
+                "balance": {
+                    "daily_credits_reward": 12345,
+                    "daily_xp_reward": 100,
+                    "daily_cooldown_hours": 24,
+                }
+            },
+            "progression": {
+                "progression": {
+                    "level_xp": {
+                        1: 0,
+                        2: 100,
+                        3: 250,
+                    }
+                }
+            },
+        }
+    )
+    user = type("User", (), {"id": 123})()
+    data = {
+        "started": True,
+        "credits": 0,
+        "vehicles": [],
+        "equipment": [],
+        "trainings": [],
+        "expansions": [],
+        "station_level": 1,
+        "command_level": 1,
+        "xp": 0,
+        "reputation": 0,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "active_mission": {},
+        "last_daily_at": None,
+    }
+    cog.config = _Config(data, {})
+    first_ctx = _Ctx(user)
+
+    asyncio.run(FireStationCommand.fsc_daily(cog, first_ctx))
+
+    first_embed = first_ctx.sent[0]["embed"]
+    first_fields = {field["name"]: field["value"] for field in first_embed.fields}
+    assert first_embed.kwargs["title"] == "Daily station reward"
+    assert first_fields["Credits"] == "+12,345"
+    assert first_fields["Command XP"] == "+100"
+    assert first_fields["Level up"] == "Command level 1 -> 2."
+    assert data["credits"] == 12345
+    assert data["xp"] == 100
+    assert data["command_level"] == 2
+    assert data["last_daily_at"] == "2026-06-12T12:00:00Z"
+
+    second_ctx = _Ctx(user)
+    asyncio.run(FireStationCommand.fsc_daily(cog, second_ctx))
+
+    second_embed = second_ctx.sent[0]["embed"]
+    second_fields = {field["name"]: field["value"] for field in second_embed.fields}
+    assert second_embed.kwargs["title"] == "Daily reward"
+    assert second_fields["Ready"] == "in 24 hours"
+    assert data["credits"] == 12345
+    assert data["xp"] == 100
 
 
 def test_vehicle_image_helpers_build_raw_urls_and_apply_embed_image():
@@ -1371,6 +1443,7 @@ def test_dashboard_categories_and_actions_are_alphabetized():
     assert [view.ACTION_LABELS[action] for action in view._category_actions("Station", data)] == [
         "Build expansions",
         "Career station",
+        "Daily reward",
         "Overview",
         "Refresh dashboard",
         "Upgrade station",
@@ -1433,6 +1506,47 @@ def test_dashboard_action_dropdown_routes_to_handler():
 
     assert interaction.response.edited["embed"].kwargs["title"] == "Equipment shop"
     assert isinstance(interaction.response.edited["view"], EquipmentShopView)
+
+
+def test_dashboard_daily_action_claims_reward_and_refreshes_view():
+    user = type("User", (), {"id": 123})()
+    cog = _cog_with_game_data(
+        {
+            "balance": {
+                "balance": {
+                    "daily_credits_reward": 5000,
+                    "daily_xp_reward": 40,
+                    "daily_cooldown_hours": 24,
+                }
+            }
+        }
+    )
+    data = {
+        "started": True,
+        "credits": 0,
+        "station_level": 1,
+        "command_level": 1,
+        "xp": 0,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "vehicles": [],
+        "equipment": [],
+        "trainings": [],
+        "expansions": [],
+        "active_mission": {},
+        "last_daily_at": None,
+    }
+    cog.config = _Config(data, {})
+    view = FscDashboardView(cog, user, object(), object(), data=data)
+    interaction = _Interaction(user)
+
+    asyncio.run(view.daily(interaction, None))
+
+    assert interaction.response.edited["embed"].kwargs["title"] == "Daily station reward"
+    assert isinstance(interaction.response.edited["view"], FscDashboardView)
+    assert data["credits"] == 5000
+    assert data["xp"] == 40
 
 
 def test_dashboard_category_view_uses_action_dropdown():
