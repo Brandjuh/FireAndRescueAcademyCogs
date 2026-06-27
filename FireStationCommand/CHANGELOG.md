@@ -77,6 +77,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - Mission embeds now show configured mission images when available.
 - Vehicle purchase embeds now show configured vehicle images when available.
 - Mission images now use the same flat illustrated fire-station style as vehicle assets.
+- The main `[p]fsc` dashboard now shows the current station level image.
 - Mission embeds now show configured required equipment names when available.
 - Mission embeds now show configured required vehicle names when available.
 - Mission embeds now warn when the station is missing required vehicle types for the incident.
