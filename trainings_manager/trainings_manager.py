@@ -330,9 +330,16 @@ def _board_training_aliases(discipline: str, training: str) -> Tuple[str, ...]:
     return tuple(sorted(alias for alias in aliases if alias))
 
 
-def _mentions_board_discipline_prefix(normalized_text: str, discipline: str) -> bool:
+def _mentions_board_discipline_prefix(normalized_text: str, discipline: str, training: Optional[str] = None) -> bool:
+    normalized_training = _normalize_training_search_text(training or "")
     for prefix in BOARD_DISCIPLINE_SEARCH_PREFIXES.get(discipline, (discipline,)):
         normalized_prefix = _normalize_training_search_text(prefix)
+        if (
+            normalized_training
+            and normalized_training.startswith(f"{normalized_prefix} ")
+            and len(normalized_prefix.split()) == 1
+        ):
+            continue
         if normalized_prefix and re.search(rf"\b{re.escape(normalized_prefix)}\b", normalized_text):
             return True
     return False
@@ -398,17 +405,31 @@ def _prune_contained_board_training_matches(matches: List[BoardTrainingMatch]) -
 
     keep: List[BoardTrainingMatch] = []
     token_cache = {index: _training_match_tokens(match.training) for index, match in enumerate(matches)}
+    full_token_cache = {
+        index: set(_normalize_training_search_text(match.training).split())
+        for index, match in enumerate(matches)
+    }
     for index, match in enumerate(matches):
         tokens = token_cache[index]
+        full_tokens = full_token_cache[index]
         remove = False
-        if len(tokens) >= 2:
+        if len(tokens) >= 2 or len(full_tokens) >= 2:
             for other_index, other in enumerate(matches):
                 if index == other_index:
                     continue
                 other_tokens = token_cache[other_index]
-                if len(other_tokens) <= len(tokens):
-                    continue
-                if not tokens.issubset(other_tokens):
+                other_full_tokens = full_token_cache[other_index]
+                significant_contained = (
+                    len(tokens) >= 2
+                    and len(other_tokens) > len(tokens)
+                    and tokens.issubset(other_tokens)
+                )
+                full_contained = (
+                    len(full_tokens) >= 2
+                    and len(other_full_tokens) > len(full_tokens)
+                    and full_tokens.issubset(other_full_tokens)
+                )
+                if not significant_contained and not full_contained:
                     continue
                 if other.score >= 0.90 or other.score >= match.score - 0.05:
                     remove = True
@@ -441,6 +462,32 @@ def _training_catalog() -> List[TrainingCatalogEntry]:
     return entries
 
 
+def _is_short_training_candidate_inside_longer_training(
+    normalized_text: str,
+    candidate: str,
+    entry: TrainingCatalogEntry,
+    catalog: List[TrainingCatalogEntry],
+) -> bool:
+    """Avoid matching a generic course name inside a longer requested course name."""
+    candidate_tokens = candidate.split()
+    if len(candidate_tokens) < 2:
+        return False
+
+    for other in catalog:
+        if other is entry:
+            continue
+        longer_candidates = {other.normalized, *other.aliases}
+        for longer_candidate in longer_candidates:
+            longer_tokens = longer_candidate.split()
+            if len(longer_tokens) <= len(candidate_tokens):
+                continue
+            if not re.search(rf"\b{re.escape(candidate)}\b", longer_candidate):
+                continue
+            if re.search(rf"\b{re.escape(longer_candidate)}\b", normalized_text):
+                return True
+    return False
+
+
 def extract_board_training_matches(text: str) -> List[BoardTrainingMatch]:
     """Extract one or more training requests from free-form board text."""
     normalized_text = _normalize_training_search_text(text)
@@ -461,6 +508,12 @@ def extract_board_training_matches(text: str) -> List[BoardTrainingMatch]:
                 candidate
                 for candidate in sorted(exact_candidates, key=len, reverse=True)
                 if candidate and re.search(rf"\b{re.escape(candidate)}\b", normalized_text)
+                and not _is_short_training_candidate_inside_longer_training(
+                    normalized_text,
+                    candidate,
+                    entry,
+                    catalog,
+                )
             ),
             None,
         )
@@ -488,7 +541,7 @@ def extract_board_training_matches(text: str) -> List[BoardTrainingMatch]:
             if key in seen_trainings:
                 continue
             if entry.normalized in ambiguous_names:
-                if not _mentions_board_discipline_prefix(chunk, entry.discipline):
+                if not _mentions_board_discipline_prefix(chunk, entry.discipline, entry.training):
                     continue
                 if not _has_board_training_specific_tokens(chunk, entry.training):
                     continue
@@ -496,6 +549,16 @@ def extract_board_training_matches(text: str) -> List[BoardTrainingMatch]:
             if entry.normalized not in ambiguous_names:
                 candidates.append(entry.normalized)
             candidates = [candidate for candidate in candidates if candidate]
+            candidates = [
+                candidate
+                for candidate in candidates
+                if not _is_short_training_candidate_inside_longer_training(
+                    chunk,
+                    candidate,
+                    entry,
+                    catalog,
+                )
+            ]
             if not candidates:
                 continue
             score = max(_candidate_training_score(chunk, candidate) for candidate in candidates)
