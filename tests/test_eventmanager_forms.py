@@ -9,6 +9,8 @@ from eventmanager.event_manager import (
     build_browser_start_config,
     build_payload,
     EVENT_DEFAULT_OVERRIDES,
+    DEFAULT_EVENT_ROUTE_TIME,
+    DEFAULT_TIMEZONE,
     EVENT_ROUTE_LOCATIONS,
     EVENT_RADIO_FIELD,
     fields_for_selection,
@@ -17,6 +19,7 @@ from eventmanager.event_manager import (
     normalize_kind,
     normalize_optional_profile_arg,
     normalize_random_location_region,
+    migrate_default_event_schedule_time,
     next_free_start_from_text,
     next_schedule_attempt_time,
     parse_event_form,
@@ -559,28 +562,28 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertEqual(next_free.isoformat(), "2026-06-27T14:10:25-04:00")
 
     def test_next_weekly_schedule_attempt_retries_same_week_after_cooldown(self):
-        now = datetime(2026, 6, 27, 7, 0, 30, tzinfo=ZoneInfo("America/New_York"))
+        now = datetime(2026, 6, 27, 15, 0, 30, tzinfo=ZoneInfo("America/New_York"))
         schedule = {
             "enabled": True,
             "profiles": ["weekly"],
             "rotation_index": 0,
-            "time": "07:00",
+            "time": DEFAULT_EVENT_ROUTE_TIME,
             "timezone": "America/New_York",
             "weekday": "saturday",
         }
-        retry_after = {"event": "2026-06-27T11:01:15+00:00"}
+        retry_after = {"event": "2026-06-27T19:01:15+00:00"}
 
         next_attempt = next_schedule_attempt_time("event", schedule, {}, retry_after, now)
 
-        self.assertEqual(next_attempt.isoformat(), "2026-06-27T07:01:15-04:00")
+        self.assertEqual(next_attempt.isoformat(), "2026-06-27T15:01:15-04:00")
 
     def test_due_weekly_schedule_attempt_is_now_before_run_key_is_written(self):
-        now = datetime(2026, 6, 27, 7, 0, 30, tzinfo=ZoneInfo("America/New_York"))
+        now = datetime(2026, 6, 27, 15, 0, 30, tzinfo=ZoneInfo("America/New_York"))
         schedule = {
             "enabled": True,
             "profiles": ["weekly"],
             "rotation_index": 0,
-            "time": "07:00",
+            "time": DEFAULT_EVENT_ROUTE_TIME,
             "timezone": "America/New_York",
             "weekday": "saturday",
         }
@@ -589,6 +592,24 @@ class EventManagerFormTests(unittest.TestCase):
 
         self.assertEqual(next_attempt, now)
         self.assertEqual(schedule_run_key("event", now), "2026-W26")
+
+    def test_migrates_legacy_weekly_event_schedule_to_1500_new_york(self):
+        schedules = {
+            "event": {
+                "enabled": True,
+                "profiles": ["weekly"],
+                "rotation_index": 0,
+                "time": "07:00",
+                "timezone": DEFAULT_TIMEZONE,
+                "weekday": "saturday",
+            }
+        }
+
+        changed = migrate_default_event_schedule_time(schedules)
+
+        self.assertTrue(changed)
+        self.assertEqual(schedules["event"]["time"], DEFAULT_EVENT_ROUTE_TIME)
+        self.assertEqual(schedules["event"]["timezone"], DEFAULT_TIMEZONE)
 
 
 class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):

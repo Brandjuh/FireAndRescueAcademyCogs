@@ -37,6 +37,9 @@ EVENT_KINDS = {
     },
 }
 DEFAULT_TIMEZONE = "America/New_York"
+DEFAULT_LARGE_ROUTE_TIME = "07:00"
+DEFAULT_EVENT_ROUTE_TIME = "15:00"
+LEGACY_EVENT_ROUTE_TIME = "07:00"
 DEFAULT_PANEL_CHANNEL_ID = 1421256548977606827
 PANEL_TITLE = "EventManager Control Panel"
 REQUEST_PANEL_TITLE = "Event Requests"
@@ -1194,6 +1197,20 @@ def schedule_run_key(kind: str, when: datetime) -> str:
     return when.strftime("%Y-%m-%d")
 
 
+def migrate_default_event_schedule_time(schedules: dict) -> bool:
+    """Move existing default alliance event schedules from 07:00 to 15:00 New York time."""
+    event_schedule = schedules.get("event")
+    if not isinstance(event_schedule, dict):
+        return False
+    if event_schedule.get("time") != LEGACY_EVENT_ROUTE_TIME:
+        return False
+    if event_schedule.get("timezone") not in (None, DEFAULT_TIMEZONE):
+        return False
+    event_schedule["time"] = DEFAULT_EVENT_ROUTE_TIME
+    event_schedule["timezone"] = DEFAULT_TIMEZONE
+    return True
+
+
 def next_nominal_schedule_time(kind: str, schedule: dict, last_runs: dict, now: datetime) -> Optional[datetime]:
     """Return the next intended scheduler attempt before cooldown retry overrides."""
     kind = normalize_kind(kind)
@@ -1832,9 +1849,9 @@ class EventManager(commands.Cog):
                     "profile": None,
                     "profiles": [],
                     "rotation_index": 0,
-                    "time": "23:55",
+                    "time": DEFAULT_EVENT_ROUTE_TIME,
                     "timezone": DEFAULT_TIMEZONE,
-                    "weekday": "monday",
+                    "weekday": "saturday",
                 },
             },
             last_runs={},
@@ -1855,6 +1872,7 @@ class EventManager(commands.Cog):
     async def cog_load(self):
         self.bot.add_view(EventManagerPanelView(self))
         self.bot.add_view(EventRequestPanelView(self))
+        await self._migrate_default_event_schedule_time()
         self._task = asyncio.create_task(self._scheduler_loop())
         self._panel_task = asyncio.create_task(self._ensure_panels_after_ready())
 
@@ -1863,6 +1881,10 @@ class EventManager(commands.Cog):
             self._task.cancel()
         if self._panel_task:
             self._panel_task.cancel()
+
+    async def _migrate_default_event_schedule_time(self):
+        async with self.config.schedules() as schedules:
+            migrate_default_event_schedule_time(schedules)
 
     async def _scheduler_loop(self):
         await self.bot.wait_until_ready()
@@ -3053,9 +3075,9 @@ class EventManager(commands.Cog):
     async def profile_seed_route_schedule(
         self,
         ctx: commands.Context,
-        daily_time: str = "07:00",
+        daily_time: str = DEFAULT_LARGE_ROUTE_TIME,
         weekly_day: str = "saturday",
-        weekly_time: str = "07:00",
+        weekly_time: str = DEFAULT_EVENT_ROUTE_TIME,
     ):
         """Create the fixed location rotation for daily missions and weekly events."""
         weekly_day = weekly_day.strip().lower()
