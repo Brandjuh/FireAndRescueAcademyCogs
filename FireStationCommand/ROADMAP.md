@@ -4,7 +4,7 @@ This document tracks larger gameplay systems that should be implemented after th
 
 ## Requested Gameplay TODOs
 
-- Add a developer menu toggle for user ID `132620654087241729` that enables a testing mode with all unlocks, unrestricted actions, and fast access to credits, XP, station levels, vehicles, equipment, missions, and outcome controls.
+- Extend the existing developer menu for user ID `132620654087241729` with mission outcome controls, so active incidents can be forced to success, partial success, or failure during testing.
 
 ## Mutual Aid
 
