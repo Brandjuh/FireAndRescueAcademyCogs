@@ -4,7 +4,6 @@ This document tracks larger gameplay systems that should be implemented after th
 
 ## Requested Gameplay TODOs
 
-- Improve purchase-blocked feedback for vehicles, equipment, expansions, and upgrades with clear reasons such as missing credits, missing level, missing extension, full capacity, or already owned.
 - Add a developer menu toggle for user ID `132620654087241729` that enables a testing mode with all unlocks, unrestricted actions, and fast access to credits, XP, station levels, vehicles, equipment, missions, and outcome controls.
 
 ## Mutual Aid

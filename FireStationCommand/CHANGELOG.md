@@ -147,6 +147,7 @@ All notable changes to FireStationCommand will be documented in this file.
 - Incident result embeds now use outcome-specific images instead of reusing the active incident image.
 - Dashboard menu buttons now use clearer action labels such as `Vehicle shop`, `Equipment shop`, and `Start mission`.
 - Vehicle and equipment shop lock lists now group items by command level or required expansion.
+- Purchase-blocked feedback now shows specific missing requirements for credits, command level, station expansions, training, and vehicle capacity.
 
 ### Fixed
 
