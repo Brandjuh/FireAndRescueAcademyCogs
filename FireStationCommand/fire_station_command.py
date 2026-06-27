@@ -1726,6 +1726,42 @@ class FireStationCommand(commands.Cog):
             return f"{text}\n{unlocks}"
         return text
 
+    def _command_level_lock_text(
+        self,
+        subject: str,
+        required_level: int,
+        xp: int,
+        command_level: int,
+        *,
+        action: str,
+    ) -> str:
+        return (
+            f"{subject} requires command level {required_level} before it can be {action}. "
+            f"Current progress: {self._xp_progress_text(xp, command_level)}."
+        )
+
+    def _expansion_lock_text(self, subject: str, missing_expansions: List[str], *, action: str) -> str:
+        expansion_text = self._expansion_requirement_display_text(missing_expansions) or ", ".join(missing_expansions)
+        return (
+            f"{subject} requires the following station expansion before it can be {action}: "
+            f"{expansion_text}. Build the required expansion first."
+        )
+
+    def _training_lock_text(self, subject: str, missing_training: List[str], *, action: str) -> str:
+        training_text = self._training_display_text(missing_training) or ", ".join(missing_training)
+        return (
+            f"{subject} requires station training before it can be {action}: "
+            f"{training_text}. Complete the required training first."
+        )
+
+    @staticmethod
+    def _credit_lock_text(action: str, cost: int, credits: int) -> str:
+        missing = max(0, cost - credits)
+        return (
+            f"{action} costs {cost:,} credits. Current balance: {credits:,} credits. "
+            f"Missing: {missing:,} credits."
+        )
+
     def _vehicle_is_unlocked(
         self,
         vehicle: Dict[str, Any],
@@ -2186,7 +2222,7 @@ class FireStationCommand(commands.Cog):
         elif hireable <= 0:
             embed.add_field(
                 name="Recruitment status",
-                value="You do not have enough credits to hire another recruit yet.",
+                value=self._credit_lock_text("Hiring 1 staff", cost_per, credits),
                 inline=False,
             )
         else:
@@ -2856,10 +2892,7 @@ class FireStationCommand(commands.Cog):
 
         credits = await self._get_credits(ctx.author)
         if credits < total_cost:
-            await ctx.send(
-                f"You do not have enough credits. Recruiting {amount} costs {total_cost:,}, "
-                f"but you only have {credits:,}."
-            )
+            await ctx.send(self._credit_lock_text(f"Recruiting {amount} staff", total_cost, credits))
             return
 
         embed = discord.Embed(
@@ -2909,13 +2942,14 @@ class FireStationCommand(commands.Cog):
 
         credits = await self._get_credits(user)
         if credits < total_cost or not await self._spend(user, total_cost):
+            lock_text = self._credit_lock_text(f"Recruiting {amount} staff", total_cost, credits)
             if edit_message:
                 embed = await self._build_recruitment_embed(user)
-                embed.add_field(name="Recruitment failed", value="Not enough credits.", inline=False)
+                embed.add_field(name="Recruitment failed", value=lock_text, inline=False)
                 view = RecruitmentView(self, user, channel or interaction.channel, guild or interaction.guild)
                 await interaction.response.edit_message(content=None, embed=embed, view=view)
                 return
-            await interaction.response.send_message("Recruitment failed: not enough credits.", ephemeral=True)
+            await interaction.response.send_message(f"Recruitment failed: {lock_text}", ephemeral=True)
             return
 
         staff_total += amount
@@ -2955,8 +2989,13 @@ class FireStationCommand(commands.Cog):
         new_lvl = lvl + 1
         if command_level < new_lvl:
             await ctx.send(
-                f"Station upgrade to level {new_lvl} is not available yet. "
-                f"Reach command level {new_lvl} first. Current progress: {self._xp_progress_text(xp, command_level)}."
+                self._command_level_lock_text(
+                    f"Station level {new_lvl}",
+                    new_lvl,
+                    xp,
+                    command_level,
+                    action="built",
+                )
             )
             return
 
@@ -2968,16 +3007,20 @@ class FireStationCommand(commands.Cog):
         cost = self._economy_scaled_cost(base_cost, credits)
         if credits < cost:
             await ctx.send(
-                f"You do not have enough credits to upgrade. "
-                f"Level {lvl} → {lvl + 1} costs {cost:,}, you have {credits:,}."
+                self._credit_lock_text(f"Station level {lvl} -> {lvl + 1} upgrade", cost, credits)
             )
             return
 
         new_lvl = lvl + 1
         if command_level < new_lvl:
             await ctx.send(
-                f"You need command level {new_lvl} before upgrading this station. "
-                f"Current progress: {self._xp_progress_text(xp, command_level)}."
+                self._command_level_lock_text(
+                    f"Station level {new_lvl}",
+                    new_lvl,
+                    xp,
+                    command_level,
+                    action="built",
+                )
             )
             return
 
@@ -3029,9 +3072,12 @@ class FireStationCommand(commands.Cog):
                 embed = await self._build_dashboard_embed(user)
                 embed.add_field(
                     name="Upgrade not available yet",
-                    value=(
-                        f"Station level {new_level} unlocks at command level {new_level}. "
-                        f"Current progress: {self._xp_progress_text(xp, command_level)}."
+                    value=self._command_level_lock_text(
+                        f"Station level {new_level}",
+                        new_level,
+                        xp,
+                        command_level,
+                        action="built",
                     ),
                     inline=False,
                 )
@@ -3039,7 +3085,14 @@ class FireStationCommand(commands.Cog):
                 await interaction.response.edit_message(content=None, embed=embed, view=view)
                 return
             await interaction.response.send_message(
-                f"Upgrade not available yet: command level {new_level} required.", ephemeral=True
+                self._command_level_lock_text(
+                    f"Station level {new_level}",
+                    new_level,
+                    xp,
+                    command_level,
+                    action="built",
+                ),
+                ephemeral=True,
             )
             return
 
@@ -3048,13 +3101,14 @@ class FireStationCommand(commands.Cog):
         base_upgrade_cost = int(glb.get("upgrade_base_cost", 50000)) * current_lvl
         cost = self._economy_scaled_cost(base_upgrade_cost, credits)
         if credits < cost or not await self._spend(user, cost):
+            lock_text = self._credit_lock_text(f"Station level {current_lvl} -> {new_level} upgrade", cost, credits)
             if edit_message:
                 embed = await self._build_dashboard_embed(user)
-                embed.add_field(name="Upgrade failed", value="Not enough credits.", inline=False)
+                embed.add_field(name="Upgrade failed", value=lock_text, inline=False)
                 view = FscDashboardView(self, user, channel or interaction.channel, guild or interaction.guild)
                 await interaction.response.edit_message(content=None, embed=embed, view=view)
                 return
-            await interaction.response.send_message("Upgrade failed: not enough credits.", ephemeral=True)
+            await interaction.response.send_message(f"Upgrade failed: {lock_text}", ephemeral=True)
             return
 
         await user_conf.station_level.set(new_level)
@@ -3102,10 +3156,7 @@ class FireStationCommand(commands.Cog):
         credits = await self._get_credits(ctx.author)
         cost = self._economy_scaled_cost(base_cost, credits)
         if credits < cost:
-            await ctx.send(
-                f"You do not have enough credits. Converting to a career station costs {cost:,}, "
-                f"but you only have {credits:,}."
-            )
+            await ctx.send(self._credit_lock_text("Career station conversion", cost, credits))
             return
 
         embed = discord.Embed(
@@ -3151,13 +3202,14 @@ class FireStationCommand(commands.Cog):
         base_cost = int(glb.get("career_convert_cost", 250000))
         cost = self._economy_scaled_cost(base_cost, credits)
         if credits < cost or not await self._spend(user, cost):
+            lock_text = self._credit_lock_text("Career station conversion", cost, credits)
             if edit_message:
                 embed = await self._build_dashboard_embed(user)
-                embed.add_field(name="Conversion failed", value="Not enough credits.", inline=False)
+                embed.add_field(name="Conversion failed", value=lock_text, inline=False)
                 view = FscDashboardView(self, user, channel or interaction.channel, guild or interaction.guild)
                 await interaction.response.edit_message(content=None, embed=embed, view=view)
                 return
-            await interaction.response.send_message("Conversion failed: not enough credits.", ephemeral=True)
+            await interaction.response.send_message(f"Conversion failed: {lock_text}", ephemeral=True)
             return
 
         await user_conf.station_type.set("career")
@@ -4003,7 +4055,7 @@ class FireStationCommand(commands.Cog):
             embed = self._build_maintenance_embed(data)
             embed.add_field(
                 name="Repair failed",
-                value=f"Fleet repair costs {cost:,} credits, but you only have {credits:,}.",
+                value=self._credit_lock_text("Fleet repair", cost, credits),
                 inline=False,
             )
             view = MaintenanceView(self, channel, user, guild or interaction.guild)
@@ -4068,12 +4120,15 @@ class FireStationCommand(commands.Cog):
             required_level = int(vdef.get("unlock_level", 1))
             missing_expansions = self._missing_required_expansion_ids(vdef, data)
             if missing_expansions:
-                locked_text = (
-                    f"{vdef['name']} requires expansion: "
-                    f"{self._expansion_requirement_display_text(missing_expansions)}."
-                )
+                locked_text = self._expansion_lock_text(vdef["name"], missing_expansions, action="purchased")
             else:
-                locked_text = f"{vdef['name']} requires command level {required_level}."
+                locked_text = self._command_level_lock_text(
+                    vdef["name"],
+                    required_level,
+                    xp,
+                    command_level,
+                    action="purchased",
+                )
             if edit_message:
                 embed = self._build_vehicle_shop_embed(data)
                 embed.add_field(
@@ -4094,20 +4149,18 @@ class FireStationCommand(commands.Cog):
         else:
             missing_training = []
         if missing_training:
-            training_text = self._training_display_text(missing_training) or ", ".join(missing_training)
+            locked_text = self._training_lock_text(vdef["name"], missing_training, action="purchased")
             if edit_message:
                 embed = self._build_vehicle_shop_embed(data)
                 embed.add_field(
                     name="Purchase locked",
-                    value=f"{vdef['name']} requires training: {training_text}.",
+                    value=locked_text,
                     inline=False,
                 )
                 view = VehicleShopView(self, channel, user, guild or interaction.guild, data=data)
                 await interaction.response.edit_message(content=None, embed=embed, view=view)
                 return
-            await interaction.response.send_message(
-                f"Purchase locked: training required: {training_text}.", ephemeral=True
-            )
+            await interaction.response.send_message(f"Purchase locked: {locked_text}", ephemeral=True)
             return
 
         base_price = int(vdef["price"])
@@ -4116,38 +4169,38 @@ class FireStationCommand(commands.Cog):
         vehicles = data.get("vehicles", [])
         max_veh = self._max_vehicles_for_data(data)
         if len(vehicles) >= max_veh:
+            lock_text = (
+                f"Vehicle capacity is full: {len(vehicles)} / {max_veh}. "
+                "Upgrade the station, build a parking lot, build an extra vehicle bay, or sell a vehicle first."
+            )
             if edit_message:
                 embed = await self._build_dashboard_embed(user)
                 embed.add_field(
                     name="Vehicle shop",
-                    value="Purchase failed: you are at maximum vehicle capacity.",
+                    value=lock_text,
                     inline=False,
                 )
                 view = FscDashboardView(self, user, channel, guild or interaction.guild)
                 await interaction.response.edit_message(content=None, embed=embed, view=view)
                 return
-            await interaction.response.send_message(
-                "Purchase failed: you are at maximum vehicle capacity.", ephemeral=True
-            )
+            await interaction.response.send_message(f"Purchase failed: {lock_text}", ephemeral=True)
             return
 
         credits = await self._get_credits(user)
         price = self._economy_scaled_cost(base_price, credits)
         if credits < price or not await self._spend(user, price):
+            lock_text = self._credit_lock_text(f"Buying {vdef['name']}", price, credits)
             if edit_message:
                 embed = self._build_vehicle_shop_embed(data)
                 embed.add_field(
                     name="Purchase failed",
-                    value="You do not have enough credits to complete this purchase.",
+                    value=lock_text,
                     inline=False,
                 )
                 view = VehicleShopView(self, channel, user, guild or interaction.guild, data=data)
                 await interaction.response.edit_message(content=None, embed=embed, view=view)
                 return
-            await interaction.response.send_message(
-                "You do not have enough credits to complete this purchase.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message(f"Purchase failed: {lock_text}", ephemeral=True)
             return
 
         next_id = int(data.get("next_vehicle_id", 1))
@@ -4285,10 +4338,11 @@ class FireStationCommand(commands.Cog):
         base_cost = self._parking_lot_base_cost_for_count(self._parking_lot_count(data))
         cost = self._economy_scaled_cost(base_cost, credits)
         if credits < cost or not await self._spend(user, cost):
+            lock_text = self._credit_lock_text("Building the next parking lot", cost, credits)
             embed = self._build_parking_lot_embed(data, credits)
             embed.add_field(
                 name="Parking lot",
-                value=f"Build failed: this parking lot costs {cost:,} credits, but you only have {credits:,}.",
+                value=lock_text,
                 inline=False,
             )
             if edit_message:
@@ -4357,39 +4411,42 @@ class FireStationCommand(commands.Cog):
         command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
         if not self._expansion_is_unlocked(expansion, command_level, data):
             required_level = int(expansion.get("unlock_level", 1))
+            locked_text = self._command_level_lock_text(
+                expansion["name"],
+                required_level,
+                xp,
+                command_level,
+                action="built",
+            )
             if edit_message:
                 embed = self._build_expansion_embed(data)
                 embed.add_field(
                     name="Expansion not available yet",
-                    value=f"{expansion['name']} unlocks at command level {required_level}.",
+                    value=locked_text,
                     inline=False,
                 )
                 view = ExpansionView(self, channel, user, guild or interaction.guild, data=data)
                 await interaction.response.edit_message(content=None, embed=embed, view=view)
                 return
-            await interaction.response.send_message(
-                f"Expansion not available yet: command level {required_level} required.", ephemeral=True
-            )
+            await interaction.response.send_message(f"Expansion not available yet: {locked_text}", ephemeral=True)
             return
 
         credits = await self._get_credits(user)
         base_price = int(expansion.get("price", 0))
         price = self._economy_scaled_cost(base_price, credits)
         if credits < price or not await self._spend(user, price):
+            lock_text = self._credit_lock_text(f"Building {expansion['name']}", price, credits)
             if edit_message:
                 embed = self._build_expansion_embed(data)
                 embed.add_field(
                     name="Expansion failed",
-                    value="You do not have enough credits to build this expansion.",
+                    value=lock_text,
                     inline=False,
                 )
                 view = ExpansionView(self, channel, user, guild or interaction.guild, data=data)
                 await interaction.response.edit_message(content=None, embed=embed, view=view)
                 return
-            await interaction.response.send_message(
-                "You do not have enough credits to build this expansion.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message(f"Expansion failed: {lock_text}", ephemeral=True)
             return
 
         updated_expansions = sorted(owned | {expansion_id})
@@ -4457,39 +4514,42 @@ class FireStationCommand(commands.Cog):
         command_level = int(data.get("command_level", self._command_level_for_xp(xp)))
         if not self._training_is_unlocked(training, command_level, data):
             required_level = int(training.get("unlock_level", 1))
+            locked_text = self._command_level_lock_text(
+                training["name"],
+                required_level,
+                xp,
+                command_level,
+                action="completed",
+            )
             if edit_message:
                 embed = self._build_training_embed(data)
                 embed.add_field(
                     name="Training locked",
-                    value=f"{training['name']} requires command level {required_level}.",
+                    value=locked_text,
                     inline=False,
                 )
                 view = TrainingView(self, channel, user, guild or interaction.guild, data=data)
                 await interaction.response.edit_message(content=None, embed=embed, view=view)
                 return
-            await interaction.response.send_message(
-                f"Training locked: command level {required_level} required.", ephemeral=True
-            )
+            await interaction.response.send_message(f"Training locked: {locked_text}", ephemeral=True)
             return
 
         credits = await self._get_credits(user)
         base_price = int(training.get("price", 0))
         price = self._economy_scaled_cost(base_price, credits)
         if credits < price or not await self._spend(user, price):
+            lock_text = self._credit_lock_text(f"Completing {training['name']}", price, credits)
             if edit_message:
                 embed = self._build_training_embed(data)
                 embed.add_field(
                     name="Training failed",
-                    value="You do not have enough credits to complete this training.",
+                    value=lock_text,
                     inline=False,
                 )
                 view = TrainingView(self, channel, user, guild or interaction.guild, data=data)
                 await interaction.response.edit_message(content=None, embed=embed, view=view)
                 return
-            await interaction.response.send_message(
-                "You do not have enough credits to complete this training.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message(f"Training failed: {lock_text}", ephemeral=True)
             return
 
         updated_trainings = sorted(trained | {training_id})
@@ -4547,12 +4607,15 @@ class FireStationCommand(commands.Cog):
             required_level = int(equipment.get("unlock_level", 1))
             missing_expansions = self._missing_required_expansion_ids(equipment, data)
             if missing_expansions:
-                locked_text = (
-                    f"{equipment['name']} requires expansion: "
-                    f"{self._expansion_requirement_display_text(missing_expansions)}."
-                )
+                locked_text = self._expansion_lock_text(equipment["name"], missing_expansions, action="purchased")
             else:
-                locked_text = f"{equipment['name']} requires command level {required_level}."
+                locked_text = self._command_level_lock_text(
+                    equipment["name"],
+                    required_level,
+                    xp,
+                    command_level,
+                    action="purchased",
+                )
             if edit_message:
                 embed = self._build_equipment_shop_embed(data)
                 embed.add_field(
@@ -4573,40 +4636,36 @@ class FireStationCommand(commands.Cog):
         else:
             missing_training = []
         if missing_training:
-            training_text = self._training_display_text(missing_training) or ", ".join(missing_training)
+            locked_text = self._training_lock_text(equipment["name"], missing_training, action="purchased")
             if edit_message:
                 embed = self._build_equipment_shop_embed(data)
                 embed.add_field(
                     name="Purchase locked",
-                    value=f"{equipment['name']} requires training: {training_text}.",
+                    value=locked_text,
                     inline=False,
                 )
                 view = EquipmentShopView(self, channel, user, guild or interaction.guild, data=data)
                 await interaction.response.edit_message(content=None, embed=embed, view=view)
                 return
-            await interaction.response.send_message(
-                f"Purchase locked: training required: {training_text}.", ephemeral=True
-            )
+            await interaction.response.send_message(f"Purchase locked: {locked_text}", ephemeral=True)
             return
 
         credits = await self._get_credits(user)
         base_price = int(equipment.get("price", 0))
         price = self._economy_scaled_cost(base_price, credits)
         if credits < price or not await self._spend(user, price):
+            lock_text = self._credit_lock_text(f"Buying {equipment['name']}", price, credits)
             if edit_message:
                 embed = self._build_equipment_shop_embed(data)
                 embed.add_field(
                     name="Purchase failed",
-                    value="You do not have enough credits to complete this purchase.",
+                    value=lock_text,
                     inline=False,
                 )
                 view = EquipmentShopView(self, channel, user, guild or interaction.guild, data=data)
                 await interaction.response.edit_message(content=None, embed=embed, view=view)
                 return
-            await interaction.response.send_message(
-                "You do not have enough credits to complete this purchase.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message(f"Purchase failed: {lock_text}", ephemeral=True)
             return
 
         equipment_inventory = data.get("equipment", [])
@@ -5086,9 +5145,12 @@ class FscDashboardView(FscTimedView):
             embed = await self.cog._build_dashboard_embed(self.user)
             embed.add_field(
                 name="Upgrade not available yet",
-                value=(
-                    f"Station level {new_lvl} unlocks at command level {new_lvl}. "
-                    f"Current progress: {self.cog._xp_progress_text(xp, command_level)}."
+                value=self.cog._command_level_lock_text(
+                    f"Station level {new_lvl}",
+                    new_lvl,
+                    xp,
+                    command_level,
+                    action="built",
                 ),
                 inline=False,
             )
@@ -5103,7 +5165,7 @@ class FscDashboardView(FscTimedView):
             embed = await self.cog._build_dashboard_embed(self.user)
             embed.add_field(
                 name="Station upgrade",
-                value=f"Level {lvl} to {lvl + 1} costs {cost:,} credits, but you only have {credits:,}.",
+                value=self.cog._credit_lock_text(f"Station level {lvl} -> {lvl + 1} upgrade", cost, credits),
                 inline=False,
             )
             await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
@@ -5169,7 +5231,7 @@ class FscDashboardView(FscTimedView):
             embed = await self.cog._build_dashboard_embed(self.user)
             embed.add_field(
                 name="Career station",
-                value=f"Career conversion costs {cost:,} credits, but you only have {credits:,}.",
+                value=self.cog._credit_lock_text("Career station conversion", cost, credits),
                 inline=False,
             )
             await interaction.response.edit_message(content=None, embed=embed, view=self._dashboard_view())
@@ -5534,7 +5596,7 @@ class RecruitmentView(FscTimedView):
             await self._show_recruitment_status(
                 interaction,
                 "Recruitment unavailable",
-                "You do not have enough credits to hire another recruit yet.",
+                self.cog._credit_lock_text("Hiring 1 staff", cost_per, credits),
             )
             return
 
@@ -5544,7 +5606,7 @@ class RecruitmentView(FscTimedView):
             await self._show_recruitment_status(
                 interaction,
                 "Not enough credits",
-                f"Hiring {amount} staff costs {total_cost:,} credits, but you only have {credits:,}.",
+                self.cog._credit_lock_text(f"Hiring {amount} staff", total_cost, credits),
             )
             return
 
@@ -6052,12 +6114,15 @@ class VehicleShopSelect(discord.ui.Select):
             required_level = int(vdef.get("unlock_level", 1))
             missing_expansions = self.cog._missing_required_expansion_ids(vdef, data)
             if missing_expansions:
-                locked_text = (
-                    f"{vdef['name']} requires expansion: "
-                    f"{self.cog._expansion_requirement_display_text(missing_expansions)}."
-                )
+                locked_text = self.cog._expansion_lock_text(vdef["name"], missing_expansions, action="purchased")
             else:
-                locked_text = f"{vdef['name']} requires command level {required_level}."
+                locked_text = self.cog._command_level_lock_text(
+                    vdef["name"],
+                    required_level,
+                    xp,
+                    command_level,
+                    action="purchased",
+                )
             embed = self.cog._build_vehicle_shop_embed(data)
             embed.add_field(
                 name="Purchase locked",
@@ -6429,12 +6494,15 @@ class EquipmentShopSelect(discord.ui.Select):
             required_level = int(equipment.get("unlock_level", 1))
             missing_expansions = self.cog._missing_required_expansion_ids(equipment, data)
             if missing_expansions:
-                locked_text = (
-                    f"{equipment['name']} requires expansion: "
-                    f"{self.cog._expansion_requirement_display_text(missing_expansions)}."
-                )
+                locked_text = self.cog._expansion_lock_text(equipment["name"], missing_expansions, action="purchased")
             else:
-                locked_text = f"{equipment['name']} requires command level {required_level}."
+                locked_text = self.cog._command_level_lock_text(
+                    equipment["name"],
+                    required_level,
+                    xp,
+                    command_level,
+                    action="purchased",
+                )
             embed = self.cog._build_equipment_shop_embed(data)
             embed.add_field(
                 name="Purchase locked",
@@ -6614,7 +6682,13 @@ class TrainingSelect(discord.ui.Select):
             embed = self.cog._build_training_embed(data)
             embed.add_field(
                 name="Training locked",
-                value=f"{training['name']} requires command level {required_level}.",
+                value=self.cog._command_level_lock_text(
+                    training["name"],
+                    required_level,
+                    xp,
+                    command_level,
+                    action="completed",
+                ),
                 inline=False,
             )
             await interaction.response.edit_message(
@@ -6758,7 +6832,13 @@ class ExpansionSelect(discord.ui.Select):
             embed = self.cog._build_expansion_embed(data)
             embed.add_field(
                 name="Expansion not available yet",
-                value=f"{expansion['name']} unlocks at command level {required_level}.",
+                value=self.cog._command_level_lock_text(
+                    expansion["name"],
+                    required_level,
+                    xp,
+                    command_level,
+                    action="built",
+                ),
                 inline=False,
             )
             await interaction.response.edit_message(

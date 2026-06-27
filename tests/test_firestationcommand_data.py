@@ -1854,9 +1854,33 @@ def test_dashboard_upgrade_button_explains_locked_level():
     edited = interaction.response.edited
     fields = {field["name"]: field["value"] for field in edited["embed"].fields}
     assert fields["Upgrade not available yet"].startswith(
-        "Station level 3 unlocks at command level 3."
+        "Station level 3 requires command level 3 before it can be built."
     )
+    assert "Current progress: Level 1 - 0 / 100 XP." in fields["Upgrade not available yet"]
     assert isinstance(edited["view"], FscDashboardView)
+
+
+def test_purchase_blocked_feedback_helpers_include_actionable_details():
+    cog = _cog_with_game_data({})
+
+    credit_text = FireStationCommand._credit_lock_text("Buying Standard Fire Engine", 50000, 12000)
+    assert credit_text == (
+        "Buying Standard Fire Engine costs 50,000 credits. "
+        "Current balance: 12,000 credits. Missing: 38,000 credits."
+    )
+
+    level_text = FireStationCommand._command_level_lock_text(
+        cog,
+        "Standard Fire Engine",
+        3,
+        50,
+        1,
+        action="purchased",
+    )
+    assert level_text.startswith(
+        "Standard Fire Engine requires command level 3 before it can be purchased."
+    )
+    assert "Current progress: Level 1 - 50 / 100 XP." in level_text
 
 
 def test_dashboard_career_button_opens_confirm_view():
@@ -1912,6 +1936,48 @@ def test_vehicle_shop_select_edits_message_to_confirm_purchase():
     assert edited["view"].edit_message is True
 
 
+def test_vehicle_shop_select_explains_missing_expansion_lock():
+    user = type("User", (), {"id": 123})()
+    user_data = {
+        "xp": 1000,
+        "command_level": 5,
+        "expansions": [],
+        "vehicles": [],
+    }
+    cog = _cog_with_game_data(
+        {
+            "expansions": {
+                "expansions": [
+                    {"id": "hazmat_unit", "name": "HazMat Unit", "base_cost": 100000},
+                ]
+            }
+        }
+    )
+    cog.VEHICLE_CATALOG = {
+        "hazmat_truck": {
+            "name": "HazMat Truck",
+            "crew_capacity": 4,
+            "price": 75000,
+            "unlock_level": 1,
+            "required_expansions": ["hazmat_unit"],
+        }
+    }
+    cog.config = _Config(user_data, {})
+    select = VehicleShopSelect(cog, object(), user, object(), data=user_data, command_level=5)
+    select.values = ["hazmat_truck"]
+    interaction = _Interaction(user)
+
+    asyncio.run(select.callback(interaction))
+
+    edited = interaction.response.edited
+    fields = {field["name"]: field["value"] for field in edited["embed"].fields}
+    assert fields["Purchase locked"] == (
+        "HazMat Truck requires the following station expansion before it can be purchased: "
+        "HazMat Unit. Build the required expansion first."
+    )
+    assert isinstance(edited["view"], VehicleShopView)
+
+
 def test_vehicle_purchase_confirm_edits_message_and_stores_vehicle():
     user = type("User", (), {"id": 123})()
     user_data = {
@@ -1964,6 +2030,55 @@ def test_vehicle_purchase_confirm_edits_message_and_stores_vehicle():
         ]
     assert user_data["next_vehicle_id"] == 2
     assert user_data["credits"] == 50000
+
+
+def test_vehicle_purchase_confirm_explains_credit_shortfall():
+    user = type("User", (), {"id": 123})()
+    user_data = {
+        "started": True,
+        "station_level": 2,
+        "command_level": 1,
+        "xp": 0,
+        "station_type": "volunteer",
+        "staff_total": 6,
+        "staff_trained": 0,
+        "vehicles": [],
+        "next_vehicle_id": 1,
+        "active_mission": {},
+        "credits": 10000,
+    }
+    cog = _cog_with_game_data({})
+    cog.config = _Config(user_data, {})
+    cog.VEHICLE_CATALOG = {
+        "engine_basic": {
+            "name": "Standard Fire Engine",
+            "crew_capacity": 4,
+            "price": 50000,
+            "image": "Images/Vehicles/engine_basic.png",
+            "unlock_level": 1,
+        }
+    }
+    interaction = _Interaction(user)
+
+    asyncio.run(
+        cog._confirm_vehicle_purchase(
+            interaction,
+            object(),
+            user,
+            "engine_basic",
+            edit_message=True,
+            guild=object(),
+        )
+    )
+
+    edited = interaction.response.edited
+    fields = {field["name"]: field["value"] for field in edited["embed"].fields}
+    assert fields["Purchase failed"] == (
+        "Buying Standard Fire Engine costs 50,000 credits. "
+        "Current balance: 10,000 credits. Missing: 40,000 credits."
+    )
+    assert user_data["vehicles"] == []
+    assert user_data["credits"] == 10000
 
 
 def test_vehicle_purchase_confirm_button_disables_message_before_purchase():
@@ -2300,6 +2415,61 @@ def test_equipment_purchase_confirm_edits_message_and_stores_inventory():
     assert isinstance(edited["view"], EquipmentShopView)
     assert user_data["equipment"] == [{"catalog_id": "hose", "quantity": 2}]
     assert user_data["credits"] == 8500
+
+
+def test_equipment_purchase_confirm_explains_missing_training_lock():
+    user = type("User", (), {"id": 123})()
+    user_data = {
+        "started": True,
+        "station_level": 2,
+        "command_level": 2,
+        "xp": 100,
+        "equipment": [],
+        "trainings": [],
+        "credits": 10000,
+    }
+    cog = _cog_with_game_data(
+        {
+            "trainings": {
+                "trainings": [
+                    {"id": "technical_rescue", "name": "Technical Rescue", "cost": 3000, "unlock_level": 2},
+                ]
+            },
+            "equipment": {
+                "equipment": [
+                    {
+                        "id": "rescue_tools",
+                        "name": "Hydraulic Rescue Tools",
+                        "base_cost": 5000,
+                        "unlock_level": 1,
+                        "required_training": ["technical_rescue"],
+                    },
+                ]
+            },
+        }
+    )
+    cog.config = _Config(user_data, {})
+    interaction = _Interaction(user)
+
+    asyncio.run(
+        cog._confirm_equipment_purchase(
+            interaction,
+            object(),
+            user,
+            "rescue_tools",
+            edit_message=True,
+            guild=object(),
+        )
+    )
+
+    edited = interaction.response.edited
+    fields = {field["name"]: field["value"] for field in edited["embed"].fields}
+    assert fields["Purchase locked"] == (
+        "Hydraulic Rescue Tools requires station training before it can be purchased: "
+        "Technical Rescue. Complete the required training first."
+    )
+    assert user_data["equipment"] == []
+    assert user_data["credits"] == 10000
 
 
 def test_training_embed_shows_completed_available_and_locked_training():
