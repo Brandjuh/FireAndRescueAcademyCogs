@@ -1,5 +1,14 @@
 # FireStationCommander Questions
 
+## Resolved Questions
+
+### Existing Player Data During Early Development
+
+- Decision: Existing FireStationCommander players can be reset when starter values or core systems change.
+- Reason: There are not many active players yet, and full resets are acceptable during early development.
+- Follow-up trigger: Revisit this before the cog has a larger active player base.
+- Affected files/systems: `database.py`, admin reset command, future migrations.
+
 ## Open Questions
 
 ### Salary and Upkeep Cadence

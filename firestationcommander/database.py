@@ -218,6 +218,14 @@ class FireStationCommanderDatabase:
             return player, False
         return await self.create_player(guild_id, user_id), True
 
+    async def reset_guild_players(self, guild_id: int) -> int:
+        """Delete all FireStationCommander player progress for one guild."""
+        row = await self._fetchone("SELECT COUNT(*) AS total FROM players WHERE guild_id = ?", (guild_id,))
+        total = int(row["total"]) if row else 0
+        await self.conn.execute("DELETE FROM players WHERE guild_id = ?", (guild_id,))
+        await self.conn.commit()
+        return total
+
     async def create_station(
         self,
         player_id: int,

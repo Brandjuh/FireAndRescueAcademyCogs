@@ -38,9 +38,9 @@ class _Context:
         self.author = SimpleNamespace(id=user_id, display_name=display_name)
         self.sent = []
 
-    async def send(self, **kwargs):
+    async def send(self, content=None, **kwargs):
         message = _Message()
-        self.sent.append((kwargs, message))
+        self.sent.append((content, kwargs, message))
         return message
 
 
@@ -103,6 +103,50 @@ def test_start_command_creates_phase_one_profile_once(tmp_path):
             ]
             assert len(equipment) == 4
             assert len(ctx.sent) == 2
+        finally:
+            await cog.cog_unload()
+
+    asyncio.run(run())
+
+
+def test_reset_command_requires_confirmation(tmp_path):
+    async def run():
+        cog = await _make_loaded_cog(tmp_path)
+        try:
+            player = await _seed_player(cog)
+            ctx = _Context()
+
+            await cog.fsc_reset(ctx)
+
+            assert await cog.db.get_player_by_id(player.id) is not None
+            content, kwargs, _message = ctx.sent[0]
+            assert "permanently resets all FireStationCommander player progress" in content
+            assert kwargs == {}
+        finally:
+            await cog.cog_unload()
+
+    asyncio.run(run())
+
+
+def test_reset_command_deletes_only_current_guild_players(tmp_path):
+    async def run():
+        cog = await _make_loaded_cog(tmp_path)
+        try:
+            first = await _seed_player(cog)
+            other, created = await cog.db.get_or_create_player(101, 201)
+            await cog.db.create_station(other.id, "Station 1", 2, BASE_STORAGE_SLOTS)
+            if created:
+                await cog._seed_starter_assets(other.id)
+            ctx = _Context(guild_id=100)
+
+            await cog.fsc_reset(ctx, "CONFIRM")
+
+            assert await cog.db.get_player_by_id(first.id) is None
+            assert await cog.db.get_player_by_id(other.id) is not None
+            assert await cog.db.get_station(first.id) is None
+            content, kwargs, _message = ctx.sent[0]
+            assert content == "FireStationCommander reset complete. Removed 1 player profile(s)."
+            assert kwargs == {}
         finally:
             await cog.cog_unload()
 

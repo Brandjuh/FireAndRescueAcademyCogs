@@ -1,5 +1,28 @@
 # FireStationCommander Changelog
 
+## 2026-06-28 - Phase 3 Reset Policy
+
+### Added
+
+- Added `[p]fsc reset CONFIRM` for server admins to reset all FireStationCommander player progress in the current server.
+- Added the early player reset policy to the design decisions and resolved questions.
+
+### Changed
+
+- Documented that early development data can be reset instead of migrated while the player base is still small.
+
+### Fixed
+
+- None.
+
+### Removed
+
+- None.
+
+### Known Issues
+
+- Reset is intentionally destructive and server-scoped; there is no per-player restore flow.
+
 ## 2026-06-28 - Phase 0 / Phase 1 Alignment
 
 ### Added

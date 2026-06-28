@@ -23,6 +23,7 @@
 - `[p]fsc incident` creates or reopens an active incident.
 - `[p]fsc maintenance` shows vehicle and equipment repair needs.
 - `[p]fsc report` shows the latest incident report or a clear message when none exists.
+- `[p]fsc reset CONFIRM` removes FireStationCommander progress for the current server and requires admin permissions.
 
 ## Interaction Test Checklist
 
@@ -51,3 +52,5 @@
 - Maintenance with no repair needs returns an ephemeral message.
 - Maintenance with insufficient cash returns an ephemeral error.
 - Existing early MVP rows with legacy Dutch keys still render/scoring through alias normalization.
+- Reset without `CONFIRM` returns a warning and leaves player data untouched.
+- Reset deletes only the current server's FireStationCommander players.

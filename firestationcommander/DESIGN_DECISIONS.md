@@ -16,6 +16,14 @@
 - Future risk: Alias maps must remain until a database migration is added.
 - Reversal cost: Low if a future migration rewrites old rows.
 
+## Early Player Reset Policy
+
+- Decision: During early development, existing player progress may be reset instead of migrated when starter values or core systems change.
+- Reason: The current player base is small, and full resets are simpler and less fragile than partial data migrations while the game foundation is still changing.
+- Alternatives considered: Backfill every existing profile to new Phase 1 values.
+- Future risk: This policy must be revisited before the game has a larger active player base.
+- Reversal cost: Low now, high after broader release.
+
 ## SQLite for Game State
 
 - Decision: Persistent game state remains in SQLite through `aiosqlite`.
