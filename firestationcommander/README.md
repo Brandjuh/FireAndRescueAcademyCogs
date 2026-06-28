@@ -16,11 +16,11 @@ The cog requires Python 3.11+ and `aiosqlite`. Game progress is stored in a loca
 
 - `[p]fsc start` creates your player, starter station, first TS, six personnel members, starter equipment, and starter trainings.
 - `[p]fsc status` opens the station dashboard.
-- `[p]fsc voertuigen` shows owned vehicles.
-- `[p]fsc personeel` shows personnel and trainings.
-- `[p]fsc melding` generates or reopens an active incident.
-- `[p]fsc onderhoud` shows worn vehicles and equipment with repair actions.
-- `[p]fsc rapport` shows the latest incident report.
+- `[p]fsc vehicles` shows owned vehicles.
+- `[p]fsc staff` shows personnel and trainings.
+- `[p]fsc incident` generates or reopens an active incident.
+- `[p]fsc maintenance` shows worn vehicles and equipment with repair actions.
+- `[p]fsc report` shows the latest incident report.
 
 ## Data
 

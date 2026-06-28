@@ -1,33 +1,33 @@
 {
   "trainings": [
     {
-      "key": "basis_brandbestrijding",
-      "name": "Basis Brandbestrijding",
+      "key": "basic_firefighting",
+      "name": "Basic Firefighting",
       "attribute": "technical"
     },
     {
-      "key": "ademlucht",
-      "name": "Ademlucht",
+      "key": "scba",
+      "name": "SCBA",
       "attribute": "discipline"
     },
     {
-      "key": "chauffeur_ts",
-      "name": "Chauffeur TS",
+      "key": "engine_driver",
+      "name": "Engine Driver",
       "attribute": "discipline"
     },
     {
-      "key": "pompbediener",
-      "name": "Pompbediener",
+      "key": "pump_operator",
+      "name": "Pump Operator",
       "attribute": "technical"
     },
     {
-      "key": "technische_hulpverlening",
-      "name": "Technische Hulpverlening",
+      "key": "technical_rescue",
+      "name": "Technical Rescue",
       "attribute": "technical"
     },
     {
-      "key": "bevelvoerder",
-      "name": "Bevelvoerder",
+      "key": "incident_commander",
+      "name": "Incident Commander",
       "attribute": "leadership"
     }
   ]
