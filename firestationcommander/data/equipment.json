@@ -2,31 +2,31 @@
   "equipment": [
     {
       "key": "breathing_apparatus",
-      "name": "Ademluchtset",
+      "name": "Breathing Apparatus",
       "tags": ["fire", "smoke"],
       "condition_score": 100
     },
     {
       "key": "thermal_camera",
-      "name": "Warmtebeeldcamera",
+      "name": "Thermal Imaging Camera",
       "tags": ["search", "fire"],
       "condition_score": 100
     },
     {
       "key": "hydraulic_cutter",
-      "name": "Hydraulische schaar",
+      "name": "Hydraulic Cutter",
       "tags": ["rescue", "technical"],
       "condition_score": 100
     },
     {
       "key": "spreader",
-      "name": "Spreider",
+      "name": "Spreader",
       "tags": ["rescue", "technical"],
       "condition_score": 100
     },
     {
       "key": "positive_pressure_fan",
-      "name": "Overdrukventilator",
+      "name": "Positive Pressure Fan",
       "tags": ["smoke", "ventilation"],
       "condition_score": 100
     },
@@ -38,7 +38,7 @@
     },
     {
       "key": "hose_pack",
-      "name": "Slangenpakket",
+      "name": "Hose Pack",
       "tags": ["fire", "water"],
       "condition_score": 100
     }

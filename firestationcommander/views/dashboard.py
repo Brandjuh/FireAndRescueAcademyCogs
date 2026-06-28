@@ -36,7 +36,7 @@ class DashboardView(FireStationCommanderViewMixin, discord.ui.View):
         await self.cog.show_status_panel(interaction)
 
     @discord.ui.button(
-        label="Voertuigen",
+        label="Vehicles",
         style=discord.ButtonStyle.secondary,
         custom_id="fsc:dashboard:vehicles",
     )
@@ -44,7 +44,7 @@ class DashboardView(FireStationCommanderViewMixin, discord.ui.View):
         await self.cog.show_vehicle_panel(interaction)
 
     @discord.ui.button(
-        label="Personeel",
+        label="Staff",
         style=discord.ButtonStyle.secondary,
         custom_id="fsc:dashboard:personnel",
     )
@@ -52,7 +52,7 @@ class DashboardView(FireStationCommanderViewMixin, discord.ui.View):
         await self.cog.show_personnel_panel(interaction)
 
     @discord.ui.button(
-        label="Meldingen",
+        label="Incidents",
         style=discord.ButtonStyle.success,
         custom_id="fsc:dashboard:incidents",
     )
@@ -60,7 +60,7 @@ class DashboardView(FireStationCommanderViewMixin, discord.ui.View):
         await self.cog.start_incident_from_interaction(interaction)
 
     @discord.ui.button(
-        label="Onderhoud",
+        label="Maintenance",
         style=discord.ButtonStyle.danger,
         custom_id="fsc:dashboard:maintenance",
     )

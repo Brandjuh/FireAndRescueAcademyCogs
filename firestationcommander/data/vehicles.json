@@ -2,34 +2,34 @@
   "vehicles": [
     {
       "key": "ts",
-      "name": "Tankautospuit",
+      "name": "Fire Engine",
       "type": "TS",
       "crew_capacity": 6,
       "base_reliability": 92,
       "tags": ["fire", "pump", "water"],
-      "required_trainings": ["chauffeur_ts", "pompbediener"]
+      "required_trainings": ["engine_driver", "pump_operator"]
     },
     {
       "key": "hv",
-      "name": "Hulpverleningsvoertuig",
+      "name": "Heavy Rescue Unit",
       "type": "HV",
       "crew_capacity": 3,
       "base_reliability": 88,
       "tags": ["rescue", "technical"],
-      "required_trainings": ["technische_hulpverlening"]
+      "required_trainings": ["technical_rescue"]
     },
     {
       "key": "rv",
-      "name": "Redvoertuig",
+      "name": "Aerial Ladder Truck",
       "type": "RV",
       "crew_capacity": 2,
       "base_reliability": 86,
       "tags": ["height", "rescue"],
-      "required_trainings": ["bevelvoerder"]
+      "required_trainings": ["incident_commander"]
     },
     {
       "key": "db",
-      "name": "Dienstbus",
+      "name": "Support Van",
       "type": "DB",
       "crew_capacity": 4,
       "base_reliability": 90,

@@ -30,7 +30,7 @@ class IncidentActionView(FireStationCommanderViewMixin, discord.ui.View):
         return True
 
     @discord.ui.button(
-        label="Alarmeer voertuigen",
+        label="Dispatch vehicles",
         style=discord.ButtonStyle.success,
         custom_id="fsc:incident:dispatch",
     )
@@ -38,7 +38,7 @@ class IncidentActionView(FireStationCommanderViewMixin, discord.ui.View):
         await self.cog.show_vehicle_dispatch(interaction, self.incident_id)
 
     @discord.ui.button(
-        label="Bekijk vereisten",
+        label="View requirements",
         style=discord.ButtonStyle.secondary,
         custom_id="fsc:incident:requirements",
     )
@@ -46,7 +46,7 @@ class IncidentActionView(FireStationCommanderViewMixin, discord.ui.View):
         await self.cog.show_incident_requirements(interaction, self.incident_id)
 
     @discord.ui.button(
-        label="Negeer",
+        label="Ignore",
         style=discord.ButtonStyle.danger,
         custom_id="fsc:incident:ignore",
     )

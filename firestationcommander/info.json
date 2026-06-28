@@ -3,7 +3,7 @@
         "Brandjuh"
     ],
     "description": "SQLite-backed fire station management MVP for Red Discord Bot.",
-    "install_msg": "Thanks for installing FireStationCommander.\n\nUse `[p]fsc start` to create a station, `[p]fsc status` for the dashboard, and `[p]fsc melding` to receive an incident.",
+    "install_msg": "Thanks for installing FireStationCommander.\n\nUse `[p]fsc start` to create a station, `[p]fsc status` for the dashboard, and `[p]fsc incident` to receive an incident.",
     "short": "Fire station commander management MVP",
     "name": "FireStationCommander",
     "tags": [

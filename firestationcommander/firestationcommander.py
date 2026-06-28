@@ -25,13 +25,21 @@ from .services.economy import EconomyService
 from .services.incidents import IncidentService
 from .services.maintenance import MaintenanceService
 from .services.personnel import PersonnelService
-from .services.training import TrainingService
+from .services.training import TRAINING_KEY_ALIASES, TrainingService
 from .services.vehicles import VehicleService
 from .views.dashboard import DashboardView
 from .views.incident_view import IncidentActionView, VehicleDispatchView
 from .views.shop_view import MaintenanceView
 
 log = logging.getLogger("red.firestationcommander")
+
+LEGACY_INCIDENT_KEY_ALIASES = {
+    "containerbrand": "dumpster_fire",
+    "buitenbrand": "outdoor_fire",
+    "keukenbrand": "kitchen_fire",
+    "woningbrand": "residential_fire",
+    "verkeersongeval_beknelling": "vehicle_extrication_crash",
+}
 
 
 class FireStationCommander(commands.Cog):
@@ -48,6 +56,19 @@ class FireStationCommander(commands.Cog):
         self.incident_templates = _load_catalog("incidents.json", "incidents")
         self.equipment_by_key = {item["key"]: item for item in self.equipment_templates}
         self.incidents_by_key = {item["key"]: item for item in self.incident_templates}
+        self.incidents_by_key.update(
+            {
+                legacy_key: self.incidents_by_key[canonical_key]
+                for legacy_key, canonical_key in LEGACY_INCIDENT_KEY_ALIASES.items()
+            }
+        )
+        self.training_by_key = {item["key"]: item for item in self.training_templates}
+        self.training_by_key.update(
+            {
+                legacy_key: self.training_by_key[canonical_key]
+                for legacy_key, canonical_key in TRAINING_KEY_ALIASES.items()
+            }
+        )
 
         self.economy = EconomyService()
         self.personnel_service = PersonnelService()
@@ -111,7 +132,9 @@ class FireStationCommander(commands.Cog):
             value="Station created." if created else "Station already exists.",
             inline=False,
         )
-        await ctx.send(embed=embed, view=DashboardView(self, ctx.author.id))
+        view = DashboardView(self, ctx.author.id)
+        message = await ctx.send(embed=embed, view=view)
+        view.message = message
 
     @fsc_group.command(name="status")
     async def fsc_status(self, ctx: commands.Context) -> None:
@@ -120,9 +143,11 @@ class FireStationCommander(commands.Cog):
         if player is None:
             return
         embed = await self._build_status_embed(player.id)
-        await ctx.send(embed=embed, view=DashboardView(self, ctx.author.id))
+        view = DashboardView(self, ctx.author.id)
+        message = await ctx.send(embed=embed, view=view)
+        view.message = message
 
-    @fsc_group.command(name="voertuigen")
+    @fsc_group.command(name="vehicles")
     async def fsc_vehicles(self, ctx: commands.Context) -> None:
         """Show your station vehicles."""
         player = await self._player_for_context(ctx)
@@ -130,7 +155,7 @@ class FireStationCommander(commands.Cog):
             return
         await ctx.send(embed=await self._build_vehicle_embed(player.id))
 
-    @fsc_group.command(name="personeel")
+    @fsc_group.command(name="staff")
     async def fsc_personnel(self, ctx: commands.Context) -> None:
         """Show your station personnel."""
         player = await self._player_for_context(ctx)
@@ -138,7 +163,7 @@ class FireStationCommander(commands.Cog):
             return
         await ctx.send(embed=await self._build_personnel_embed(player.id))
 
-    @fsc_group.command(name="melding")
+    @fsc_group.command(name="incident")
     async def fsc_incident(self, ctx: commands.Context) -> None:
         """Generate a new incident for your station."""
         player = await self._player_for_context(ctx)
@@ -146,18 +171,22 @@ class FireStationCommander(commands.Cog):
             return
         incident = await self._get_or_create_incident(ctx.guild.id, player)
         embed = self._build_incident_embed(incident)
-        await ctx.send(embed=embed, view=IncidentActionView(self, ctx.author.id, incident.id))
+        view = IncidentActionView(self, ctx.author.id, incident.id)
+        message = await ctx.send(embed=embed, view=view)
+        view.message = message
 
-    @fsc_group.command(name="onderhoud")
+    @fsc_group.command(name="maintenance")
     async def fsc_maintenance(self, ctx: commands.Context) -> None:
         """Show maintenance needs and repair options."""
         player = await self._player_for_context(ctx)
         if player is None:
             return
         embed = await self._build_maintenance_embed(player.id)
-        await ctx.send(embed=embed, view=MaintenanceView(self, ctx.author.id))
+        view = MaintenanceView(self, ctx.author.id)
+        message = await ctx.send(embed=embed, view=view)
+        view.message = message
 
-    @fsc_group.command(name="rapport")
+    @fsc_group.command(name="report")
     async def fsc_report(self, ctx: commands.Context) -> None:
         """Show your latest incident report."""
         player = await self._player_for_context(ctx)
@@ -174,9 +203,11 @@ class FireStationCommander(commands.Cog):
         player = await self._player_for_interaction(interaction)
         if player is None:
             return
+        view = DashboardView(self, interaction.user.id)
+        view.message = getattr(interaction, "message", None)
         await interaction.response.edit_message(
             embed=await self._build_status_embed(player.id),
-            view=DashboardView(self, interaction.user.id),
+            view=view,
         )
 
     async def show_vehicle_panel(self, interaction: discord.Interaction) -> None:
@@ -199,9 +230,11 @@ class FireStationCommander(commands.Cog):
         if player is None or interaction.guild is None:
             return
         incident = await self._get_or_create_incident(interaction.guild.id, player)
+        view = IncidentActionView(self, interaction.user.id, incident.id)
+        view.message = getattr(interaction, "message", None)
         await interaction.response.edit_message(
             embed=self._build_incident_embed(incident),
-            view=IncidentActionView(self, interaction.user.id, incident.id),
+            view=view,
         )
 
     async def show_incident_requirements(
@@ -228,13 +261,15 @@ class FireStationCommander(commands.Cog):
         if not vehicles:
             await interaction.response.send_message("No available vehicles to dispatch.", ephemeral=True)
             return
+        view = VehicleDispatchView(self, interaction.user.id, incident_id, vehicles)
+        view.message = getattr(interaction, "message", None)
         await interaction.response.edit_message(
             embed=_basic_embed(
                 "Alarm vehicles",
                 "Select the vehicles that should respond to this incident.",
                 discord.Color.red(),
             ),
-            view=VehicleDispatchView(self, interaction.user.id, incident_id, vehicles),
+            view=view,
         )
 
     async def ignore_incident(self, interaction: discord.Interaction, incident_id: int) -> None:
@@ -336,9 +371,11 @@ class FireStationCommander(commands.Cog):
         player = await self._player_for_interaction(interaction)
         if player is None:
             return
+        view = MaintenanceView(self, interaction.user.id)
+        view.message = getattr(interaction, "message", None)
         await interaction.response.edit_message(
             embed=await self._build_maintenance_embed(player.id),
-            view=MaintenanceView(self, interaction.user.id),
+            view=view,
         )
 
     async def repair_all_from_interaction(self, interaction: discord.Interaction) -> None:
@@ -370,7 +407,9 @@ class FireStationCommander(commands.Cog):
                 await self.db.repair_equipment(equipment_id)
         embed = await self._build_maintenance_embed(player.id)
         embed.add_field(name="Maintenance complete", value=f"Spent {total_cost:,} cash.", inline=False)
-        await interaction.response.edit_message(embed=embed, view=MaintenanceView(self, interaction.user.id))
+        view = MaintenanceView(self, interaction.user.id)
+        view.message = getattr(interaction, "message", None)
+        await interaction.response.edit_message(embed=embed, view=view)
 
     async def _ctx_guild_id(self, ctx: commands.Context) -> int | None:
         if getattr(ctx, "guild", None) is None:
@@ -482,7 +521,7 @@ class FireStationCommander(commands.Cog):
                 value=(
                     f"Contract: {member.contract_type} | Condition: {member.condition_score}% | "
                     f"Stress: {member.stress_score}% | Morale: {member.morale_score}% | "
-                    f"Training: {', '.join(trainings) if trainings else 'none'}"
+                    f"Training: {self._format_training_names(trainings)}"
                 ),
                 inline=False,
             )
@@ -496,7 +535,7 @@ class FireStationCommander(commands.Cog):
         trainings = json.loads(incident.required_trainings_json)
         tags = json.loads(incident.required_tags_json)
         embed = discord.Embed(
-            title=f"Incident: {incident.title}",
+            title=f"Incident: {template.get('title', incident.title)}",
             description=template.get("description", "A new incident is waiting for command."),
             color=discord.Color.orange(),
         )
@@ -512,7 +551,7 @@ class FireStationCommander(commands.Cog):
             name="Requirements",
             value=(
                 f"Vehicles: {_format_list(vehicles)}\n"
-                f"Training: {_format_list(trainings)}\n"
+                f"Training: {self._format_training_names(trainings)}\n"
                 f"Capabilities: {_format_list(tags)}"
             ),
             inline=False,
@@ -521,8 +560,9 @@ class FireStationCommander(commands.Cog):
         return embed
 
     def _build_incident_requirements_embed(self, incident: Incident) -> discord.Embed:
+        template = self.incidents_by_key[incident.template_key]
         embed = discord.Embed(
-            title=f"Requirements: {incident.title}",
+            title=f"Requirements: {template.get('title', incident.title)}",
             color=discord.Color.blurple(),
         )
         embed.add_field(
@@ -532,7 +572,7 @@ class FireStationCommander(commands.Cog):
         )
         embed.add_field(
             name="Trainings",
-            value=", ".join(json.loads(incident.required_trainings_json)) or "None",
+            value=self._format_training_names(json.loads(incident.required_trainings_json)),
             inline=False,
         )
         embed.add_field(
@@ -598,6 +638,14 @@ class FireStationCommander(commands.Cog):
             embed.add_field(name="More equipment", value=f"+{len(equipment_costs) - 8} items", inline=False)
         embed.add_field(name="Total repair cost", value=f"{total:,}", inline=True)
         return embed
+
+    def _format_training_names(self, training_keys: list[str]) -> str:
+        names = []
+        for key in training_keys:
+            canonical_key = self.training_service.normalize_key(str(key))
+            template = self.training_by_key.get(canonical_key, self.training_by_key.get(str(key), {}))
+            names.append(str(template.get("name", canonical_key)))
+        return ", ".join(names) if names else "None"
 
 
 def _load_catalog(file_name: str, key: str) -> list[dict[str, Any]]:
