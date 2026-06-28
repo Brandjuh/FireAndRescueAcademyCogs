@@ -4603,15 +4603,28 @@ class SummaryView(discord.ui.View):
             if isinstance(child, discord.ui.Button):
                 child.disabled = True
 
+    @staticmethod
+    def _is_public_request_panel_message(message) -> bool:
+        """Return True when a stale interaction points at the public request panel."""
+        if message is None:
+            return False
+        for embed in getattr(message, "embeds", []) or []:
+            if getattr(embed, "title", None) == REQUEST_PANEL_TITLE:
+                return True
+        return False
+
     async def send_summary(self, interaction: discord.Interaction):
-        """Display the summary embed."""
+        """Display the summary embed privately without touching the public request panel."""
         embed = self._create_embed(interaction.user)
-        await safe_update(
-            interaction,
-            content="⚠️ **Warning**: Once submitted, you cannot edit this request!\n\nReview your request:",
-            embed=embed,
-            view=self
-        )
+        content = "Warning: Once submitted, you cannot edit this request!\n\nReview your request:"
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(content=content, embed=embed, view=self, ephemeral=True)
+            else:
+                await interaction.response.send_message(content=content, embed=embed, view=self, ephemeral=True)
+        except Exception as exc:
+            log.exception("BuildingManager failed to send private request summary: %r", exc)
+            await send_ephemeral_followup(interaction, "Could not open the private request summary. Please try again.")
 
     def _add_location_details(self, embed: discord.Embed, *, warning_title: str = "Facility Check"):
         """Add resolved location fields to a request embed."""
@@ -4684,23 +4697,33 @@ class SummaryView(discord.ui.View):
 
         self.submitted = True
         self._disable_actions()
-        await interaction.response.send_message(
-            "Request received. BuildingManager is processing it in the background. "
-            "You can dismiss this message.",
-            ephemeral=True,
+        submitted_embed = self._create_embed(interaction.user)
+        submitted_embed.title = "Submitted Building Request"
+        submitted_embed.color = discord.Color.green()
+        submitted_embed.add_field(
+            name="Status",
+            value=(
+                "BuildingManager is processing this request in the background. "
+                "You will be notified when there is an update."
+            ),
+            inline=False,
         )
+        submitted_content = "Request submitted. You can dismiss this private message."
 
-        removed_review = False
-        with contextlib.suppress(Exception):
-            await interaction.message.delete()
-            removed_review = True
-        if not removed_review:
+        updated_review = False
+        if not self._is_public_request_panel_message(getattr(interaction, "message", None)):
             with contextlib.suppress(Exception):
-                await interaction.message.edit(
-                    content="Request received. Processing in the background.",
-                    embed=None,
+                await interaction.response.edit_message(
+                    content=submitted_content,
+                    embed=submitted_embed,
                     view=None,
                 )
+                updated_review = True
+        if not updated_review:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(submitted_content, ephemeral=True)
+            else:
+                await interaction.followup.send(submitted_content, ephemeral=True)
 
         self._schedule_background_submission(interaction, guild, interaction.user)
         return
@@ -4714,9 +4737,12 @@ class SummaryView(discord.ui.View):
             )
             return
         self._disable_actions()
-        with contextlib.suppress(Exception):
-            await interaction.message.delete()
-        await send_ephemeral_followup(interaction, "Request cancelled.")
+        cancelled_content = "Request cancelled. You can dismiss this private message."
+        if not self._is_public_request_panel_message(getattr(interaction, "message", None)):
+            with contextlib.suppress(Exception):
+                await interaction.response.edit_message(content=cancelled_content, embed=None, view=None)
+                return
+        await send_ephemeral_followup(interaction, cancelled_content)
         return
 
     def _schedule_background_submission(

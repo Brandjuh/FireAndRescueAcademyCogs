@@ -211,8 +211,32 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
         submit_source = source[start:end]
 
         self.assertNotIn("thinking=True", submit_source)
-        self.assertIn("processing it in the background", submit_source)
+        self.assertIn("processing this request in the background", submit_source)
         self.assertIn("_schedule_background_submission", submit_source)
+        self.assertIn("interaction.response.edit_message", submit_source)
+        self.assertNotIn("interaction.message.delete", submit_source)
+        self.assertNotIn("interaction.message.edit", submit_source)
+        self.assertIn("_is_public_request_panel_message", submit_source)
+
+    def test_summary_send_uses_private_message_without_safe_update(self):
+        source = Path("buildingmanager/buildingmanager.py").read_text(encoding="utf-8")
+        start = source.index("async def send_summary")
+        end = source.index("def _add_location_details", start)
+        send_summary_source = source[start:end]
+
+        self.assertNotIn("safe_update", send_summary_source)
+        self.assertIn("ephemeral=True", send_summary_source)
+        self.assertIn("interaction.followup.send", send_summary_source)
+        self.assertIn("interaction.response.send_message", send_summary_source)
+
+    def test_summary_cancel_does_not_delete_public_request_panel(self):
+        source = Path("buildingmanager/buildingmanager.py").read_text(encoding="utf-8")
+        start = source.index('custom_id="bm:cancel"')
+        end = source.index("def _schedule_background_submission", start)
+        cancel_source = source[start:end]
+
+        self.assertNotIn("interaction.message.delete", cancel_source)
+        self.assertIn("_is_public_request_panel_message", cancel_source)
 
     def test_building_request_cleans_encoded_names(self):
         request = BuildingRequest(
