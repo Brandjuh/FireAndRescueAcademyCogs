@@ -1,0 +1,34 @@
+{
+  "trainings": [
+    {
+      "key": "basis_brandbestrijding",
+      "name": "Basis Brandbestrijding",
+      "attribute": "technical"
+    },
+    {
+      "key": "ademlucht",
+      "name": "Ademlucht",
+      "attribute": "discipline"
+    },
+    {
+      "key": "chauffeur_ts",
+      "name": "Chauffeur TS",
+      "attribute": "discipline"
+    },
+    {
+      "key": "pompbediener",
+      "name": "Pompbediener",
+      "attribute": "technical"
+    },
+    {
+      "key": "technische_hulpverlening",
+      "name": "Technische Hulpverlening",
+      "attribute": "technical"
+    },
+    {
+      "key": "bevelvoerder",
+      "name": "Bevelvoerder",
+      "attribute": "leadership"
+    }
+  ]
+}

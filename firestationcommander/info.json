@@ -1,0 +1,30 @@
+{
+    "author": [
+        "Brandjuh"
+    ],
+    "description": "SQLite-backed fire station management MVP for Red Discord Bot.",
+    "install_msg": "Thanks for installing FireStationCommander.\n\nUse `[p]fsc start` to create a station, `[p]fsc status` for the dashboard, and `[p]fsc melding` to receive an incident.",
+    "short": "Fire station commander management MVP",
+    "name": "FireStationCommander",
+    "tags": [
+        "game",
+        "fire",
+        "firefighter",
+        "management",
+        "sqlite"
+    ],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores Discord user IDs, guild IDs, game progress, station state, personnel, vehicles, equipment, incidents, and incident reports in a local SQLite database.",
+    "required_cogs": {},
+    "requirements": [
+        "aiosqlite"
+    ],
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "min_python_version": [
+        3,
+        11,
+        0
+    ]
+}

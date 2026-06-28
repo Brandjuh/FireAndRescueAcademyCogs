@@ -1,0 +1,46 @@
+{
+  "equipment": [
+    {
+      "key": "breathing_apparatus",
+      "name": "Ademluchtset",
+      "tags": ["fire", "smoke"],
+      "condition_score": 100
+    },
+    {
+      "key": "thermal_camera",
+      "name": "Warmtebeeldcamera",
+      "tags": ["search", "fire"],
+      "condition_score": 100
+    },
+    {
+      "key": "hydraulic_cutter",
+      "name": "Hydraulische schaar",
+      "tags": ["rescue", "technical"],
+      "condition_score": 100
+    },
+    {
+      "key": "spreader",
+      "name": "Spreider",
+      "tags": ["rescue", "technical"],
+      "condition_score": 100
+    },
+    {
+      "key": "positive_pressure_fan",
+      "name": "Overdrukventilator",
+      "tags": ["smoke", "ventilation"],
+      "condition_score": 100
+    },
+    {
+      "key": "aed",
+      "name": "AED",
+      "tags": ["medical"],
+      "condition_score": 100
+    },
+    {
+      "key": "hose_pack",
+      "name": "Slangenpakket",
+      "tags": ["fire", "water"],
+      "condition_score": 100
+    }
+  ]
+}
