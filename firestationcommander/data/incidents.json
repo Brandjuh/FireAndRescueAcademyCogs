@@ -1,0 +1,69 @@
+{
+  "incidents": [
+    {
+      "key": "containerbrand",
+      "title": "Containerbrand",
+      "risk_level": 1,
+      "min_level": 1,
+      "required_tags": ["fire", "water"],
+      "required_vehicle_types": ["TS"],
+      "required_trainings": ["basis_brandbestrijding"],
+      "base_reward": 900,
+      "base_xp": 35,
+      "time_limit_minutes": 20,
+      "description": "A waste container is burning near a small storage yard."
+    },
+    {
+      "key": "buitenbrand",
+      "title": "Buitenbrand",
+      "risk_level": 1,
+      "min_level": 1,
+      "required_tags": ["fire", "water"],
+      "required_vehicle_types": ["TS"],
+      "required_trainings": ["basis_brandbestrijding", "pompbediener"],
+      "base_reward": 1100,
+      "base_xp": 45,
+      "time_limit_minutes": 25,
+      "description": "Dry brush and stacked pallets are burning behind a workshop."
+    },
+    {
+      "key": "keukenbrand",
+      "title": "Keukenbrand",
+      "risk_level": 2,
+      "min_level": 1,
+      "required_tags": ["fire", "smoke", "search"],
+      "required_vehicle_types": ["TS"],
+      "required_trainings": ["basis_brandbestrijding", "ademlucht"],
+      "base_reward": 1700,
+      "base_xp": 70,
+      "time_limit_minutes": 30,
+      "description": "Smoke is pushing from the kitchen of a small apartment."
+    },
+    {
+      "key": "woningbrand",
+      "title": "Woningbrand",
+      "risk_level": 3,
+      "min_level": 2,
+      "required_tags": ["fire", "smoke", "search", "ventilation"],
+      "required_vehicle_types": ["TS", "RV"],
+      "required_trainings": ["basis_brandbestrijding", "ademlucht", "bevelvoerder"],
+      "base_reward": 3200,
+      "base_xp": 125,
+      "time_limit_minutes": 35,
+      "description": "A two-floor home has smoke from the roofline and reports of occupants outside."
+    },
+    {
+      "key": "verkeersongeval_beknelling",
+      "title": "Verkeersongeval met beknelling",
+      "risk_level": 3,
+      "min_level": 2,
+      "required_tags": ["rescue", "technical", "medical"],
+      "required_vehicle_types": ["TS", "HV"],
+      "required_trainings": ["technische_hulpverlening", "bevelvoerder"],
+      "base_reward": 2800,
+      "base_xp": 115,
+      "time_limit_minutes": 35,
+      "description": "Two vehicles collided at an intersection and one driver is trapped."
+    }
+  ]
+}

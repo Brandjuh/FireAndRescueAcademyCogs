@@ -1,0 +1,40 @@
+{
+  "vehicles": [
+    {
+      "key": "ts",
+      "name": "Tankautospuit",
+      "type": "TS",
+      "crew_capacity": 6,
+      "base_reliability": 92,
+      "tags": ["fire", "pump", "water"],
+      "required_trainings": ["chauffeur_ts", "pompbediener"]
+    },
+    {
+      "key": "hv",
+      "name": "Hulpverleningsvoertuig",
+      "type": "HV",
+      "crew_capacity": 3,
+      "base_reliability": 88,
+      "tags": ["rescue", "technical"],
+      "required_trainings": ["technische_hulpverlening"]
+    },
+    {
+      "key": "rv",
+      "name": "Redvoertuig",
+      "type": "RV",
+      "crew_capacity": 2,
+      "base_reliability": 86,
+      "tags": ["height", "rescue"],
+      "required_trainings": ["bevelvoerder"]
+    },
+    {
+      "key": "db",
+      "name": "Dienstbus",
+      "type": "DB",
+      "crew_capacity": 4,
+      "base_reliability": 90,
+      "tags": ["support", "personnel"],
+      "required_trainings": []
+    }
+  ]
+}
