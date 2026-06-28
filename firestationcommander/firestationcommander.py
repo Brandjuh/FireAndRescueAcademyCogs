@@ -570,11 +570,11 @@ class FireStationCommander(commands.Cog):
         vehicles = await self.db.list_vehicles(player_id)
         equipment = await self.db.list_equipment(player_id)
         vehicle_costs = self.maintenance_service.vehicles_needing_work(vehicles)
-        equipment_costs = [
-            (row, self.maintenance_service.equipment_repair_cost(int(row["condition_score"])))
-            for row in equipment
-            if self.maintenance_service.equipment_repair_cost(int(row["condition_score"])) > 0
-        ]
+        equipment_costs = []
+        for row in equipment:
+            cost = self.maintenance_service.equipment_repair_cost(int(row["condition_score"]))
+            if cost > 0:
+                equipment_costs.append((row, cost))
         total = sum(cost for _, cost in vehicle_costs) + sum(cost for _, cost in equipment_costs)
         embed = _basic_embed("Maintenance", "Repair worn vehicles and equipment.", discord.Color.dark_gray())
         if not vehicle_costs and not equipment_costs:
@@ -585,8 +585,17 @@ class FireStationCommander(commands.Cog):
                 value=f"Condition {vehicle.condition_score}% | Fuel {vehicle.fuel}% | Cost {cost:,}",
                 inline=False,
             )
-        if equipment_costs:
-            embed.add_field(name="Equipment items", value=str(len(equipment_costs)), inline=True)
+        for row, cost in equipment_costs[:8]:
+            template_key = str(row["template_key"])
+            template = self.equipment_by_key.get(template_key, {})
+            name = template.get("name", template_key)
+            embed.add_field(
+                name=f"Equipment: {name}",
+                value=f"Condition {int(row['condition_score'])}% | Cost {cost:,}",
+                inline=False,
+            )
+        if len(equipment_costs) > 8:
+            embed.add_field(name="More equipment", value=f"+{len(equipment_costs) - 8} items", inline=False)
         embed.add_field(name="Total repair cost", value=f"{total:,}", inline=True)
         return embed
 

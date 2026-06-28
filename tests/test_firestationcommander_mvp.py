@@ -266,6 +266,30 @@ def test_maintenance_requires_enough_cash(tmp_path):
     asyncio.run(run())
 
 
+def test_maintenance_embed_lists_worn_equipment(tmp_path):
+    async def run():
+        cog = await _make_loaded_cog(tmp_path)
+        try:
+            player = await _seed_player(cog)
+            equipment = await cog.db.list_equipment(player.id)
+            await cog.db.conn.execute(
+                "UPDATE equipment SET condition_score = 60 WHERE id = ?",
+                (equipment[0]["id"],),
+            )
+            await cog.db.conn.commit()
+
+            embed = await cog._build_maintenance_embed(player.id)
+            fields = _embed_fields(embed)
+
+            assert "Equipment: Ademluchtset" in fields
+            assert fields["Equipment: Ademluchtset"] == "Condition 60% | Cost 400"
+            assert fields["Total repair cost"] == "400"
+        finally:
+            await cog.cog_unload()
+
+    asyncio.run(run())
+
+
 def test_maintenance_repairs_worn_vehicle_and_spends_cash(tmp_path):
     async def run():
         cog = await _make_loaded_cog(tmp_path)
