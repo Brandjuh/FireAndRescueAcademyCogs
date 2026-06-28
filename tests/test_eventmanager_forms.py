@@ -42,6 +42,10 @@ from eventmanager.event_manager import (
     route_profile_names,
     safe_debug_mapping,
     safe_debug_payload,
+    schedule_overview_text,
+    schedule_today_text,
+    schedule_upcoming_text,
+    missing_schedule_profiles,
     schedule_run_key,
     select_scheduled_profile,
     summarize_browser_snapshot,
@@ -682,6 +686,134 @@ class EventManagerFormTests(unittest.TestCase):
         next_attempt = next_schedule_attempt_time("large", schedule, {}, {}, now, last_started_at)
 
         self.assertEqual(next_attempt.isoformat(), "2026-06-27T15:08:30-04:00")
+
+    def test_schedule_overview_text_is_readable_and_includes_next_profile(self):
+        large_names = route_profile_names("large")[:2]
+        event_names = route_profile_names("event")[:1]
+        large_locations = route_locations_for_kind("large")[:2]
+        event_locations = route_locations_for_kind("event")[:1]
+        schedules = {
+            "large": {
+                "enabled": True,
+                "profiles": large_names,
+                "rotation_index": 0,
+                "time": "15:00",
+                "timezone": DEFAULT_TIMEZONE,
+                "weekday": None,
+            },
+            "event": {
+                "enabled": False,
+                "profiles": event_names,
+                "rotation_index": 0,
+                "time": DEFAULT_EVENT_ROUTE_TIME,
+                "timezone": DEFAULT_TIMEZONE,
+                "weekday": "saturday",
+            },
+        }
+        profiles = {
+            "large": {
+                large_names[index]: route_profile_for_location("large", location)
+                for index, location in enumerate(large_locations)
+            },
+            "event": {
+                event_names[index]: route_profile_for_location("event", location)
+                for index, location in enumerate(event_locations)
+            },
+        }
+
+        text = schedule_overview_text(
+            schedules,
+            profiles,
+            {},
+            {},
+            {},
+            now_provider=lambda timezone_name: datetime(2026, 6, 27, 14, 0, tzinfo=ZoneInfo(timezone_name)),
+        )
+
+        self.assertIn("EventManager Schedule Overview", text)
+        self.assertIn("Large scale alliance mission", text)
+        self.assertIn("Status: ON", text)
+        self.assertIn("Next attempt: Sat 2026-06-27 15:00 EDT", text)
+        self.assertIn("<t:", text)
+        self.assertIn("Profile: route_new_york_city", text)
+        self.assertIn("Location: New York City, NY, USA", text)
+        self.assertIn("Useful commands:", text)
+
+    def test_schedule_today_text_lists_due_items_for_today(self):
+        large_names = route_profile_names("large")[:1]
+        schedules = {
+            "large": {
+                "enabled": True,
+                "profiles": large_names,
+                "rotation_index": 0,
+                "time": "15:00",
+                "timezone": DEFAULT_TIMEZONE,
+                "weekday": None,
+            },
+            "event": {"enabled": False, "profiles": []},
+        }
+        profiles = {
+            "large": {
+                large_names[0]: route_profile_for_location("large", route_locations_for_kind("large")[0])
+            },
+            "event": {},
+        }
+
+        text = schedule_today_text(
+            schedules,
+            profiles,
+            {},
+            {},
+            {},
+            now_provider=lambda timezone_name: datetime(2026, 6, 27, 14, 0, tzinfo=ZoneInfo(timezone_name)),
+        )
+
+        self.assertIn("EventManager Schedule Today", text)
+        self.assertIn("When: Sat 2026-06-27 15:00 EDT", text)
+        self.assertIn("Profile: route_new_york_city", text)
+        self.assertIn("Alliance event: no automatic start today.", text)
+
+    def test_schedule_upcoming_text_projects_rotation(self):
+        large_names = route_profile_names("large")[:2]
+        large_locations = route_locations_for_kind("large")[:2]
+        schedules = {
+            "large": {
+                "enabled": True,
+                "profiles": large_names,
+                "rotation_index": 0,
+                "time": "15:00",
+                "timezone": DEFAULT_TIMEZONE,
+                "weekday": None,
+            },
+            "event": {"enabled": False, "profiles": []},
+        }
+        profiles = {
+            "large": {
+                large_names[index]: route_profile_for_location("large", location)
+                for index, location in enumerate(large_locations)
+            },
+            "event": {},
+        }
+
+        text = schedule_upcoming_text(
+            schedules,
+            profiles,
+            {},
+            {},
+            {},
+            days=2,
+            now_provider=lambda timezone_name: datetime(2026, 6, 27, 14, 0, tzinfo=ZoneInfo(timezone_name)),
+        )
+
+        self.assertIn("EventManager Upcoming Schedule (2 days)", text)
+        self.assertIn("Profile: route_new_york_city", text)
+        self.assertIn("Profile: route_portland_or", text)
+        self.assertIn("Location: Portland, OR, USA", text)
+
+    def test_missing_schedule_profiles_reports_unknown_names(self):
+        missing = missing_schedule_profiles("large", ["known", "missing"], {"large": {"known": {}}})
+
+        self.assertEqual(missing, ["missing"])
 
     def test_migrates_legacy_weekly_event_schedule_to_1500_new_york(self):
         schedules = {

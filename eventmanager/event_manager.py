@@ -11,7 +11,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
@@ -1359,6 +1359,272 @@ def next_schedule_attempt_time(
     return nominal
 
 
+def schedule_profile_names(schedule: dict) -> List[str]:
+    """Return normalized profile names configured for a schedule."""
+    profiles = schedule.get("profiles") or []
+    if not profiles and schedule.get("profile"):
+        profiles = [schedule["profile"]]
+    return [
+        str(profile).strip().lower()
+        for profile in profiles
+        if str(profile).strip()
+    ]
+
+
+def missing_schedule_profiles(kind: str, profile_names: List[str], profiles: dict) -> List[str]:
+    """Return configured profile names that do not exist for a schedule kind."""
+    kind = normalize_kind(kind)
+    available = profiles.get(kind, {})
+    return [profile_name for profile_name in profile_names if profile_name not in available]
+
+
+def discord_time(value: datetime, style: str = "F") -> str:
+    """Return a Discord timestamp tag for an aware datetime."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return f"<t:{int(value.timestamp())}:{style}>"
+
+
+def schedule_time_text(value: Optional[datetime], timezone_name: str) -> str:
+    """Return a readable time with absolute and relative Discord timestamps."""
+    if not value:
+        return "not scheduled"
+    local = value.astimezone(ZoneInfo(timezone_name))
+    return f"{local:%a %Y-%m-%d %H:%M %Z} ({discord_time(local, 'F')} / {discord_time(local, 'R')})"
+
+
+def schedule_frequency_label(kind: str, schedule: dict) -> str:
+    """Return a human-friendly frequency label."""
+    kind = normalize_kind(kind)
+    if kind == "large":
+        return "Daily"
+    weekday = str(schedule.get("weekday") or "monday").strip().title()
+    return f"Weekly on {weekday}"
+
+
+def schedule_profile_text(kind: str, profile_name: str, profile: Optional[dict]) -> List[str]:
+    """Return readable profile lines for schedule output."""
+    if not profile:
+        return [f"Profile: {profile_name} (missing profile data)"]
+    lines = [f"Profile: {profile_name}"]
+    for line in profile_start_summary(kind, profile).splitlines():
+        lines.append(f"  {line}")
+    return lines
+
+
+def schedule_occurrences(
+    kind: str,
+    schedule: dict,
+    profiles: dict,
+    last_runs: dict,
+    retry_after: dict,
+    last_started_at: dict,
+    now: datetime,
+    *,
+    days: int,
+    limit: int = 30,
+) -> List[Dict[str, Any]]:
+    """Return projected schedule occurrences within a future window."""
+    kind = normalize_kind(kind)
+    if not schedule.get("enabled"):
+        return []
+    profile_names = schedule_profile_names(schedule)
+    if not profile_names:
+        return []
+
+    next_attempt = next_schedule_attempt_time(kind, schedule, last_runs, retry_after, now, last_started_at)
+    if not next_attempt:
+        return []
+
+    horizon = now + timedelta(days=max(1, int(days)))
+    index = int(schedule.get("rotation_index") or 0) % len(profile_names)
+    current = next_attempt
+    interval = schedule_interval(kind)
+    kind_profiles = profiles.get(kind, {})
+    occurrences = []
+    while current <= horizon and len(occurrences) < max(1, int(limit)):
+        profile_name = profile_names[index % len(profile_names)]
+        occurrences.append(
+            {
+                "kind": kind,
+                "when": current,
+                "profile_name": profile_name,
+                "profile": kind_profiles.get(profile_name),
+            }
+        )
+        current = current + interval
+        index = (index + 1) % len(profile_names)
+    return occurrences
+
+
+def schedule_overview_text(
+    schedules: dict,
+    profiles: dict,
+    last_runs: dict,
+    retry_after: dict,
+    last_started_at: dict,
+    *,
+    now_provider: Optional[Callable[[str], datetime]] = None,
+) -> str:
+    """Return a clear admin-facing overview of all EventManager schedules."""
+    lines = ["EventManager Schedule Overview", ""]
+    for kind in ("large", "event"):
+        schedule = schedules.get(kind, {})
+        timezone_name = schedule.get("timezone") or DEFAULT_TIMEZONE
+        now = now_provider(timezone_name) if now_provider else datetime.now(ZoneInfo(timezone_name))
+        next_attempt = next_schedule_attempt_time(kind, schedule, last_runs, retry_after, now, last_started_at)
+        profile_names = schedule_profile_names(schedule)
+        current_profile, _ = select_scheduled_profile(schedule)
+        profile = profiles.get(kind, {}).get(current_profile or "")
+        retry_at = parse_config_datetime(retry_after.get(kind))
+        last_started = parse_config_datetime(last_started_at.get(kind))
+
+        lines.append(EVENT_KINDS[kind]["label"])
+        lines.append(f"Status: {'ON' if schedule.get('enabled') else 'OFF'}")
+        lines.append(f"Frequency: {schedule_frequency_label(kind, schedule)}")
+        lines.append(f"Configured first-start time: {schedule.get('time') or 'not set'} {timezone_name}")
+        lines.append(f"Profiles in rotation: {len(profile_names)}")
+        lines.append(f"Next attempt: {schedule_time_text(next_attempt, timezone_name)}")
+        if current_profile:
+            lines.extend(schedule_profile_text(kind, current_profile, profile))
+        if last_started:
+            lines.append(f"Last successful start: {schedule_time_text(last_started, timezone_name)}")
+            lines.append("Timing mode: anchored to the last successful start.")
+        else:
+            lines.append("Timing mode: using the configured first-start time.")
+        if retry_at:
+            lines.append(f"Cooldown retry after: {schedule_time_text(retry_at, timezone_name)}")
+        if last_runs.get(kind):
+            lines.append(f"Last run key: {last_runs[kind]}")
+        lines.append("")
+
+    lines.extend(
+        [
+            "Useful commands:",
+            "- eventmanager schedule today",
+            "- eventmanager schedule upcoming 14",
+            "- eventmanager schedule daily HH:MM profile1, profile2",
+            "- eventmanager schedule weekly saturday HH:MM profile1, profile2",
+            "- eventmanager schedule enable large|event",
+            "- eventmanager schedule off large|event",
+            "- eventmanager schedule remove large|event",
+            "- eventmanager schedule fire large|event",
+        ]
+    )
+    return "\n".join(lines).strip()
+
+
+def schedule_today_text(
+    schedules: dict,
+    profiles: dict,
+    last_runs: dict,
+    retry_after: dict,
+    last_started_at: dict,
+    *,
+    now_provider: Optional[Callable[[str], datetime]] = None,
+) -> str:
+    """Return a clear overview of EventManager starts due today."""
+    lines = ["EventManager Schedule Today", ""]
+    any_today = False
+    for kind in ("large", "event"):
+        schedule = schedules.get(kind, {})
+        timezone_name = schedule.get("timezone") or DEFAULT_TIMEZONE
+        now = now_provider(timezone_name) if now_provider else datetime.now(ZoneInfo(timezone_name))
+        occurrences = schedule_occurrences(
+            kind,
+            schedule,
+            profiles,
+            last_runs,
+            retry_after,
+            last_started_at,
+            now,
+            days=1,
+            limit=3,
+        )
+        today = [item for item in occurrences if item["when"].astimezone(now.tzinfo).date() == now.date()]
+        if not today:
+            next_attempt = next_schedule_attempt_time(kind, schedule, last_runs, retry_after, now, last_started_at)
+            lines.append(f"{EVENT_KINDS[kind]['label']}: no automatic start today.")
+            if next_attempt:
+                lines.append(f"Next: {schedule_time_text(next_attempt, timezone_name)}")
+            lines.append("")
+            continue
+
+        any_today = True
+        lines.append(EVENT_KINDS[kind]["label"])
+        for item in today:
+            lines.append(f"When: {schedule_time_text(item['when'], timezone_name)}")
+            lines.extend(schedule_profile_text(kind, item["profile_name"], item["profile"]))
+        lines.append("")
+
+    if not any_today:
+        lines.append("No EventManager automatic starts are due today.")
+    return "\n".join(lines).strip()
+
+
+def schedule_upcoming_text(
+    schedules: dict,
+    profiles: dict,
+    last_runs: dict,
+    retry_after: dict,
+    last_started_at: dict,
+    *,
+    days: int = 14,
+    now_provider: Optional[Callable[[str], datetime]] = None,
+) -> str:
+    """Return projected upcoming EventManager starts."""
+    days = max(1, min(int(days), 60))
+    lines = [f"EventManager Upcoming Schedule ({days} days)", ""]
+    for kind in ("large", "event"):
+        schedule = schedules.get(kind, {})
+        timezone_name = schedule.get("timezone") or DEFAULT_TIMEZONE
+        now = now_provider(timezone_name) if now_provider else datetime.now(ZoneInfo(timezone_name))
+        occurrences = schedule_occurrences(
+            kind,
+            schedule,
+            profiles,
+            last_runs,
+            retry_after,
+            last_started_at,
+            now,
+            days=days,
+            limit=30,
+        )
+        lines.append(EVENT_KINDS[kind]["label"])
+        if not occurrences:
+            lines.append("No upcoming automatic starts.")
+            lines.append("")
+            continue
+        for item in occurrences:
+            lines.append(f"- {schedule_time_text(item['when'], timezone_name)}")
+            lines.append(f"  Profile: {item['profile_name']}")
+            profile = item["profile"]
+            if profile:
+                lines.append(f"  Location: {profile_location_summary(profile)}")
+                lines.append(f"  Type: {profile_type_summary(kind, profile)}")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def chunk_text(value: str, limit: int = 1850) -> List[str]:
+    """Split long Discord text safely on line boundaries."""
+    lines = str(value or "").splitlines()
+    chunks: List[str] = []
+    current: List[str] = []
+    current_length = 0
+    for line in lines:
+        line_length = len(line) + 1
+        if current and current_length + line_length > limit:
+            chunks.append("\n".join(current))
+            current = []
+            current_length = 0
+        current.append(line)
+        current_length += line_length
+    if current:
+        chunks.append("\n".join(current))
+    return chunks or [""]
+
+
 def build_browser_event_start_script(
     fields: Dict[str, str],
     *,
@@ -2486,6 +2752,11 @@ class EventManager(commands.Cog):
                 return bool(await is_admin(user))
         return False
 
+    async def _send_schedule_text(self, ctx: commands.Context, text: str):
+        """Send long schedule text in chunks while keeping Discord timestamps renderable."""
+        for chunk in chunk_text(text):
+            await ctx.send(chunk)
+
     async def _ensure_panels_after_ready(self):
         await self.bot.wait_until_ready()
         for guild in self.bot.guilds:
@@ -3445,30 +3716,52 @@ class EventManager(commands.Cog):
     @commands.admin()
     async def schedule(self, ctx: commands.Context):
         """Manage automatic schedules."""
+        await self._send_schedule_overview(ctx)
+
+    async def _send_schedule_overview(self, ctx: commands.Context):
         schedules = await self.config.schedules()
+        profiles = await self.config.profiles()
         last_runs = await self.config.last_runs()
         retry_after = await self.config.schedule_retry_after()
         last_started_at = await self.config.last_started_at()
-        lines = []
-        for kind, schedule in schedules.items():
-            profiles = schedule.get("profiles") or [schedule.get("profile")]
-            profiles = [profile for profile in profiles if profile]
-            timezone_name = schedule.get("timezone") or DEFAULT_TIMEZONE
-            now = datetime.now(ZoneInfo(timezone_name))
-            next_attempt = next_schedule_attempt_time(kind, schedule, last_runs, retry_after, now, last_started_at)
-            next_attempt_text = next_attempt.isoformat() if next_attempt else "not scheduled"
-            retry_at = parse_config_datetime(retry_after.get(kind))
-            retry_text = retry_at.isoformat() if retry_at else "none"
-            last_started = parse_config_datetime(last_started_at.get(kind))
-            last_started_text = last_started.isoformat() if last_started else "none"
-            lines.append(
-                f"{kind}: enabled={schedule.get('enabled')} profiles={profiles or 'none'} "
-                f"time={schedule.get('time')} timezone={schedule.get('timezone')} "
-                f"weekday={schedule.get('weekday')} rotation_index={schedule.get('rotation_index', 0)} "
-                f"last_run={last_runs.get(kind, 'none')} last_started_at={last_started_text} "
-                f"retry_after={retry_text} next_attempt={next_attempt_text}"
-            )
-        await ctx.send(box("\n".join(lines), lang="ini"))
+        await self._send_schedule_text(
+            ctx,
+            schedule_overview_text(schedules, profiles, last_runs, retry_after, last_started_at),
+        )
+
+    @schedule.command(name="status", aliases=["overview", "list"])
+    @commands.admin()
+    async def schedule_status(self, ctx: commands.Context):
+        """Show a readable overview of all automatic schedules."""
+        await self._send_schedule_overview(ctx)
+
+    @schedule.command(name="today", aliases=["day"])
+    @commands.admin()
+    async def schedule_today(self, ctx: commands.Context):
+        """Show automatic EventManager starts due today."""
+        schedules = await self.config.schedules()
+        profiles = await self.config.profiles()
+        last_runs = await self.config.last_runs()
+        retry_after = await self.config.schedule_retry_after()
+        last_started_at = await self.config.last_started_at()
+        await self._send_schedule_text(
+            ctx,
+            schedule_today_text(schedules, profiles, last_runs, retry_after, last_started_at),
+        )
+
+    @schedule.command(name="upcoming", aliases=["next"])
+    @commands.admin()
+    async def schedule_upcoming(self, ctx: commands.Context, days: int = 14):
+        """Show projected automatic EventManager starts for the next days."""
+        schedules = await self.config.schedules()
+        profiles = await self.config.profiles()
+        last_runs = await self.config.last_runs()
+        retry_after = await self.config.schedule_retry_after()
+        last_started_at = await self.config.last_started_at()
+        await self._send_schedule_text(
+            ctx,
+            schedule_upcoming_text(schedules, profiles, last_runs, retry_after, last_started_at, days=days),
+        )
 
     @schedule.command(name="fire", aliases=["run", "startnow"])
     @commands.admin()
@@ -3486,14 +3779,16 @@ class EventManager(commands.Cog):
             await ctx.send(f"Could not start scheduled {EVENT_KINDS[kind]['label']}: {result.reason}")
             return
 
-        next_start = (started_at + schedule_interval(kind)).astimezone(ZoneInfo(DEFAULT_TIMEZONE)) if started_at else None
-        next_text = next_start.isoformat() if next_start else "unknown"
         schedules = await self.config.schedules()
+        schedule = schedules.get(kind, {})
+        timezone_name = schedule.get("timezone") or DEFAULT_TIMEZONE
+        next_start = (started_at + schedule_interval(kind)).astimezone(ZoneInfo(timezone_name)) if started_at else None
+        next_text = schedule_time_text(next_start, timezone_name) if next_start else "unknown"
         enabled = bool(schedules.get(kind, {}).get("enabled"))
         automatic_note = (
-            f"Next automatic attempt is anchored to this start time: `{next_text}`."
+            f"Next automatic attempt is anchored to this start time: {next_text}."
             if enabled
-            else f"The next automatic attempt is anchored to `{next_text}`, but this schedule is currently disabled."
+            else f"The next automatic attempt is anchored to {next_text}, but this schedule is currently disabled."
         )
         await ctx.send(
             f"Started scheduled {EVENT_KINDS[kind]['label']} with profile `{profile_name}`.\n"
@@ -3510,6 +3805,15 @@ class EventManager(commands.Cog):
         except ValueError as exc:
             await ctx.send(str(exc))
             return
+        saved_profiles = await self.config.profiles()
+        missing = missing_schedule_profiles("large", profile_names, saved_profiles)
+        if missing:
+            await ctx.send(
+                "Unknown large mission profile(s): "
+                + ", ".join(f"`{profile}`" for profile in missing)
+                + "\nUse `eventmanager profile list` or `eventmanager profile seedrouteschedule` first."
+            )
+            return
         async with self.config.schedules() as schedules:
             schedules["large"].update(
                 enabled=True,
@@ -3524,7 +3828,8 @@ class EventManager(commands.Cog):
             last_started_at.pop("large", None)
         async with self.config.schedule_retry_after() as retry_after:
             retry_after.pop("large", None)
-        await ctx.tick()
+        await ctx.send("Daily large-scale mission schedule saved.")
+        await self._send_schedule_overview(ctx)
 
     @schedule.command(name="weekly")
     @commands.admin()
@@ -3540,6 +3845,15 @@ class EventManager(commands.Cog):
         except ValueError as exc:
             await ctx.send(str(exc))
             return
+        saved_profiles = await self.config.profiles()
+        missing = missing_schedule_profiles("event", profile_names, saved_profiles)
+        if missing:
+            await ctx.send(
+                "Unknown alliance event profile(s): "
+                + ", ".join(f"`{profile}`" for profile in missing)
+                + "\nUse `eventmanager profile list` or `eventmanager profile seedrouteschedule` first."
+            )
+            return
         async with self.config.schedules() as schedules:
             schedules["event"].update(
                 enabled=True,
@@ -3554,9 +3868,10 @@ class EventManager(commands.Cog):
             last_started_at.pop("event", None)
         async with self.config.schedule_retry_after() as retry_after:
             retry_after.pop("event", None)
-        await ctx.tick()
+        await ctx.send("Weekly alliance event schedule saved.")
+        await self._send_schedule_overview(ctx)
 
-    @schedule.command(name="off")
+    @schedule.command(name="off", aliases=["disable"])
     @commands.admin()
     async def schedule_off(self, ctx: commands.Context, kind: str):
         """Disable one automatic schedule."""
@@ -3567,7 +3882,59 @@ class EventManager(commands.Cog):
             return
         async with self.config.schedules() as schedules:
             schedules[kind]["enabled"] = False
-        await ctx.tick()
+        await ctx.send(
+            f"Disabled the {EVENT_KINDS[kind]['label']} schedule. "
+            "The configured profile rotation is kept. Use `eventmanager schedule remove "
+            f"{kind}` to clear it completely."
+        )
+
+    @schedule.command(name="enable", aliases=["on"])
+    @commands.admin()
+    async def schedule_enable(self, ctx: commands.Context, kind: str):
+        """Enable an existing automatic schedule."""
+        try:
+            kind = normalize_kind(kind)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+        schedules = await self.config.schedules()
+        schedule = schedules.get(kind, {})
+        if not schedule_profile_names(schedule):
+            await ctx.send(
+                f"No {EVENT_KINDS[kind]['label']} schedule is configured. "
+                "Create one with `eventmanager schedule daily ...` or `eventmanager schedule weekly ...`."
+            )
+            return
+        async with self.config.schedules() as saved_schedules:
+            saved_schedules[kind]["enabled"] = True
+        await ctx.send(f"Enabled the {EVENT_KINDS[kind]['label']} schedule.")
+        await self._send_schedule_overview(ctx)
+
+    @schedule.command(name="remove", aliases=["delete", "clear"])
+    @commands.admin()
+    async def schedule_remove(self, ctx: commands.Context, kind: str):
+        """Remove one automatic schedule configuration."""
+        try:
+            kind = normalize_kind(kind)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+        async with self.config.schedules() as schedules:
+            schedules[kind].update(
+                enabled=False,
+                profile=None,
+                profiles=[],
+                rotation_index=0,
+            )
+        async with self.config.last_runs() as last_runs:
+            last_runs.pop(kind, None)
+        async with self.config.last_started_at() as last_started_at:
+            last_started_at.pop(kind, None)
+        async with self.config.schedule_retry_after() as retry_after:
+            retry_after.pop(kind, None)
+        await ctx.send(
+            f"Removed the {EVENT_KINDS[kind]['label']} schedule. Saved profiles were not deleted."
+        )
 
     @schedule.command(name="clearretry")
     @commands.admin()
