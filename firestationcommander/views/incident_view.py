@@ -7,9 +7,10 @@ from typing import Any
 import discord
 
 from ..models import Vehicle
+from .base import FireStationCommanderViewMixin
 
 
-class IncidentActionView(discord.ui.View):
+class IncidentActionView(FireStationCommanderViewMixin, discord.ui.View):
     """Buttons shown on an active incident."""
 
     def __init__(self, cog: Any, owner_id: int, incident_id: int):
@@ -85,7 +86,7 @@ class VehicleDispatchSelect(discord.ui.Select):
         await self.cog.finish_incident_dispatch(interaction, self.incident_id, vehicle_ids)
 
 
-class VehicleDispatchView(discord.ui.View):
+class VehicleDispatchView(FireStationCommanderViewMixin, discord.ui.View):
     """Container view for the vehicle dispatch select menu."""
 
     def __init__(self, cog: Any, owner_id: int, incident_id: int, vehicles: list[Vehicle]):
