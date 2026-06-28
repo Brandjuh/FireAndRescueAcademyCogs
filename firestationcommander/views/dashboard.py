@@ -6,8 +6,10 @@ from typing import Any
 
 import discord
 
+from .base import FireStationCommanderViewMixin
 
-class DashboardView(discord.ui.View):
+
+class DashboardView(FireStationCommanderViewMixin, discord.ui.View):
     """Main dashboard buttons for a single player."""
 
     def __init__(self, cog: Any, owner_id: int):

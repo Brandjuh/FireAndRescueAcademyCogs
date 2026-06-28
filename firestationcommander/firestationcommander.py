@@ -492,6 +492,9 @@ class FireStationCommander(commands.Cog):
 
     def _build_incident_embed(self, incident: Incident) -> discord.Embed:
         template = self.incidents_by_key[incident.template_key]
+        vehicles = json.loads(incident.required_vehicle_types_json)
+        trainings = json.loads(incident.required_trainings_json)
+        tags = json.loads(incident.required_tags_json)
         embed = discord.Embed(
             title=f"Incident: {incident.title}",
             description=template.get("description", "A new incident is waiting for command."),
@@ -501,8 +504,17 @@ class FireStationCommander(commands.Cog):
         embed.add_field(name="Reward", value=f"{incident.base_reward:,} cash", inline=True)
         embed.add_field(name="XP", value=str(incident.base_xp), inline=True)
         embed.add_field(
-            name="Vehicles",
-            value=", ".join(json.loads(incident.required_vehicle_types_json)) or "None",
+            name="Time limit",
+            value=f"{int(template.get('time_limit_minutes', 30))} minutes",
+            inline=True,
+        )
+        embed.add_field(
+            name="Requirements",
+            value=(
+                f"Vehicles: {_format_list(vehicles)}\n"
+                f"Training: {_format_list(trainings)}\n"
+                f"Capabilities: {_format_list(tags)}"
+            ),
             inline=False,
         )
         embed.set_footer(text="Use the buttons below to manage the response.")
@@ -593,3 +605,7 @@ def _safe_cog_data_path(cog: commands.Cog) -> Path:
 
 def _basic_embed(title: str, description: str, color: Any) -> discord.Embed:
     return discord.Embed(title=title, description=description, color=color)
+
+
+def _format_list(values: list[Any]) -> str:
+    return ", ".join(str(value) for value in values) if values else "None"

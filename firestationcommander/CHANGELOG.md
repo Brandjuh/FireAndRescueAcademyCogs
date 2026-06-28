@@ -1,5 +1,11 @@
 # FireStationCommander Changelog
 
+## Unreleased
+
+- Added clearer incident embeds with time limits and complete requirement summaries.
+- Added shared interaction error handling for dashboard, incident, dispatch, and maintenance views.
+- Added a cog README with Red load instructions, command overview, storage notes, and data guidelines.
+
 ## 0.1.0 - MVP
 
 - Added the initial SQLite-backed FireStationCommander Red cog.

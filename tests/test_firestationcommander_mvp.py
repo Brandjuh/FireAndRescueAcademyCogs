@@ -5,6 +5,7 @@ from unittest.mock import patch
 from firestationcommander.constants import DEFAULT_START_CASH
 from firestationcommander.firestationcommander import FireStationCommander
 from firestationcommander.models import Player
+from firestationcommander.views.dashboard import DashboardView
 
 
 class _Response:
@@ -24,6 +25,10 @@ class _Interaction:
         self.guild = SimpleNamespace(id=guild_id)
         self.user = SimpleNamespace(id=user_id)
         self.response = _Response()
+
+
+def _embed_fields(embed):
+    return {field["name"]: field["value"] for field in embed.fields}
 
 
 async def _make_loaded_cog(tmp_path):
@@ -103,6 +108,32 @@ def test_level_one_incident_selection_only_uses_level_one_templates(tmp_path):
     asyncio.run(run())
 
 
+def test_incident_embed_shows_time_limit_and_requirements(tmp_path):
+    async def run():
+        cog = await _make_loaded_cog(tmp_path)
+        try:
+            player = await _seed_player(cog)
+            template = cog.incidents_by_key["containerbrand"]
+            incident = await cog.db.create_incident(
+                100,
+                player.id,
+                template,
+                expires_at=cog.incident_service.expires_at(template),
+            )
+
+            embed = cog._build_incident_embed(incident)
+            fields = _embed_fields(embed)
+
+            assert fields["Time limit"] == "20 minutes"
+            assert "Vehicles: TS" in fields["Requirements"]
+            assert "Training: basis_brandbestrijding" in fields["Requirements"]
+            assert "Capabilities: fire, water" in fields["Requirements"]
+        finally:
+            await cog.cog_unload()
+
+    asyncio.run(run())
+
+
 def test_starter_response_scores_container_fire_strongly(tmp_path):
     async def run():
         cog = await _make_loaded_cog(tmp_path)
@@ -132,6 +163,36 @@ def test_starter_response_scores_container_fire_strongly(tmp_path):
             assert score.breakdown["equipment"] == 100
         finally:
             await cog.cog_unload()
+
+    asyncio.run(run())
+
+
+def test_dashboard_view_rejects_non_owner_ephemerally():
+    async def run():
+        view = DashboardView(cog=object(), owner_id=200)
+        interaction = _Interaction(user_id=999)
+
+        allowed = await view.interaction_check(interaction)
+
+        assert allowed is False
+        assert interaction.response.messages == [
+            ("Only the station commander can use this dashboard.", {"ephemeral": True})
+        ]
+
+    asyncio.run(run())
+
+
+def test_dashboard_view_errors_are_reported_ephemerally():
+    async def run():
+        view = DashboardView(cog=object(), owner_id=200)
+        interaction = _Interaction(user_id=200)
+
+        await view.on_error(interaction, RuntimeError("boom"), item=object())
+
+        assert len(interaction.response.messages) == 1
+        content, kwargs = interaction.response.messages[0]
+        assert "FireStationCommander control hit an error" in content
+        assert kwargs == {"ephemeral": True}
 
     asyncio.run(run())
 
@@ -168,6 +229,37 @@ def test_dispatch_resolves_incident_updates_assets_and_report(tmp_path):
             assert completed.status == "completed"
             assert interaction.response.edited["view"] is None
             assert interaction.response.edited["embed"].kwargs["title"] == "Incident report"
+        finally:
+            await cog.cog_unload()
+
+    asyncio.run(run())
+
+
+def test_maintenance_requires_enough_cash(tmp_path):
+    async def run():
+        cog = await _make_loaded_cog(tmp_path)
+        try:
+            player = await _seed_player(cog)
+            vehicle = (await cog.db.list_vehicles(player.id))[0]
+            template = cog.incidents_by_key["containerbrand"]
+            incident = await cog.db.create_incident(
+                100,
+                player.id,
+                template,
+                expires_at=cog.incident_service.expires_at(template),
+            )
+            with patch("firestationcommander.services.incidents.random.randint", return_value=0):
+                await cog.finish_incident_dispatch(_Interaction(), incident.id, [vehicle.id])
+            await cog.db.conn.execute("UPDATE players SET cash = 0 WHERE id = ?", (player.id,))
+            await cog.db.conn.commit()
+            interaction = _Interaction()
+
+            await cog.repair_all_from_interaction(interaction)
+
+            assert len(interaction.response.messages) == 1
+            content, kwargs = interaction.response.messages[0]
+            assert content.startswith("Maintenance costs ")
+            assert kwargs == {"ephemeral": True}
         finally:
             await cog.cog_unload()
 

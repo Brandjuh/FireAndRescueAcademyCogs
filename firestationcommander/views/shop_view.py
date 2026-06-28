@@ -6,8 +6,10 @@ from typing import Any
 
 import discord
 
+from .base import FireStationCommanderViewMixin
 
-class MaintenanceView(discord.ui.View):
+
+class MaintenanceView(FireStationCommanderViewMixin, discord.ui.View):
     """Maintenance action buttons for a single player."""
 
     def __init__(self, cog: Any, owner_id: int):
