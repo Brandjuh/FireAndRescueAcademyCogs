@@ -43,6 +43,7 @@ The playable foundation and core incident loop exist. The next milestone should 
 - Add cooldowns if incident generation can be spammed.
 - Add restart resilience checks for active incidents and stale views.
 - Improve logging around database and interaction failures.
+- Use the admin reset command when early development data must be cleared instead of migrated.
 
 ## Blocked Items
 

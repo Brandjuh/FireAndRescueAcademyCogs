@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import discord
-from redbot.core import Config, commands
+from redbot.core import Config, checks, commands
 from redbot.core.bot import Red
 from redbot.core.data_manager import cog_data_path
 
@@ -199,6 +199,23 @@ class FireStationCommander(commands.Cog):
             await ctx.send("No incident report has been stored yet.")
             return
         await ctx.send(embed=self._build_report_embed(report))
+
+    @fsc_group.command(name="reset")
+    @checks.admin_or_permissions(administrator=True)
+    async def fsc_reset(self, ctx: commands.Context, confirmation: str | None = None) -> None:
+        """Reset all FireStationCommander player progress in this server."""
+        guild_id = await self._ctx_guild_id(ctx)
+        if guild_id is None:
+            return
+        if confirmation != "CONFIRM":
+            await ctx.send(
+                "This permanently resets all FireStationCommander player progress in this server. "
+                "Run `[p]fsc reset CONFIRM` to continue."
+            )
+            return
+
+        deleted = await self.db.reset_guild_players(guild_id)
+        await ctx.send(f"FireStationCommander reset complete. Removed {deleted} player profile(s).")
 
     async def show_status_panel(self, interaction: discord.Interaction) -> None:
         """Edit an interaction message to the status dashboard."""

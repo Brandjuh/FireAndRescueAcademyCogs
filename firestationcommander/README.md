@@ -23,6 +23,7 @@ The cog requires Python 3.11+ and `aiosqlite`. Game progress is stored in a loca
 - `[p]fsc incident` generates or reopens an active incident.
 - `[p]fsc maintenance` shows worn vehicles and equipment with repair actions.
 - `[p]fsc report` shows the latest incident report.
+- `[p]fsc reset CONFIRM` lets server admins reset all FireStationCommander player progress in the current server during early development.
 
 ## Data
 
