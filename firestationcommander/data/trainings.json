@@ -6,13 +6,13 @@
       "attribute": "technical"
     },
     {
-      "key": "scba",
-      "name": "SCBA",
+      "key": "breathing_apparatus",
+      "name": "Breathing Apparatus",
       "attribute": "discipline"
     },
     {
-      "key": "engine_driver",
-      "name": "Engine Driver",
+      "key": "driver_operator",
+      "name": "Driver Operator",
       "attribute": "discipline"
     },
     {
@@ -26,8 +26,8 @@
       "attribute": "technical"
     },
     {
-      "key": "incident_commander",
-      "name": "Incident Commander",
+      "key": "crew_command",
+      "name": "Crew Command",
       "attribute": "leadership"
     }
   ]

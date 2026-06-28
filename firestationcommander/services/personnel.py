@@ -6,12 +6,12 @@ from ..models import Personnel
 
 
 STARTER_CREW = (
-    ("Alex Morgan", "Incident Commander", ("basic_firefighting", "incident_commander")),
-    ("Jamie Carter", "Volunteer Firefighter", ("basic_firefighting", "engine_driver")),
-    ("Robin Hayes", "Volunteer Firefighter", ("basic_firefighting", "pump_operator")),
-    ("Casey Brooks", "Volunteer Firefighter", ("basic_firefighting", "scba")),
-    ("Taylor Reed", "Volunteer Firefighter", ("basic_firefighting",)),
-    ("Jordan Ellis", "Volunteer Firefighter", ("basic_firefighting",)),
+    ("Alex Morgan", "Crew Commander", ("basic_firefighting", "crew_command")),
+    ("Jamie Carter", "Driver/Operator", ("basic_firefighting", "driver_operator")),
+    ("Robin Hayes", "Pump Operator", ("basic_firefighting", "pump_operator")),
+    ("Casey Brooks", "Firefighter", ("basic_firefighting", "breathing_apparatus")),
+    ("Taylor Reed", "Firefighter", ("basic_firefighting",)),
+    ("Jordan Ellis", "Firefighter", ("basic_firefighting",)),
 )
 
 
@@ -32,7 +32,7 @@ class PersonnelService:
                     "condition_score": 96 - index,
                     "stress_score": 5,
                     "morale_score": 78,
-                    "leadership": 3 if "incident_commander" in trainings else 1,
+                    "leadership": 3 if "crew_command" in trainings else 1,
                     "technical": 3 if index in {1, 2, 3} else 2,
                     "medical": 1,
                     "discipline": 3 if index in {0, 1, 2, 3} else 2,

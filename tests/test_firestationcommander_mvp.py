@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import discord
 
-from firestationcommander.constants import DEFAULT_START_CASH
+from firestationcommander.constants import BASE_STORAGE_SLOTS, DEFAULT_SAFETY_SCORE, DEFAULT_START_CASH
 from firestationcommander.firestationcommander import FireStationCommander
 from firestationcommander.models import Player
 from firestationcommander.views.dashboard import DashboardView
@@ -32,6 +32,18 @@ class _Interaction:
         self.response = _Response()
 
 
+class _Context:
+    def __init__(self, guild_id=100, user_id=200, display_name="Test Commander"):
+        self.guild = SimpleNamespace(id=guild_id)
+        self.author = SimpleNamespace(id=user_id, display_name=display_name)
+        self.sent = []
+
+    async def send(self, **kwargs):
+        message = _Message()
+        self.sent.append((kwargs, message))
+        return message
+
+
 class _Message:
     def __init__(self):
         self.edited = None
@@ -52,10 +64,49 @@ async def _make_loaded_cog(tmp_path):
 
 async def _seed_player(cog):
     player, created = await cog.db.get_or_create_player(100, 200)
-    await cog.db.create_station(player.id, "Test Station", 2, 8)
+    await cog.db.create_station(player.id, "Station 1", 2, BASE_STORAGE_SLOTS)
     if created:
         await cog._seed_starter_assets(player.id)
     return player
+
+
+def test_start_command_creates_phase_one_profile_once(tmp_path):
+    async def run():
+        cog = await _make_loaded_cog(tmp_path)
+        try:
+            ctx = _Context()
+
+            await cog.fsc_start(ctx)
+            await cog.fsc_start(ctx)
+
+            player = await cog.db.get_player(100, 200)
+            station = await cog.db.get_station(player.id)
+            vehicles = await cog.db.list_vehicles(player.id)
+            personnel = await cog.db.list_personnel(player.id)
+            equipment = await cog.db.list_equipment(player.id)
+
+            assert player.cash == DEFAULT_START_CASH
+            assert player.safety_score == DEFAULT_SAFETY_SCORE
+            assert station.name == "Station 1"
+            assert station.storage_slots == 10
+            assert len(vehicles) == 1
+            assert vehicles[0].callsign == "Engine 1"
+            assert vehicles[0].reliability_score == 95
+            assert len(personnel) == 6
+            assert [member.rank for member in personnel] == [
+                "Crew Commander",
+                "Driver/Operator",
+                "Pump Operator",
+                "Firefighter",
+                "Firefighter",
+                "Firefighter",
+            ]
+            assert len(equipment) == 4
+            assert len(ctx.sent) == 2
+        finally:
+            await cog.cog_unload()
+
+    asyncio.run(run())
 
 
 def test_starting_player_gets_station_and_starter_assets(tmp_path):
@@ -76,6 +127,7 @@ def test_starting_player_gets_station_and_starter_assets(tmp_path):
 
             assert station is not None
             assert station.garage_slots == 2
+            assert station.storage_slots == BASE_STORAGE_SLOTS
             assert [vehicle.template_key for vehicle in vehicles] == ["ts"]
             assert len(personnel) == 6
             assert {row["template_key"] for row in equipment} == {
@@ -86,6 +138,8 @@ def test_starting_player_gets_station_and_starter_assets(tmp_path):
             }
             assert "basic_firefighting" in training_keys
             assert "pump_operator" in training_keys
+            assert "driver_operator" in training_keys
+            assert "crew_command" in training_keys
         finally:
             await cog.cog_unload()
 
@@ -104,7 +158,7 @@ def test_level_one_incident_selection_only_uses_level_one_templates(tmp_path):
                 reputation=0,
                 command_level=1,
                 xp=0,
-                safety_score=75,
+                safety_score=DEFAULT_SAFETY_SCORE,
                 morale_score=75,
             )
 
@@ -114,7 +168,7 @@ def test_level_one_incident_selection_only_uses_level_one_templates(tmp_path):
             }
 
             assert selected_keys
-            assert selected_keys <= {"dumpster_fire", "outdoor_fire", "kitchen_fire"}
+            assert selected_keys <= {"dumpster_fire", "grass_fire", "kitchen_fire"}
         finally:
             await cog.cog_unload()
 

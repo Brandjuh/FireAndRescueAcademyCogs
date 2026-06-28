@@ -21,7 +21,7 @@ class VehicleService:
         template = self.template(STARTER_VEHICLE_KEY)
         return {
             "template_key": STARTER_VEHICLE_KEY,
-            "callsign": "TS-01",
+            "callsign": "Engine 1",
             "condition_score": 100,
             "reliability_score": int(template.get("base_reliability", 90)),
             "fuel": 100,
