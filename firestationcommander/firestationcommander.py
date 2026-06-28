@@ -35,10 +35,13 @@ log = logging.getLogger("red.firestationcommander")
 
 LEGACY_INCIDENT_KEY_ALIASES = {
     "containerbrand": "dumpster_fire",
-    "buitenbrand": "outdoor_fire",
+    "buitenbrand": "grass_fire",
     "keukenbrand": "kitchen_fire",
-    "woningbrand": "residential_fire",
-    "verkeersongeval_beknelling": "vehicle_extrication_crash",
+    "woningbrand": "house_fire",
+    "verkeersongeval_beknelling": "vehicle_crash_entrapment",
+    "outdoor_fire": "grass_fire",
+    "residential_fire": "house_fire",
+    "vehicle_extrication_crash": "vehicle_crash_entrapment",
 }
 
 
@@ -116,10 +119,9 @@ class FireStationCommander(commands.Cog):
             return
 
         player, created = await self.db.get_or_create_player(guild_id, ctx.author.id)
-        display_name = getattr(ctx.author, "display_name", str(ctx.author.id))
         await self.db.create_station(
             player.id,
-            f"{display_name}'s Fire Station",
+            "Station 1",
             BASE_GARAGE_SLOTS,
             BASE_STORAGE_SLOTS,
         )
@@ -155,7 +157,7 @@ class FireStationCommander(commands.Cog):
             return
         await ctx.send(embed=await self._build_vehicle_embed(player.id))
 
-    @fsc_group.command(name="staff")
+    @fsc_group.command(name="personnel", aliases=["staff"])
     async def fsc_personnel(self, ctx: commands.Context) -> None:
         """Show your station personnel."""
         player = await self._player_for_context(ctx)

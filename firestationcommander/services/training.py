@@ -5,11 +5,14 @@ from __future__ import annotations
 
 TRAINING_KEY_ALIASES = {
     "basis_brandbestrijding": "basic_firefighting",
-    "ademlucht": "scba",
-    "chauffeur_ts": "engine_driver",
+    "ademlucht": "breathing_apparatus",
+    "scba": "breathing_apparatus",
+    "chauffeur_ts": "driver_operator",
+    "engine_driver": "driver_operator",
     "pompbediener": "pump_operator",
     "technische_hulpverlening": "technical_rescue",
-    "bevelvoerder": "incident_commander",
+    "bevelvoerder": "crew_command",
+    "incident_commander": "crew_command",
 }
 
 

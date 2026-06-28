@@ -5,9 +5,9 @@
       "name": "Fire Engine",
       "type": "TS",
       "crew_capacity": 6,
-      "base_reliability": 92,
+      "base_reliability": 95,
       "tags": ["fire", "pump", "water"],
-      "required_trainings": ["engine_driver", "pump_operator"]
+      "required_trainings": ["driver_operator", "pump_operator"]
     },
     {
       "key": "hv",
@@ -25,7 +25,7 @@
       "crew_capacity": 2,
       "base_reliability": 86,
       "tags": ["height", "rescue"],
-      "required_trainings": ["incident_commander"]
+      "required_trainings": ["crew_command"]
     },
     {
       "key": "db",
