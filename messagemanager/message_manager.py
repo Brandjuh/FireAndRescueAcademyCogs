@@ -34,8 +34,10 @@ TAX_WARNING_MIN_RATE = 5.0
 TAX_WARNING_MIN_DAYS_BETWEEN = 7
 TAX_WARNING_SEND_DELAY_SECONDS = 90
 TAX_WARNING_MAX_PER_RUN = 5
+TAX_WARNING_AUTOKICK_MAX_PER_RUN = 1
 TAX_WARNING_REASON_CATEGORY = "Contribution"
 TAX_WARNING_REASON_DETAIL = "4.1. 5% donation to alliance - Minimum 5% donation required."
+TAX_WARNING_KICK_REASON_DETAIL = "Automatic kick after three unresolved 5% alliance donation warnings."
 SANCTION_MANAGER_COG_NAMES = ("SanctionsManager", "SanctionManager")
 TAX_WARNING_SANCTION_TYPES = {
     1: "Warning - Official 1st warning",
@@ -115,6 +117,15 @@ class MessageForm:
     body_field: Optional[str] = None
     submit_name: Optional[str] = None
     submit_value: Optional[str] = None
+
+
+@dataclass
+class KickConfirmationForm:
+    """MissionChief confirmation action for kicking an alliance member."""
+
+    action: str
+    method: str
+    payload: List[Tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -395,6 +406,96 @@ def build_reply_payload(html: str, body: str, page_url: str) -> Tuple[str, Paylo
     return action, payload
 
 
+def _is_confirmation_label(value: str) -> bool:
+    normalized = " ".join(str(value or "").split()).casefold()
+    return normalized in {"ok", "okay", "confirm", "yes"} or normalized.startswith("confirm ")
+
+
+def parse_kick_confirmation_form(html: str, page_url: str) -> KickConfirmationForm:
+    """Parse the MissionChief kick confirmation page and select the explicit OK action."""
+    soup = BeautifulSoup(html or "", "html.parser")
+
+    for form in soup.find_all("form"):
+        payload: Payload = []
+        submit_name = None
+        submit_value = None
+
+        for input_el in form.find_all("input"):
+            name = input_el.get("name")
+            field_type = (input_el.get("type") or "text").lower()
+            value = input_el.get("value") or ""
+            if field_type in {"button", "image", "reset"}:
+                continue
+            if field_type == "submit":
+                if _is_confirmation_label(value):
+                    submit_name = name
+                    submit_value = value
+                continue
+            if name:
+                payload.append((name, value))
+
+        for button in form.find_all("button"):
+            button_type = (button.get("type") or "submit").lower()
+            if button_type != "submit":
+                continue
+            value = button.get("value") or _text(button)
+            if _is_confirmation_label(value):
+                submit_name = button.get("name")
+                submit_value = value
+                break
+
+        if submit_value is None:
+            continue
+        if submit_name:
+            payload.append((submit_name, submit_value))
+        return KickConfirmationForm(
+            action=urljoin(page_url, form.get("action") or page_url),
+            method=(form.get("method") or "get").lower(),
+            payload=payload,
+        )
+
+    for link in soup.find_all("a", href=True):
+        if _is_confirmation_label(_text(link)):
+            return KickConfirmationForm(
+                action=urljoin(page_url, link.get("href") or page_url),
+                method="get",
+                payload=[],
+            )
+
+    raise ValueError("MissionChief kick confirmation OK action was not found.")
+
+
+def kick_response_indicates_success(html: str) -> bool:
+    """Return True when a MissionChief response clearly says the member was kicked/removed."""
+    text = _text(BeautifulSoup(html or "", "html.parser")).casefold()
+    success_markers = (
+        "kicked from the alliance",
+        "member kicked",
+        "member removed",
+        "removed from the alliance",
+        "left alliance",
+    )
+    return any(marker in text for marker in success_markers) and not kick_response_indicates_failure(html)
+
+
+def kick_response_indicates_failure(html: str) -> bool:
+    """Return True when a MissionChief response clearly says the kick failed or auth is missing."""
+    text = _text(BeautifulSoup(html or "", "html.parser")).casefold()
+    failure_markers = (
+        "not allowed",
+        "not authorized",
+        "permission",
+        "something went wrong",
+        "kick failed",
+        "cannot",
+        "can't",
+        "not found",
+        "sign in",
+        "log in",
+    )
+    return any(marker in text for marker in failure_markers)
+
+
 def extract_conversation_id(html: str, page_url: str = "") -> Optional[str]:
     """Extract a MissionChief conversation ID from a message page URL or HTML body."""
     url_match = re.search(r"/messages/(\d+)(?:\D|$)", str(page_url or ""))
@@ -476,6 +577,25 @@ def tax_warning_is_due(
         return False
     if not last_warning_at:
         return True
+    min_gap = max(0, int(min_days_between or 0)) * 86400
+    return int(now) - int(last_warning_at) >= min_gap
+
+
+def tax_warning_kick_is_due(
+    *,
+    existing_warning_count: int,
+    last_warning_at: Optional[int],
+    kicked_at: Optional[int],
+    now: int,
+    min_days_between: int,
+) -> bool:
+    """Return whether a low-TAX member is eligible for automatic kick after warning 3."""
+    if kicked_at:
+        return False
+    if int(existing_warning_count or 0) < 3:
+        return False
+    if not last_warning_at:
+        return False
     min_gap = max(0, int(min_days_between or 0)) * 86400
     return int(now) - int(last_warning_at) >= min_gap
 
@@ -857,11 +977,14 @@ class MessageManager(commands.Cog):
             forum_channel_id=DEFAULT_FORUM_CHANNEL_ID,
             conversation_threads={},
             inbox_scan_enabled=True,
-            tax_warning_enabled=False,
+            tax_warning_enabled=True,
+            tax_warning_default_enabled_migrated=False,
             tax_warning_min_rate=TAX_WARNING_MIN_RATE,
             tax_warning_min_days_between=TAX_WARNING_MIN_DAYS_BETWEEN,
             tax_warning_send_delay_seconds=TAX_WARNING_SEND_DELAY_SECONDS,
             tax_warning_max_per_run=TAX_WARNING_MAX_PER_RUN,
+            tax_warning_autokick_enabled=True,
+            tax_warning_autokick_max_per_run=TAX_WARNING_AUTOKICK_MAX_PER_RUN,
             tax_warning_state={},
         )
         self._panel_task: Optional[asyncio.Task] = None
@@ -869,12 +992,20 @@ class MessageManager(commands.Cog):
         self._tax_warning_task: Optional[asyncio.Task] = None
 
     async def cog_load(self):
+        await self._migrate_tax_warning_defaults()
         add_view = getattr(self.bot, "add_view", None)
         if add_view:
             add_view(MessageManagerPanelView(self))
         self._panel_task = asyncio.create_task(self._delayed_panel_start())
         self._inbox_task = asyncio.create_task(self._inbox_scan_loop())
         self._tax_warning_task = asyncio.create_task(self._tax_warning_loop())
+
+    async def _migrate_tax_warning_defaults(self) -> None:
+        """Enable TAX warning automation once for installs created with the old disabled default."""
+        if await self.config.tax_warning_default_enabled_migrated():
+            return
+        await self.config.tax_warning_enabled.set(True)
+        await self.config.tax_warning_default_enabled_migrated.set(True)
 
     async def cog_unload(self):
         if self._panel_task:
@@ -1288,7 +1419,7 @@ class MessageManager(commands.Cog):
     def _sanction_manager(self):
         return get_sanction_manager_cog(self.bot)
 
-    async def _tax_warning_history(self, guild_id: int, mc_user_id: str) -> Tuple[int, Optional[int]]:
+    async def _tax_warning_history(self, guild_id: int, mc_user_id: str) -> Tuple[int, Optional[int], Optional[int]]:
         count = 0
         latest_at = None
         sanction_manager = self._sanction_manager()
@@ -1314,9 +1445,10 @@ class MessageManager(commands.Cog):
         state_entry = state.get(str(mc_user_id)) or {}
         state_count = int(state_entry.get("count") or 0)
         state_latest_at = state_entry.get("last_warning_at")
+        kicked_at = state_entry.get("kicked_at")
         if state_latest_at:
             latest_at = max(int(state_latest_at), int(latest_at or 0))
-        return max(count, state_count), latest_at
+        return max(count, state_count), latest_at, int(kicked_at) if kicked_at else None
 
     async def _tax_warning_candidates(self, guild: discord.Guild) -> List[dict]:
         members = await self._get_alliance_members()
@@ -1331,11 +1463,18 @@ class MessageManager(commands.Cog):
             mc_id, username, rate = tax_warning_member_identity(member)
             if not mc_id or not username or rate >= min_rate:
                 continue
-            warning_count, last_warning_at = await self._tax_warning_history(guild.id, mc_id)
+            warning_count, last_warning_at, kicked_at = await self._tax_warning_history(guild.id, mc_id)
             next_level = tax_warning_level(warning_count)
             due = tax_warning_is_due(
                 existing_warning_count=warning_count,
                 last_warning_at=last_warning_at,
+                now=now,
+                min_days_between=min_days_between,
+            )
+            kick_due = tax_warning_kick_is_due(
+                existing_warning_count=warning_count,
+                last_warning_at=last_warning_at,
+                kicked_at=kicked_at,
                 now=now,
                 min_days_between=min_days_between,
             )
@@ -1347,19 +1486,43 @@ class MessageManager(commands.Cog):
                     "warning_count": warning_count,
                     "next_level": next_level,
                     "last_warning_at": last_warning_at,
+                    "kicked_at": kicked_at,
                     "due": due,
+                    "kick_due": kick_due,
                 }
             )
 
-        candidates.sort(key=lambda item: (not item["due"], item["rate"], item["username"].casefold()))
+        candidates.sort(
+            key=lambda item: (
+                not item["kick_due"],
+                not item["due"],
+                item["rate"],
+                item["username"].casefold(),
+            )
+        )
         return candidates
 
     async def _save_tax_warning_state(self, mc_user_id: str, *, count: int, warning_at: int) -> None:
         async with self.config.tax_warning_state() as state:
-            state[str(mc_user_id)] = {
-                "count": int(count),
-                "last_warning_at": int(warning_at),
-            }
+            entry = dict(state.get(str(mc_user_id)) or {})
+            entry.update(
+                {
+                    "count": int(count),
+                    "last_warning_at": int(warning_at),
+                }
+            )
+            state[str(mc_user_id)] = entry
+
+    async def _save_tax_warning_kick_state(self, mc_user_id: str, *, kicked_at: int) -> None:
+        async with self.config.tax_warning_state() as state:
+            entry = dict(state.get(str(mc_user_id)) or {})
+            entry.update(
+                {
+                    "count": max(3, int(entry.get("count") or 0)),
+                    "kicked_at": int(kicked_at),
+                }
+            )
+            state[str(mc_user_id)] = entry
 
     async def _record_tax_warning_sanction(
         self,
@@ -1391,6 +1554,92 @@ class MessageManager(commands.Cog):
             ),
             status="active",
         )
+
+    async def _record_tax_kick_sanction(
+        self,
+        *,
+        guild: discord.Guild,
+        candidate: dict,
+    ) -> Optional[int]:
+        sanction_manager = self._sanction_manager()
+        create_sanction = getattr(sanction_manager, "create_sanction_for_member", None) if sanction_manager else None
+        if not create_sanction:
+            raise RuntimeError(tax_warning_sanction_manager_error(self.bot))
+
+        bot_user = getattr(self.bot, "user", None)
+        admin_user_id = int(getattr(bot_user, "id", 0) or 0)
+        return create_sanction(
+            guild_id=guild.id,
+            discord_user_id=None,
+            mc_user_id=str(candidate["mc_user_id"]),
+            mc_username=str(candidate["username"]),
+            admin_user_id=admin_user_id,
+            admin_username="MessageManager Auto Tax Kick",
+            sanction_type="Kick",
+            reason_category=TAX_WARNING_REASON_CATEGORY,
+            reason_detail=TAX_WARNING_KICK_REASON_DETAIL,
+            additional_notes=(
+                "Automatic kick after three unresolved TAX warnings. "
+                f"Contribution rate at kick time: {candidate['rate']:.1f}%. "
+                f"Last TAX warning timestamp: {candidate.get('last_warning_at') or 'unknown'}."
+            ),
+            status="active",
+        )
+
+    async def _kick_member_from_alliance(self, mc_user_id: str) -> Tuple[bool, str]:
+        mc_user_id = str(mc_user_id or "").strip()
+        if not mc_user_id.isdigit():
+            return False, "MissionChief user ID is missing or invalid."
+
+        session = await self._get_session()
+        kick_url = f"{BASE_URL}/verband/kick/{mc_user_id}"
+        async with session.get(kick_url, allow_redirects=True) as response:
+            status = getattr(response, "status", None)
+            html = await response.text()
+        if status is not None and int(status) >= 400:
+            return False, f"MissionChief returned HTTP {status} while opening the kick confirmation page."
+        if kick_response_indicates_success(html):
+            return True, "MissionChief confirmed the member was kicked."
+
+        try:
+            form = parse_kick_confirmation_form(html, kick_url)
+        except ValueError as exc:
+            if kick_response_indicates_failure(html):
+                return False, f"{exc} MissionChief response looked like an error or login page."
+            return True, "MissionChief accepted the kick route; no separate confirmation form was found."
+
+        headers = {
+            "Origin": BASE_URL,
+            "Referer": kick_url,
+        }
+        if form.method == "post":
+            async with session.post(form.action, data=form.payload, allow_redirects=True, headers=headers) as response:
+                final_status = getattr(response, "status", None)
+                final_html = await response.text()
+        else:
+            async with session.get(form.action, allow_redirects=True, headers={"Referer": kick_url}) as response:
+                final_status = getattr(response, "status", None)
+                final_html = await response.text()
+
+        if final_status is not None and int(final_status) >= 400:
+            return False, f"MissionChief returned HTTP {final_status} while confirming the kick."
+        if kick_response_indicates_success(final_html):
+            return True, "MissionChief confirmed the member was kicked."
+        return True, "MissionChief accepted the kick confirmation request."
+
+    async def _kick_tax_warning_member(self, guild: discord.Guild, candidate: dict) -> dict:
+        sanction_manager = self._sanction_manager()
+        if not getattr(sanction_manager, "create_sanction_for_member", None):
+            return {"kicked": False, "reason": tax_warning_sanction_manager_error(self.bot)}
+
+        ok, reason = await self._kick_member_from_alliance(str(candidate["mc_user_id"]))
+        if not ok:
+            return {"kicked": False, "reason": reason}
+
+        await self._record_tax_kick_sanction(guild=guild, candidate=candidate)
+        kicked_at = int(time.time())
+        await self._save_tax_warning_kick_state(str(candidate["mc_user_id"]), kicked_at=kicked_at)
+        return {"kicked": True, "reason": reason, "kicked_at": kicked_at}
 
     async def _send_tax_warning(self, guild: discord.Guild, candidate: dict) -> dict:
         level = int(candidate.get("next_level") or 0)
@@ -1433,13 +1682,18 @@ class MessageManager(commands.Cog):
     async def _process_tax_warning_run(self, guild: discord.Guild, *, limit: Optional[int] = None) -> dict:
         candidates = await self._tax_warning_candidates(guild)
         due_candidates = [candidate for candidate in candidates if candidate["due"] and candidate["next_level"]]
+        kick_candidates = [candidate for candidate in candidates if candidate.get("kick_due")]
         max_per_run = int(await self.config.tax_warning_max_per_run())
         if limit is not None:
             max_per_run = min(max_per_run, max(0, int(limit)))
         send_delay = max(0, int(await self.config.tax_warning_send_delay_seconds()))
+        autokick_enabled = bool(await self.config.tax_warning_autokick_enabled())
+        max_kicks_per_run = int(await self.config.tax_warning_autokick_max_per_run())
 
         sent = 0
         failed = 0
+        kicked = 0
+        kick_failed = 0
         errors = []
         for candidate in due_candidates[:max_per_run]:
             result = await self._send_tax_warning(guild, candidate)
@@ -1451,12 +1705,27 @@ class MessageManager(commands.Cog):
             if sent + failed < min(len(due_candidates), max_per_run) and send_delay:
                 await asyncio.sleep(send_delay)
 
+        if autokick_enabled:
+            for candidate in kick_candidates[:max(0, max_kicks_per_run)]:
+                result = await self._kick_tax_warning_member(guild, candidate)
+                if result.get("kicked"):
+                    kicked += 1
+                else:
+                    kick_failed += 1
+                    errors.append(f"{candidate['username']} kick: {result.get('reason', 'unknown error')}")
+                if kicked + kick_failed < min(len(kick_candidates), max_kicks_per_run) and send_delay:
+                    await asyncio.sleep(send_delay)
+
         return {
             "candidates": len(candidates),
             "due": len(due_candidates),
             "sent": sent,
             "failed": failed,
             "skipped": max(0, len(due_candidates) - sent - failed),
+            "kick_due": len(kick_candidates),
+            "kicked": kicked,
+            "kick_failed": kick_failed,
+            "kick_skipped": max(0, len(kick_candidates) - kicked - kick_failed),
             "errors": errors[:5],
         }
 
@@ -1907,6 +2176,8 @@ class MessageManager(commands.Cog):
         min_days = await self.config.tax_warning_min_days_between()
         delay = await self.config.tax_warning_send_delay_seconds()
         max_per_run = await self.config.tax_warning_max_per_run()
+        autokick_enabled = await self.config.tax_warning_autokick_enabled()
+        max_kicks = await self.config.tax_warning_autokick_max_per_run()
         await ctx.send(
             "MessageManager TAX warning settings:\n"
             f"- Enabled: `{enabled}`\n"
@@ -1914,7 +2185,8 @@ class MessageManager(commands.Cog):
             f"- Minimum days between warnings: `{min_days}`\n"
             f"- Send delay between members: `{delay}` seconds\n"
             f"- Max warnings per run: `{max_per_run}`\n"
-            "- Kick automation: `not implemented`"
+            f"- Auto-kick after warning 3: `{autokick_enabled}`\n"
+            f"- Max auto-kicks per run: `{max_kicks}`"
         )
 
     @taxwarnings.command(name="enable")
@@ -1970,6 +2242,26 @@ class MessageManager(commands.Cog):
         await self.config.tax_warning_max_per_run.set(int(count))
         await ctx.send(f"TAX warning max per run set to `{count}`.")
 
+    @taxwarnings.command(name="autokick")
+    @commands.admin()
+    @commands.guild_only()
+    async def taxwarnings_autokick(self, ctx: commands.Context, enabled: bool):
+        """Enable or disable automatic kicks after the third unresolved TAX warning."""
+        await self.config.tax_warning_autokick_enabled.set(bool(enabled))
+        state = "enabled" if enabled else "disabled"
+        await ctx.send(f"TAX warning auto-kick is now `{state}`.")
+
+    @taxwarnings.command(name="maxkicks")
+    @commands.admin()
+    @commands.guild_only()
+    async def taxwarnings_maxkicks(self, ctx: commands.Context, count: int):
+        """Set the maximum automatic TAX kicks per run."""
+        if count < 0 or count > 5:
+            await ctx.send("Max kicks per run must be between 0 and 5.")
+            return
+        await self.config.tax_warning_autokick_max_per_run.set(int(count))
+        await ctx.send(f"TAX warning max auto-kicks per run set to `{count}`.")
+
     @taxwarnings.command(name="preview")
     @commands.admin()
     @commands.guild_only()
@@ -1983,10 +2275,16 @@ class MessageManager(commands.Cog):
                 return
 
         due = [candidate for candidate in candidates if candidate["due"] and candidate["next_level"]]
-        blocked = [candidate for candidate in candidates if not candidate["due"] or not candidate["next_level"]]
+        kick_due = [candidate for candidate in candidates if candidate.get("kick_due")]
+        blocked = [
+            candidate
+            for candidate in candidates
+            if not candidate.get("kick_due") and (not candidate["due"] or not candidate["next_level"])
+        ]
         lines = [
             f"Low-TAX members: `{len(candidates)}`",
             f"Due now: `{len(due)}`",
+            f"Auto-kick due: `{len(kick_due)}`",
             "",
         ]
         for candidate in due[:10]:
@@ -1994,6 +2292,14 @@ class MessageManager(commands.Cog):
                 f"- `{candidate['username']}` ({candidate['rate']:.1f}%) -> warning "
                 f"`{candidate['next_level']}/3`"
             )
+        if kick_due:
+            lines.append("")
+            lines.append("Ready for auto-kick:")
+            for candidate in kick_due[:10]:
+                lines.append(
+                    f"- `{candidate['username']}` ({candidate['rate']:.1f}%) -> kick after "
+                    f"`{candidate['warning_count']}` TAX warnings"
+                )
         if blocked:
             lines.append("")
             lines.append(f"Not due yet or already at max warnings: `{len(blocked)}`")
@@ -2020,6 +2326,10 @@ class MessageManager(commands.Cog):
             f"- Sent: `{result['sent']}`",
             f"- Failed: `{result['failed']}`",
             f"- Still queued/skipped this run: `{result['skipped']}`",
+            f"- Auto-kick due: `{result['kick_due']}`",
+            f"- Auto-kicked: `{result['kicked']}`",
+            f"- Auto-kick failed: `{result['kick_failed']}`",
+            f"- Auto-kick queued/skipped this run: `{result['kick_skipped']}`",
         ]
         if result["errors"]:
             lines.append("")

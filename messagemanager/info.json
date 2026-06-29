@@ -4,7 +4,7 @@
     ],
     "name": "MessageManager",
     "description": "Role-gated MissionChief direct message manager with Discord forum conversation routing.",
-    "install_msg": "MessageManager installed. A panel is posted automatically in the configured panel channel. MissionChief conversations are routed to the configured forum channel and the inbox is checked every 15-20 minutes. TAX warning automation is available but disabled by default. Use `[p]mm` to ensure the panel exists, `[p]messagemanager inspect` to inspect the live MissionChief message form, or `[p]messagemanager send <username> | <subject> | <body>` to send an admin-controlled MissionChief DM.",
+    "install_msg": "MessageManager installed. A panel is posted automatically in the configured panel channel. MissionChief conversations are routed to the configured forum channel and the inbox is checked every 15-20 minutes. TAX warning automation is enabled by default, sends up to three warnings, and can auto-kick unresolved low-TAX members after the final warning delay. Use `[p]mm` to ensure the panel exists, `[p]messagemanager taxwarnings settings` to review automation settings, or `[p]messagemanager send <username> | <subject> | <body>` to send an admin-controlled MissionChief DM.",
     "short": "MissionChief message manager",
     "tags": [
         "missionchief",
@@ -20,7 +20,7 @@
     "requirements": [
         "beautifulsoup4"
     ],
-    "end_user_data_statement": "This cog does not persist message contents. It stores MissionChief conversation-to-forum mappings and TAX warning counters, sends MissionChief direct messages through the configured CookieManager session, and may show redacted diagnostics to admins.",
+    "end_user_data_statement": "This cog does not persist message contents. It stores MissionChief conversation-to-forum mappings and TAX warning counters, sends MissionChief direct messages through the configured CookieManager session, may automatically kick unresolved low-TAX members after three warnings, and may show redacted diagnostics to admins.",
     "min_bot_version": "3.5.0",
     "min_python_version": [
         3,

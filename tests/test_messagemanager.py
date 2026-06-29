@@ -20,15 +20,19 @@ from messagemanager.message_manager import (
     get_loaded_cog_names,
     get_sanction_manager_cog,
     inbox_scan_delay_seconds,
+    kick_response_indicates_failure,
+    kick_response_indicates_success,
     message_was_sent,
     parse_conversation_messages,
     parse_inbox_messages,
+    parse_kick_confirmation_form,
     parse_message_form,
     parse_send_spec,
     resolve_alliance_member_name,
     safe_payload_summary,
     split_discord_content,
     summarize_message_form,
+    tax_warning_kick_is_due,
     tax_warning_sanction_manager_error,
     tax_warning_is_due,
     tax_warning_level,
@@ -104,6 +108,19 @@ REPLY_HTML = """
       <input id="message_conversation_id" name="message[conversation_id]" type="hidden" value="238264" />
       <textarea id="message_body" name="message[body]"></textarea>
       <input id="submit_button" name="submit_button" type="submit" value="Send Message" />
+    </form>
+  </body>
+</html>
+"""
+
+
+KICK_CONFIRM_HTML = """
+<html>
+  <body>
+    <form action="/verband/kick/12345" method="post">
+      <input name="authenticity_token" type="hidden" value="secret" />
+      <input name="commit" type="submit" value="OK" />
+      <a href="/verband">Cancel</a>
     </form>
   </body>
 </html>
@@ -406,6 +423,46 @@ class MessageManagerTests(unittest.TestCase):
             )
         )
 
+    def test_tax_warning_kick_due_requires_three_warnings_and_final_gap(self):
+        now = 1_000_000
+
+        self.assertFalse(
+            tax_warning_kick_is_due(
+                existing_warning_count=2,
+                last_warning_at=now - 10 * 86400,
+                kicked_at=None,
+                now=now,
+                min_days_between=TAX_WARNING_MIN_DAYS_BETWEEN,
+            )
+        )
+        self.assertFalse(
+            tax_warning_kick_is_due(
+                existing_warning_count=3,
+                last_warning_at=now - 6 * 86400,
+                kicked_at=None,
+                now=now,
+                min_days_between=TAX_WARNING_MIN_DAYS_BETWEEN,
+            )
+        )
+        self.assertTrue(
+            tax_warning_kick_is_due(
+                existing_warning_count=3,
+                last_warning_at=now - 7 * 86400,
+                kicked_at=None,
+                now=now,
+                min_days_between=TAX_WARNING_MIN_DAYS_BETWEEN,
+            )
+        )
+        self.assertFalse(
+            tax_warning_kick_is_due(
+                existing_warning_count=3,
+                last_warning_at=now - 7 * 86400,
+                kicked_at=now - 1,
+                now=now,
+                min_days_between=TAX_WARNING_MIN_DAYS_BETWEEN,
+            )
+        )
+
     def test_tax_warning_presets_use_alliance_donation_texts(self):
         self.assertEqual(TAX_WARNING_MIN_DAYS_BETWEEN, 7)
         self.assertEqual(TAX_WARNING_PRESETS[1][0], "Reminder: Please set your alliance donation to 5%")
@@ -426,6 +483,62 @@ class MessageManagerTests(unittest.TestCase):
             ),
             ("456", "CrashTestDummy", 4.5),
         )
+
+    def test_parse_kick_confirmation_form_selects_ok_submit(self):
+        form = parse_kick_confirmation_form(
+            KICK_CONFIRM_HTML,
+            "https://www.missionchief.com/verband/kick/12345",
+        )
+
+        self.assertEqual(form.action, "https://www.missionchief.com/verband/kick/12345")
+        self.assertEqual(form.method, "post")
+        self.assertIn(("authenticity_token", "secret"), form.payload)
+        self.assertIn(("commit", "OK"), form.payload)
+
+    def test_kick_response_detection_rejects_login_or_error_pages(self):
+        self.assertTrue(kick_response_indicates_success("<p>Member kicked from the alliance.</p>"))
+        self.assertTrue(kick_response_indicates_failure("<form>Sign in Password</form>"))
+        self.assertFalse(kick_response_indicates_success("<form>Sign in Password</form>"))
+
+    def test_process_tax_warning_run_autokicks_after_max_warnings(self):
+        class FakeConfig:
+            async def tax_warning_max_per_run(self):
+                return 5
+
+            async def tax_warning_send_delay_seconds(self):
+                return 0
+
+            async def tax_warning_autokick_enabled(self):
+                return True
+
+            async def tax_warning_autokick_max_per_run(self):
+                return 1
+
+        manager = MessageManager.__new__(MessageManager)
+        manager.config = FakeConfig()
+        manager._tax_warning_candidates = AsyncMock(
+            return_value=[
+                {
+                    "mc_user_id": "456",
+                    "username": "CrashTestDummy",
+                    "rate": 0.0,
+                    "warning_count": 3,
+                    "next_level": None,
+                    "due": False,
+                    "kick_due": True,
+                }
+            ]
+        )
+        manager._send_tax_warning = AsyncMock()
+        manager._kick_tax_warning_member = AsyncMock(return_value={"kicked": True})
+
+        result = asyncio.run(manager._process_tax_warning_run(types.SimpleNamespace(id=123)))
+
+        self.assertEqual(result["sent"], 0)
+        self.assertEqual(result["kick_due"], 1)
+        self.assertEqual(result["kicked"], 1)
+        manager._send_tax_warning.assert_not_awaited()
+        manager._kick_tax_warning_member.assert_awaited_once()
 
     def test_sanction_manager_lookup_accepts_loaded_cog_name(self):
         expected_cog = object()
