@@ -945,7 +945,7 @@ def profile_type_summary(kind: str, profile: dict) -> str:
     if type_search:
         return type_search
     if profile.get(RANDOM_TYPE_KEY):
-        return f"Surprise {EVENT_KINDS[kind]['label']} type"
+        return "Suprise"
     fields = dict(profile.get("fields", {}))
     type_value = fields.get(EVENT_RADIO_FIELD) if kind == "event" else fields.get(MISSION_TYPE_FIELD)
     type_value = type_value or fields.get(MISSION_TYPE_FIELD)

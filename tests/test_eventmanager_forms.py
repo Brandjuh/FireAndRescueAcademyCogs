@@ -441,7 +441,7 @@ class EventManagerFormTests(unittest.TestCase):
         summary = profile_start_summary("event", profile)
 
         self.assertIn("Location: Portland, OR, USA", summary)
-        self.assertIn("Type: Surprise Alliance event type", summary)
+        self.assertIn("Type: Suprise", summary)
 
     def test_profile_type_summary_shows_resolved_event_type_label(self):
         profile = route_profile_for_location("event", EVENT_ROUTE_LOCATIONS[0])
@@ -488,7 +488,7 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertTrue(profile[RANDOM_TYPE_KEY])
         self.assertEqual(profile["fields"][ADDRESS_FIELD], "Tokyo, Japan")
         self.assertEqual(profile["fields"]["mission_position[shape]"], "circle")
-        self.assertEqual(profile_type_summary("event", profile), "Surprise Alliance event type")
+        self.assertEqual(profile_type_summary("event", profile), "Suprise")
         self.assertEqual(custom_route_profile_name(location["label"]), "custom_route_tokyo")
 
     def test_custom_route_schedule_helpers_preserve_rotation_order(self):
@@ -925,7 +925,7 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         summary = await EventManager._next_scheduled_profile_summary(fake, "event", "route_new_york_city")
 
         self.assertIn("Location: Portland, OR, USA", summary)
-        self.assertIn("Type: Surprise Alliance event type", summary)
+        self.assertIn("Type: Suprise", summary)
 
     async def test_notification_context_exposes_next_route_profile(self):
         profile_names = route_profile_names("large")
@@ -962,7 +962,7 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         summary = await EventManager.get_next_notification_summary(fake, "large")
 
         self.assertIn("Location: Portland, OR, USA", summary)
-        self.assertIn("Type: Surprise Large scale alliance mission type", summary)
+        self.assertIn("Type: Suprise", summary)
 
     async def test_next_notification_details_include_location_type_and_schedule_time(self):
         profile_names = route_profile_names("event")
@@ -992,7 +992,7 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         details = await EventManager.get_next_notification_details(fake, "event")
 
         self.assertEqual(details["location"], "Portland, OR, USA")
-        self.assertEqual(details["type"], "Surprise Alliance event type")
+        self.assertEqual(details["type"], "Suprise")
         self.assertEqual(details["scheduled_at"].isoformat(), "2099-06-27T15:08:30-04:00")
 
     async def test_reverse_address_replaces_payload_address(self):
