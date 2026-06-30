@@ -57,12 +57,17 @@ from eventmanager.event_manager import (
     LATITUDE_FIELD,
     LONGITUDE_FIELD,
     ADDRESS_FIELD,
+    add_profile_to_schedule_rotation,
     build_browser_event_start_script,
+    custom_route_profile_name,
+    geocoded_location_from_results,
     _ajax_get_headers,
     _ajax_submit_headers,
     _form_position_params,
     _replace_payload_value,
     _validate_free_submit,
+    parse_location_add_request,
+    remove_profile_from_schedule_rotation,
 )
 
 
@@ -469,6 +474,68 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertNotIn(RANDOM_TYPE_KEY, profile)
         self.assertIn("Yakima", profile["fields"][ADDRESS_FIELD])
         self.assertEqual(profile_type_summary("large", profile), "Wildfire")
+
+    def test_parse_custom_event_route_without_type_uses_surprise_type(self):
+        location = {
+            "label": "Tokyo",
+            "latitude": "35.676200",
+            "longitude": "139.650300",
+            "address": "Tokyo, Japan",
+        }
+
+        profile = route_profile_for_location("event", location)
+
+        self.assertTrue(profile[RANDOM_TYPE_KEY])
+        self.assertEqual(profile["fields"][ADDRESS_FIELD], "Tokyo, Japan")
+        self.assertEqual(profile["fields"]["mission_position[shape]"], "circle")
+        self.assertEqual(profile_type_summary("event", profile), "Surprise Alliance event type")
+        self.assertEqual(custom_route_profile_name(location["label"]), "custom_route_tokyo")
+
+    def test_custom_route_schedule_helpers_preserve_rotation_order(self):
+        schedule = {"profiles": ["alpha"], "profile": "alpha", "rotation_index": 0}
+
+        self.assertTrue(add_profile_to_schedule_rotation(schedule, "custom_route_tokyo"))
+        self.assertFalse(add_profile_to_schedule_rotation(schedule, "custom_route_tokyo"))
+        self.assertEqual(schedule["profiles"], ["alpha", "custom_route_tokyo"])
+        self.assertEqual(schedule["profile"], "alpha")
+
+        self.assertTrue(remove_profile_from_schedule_rotation(schedule, "alpha"))
+
+        self.assertEqual(schedule["profiles"], ["custom_route_tokyo"])
+        self.assertEqual(schedule["profile"], "custom_route_tokyo")
+        self.assertEqual(schedule["rotation_index"], 0)
+
+    def test_parse_simple_location_add_request(self):
+        self.assertEqual(
+            parse_location_add_request("alliance event Kansas City, Kansas random"),
+            ("event", "Kansas City, Kansas", ""),
+        )
+        self.assertEqual(
+            parse_location_add_request("alliance missions Amsterdam, Netherlands random"),
+            ("large", "Amsterdam, Netherlands", ""),
+        )
+        self.assertEqual(
+            parse_location_add_request("large scale operation Yakima, Washington | Wildfire"),
+            ("large", "Yakima, Washington", "Wildfire"),
+        )
+
+    def test_geocoded_location_from_results_uses_first_valid_coordinates(self):
+        location = geocoded_location_from_results(
+            "Kansas City, Kansas",
+            [
+                {"display_name": "Broken result"},
+                {
+                    "lat": "39.114053",
+                    "lon": "-94.627464",
+                    "display_name": "Kansas City, Wyandotte County, Kansas, United States",
+                },
+            ],
+        )
+
+        self.assertEqual(location["label"], "Kansas City, Kansas")
+        self.assertEqual(location["latitude"], "39.114053")
+        self.assertEqual(location["longitude"], "-94.627464")
+        self.assertIn("Kansas", location["address"])
 
     def test_find_type_option_matches_wildfire_without_hardcoded_id(self):
         options = [

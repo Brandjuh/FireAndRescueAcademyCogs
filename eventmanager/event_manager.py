@@ -16,6 +16,7 @@ from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
+import aiohttp
 import discord
 from redbot.core import Config, commands
 from redbot.core.utils.chat_formatting import box
@@ -513,6 +514,10 @@ RANDOM_LOCATION_KEY = "random_location"
 RANDOM_TYPE_KEY = "random_type"
 TYPE_SEARCH_KEY = "type_search"
 EVENT_ROUTE_PROFILE_PREFIX = "route_"
+CUSTOM_ROUTE_PROFILE_PREFIX = "custom_route_"
+LOCATION_ADD_HELP = "`eventmanager add alliance event Kansas City, Kansas random`"
+GEOCODE_SEARCH_URL = "https://geocode.maps.co/search"
+GEOCODE_TIMEOUT_SECONDS = 8
 EVENT_NOTIFICATION_CONTEXT_TTL_SECONDS = 10 * 60
 RANDOM_LOCATION_ANCHORS = {
     "nyc": [
@@ -816,6 +821,90 @@ def route_locations_for_kind(kind: Optional[str] = None) -> List[Dict[str, str]]
 def route_profile_names(kind: Optional[str] = None) -> List[str]:
     """Return route profile names in the exact rotation order."""
     return [route_profile_name(location) for location in route_locations_for_kind(kind)]
+
+
+def custom_route_profile_name(label: str) -> str:
+    """Return a stable internal profile name for a custom scheduled location."""
+    return profile_name_from_label(label, prefix=CUSTOM_ROUTE_PROFILE_PREFIX)
+
+
+ADD_KIND_ALIASES: Tuple[Tuple[str, str], ...] = (
+    ("large scale operations", "large"),
+    ("large scale operation", "large"),
+    ("large scale missions", "large"),
+    ("large scale mission", "large"),
+    ("alliance missions", "large"),
+    ("alliance mission", "large"),
+    ("missions", "large"),
+    ("mission", "large"),
+    ("alliance event", "event"),
+    ("alliance events", "event"),
+    ("event", "event"),
+    ("events", "event"),
+)
+
+
+def parse_location_add_request(value: str) -> Tuple[str, str, str]:
+    """Parse the simple admin-facing `eventmanager add ...` command."""
+    text = " ".join(str(value or "").strip().split())
+    if not text:
+        raise ValueError(f"Use {LOCATION_ADD_HELP}")
+
+    lowered = text.casefold()
+    kind = ""
+    remainder = ""
+    for alias, alias_kind in sorted(ADD_KIND_ALIASES, key=lambda item: len(item[0]), reverse=True):
+        if lowered == alias or lowered.startswith(f"{alias} "):
+            kind = alias_kind
+            remainder = text[len(alias) :].strip()
+            break
+    if not kind or not remainder:
+        raise ValueError(f"Use {LOCATION_ADD_HELP}")
+
+    type_search = ""
+    if "|" in remainder:
+        location_text, type_text = [part.strip() for part in remainder.split("|", 1)]
+        if type_text and type_text.casefold() not in {"random", "surprise"}:
+            type_search = type_text
+    else:
+        random_suffixes = (" random", " surprise")
+        for suffix in random_suffixes:
+            if remainder.casefold().endswith(suffix):
+                remainder = remainder[: -len(suffix)].strip()
+                break
+        location_text = remainder
+
+    if not location_text:
+        raise ValueError("Location is required.")
+    return kind, location_text, type_search
+
+
+def geocoded_location_from_results(label: str, results: Any) -> Dict[str, str]:
+    """Return a scheduled location from geocode.maps.co search results."""
+    if not isinstance(results, list):
+        raise ValueError("Geocode did not return a result list.")
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        latitude = result.get("lat")
+        longitude = result.get("lon")
+        if latitude is None or longitude is None:
+            continue
+        try:
+            latitude_value = float(latitude)
+            longitude_value = float(longitude)
+        except (TypeError, ValueError):
+            continue
+        if not -90 <= latitude_value <= 90 or not -180 <= longitude_value <= 180:
+            continue
+        address = str(result.get("display_name") or label).strip()
+        return {
+            "label": str(label or address).strip(),
+            "latitude": f"{latitude_value:.6f}",
+            "longitude": f"{longitude_value:.6f}",
+            "address": address,
+        }
+    raise ValueError("Location could not be resolved to GPS coordinates.")
 
 
 def profile_with_selected_type(kind: str, profile: dict, option: FormOption) -> dict:
@@ -1371,6 +1460,43 @@ def schedule_profile_names(schedule: dict) -> List[str]:
     ]
 
 
+def add_profile_to_schedule_rotation(schedule: dict, profile_name: str) -> bool:
+    """Add a profile to an existing schedule rotation without enabling the schedule."""
+    profile_name = str(profile_name or "").strip().lower()
+    if not profile_name:
+        return False
+    profiles = schedule_profile_names(schedule)
+    added = profile_name not in profiles
+    if added:
+        profiles.append(profile_name)
+    rotation_index = int(schedule.get("rotation_index") or 0)
+    if profiles:
+        rotation_index %= len(profiles)
+        schedule["profiles"] = profiles
+        schedule["rotation_index"] = rotation_index
+        schedule["profile"] = profiles[rotation_index]
+    return added
+
+
+def remove_profile_from_schedule_rotation(schedule: dict, profile_name: str) -> bool:
+    """Remove a profile from a schedule rotation while preserving the remaining order."""
+    profile_name = str(profile_name or "").strip().lower()
+    profiles = schedule_profile_names(schedule)
+    filtered = [profile for profile in profiles if profile != profile_name]
+    if len(filtered) == len(profiles):
+        return False
+    if not filtered:
+        schedule["profiles"] = []
+        schedule["profile"] = None
+        schedule["rotation_index"] = 0
+        return True
+    rotation_index = int(schedule.get("rotation_index") or 0) % len(filtered)
+    schedule["profiles"] = filtered
+    schedule["rotation_index"] = rotation_index
+    schedule["profile"] = filtered[rotation_index]
+    return True
+
+
 def missing_schedule_profiles(kind: str, profile_names: List[str], profiles: dict) -> List[str]:
     """Return configured profile names that do not exist for a schedule kind."""
     kind = normalize_kind(kind)
@@ -1509,6 +1635,9 @@ def schedule_overview_text(
             "- eventmanager schedule off large|event",
             "- eventmanager schedule remove large|event",
             "- eventmanager schedule fire large|event",
+            "- eventmanager add alliance event Kansas City, Kansas random",
+            "- eventmanager add alliance missions Amsterdam, Netherlands random",
+            "- eventmanager locations",
         ]
     )
     return "\n".join(lines).strip()
@@ -2219,6 +2348,7 @@ class EventManager(commands.Cog):
             request_panel_message_id=None,
             request_log_channel_id=None,
             event_requests=[],
+            geocode_api_key="",
         )
         self._task: Optional[asyncio.Task] = None
         self._panel_task: Optional[asyncio.Task] = None
@@ -2315,6 +2445,48 @@ class EventManager(commands.Cog):
         if not session:
             raise RuntimeError("CookieManager did not return a session.")
         return session
+
+    async def _get_geocode_api_key(self) -> str:
+        """Use EventManager's key, or reuse EventPinger's key when that cog is loaded."""
+        key = str(await self.config.geocode_api_key() or "").strip()
+        if key:
+            return key
+        eventpinger = self.bot.get_cog("EventPinger")
+        config = getattr(eventpinger, "config", None)
+        if config and hasattr(config, "geocode_api_key"):
+            return str(await config.geocode_api_key() or "").strip()
+        return ""
+
+    async def _geocode_location(self, location_text: str) -> Dict[str, str]:
+        """Resolve a human location into a fixed MissionChief start location."""
+        api_key = await self._get_geocode_api_key()
+        if not api_key:
+            raise RuntimeError(
+                "Geocode API key is not configured. Set it with `eventmanager geocodekey <key>` "
+                "or load EventPinger with its geocode key configured."
+            )
+
+        eventpinger = self.bot.get_cog("EventPinger")
+        fetcher = getattr(eventpinger, "_fetch_geocode_results", None)
+        if callable(fetcher):
+            results = await fetcher(location_text, api_key)
+            return geocoded_location_from_results(location_text, results)
+
+        params = {
+            "q": location_text,
+            "format": "json",
+            "addressdetails": "1",
+            "limit": "3",
+            "accept-language": "en",
+        }
+        headers = {"Authorization": f"Bearer {api_key}"}
+        timeout = aiohttp.ClientTimeout(total=GEOCODE_TIMEOUT_SECONDS)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(GEOCODE_SEARCH_URL, params=params, headers=headers) as response:
+                if int(response.status) >= 400:
+                    raise RuntimeError(f"Geocode API returned HTTP {response.status}")
+                results = await response.json(content_type=None)
+        return geocoded_location_from_results(location_text, results)
 
     async def _fetch_form(self, kind: str, fields: Optional[Dict[str, str]] = None, *, ajax: bool = False) -> EventForm:
         kind = normalize_kind(kind)
@@ -3711,6 +3883,114 @@ class EventManager(commands.Cog):
             names = sorted(profiles.get(kind, {}).keys())
             lines.append(f"{kind}: {', '.join(names) if names else 'none'}")
         await ctx.send(box("\n".join(lines), lang="ini"))
+
+    @eventmanager.command(name="add")
+    @commands.admin()
+    async def eventmanager_add_location(self, ctx: commands.Context, *, request: str):
+        """Add a scheduled location by place name."""
+        try:
+            kind, location_text, type_search = parse_location_add_request(request)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+
+        status_message = await ctx.send("Resolving location and adding it to the schedule...")
+        try:
+            location = await self._geocode_location(location_text)
+        except Exception as exc:
+            await status_message.edit(content=f"Could not resolve `{location_text}`: {exc}")
+            return
+        if type_search:
+            location[TYPE_SEARCH_KEY] = type_search
+
+        profile_name = custom_route_profile_name(location["label"])
+        profile = route_profile_for_location(kind, location)
+        async with self.config.profiles() as profiles:
+            profiles.setdefault(kind, {})[profile_name] = profile
+
+        async with self.config.schedules() as schedules:
+            schedule = schedules.setdefault(kind, {})
+            was_added = add_profile_to_schedule_rotation(schedule, profile_name)
+            enabled = bool(schedule.get("enabled"))
+
+        status = "added to the scheduler" if was_added else "updated in the scheduler"
+        enabled_text = "on" if enabled else "off"
+        lines = [
+            f"Scheduled {EVENT_KINDS[kind]['label']} location {status}.",
+            f"Location: {location['label']}",
+            f"Resolved as: {location['address']}",
+            f"Coordinates: {location['latitude']}, {location['longitude']}",
+            f"Type: {profile_type_summary(kind, profile)}",
+            f"Automatic schedule: {enabled_text}",
+        ]
+        if not enabled:
+            lines.append(f"Enable it with `eventmanager schedule enable {kind}` when ready.")
+        await status_message.edit(content=box("\n".join(lines), lang="ini"))
+
+    @eventmanager.command(name="locations")
+    @commands.admin()
+    async def eventmanager_locations(self, ctx: commands.Context, kind: Optional[str] = None):
+        """List scheduled EventManager locations."""
+        try:
+            kinds = [normalize_kind(kind)] if kind else ["large", "event"]
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+
+        profiles = await self.config.profiles()
+        schedules = await self.config.schedules()
+        lines = ["EventManager scheduled locations"]
+        for current_kind in kinds:
+            lines.extend(["", f"[{EVENT_KINDS[current_kind]['label']}]"])
+            kind_profiles = profiles.get(current_kind, {})
+            scheduled = set(schedule_profile_names(schedules.get(current_kind, {})))
+            location_items = [
+                (name, profile)
+                for name, profile in sorted(kind_profiles.items())
+                if profile.get("location_label")
+            ]
+            if not location_items:
+                lines.append("none")
+                continue
+            for name, profile in location_items:
+                scheduler_status = "scheduled" if name in scheduled else "saved only"
+                custom_status = "custom" if name.startswith(CUSTOM_ROUTE_PROFILE_PREFIX) else "default"
+                lines.append(f"- {profile.get('location_label') or name} ({custom_status}, {scheduler_status})")
+                lines.append(f"  {profile_location_summary(profile)}")
+                lines.append(f"  {profile_type_summary(current_kind, profile)}")
+        await self._send_schedule_text(ctx, "\n".join(lines))
+
+    @eventmanager.command(name="remove")
+    @commands.admin()
+    async def eventmanager_remove_location(self, ctx: commands.Context, *, request: str):
+        """Remove a custom scheduled location."""
+        try:
+            kind, location_text, _type_search = parse_location_add_request(request)
+        except ValueError as exc:
+            await ctx.send(str(exc))
+            return
+
+        profile_name = custom_route_profile_name(location_text)
+        async with self.config.profiles() as profiles:
+            kind_profiles = profiles.setdefault(kind, {})
+            if profile_name not in kind_profiles:
+                await ctx.send("Custom scheduled location not found.")
+                return
+            del kind_profiles[profile_name]
+
+        async with self.config.schedules() as schedules:
+            removed_from_rotation = remove_profile_from_schedule_rotation(schedules.setdefault(kind, {}), profile_name)
+
+        scheduler_text = "Removed from the scheduler." if removed_from_rotation else "It was not in the scheduler."
+        await ctx.send(f"Deleted `{location_text}`. {scheduler_text}")
+
+    @eventmanager.command(name="geocodekey")
+    @commands.is_owner()
+    async def eventmanager_geocode_key(self, ctx: commands.Context, api_key: str = ""):
+        """Set or clear EventManager's geocode.maps.co API key."""
+        clean_key = str(api_key or "").strip()
+        await self.config.geocode_api_key.set(clean_key)
+        await ctx.send("EventManager geocode API key updated." if clean_key else "EventManager geocode API key cleared.")
 
     @eventmanager.group(name="schedule", invoke_without_command=True)
     @commands.admin()
