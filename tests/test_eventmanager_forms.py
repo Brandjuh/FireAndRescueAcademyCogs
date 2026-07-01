@@ -13,9 +13,11 @@ from eventmanager.event_manager import (
     DEFAULT_TIMEZONE,
     EVENT_ROUTE_LOCATIONS,
     EVENT_RADIO_FIELD,
+    extract_event_location_request_text,
     fields_for_selection,
     field_options_for_kind,
     find_type_option,
+    format_scheduled_locations_text,
     MISSION_TYPE_FIELD,
     normalize_kind,
     normalize_optional_profile_arg,
@@ -24,6 +26,7 @@ from eventmanager.event_manager import (
     next_free_start_from_text,
     next_schedule_attempt_time,
     parse_event_form,
+    parse_event_board_page,
     parse_last_free_mission_time,
     parse_location_or_random_region,
     parse_location_value,
@@ -1149,6 +1152,85 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("missionType: 41", summary)
         self.assertIn("Start Event", summary)
         self.assertNotIn("authenticity_token", summary)
+
+    def test_format_scheduled_locations_text_hides_internal_profile_names(self):
+        profile_name = custom_route_profile_name("Kansas City, Kansas")
+        profiles = {
+            "large": {
+                profile_name: {
+                    "location_label": "Kansas City, Kansas",
+                    "fields": {
+                        LATITUDE_FIELD: "39.099724",
+                        LONGITUDE_FIELD: "-94.578331",
+                        ADDRESS_FIELD: "Kansas City, Jackson County, Missouri, United States",
+                    },
+                    RANDOM_TYPE_KEY: True,
+                }
+            },
+            "event": {
+                profile_name: {
+                    "location_label": "Kansas City, Kansas",
+                    "fields": {
+                        LATITUDE_FIELD: "39.099724",
+                        LONGITUDE_FIELD: "-94.578331",
+                        ADDRESS_FIELD: "Kansas City, Jackson County, Missouri, United States",
+                    },
+                    RANDOM_TYPE_KEY: True,
+                }
+            },
+        }
+        schedules = {
+            "large": {"profiles": [profile_name]},
+            "event": {"profiles": [profile_name]},
+        }
+
+        text = format_scheduled_locations_text(profiles, schedules)
+
+        self.assertIn("[Large scale alliance missions]", text)
+        self.assertIn("[Alliance events]", text)
+        self.assertIn("Kansas City, Jackson County, Missouri, United States", text)
+        self.assertIn("Suprise", text)
+        self.assertNotIn(profile_name, text)
+        self.assertNotIn("saved only", text)
+        self.assertNotIn("(custom,", text)
+        self.assertNotIn("(default,", text)
+
+    def test_extract_event_location_request_text_strips_prefixes_and_markers(self):
+        self.assertEqual(
+            extract_event_location_request_text("Location: Amsterdam, Netherlands"),
+            "Amsterdam, Netherlands",
+        )
+        self.assertEqual(extract_event_location_request_text("[EM-REPLY]\nDone"), "")
+
+    def test_parse_event_board_page_reads_posts_and_reply_form(self):
+        html = """
+        <html><body>
+          <script>var user_id = 42;</script>
+          <div id="post-on-page-1">
+            <a href="/profile/88649">DutchFireFighter</a>
+            <span title="2026-07-01T10:00:00-04:00">date</span>
+            <div class="col-md-11">
+              Location: Kansas City, Kansas
+              <a href="/alliance_posts/123/edit">edit</a>
+            </div>
+          </div>
+          <form id="new_alliance_post" action="/alliance_posts?alliance_thread_id=15292">
+            <input name="authenticity_token" value="token123" />
+          </form>
+          <a href="/alliance_threads/15292?page=3">3</a>
+        </body></html>
+        """
+
+        page = parse_event_board_page(html)
+
+        self.assertEqual(page.current_user_id, "42")
+        self.assertEqual(page.reply_action, "/alliance_posts?alliance_thread_id=15292")
+        self.assertEqual(page.reply_token, "token123")
+        self.assertEqual(page.last_page, 3)
+        self.assertEqual(len(page.posts), 1)
+        self.assertEqual(page.posts[0].post_id, 123)
+        self.assertEqual(page.posts[0].author_id, "88649")
+        self.assertIn("Kansas City", page.posts[0].content)
 
 
 if __name__ == "__main__":
