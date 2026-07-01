@@ -46,9 +46,11 @@ LEGACY_EVENT_ROUTE_TIME = "07:00"
 DEFAULT_PANEL_CHANNEL_ID = 1421256548977606827
 DEFAULT_REQUEST_PANEL_CHANNEL_ID = 1421627971831070730
 DEFAULT_REQUEST_LOG_CHANNEL_ID = 668919729762730004
+EVENT_REQUEST_MIN_CONTRIBUTION_RATE = 5.0
 PANEL_TITLE = "EventManager Control Panel"
 REQUEST_PANEL_TITLE = "Event Requests"
-EVENT_REQUEST_BOARD_THREAD_ID = 15292
+LEGACY_EVENT_REQUEST_BOARD_THREAD_ID = 15292
+EVENT_REQUEST_BOARD_THREAD_ID = 15293
 EVENT_REQUEST_BOARD_POLL_SECONDS = 5 * 60
 EVENT_REQUEST_BOARD_DELETE_AFTER_SECONDS = 12 * 60 * 60
 EVENT_REQUEST_BOARD_CLEANUP_SECONDS = 10 * 60
@@ -1159,6 +1161,89 @@ def profile_location_list_line(profile: dict) -> str:
     return address or label or "Unknown location"
 
 
+def normalized_location_address_key(value: str) -> str:
+    """Normalize a public address for duplicate detection."""
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+
+def normalized_location_coordinate_key(latitude: Any, longitude: Any) -> str:
+    """Return a stable coordinate key for locations that resolve to the same point."""
+    try:
+        lat = round(float(latitude), 5)
+        lon = round(float(longitude), 5)
+    except (TypeError, ValueError):
+        return ""
+    return f"{lat:.5f},{lon:.5f}"
+
+
+def location_duplicate_keys_for_profile(profile: dict) -> set[str]:
+    """Return duplicate-detection keys for a saved profile."""
+    fields = profile_fields_for_start(profile)
+    keys = set()
+    address_key = normalized_location_address_key(fields.get(ADDRESS_FIELD) or profile.get("location_label") or "")
+    if address_key:
+        keys.add(f"address:{address_key}")
+    coordinate_key = normalized_location_coordinate_key(fields.get(LATITUDE_FIELD), fields.get(LONGITUDE_FIELD))
+    if coordinate_key:
+        keys.add(f"coords:{coordinate_key}")
+    return keys
+
+
+def location_duplicate_keys_for_location(location: Dict[str, str]) -> set[str]:
+    """Return duplicate-detection keys for a resolved geocode location."""
+    keys = set()
+    address_key = normalized_location_address_key(location.get("address") or location.get("label") or "")
+    if address_key:
+        keys.add(f"address:{address_key}")
+    coordinate_key = normalized_location_coordinate_key(location.get("latitude"), location.get("longitude"))
+    if coordinate_key:
+        keys.add(f"coords:{coordinate_key}")
+    return keys
+
+
+def find_existing_location_profile_name(kind_profiles: Dict[str, dict], location: Dict[str, str]) -> Optional[str]:
+    """Find an existing profile that already represents the resolved location."""
+    wanted_keys = location_duplicate_keys_for_location(location)
+    if not wanted_keys:
+        return None
+    for profile_name, profile in kind_profiles.items():
+        if wanted_keys & location_duplicate_keys_for_profile(profile):
+            return str(profile_name).strip().lower()
+    return None
+
+
+def deduplicate_schedule_locations(schedule: dict, kind_profiles: Dict[str, dict]) -> int:
+    """Remove duplicate location profiles from one schedule rotation in-place."""
+    profile_names = schedule_profile_names(schedule)
+    if not profile_names:
+        return 0
+
+    deduped = []
+    seen_keys: set[str] = set()
+    removed = 0
+    for profile_name in profile_names:
+        normalized_name = str(profile_name).strip().lower()
+        profile = kind_profiles.get(normalized_name)
+        keys = location_duplicate_keys_for_profile(profile) if profile else {f"profile:{normalized_name}"}
+        if keys & seen_keys:
+            removed += 1
+            continue
+        seen_keys.update(keys)
+        deduped.append(normalized_name)
+
+    if removed:
+        schedule["profiles"] = deduped
+        if deduped:
+            rotation_index = int(schedule.get("rotation_index") or 0) % len(deduped)
+            schedule["rotation_index"] = rotation_index
+            if str(schedule.get("profile") or "").strip().lower() not in deduped:
+                schedule["profile"] = deduped[rotation_index]
+        else:
+            schedule["profile"] = None
+            schedule["rotation_index"] = 0
+    return removed
+
+
 def profile_type_summary(kind: str, profile: dict) -> str:
     """Return the configured MissionChief type summary for a profile."""
     kind = normalize_kind(kind)
@@ -1204,10 +1289,15 @@ def format_scheduled_locations_text(
         kind_profiles = profiles.get(kind, {}) or {}
         scheduled_names = schedule_profile_names(schedules.get(kind, {}) or {})
         rendered = False
+        rendered_keys: set[str] = set()
         for profile_name in scheduled_names:
             profile = kind_profiles.get(str(profile_name).strip().lower())
             if not profile:
                 continue
+            keys = location_duplicate_keys_for_profile(profile) or {f"profile:{str(profile_name).strip().lower()}"}
+            if keys & rendered_keys:
+                continue
+            rendered_keys.update(keys)
             if rendered:
                 lines.append("")
             lines.append(profile_location_list_line(profile))
@@ -2609,6 +2699,7 @@ class EventManager(commands.Cog):
         self.bot.add_view(EventManagerPanelView(self))
         self.bot.add_view(EventRequestPanelView(self))
         await self._migrate_default_event_schedule_time()
+        await self._migrate_event_request_board_thread_id()
         await self._migrate_route_profiles()
         self._task = asyncio.create_task(self._scheduler_loop())
         self._panel_task = asyncio.create_task(self._ensure_panels_after_ready())
@@ -2628,6 +2719,17 @@ class EventManager(commands.Cog):
     async def _migrate_default_event_schedule_time(self):
         async with self.config.schedules() as schedules:
             migrate_default_event_schedule_time(schedules)
+
+    async def _migrate_event_request_board_thread_id(self):
+        """Move the managed EventManager request board from the old thread to the current thread."""
+        try:
+            current = int(await self.config.board_thread_id() or 0)
+        except (TypeError, ValueError):
+            current = 0
+        if current in {0, LEGACY_EVENT_REQUEST_BOARD_THREAD_ID}:
+            await self.config.board_thread_id.set(EVENT_REQUEST_BOARD_THREAD_ID)
+            await self.config.board_guide_post_ids.set({})
+            await self.config.board_last_seen_post_id.set(None)
 
     async def _migrate_route_profiles(self):
         """Add newly configured route profiles to existing route schedules without resetting them."""
@@ -3282,11 +3384,11 @@ class EventManager(commands.Cog):
             description=(
                 "Request a future MissionChief alliance event location.\n\n"
                 "The location is added to both the Alliance Event and Large Scale Alliance Mission scheduler "
-                "with a random MissionChief type."
+                "with a random MissionChief type.\n\n"
+                f"Requester alliance donation must be at least {EVENT_REQUEST_MIN_CONTRIBUTION_RATE:.0f}%."
             ),
             color=discord.Color.blurple(),
         )
-        embed.add_field(name="Privacy", value="Your confirmation is private to you.", inline=False)
         return embed
 
     async def find_existing_request_panel_message(self, channel: Any):
@@ -3330,6 +3432,131 @@ class EventManager(commands.Cog):
         await self.config.request_panel_message_id.set(message.id)
         return message
 
+    @staticmethod
+    def _extract_contribution_rate(member: Optional[dict]) -> Optional[float]:
+        """Read a contribution/tax rate from a MembersScraper member shape."""
+        if not member:
+            return None
+        for key in ("contribution_rate", "contribution", "tax_rate", "tax"):
+            value = member.get(key)
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _members_scraper(self):
+        get_cog = getattr(self.bot, "get_cog", None)
+        if not callable(get_cog):
+            return None
+        return get_cog("MembersScraper") or get_cog("membersscraper")
+
+    async def _get_contribution_rate_for_mc_member(
+        self,
+        *,
+        mc_user_id: Optional[str],
+        mc_username: Optional[str] = None,
+    ) -> Tuple[Optional[float], str]:
+        """Return the latest known contribution rate for one MissionChief member."""
+        members_scraper = self._members_scraper()
+        if not members_scraper:
+            return None, "MembersScraper is not loaded"
+
+        mc_user_id = str(mc_user_id or "").strip()
+        mc_username_key = str(mc_username or "").strip().casefold()
+        if mc_user_id and hasattr(members_scraper, "get_member_snapshot"):
+            try:
+                snapshot = await members_scraper.get_member_snapshot(mc_user_id)
+            except Exception:
+                snapshot = None
+            rate = self._extract_contribution_rate(snapshot)
+            if rate is not None:
+                return rate, f"MembersScraper snapshot for MC ID {mc_user_id}"
+
+        if hasattr(members_scraper, "get_members"):
+            try:
+                members = await members_scraper.get_members()
+            except Exception:
+                members = []
+            for member in members or []:
+                ids = {
+                    str(member.get(key) or "").strip()
+                    for key in ("member_id", "mc_user_id", "user_id", "id")
+                }
+                names = {
+                    str(member.get(key) or "").strip().casefold()
+                    for key in ("username", "name", "mc_username", "mc_name")
+                }
+                if (mc_user_id and mc_user_id in ids) or (mc_username_key and mc_username_key in names):
+                    rate = self._extract_contribution_rate(member)
+                    if rate is not None:
+                        return rate, "MembersScraper current members"
+
+        if mc_user_id:
+            return None, f"MembersScraper has no contribution snapshot for MC ID {mc_user_id}"
+        return None, "MembersScraper has no usable contribution snapshot"
+
+    async def _get_discord_request_contribution_rate(self, user: Any) -> Tuple[Optional[float], str, Optional[str]]:
+        """Return contribution rate and MC ID for a Discord requester."""
+        get_cog = getattr(self.bot, "get_cog", None)
+        if not callable(get_cog):
+            return None, "Bot cog registry is unavailable", None
+
+        member_sync = get_cog("MemberSync") or get_cog("membersync")
+        if not member_sync:
+            return None, "MemberSync is not loaded", None
+
+        link = None
+        method = getattr(member_sync, "get_link_for_discord", None)
+        if callable(method):
+            try:
+                link = method(int(user.id))
+                if asyncio.iscoroutine(link):
+                    link = await link
+            except Exception:
+                link = None
+        if not link:
+            return None, "No approved MemberSync link for this Discord user", None
+
+        mc_user_id = str(link.get("mc_user_id") or link.get("user_id") or "").strip()
+        if not mc_user_id:
+            return None, "MemberSync link has no MissionChief ID", None
+
+        mc_username = link.get("mc_username") or link.get("mc_name") or link.get("name")
+        rate, source = await self._get_contribution_rate_for_mc_member(
+            mc_user_id=mc_user_id,
+            mc_username=mc_username,
+        )
+        return rate, source, mc_user_id
+
+    async def _require_request_contribution_rate(
+        self,
+        *,
+        discord_user: Optional[Any],
+        mc_user_id: Optional[str],
+        requester_name: str,
+    ) -> Tuple[float, str, Optional[str]]:
+        """Require known requester contribution >= configured minimum."""
+        if discord_user is not None:
+            rate, source, resolved_mc_user_id = await self._get_discord_request_contribution_rate(discord_user)
+        else:
+            resolved_mc_user_id = str(mc_user_id or "").strip() or None
+            rate, source = await self._get_contribution_rate_for_mc_member(
+                mc_user_id=resolved_mc_user_id,
+                mc_username=requester_name,
+            )
+
+        if rate is None:
+            raise ValueError(f"Could not verify alliance donation. {source}.")
+        if rate < EVENT_REQUEST_MIN_CONTRIBUTION_RATE:
+            raise ValueError(
+                f"Latest alliance donation is {rate:.1f}%, below the required "
+                f"{EVENT_REQUEST_MIN_CONTRIBUTION_RATE:.1f}%."
+            )
+        return rate, source, resolved_mc_user_id
+
     async def _add_location_to_scheduler(
         self,
         location: Dict[str, str],
@@ -3338,22 +3565,32 @@ class EventManager(commands.Cog):
     ) -> Dict[str, Dict[str, Any]]:
         """Add or update a resolved location in the selected scheduler rotations."""
         result: Dict[str, Dict[str, Any]] = {}
-        profile_name = custom_route_profile_name(location["label"])
         async with self.config.profiles() as profiles:
             for kind in kinds:
                 kind = normalize_kind(kind)
-                profile = route_profile_for_location(kind, location)
-                profiles.setdefault(kind, {})[profile_name] = profile
+                kind_profiles = profiles.setdefault(kind, {})
+                existing_profile_name = find_existing_location_profile_name(kind_profiles, location)
+                profile_name = existing_profile_name or custom_route_profile_name(location["label"])
+                if existing_profile_name:
+                    profile = kind_profiles.get(profile_name) or route_profile_for_location(kind, location)
+                else:
+                    profile = route_profile_for_location(kind, location)
+                    kind_profiles[profile_name] = profile
                 result[kind] = {
                     "profile_name": profile_name,
                     "profile": profile,
+                    "reused_existing": bool(existing_profile_name),
                 }
 
         async with self.config.schedules() as schedules:
+            profiles = await self.config.profiles()
             for kind in kinds:
                 kind = normalize_kind(kind)
                 schedule = schedules.setdefault(kind, {})
+                kind_profiles = profiles.get(kind, {}) or {}
+                profile_name = str(result.get(kind, {}).get("profile_name") or custom_route_profile_name(location["label"]))
                 result.setdefault(kind, {})["added"] = add_profile_to_schedule_rotation(schedule, profile_name)
+                result[kind]["deduplicated"] = deduplicate_schedule_locations(schedule, kind_profiles)
                 result[kind]["enabled"] = bool(schedule.get("enabled"))
         return result
 
@@ -3376,6 +3613,13 @@ class EventManager(commands.Cog):
 
         created_at = datetime.now(timezone.utc)
         requester_id = getattr(discord_user, "id", None)
+        contribution_rate, contribution_source, resolved_mc_user_id = await self._require_request_contribution_rate(
+            discord_user=discord_user,
+            mc_user_id=mc_user_id,
+            requester_name=requester_name,
+        )
+        if resolved_mc_user_id:
+            mc_user_id = resolved_mc_user_id
         request_id_seed = requester_id or mc_user_id or board_post_id or 0
         try:
             request_id_suffix = int(request_id_seed) % 10000
@@ -3397,6 +3641,8 @@ class EventManager(commands.Cog):
             "board_post_id": board_post_id,
             "board_created_at": board_created_at,
             "location": location_text,
+            "contribution_rate": contribution_rate,
+            "contribution_source": contribution_source,
             "resolved_label": resolved["label"],
             "resolved_address": resolved["address"],
             "latitude": resolved["latitude"],
@@ -3467,6 +3713,9 @@ class EventManager(commands.Cog):
         embed.add_field(name="Source", value=str(record.get("source") or "unknown"), inline=True)
         embed.add_field(name="Requested by", value=requested_by, inline=True)
         embed.add_field(name="Requested location", value=truncate_discord_text(record.get("location") or "Unknown", 1024), inline=False)
+        contribution = record.get("contribution_rate")
+        if contribution is not None:
+            embed.add_field(name="Contribution", value=f"{float(contribution):.1f}%", inline=True)
         embed.add_field(
             name="Resolved location",
             value=truncate_discord_text(record.get("resolved_address") or "Unknown", 1024),
@@ -3497,6 +3746,7 @@ class EventManager(commands.Cog):
             "location": record.get("location"),
             "resolved_address": record.get("resolved_address"),
             "type": record.get("type") or "Suprise",
+            "contribution_rate": record.get("contribution_rate"),
             "source": "discord",
         }
         try:
@@ -3551,6 +3801,8 @@ class EventManager(commands.Cog):
                 "",
                 "Requested locations are added to both Alliance Events and Large Scale Alliance Missions.",
                 "The MissionChief type is set to Suprise unless staff changes it later.",
+                f"Requests are only accepted when the requester alliance donation is at least "
+                f"{EVENT_REQUEST_MIN_CONTRIBUTION_RATE:.0f}%.",
                 "",
                 "Request and bot reply posts are automatically removed after 12 hours.",
             ]
@@ -4759,15 +5011,12 @@ class EventManager(commands.Cog):
         if type_search:
             location[TYPE_SEARCH_KEY] = type_search
 
-        profile_name = custom_route_profile_name(location["label"])
-        profile = route_profile_for_location(kind, location)
-        async with self.config.profiles() as profiles:
-            profiles.setdefault(kind, {})[profile_name] = profile
-
-        async with self.config.schedules() as schedules:
-            schedule = schedules.setdefault(kind, {})
-            was_added = add_profile_to_schedule_rotation(schedule, profile_name)
-            enabled = bool(schedule.get("enabled"))
+        result = await self._add_location_to_scheduler(location, kinds=(kind,))
+        details = result.get(kind, {})
+        profile = details.get("profile") or route_profile_for_location(kind, location)
+        was_added = bool(details.get("added"))
+        enabled = bool(details.get("enabled"))
+        deduplicated = int(details.get("deduplicated") or 0)
 
         status = "added to the scheduler" if was_added else "updated in the scheduler"
         enabled_text = "on" if enabled else "off"
@@ -4779,6 +5028,8 @@ class EventManager(commands.Cog):
             f"Type: {profile_type_summary(kind, profile)}",
             f"Automatic schedule: {enabled_text}",
         ]
+        if deduplicated:
+            lines.append(f"Duplicate scheduler entries removed: {deduplicated}")
         if not enabled:
             lines.append(f"Enable it with `eventmanager schedule enable {kind}` when ready.")
         await status_message.edit(content=box("\n".join(lines), lang="ini"))

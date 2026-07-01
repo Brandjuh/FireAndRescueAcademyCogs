@@ -8,7 +8,10 @@ from eventmanager.event_manager import (
     BROWSER_PREPARE_START_SCRIPT,
     build_browser_start_config,
     build_payload,
+    deduplicate_schedule_locations,
     EVENT_DEFAULT_OVERRIDES,
+    EVENT_REQUEST_MIN_CONTRIBUTION_RATE,
+    EVENT_REQUEST_BOARD_THREAD_ID,
     DEFAULT_EVENT_ROUTE_TIME,
     DEFAULT_TIMEZONE,
     EVENT_ROUTE_LOCATIONS,
@@ -18,6 +21,7 @@ from eventmanager.event_manager import (
     field_options_for_kind,
     find_type_option,
     format_scheduled_locations_text,
+    location_duplicate_keys_for_location,
     MISSION_TYPE_FIELD,
     normalize_kind,
     normalize_optional_profile_arg,
@@ -58,6 +62,7 @@ from eventmanager.event_manager import (
     valid_time,
     EventManager,
     LATITUDE_FIELD,
+    LEGACY_EVENT_REQUEST_BOARD_THREAD_ID,
     LONGITUDE_FIELD,
     ADDRESS_FIELD,
     add_profile_to_schedule_rotation,
@@ -190,13 +195,57 @@ class FakeSession:
         return self.response
 
 
+class FakeConfigValue:
+    def __init__(self, value=None):
+        self.value = value
+
+    async def __call__(self):
+        return self.value
+
+    async def set(self, value):
+        self.value = value
+
+
+class FakeConfigSection:
+    def __init__(self, value):
+        self.value = value
+
+    def __call__(self):
+        return self
+
+    def __await__(self):
+        async def _read():
+            return self.value
+
+        return _read().__await__()
+
+    async def __aenter__(self):
+        return self.value
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 class FakeEventManagerConfig:
-    def __init__(self, schedules, profiles, last_runs=None, retry_after=None, last_started_at=None):
+    def __init__(
+        self,
+        schedules,
+        profiles,
+        last_runs=None,
+        retry_after=None,
+        last_started_at=None,
+        board_thread_id=None,
+        board_guide_post_ids=None,
+        board_last_seen_post_id=None,
+    ):
         self._schedules = schedules
         self._profiles = profiles
         self._last_runs = last_runs or {}
         self._retry_after = retry_after or {}
         self._last_started_at = last_started_at or {}
+        self.board_thread_id = FakeConfigValue(board_thread_id)
+        self.board_guide_post_ids = FakeConfigValue(board_guide_post_ids or {})
+        self.board_last_seen_post_id = FakeConfigValue(board_last_seen_post_id)
 
     async def schedules(self):
         return self._schedules
@@ -905,6 +954,22 @@ class EventManagerFormTests(unittest.TestCase):
 
 
 class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
+    async def test_migrates_legacy_event_request_board_thread(self):
+        fake = type("FakeEventManager", (), {})()
+        fake.config = FakeEventManagerConfig(
+            schedules={},
+            profiles={},
+            board_thread_id=LEGACY_EVENT_REQUEST_BOARD_THREAD_ID,
+            board_guide_post_ids={"guide": 123, "locations": 456},
+            board_last_seen_post_id=789,
+        )
+
+        await EventManager._migrate_event_request_board_thread_id(fake)
+
+        self.assertEqual(await fake.config.board_thread_id(), EVENT_REQUEST_BOARD_THREAD_ID)
+        self.assertEqual(await fake.config.board_guide_post_ids(), {})
+        self.assertIsNone(await fake.config.board_last_seen_post_id())
+
     async def test_next_scheduled_profile_summary_uses_profile_after_current(self):
         profile_names = route_profile_names("event")
         event_locations = route_locations_for_kind("event")
@@ -1195,6 +1260,120 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("(custom,", text)
         self.assertNotIn("(default,", text)
 
+    def test_format_scheduled_locations_text_suppresses_duplicate_places(self):
+        first_profile = custom_route_profile_name("Kansas City")
+        second_profile = custom_route_profile_name("Kansas City Duplicate")
+        duplicate_fields = {
+            LATITUDE_FIELD: "39.099724",
+            LONGITUDE_FIELD: "-94.578331",
+            ADDRESS_FIELD: "Kansas City, Jackson County, Missouri, United States",
+        }
+        profiles = {
+            "large": {
+                first_profile: {
+                    "location_label": "Kansas City",
+                    "fields": duplicate_fields,
+                    RANDOM_TYPE_KEY: True,
+                },
+                second_profile: {
+                    "location_label": "Kansas City Duplicate",
+                    "fields": dict(duplicate_fields),
+                    RANDOM_TYPE_KEY: True,
+                },
+            }
+        }
+        schedules = {"large": {"profiles": [first_profile, second_profile]}}
+
+        text = format_scheduled_locations_text(profiles, schedules, kinds=["large"])
+
+        self.assertEqual(text.count("Kansas City, Jackson County, Missouri, United States"), 1)
+
+    def test_deduplicate_schedule_locations_removes_duplicate_profiles(self):
+        first_profile = custom_route_profile_name("Kansas City")
+        second_profile = custom_route_profile_name("Kansas City Duplicate")
+        profiles = {
+            first_profile: {
+                "location_label": "Kansas City",
+                "fields": {
+                    LATITUDE_FIELD: "39.099724",
+                    LONGITUDE_FIELD: "-94.578331",
+                    ADDRESS_FIELD: "Kansas City, Jackson County, Missouri, United States",
+                },
+            },
+            second_profile: {
+                "location_label": "Kansas City Duplicate",
+                "fields": {
+                    LATITUDE_FIELD: "39.0997244",
+                    LONGITUDE_FIELD: "-94.5783314",
+                    ADDRESS_FIELD: "Kansas City, Jackson County, Missouri, United States",
+                },
+            },
+        }
+        schedule = {"profiles": [first_profile, second_profile], "profile": second_profile, "rotation_index": 1}
+
+        removed = deduplicate_schedule_locations(schedule, profiles)
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(schedule["profiles"], [first_profile])
+        self.assertEqual(schedule["profile"], first_profile)
+        self.assertEqual(schedule["rotation_index"], 0)
+
+    def test_location_duplicate_keys_include_address_and_coordinates(self):
+        keys = location_duplicate_keys_for_location(
+            {
+                "address": "Kansas City, Jackson County, Missouri, United States",
+                "latitude": "39.099724",
+                "longitude": "-94.578331",
+            }
+        )
+
+        self.assertIn("address:kansas city jackson county missouri united states", keys)
+        self.assertIn("coords:39.09972,-94.57833", keys)
+
+    def test_extract_contribution_rate_accepts_tax_aliases(self):
+        self.assertEqual(EventManager._extract_contribution_rate({"tax": "5"}), EVENT_REQUEST_MIN_CONTRIBUTION_RATE)
+        self.assertEqual(EventManager._extract_contribution_rate({"contribution_rate": 10}), 10.0)
+        self.assertIsNone(EventManager._extract_contribution_rate({"tax": "unknown"}))
+
+    async def test_add_location_to_scheduler_reuses_existing_location_profile(self):
+        existing_profile = custom_route_profile_name("Kansas City")
+        existing = {
+            "location_label": "Kansas City",
+            "fields": {
+                LATITUDE_FIELD: "39.099724",
+                LONGITUDE_FIELD: "-94.578331",
+                ADDRESS_FIELD: "Kansas City, Jackson County, Missouri, United States",
+            },
+            TYPE_SEARCH_KEY: "wildfire",
+        }
+        profiles = {"large": {existing_profile: dict(existing)}}
+        schedules = {"large": {"profiles": [existing_profile], "profile": existing_profile, "rotation_index": 0}}
+        fake = type("FakeEventManager", (), {})()
+        fake.config = type(
+            "FakeConfig",
+            (),
+            {
+                "profiles": FakeConfigSection(profiles),
+                "schedules": FakeConfigSection(schedules),
+            },
+        )()
+
+        result = await EventManager._add_location_to_scheduler(
+            fake,
+            {
+                "label": "Kansas City again",
+                "address": "Kansas City, Jackson County, Missouri, United States",
+                "latitude": "39.0997244",
+                "longitude": "-94.5783314",
+            },
+            kinds=("large",),
+        )
+
+        self.assertTrue(result["large"]["reused_existing"])
+        self.assertFalse(result["large"]["added"])
+        self.assertEqual(schedules["large"]["profiles"], [existing_profile])
+        self.assertEqual(profiles["large"][existing_profile], existing)
+
     def test_extract_event_location_request_text_strips_prefixes_and_markers(self):
         self.assertEqual(
             extract_event_location_request_text("Location: Amsterdam, Netherlands"),
@@ -1214,17 +1393,17 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
               <a href="/alliance_posts/123/edit">edit</a>
             </div>
           </div>
-          <form id="new_alliance_post" action="/alliance_posts?alliance_thread_id=15292">
+          <form id="new_alliance_post" action="/alliance_posts?alliance_thread_id=15293">
             <input name="authenticity_token" value="token123" />
           </form>
-          <a href="/alliance_threads/15292?page=3">3</a>
+          <a href="/alliance_threads/15293?page=3">3</a>
         </body></html>
         """
 
         page = parse_event_board_page(html)
 
         self.assertEqual(page.current_user_id, "42")
-        self.assertEqual(page.reply_action, "/alliance_posts?alliance_thread_id=15292")
+        self.assertEqual(page.reply_action, "/alliance_posts?alliance_thread_id=15293")
         self.assertEqual(page.reply_token, "token123")
         self.assertEqual(page.last_page, 3)
         self.assertEqual(len(page.posts), 1)
