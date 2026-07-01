@@ -1253,7 +1253,8 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("[Large scale alliance missions]", text)
         self.assertIn("[Alliance events]", text)
-        self.assertIn("Kansas City, Jackson County, Missouri, United States / Suprise", text)
+        self.assertIn("Kansas City, Jackson County, Missouri, United States", text)
+        self.assertNotIn("Suprise", text)
         self.assertNotIn(profile_name, text)
         self.assertNotIn("saved only", text)
         self.assertNotIn("(custom,", text)
@@ -1289,7 +1290,8 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
 
         text = format_scheduled_locations_text(profiles, schedules, kinds=["event"])
 
-        self.assertLess(text.index("Amsterdam, Netherlands / Suprise"), text.index("Copenhagen, Denmark / Suprise"))
+        self.assertLess(text.index("Amsterdam, Netherlands"), text.index("Copenhagen, Denmark"))
+        self.assertNotIn("/ Suprise", text)
         self.assertNotIn("\n\n", text)
 
     def test_format_scheduled_locations_text_suppresses_duplicate_places(self):
@@ -1436,7 +1438,20 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("Last updated:", text)
         self.assertRegex(text, r"Last updated: \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC")
-        self.assertIn("Copenhagen, Denmark / Suprise", text)
+        self.assertIn("Copenhagen, Denmark", text)
+        self.assertNotIn("/ Suprise", text)
+
+    def test_board_guide_content_has_markup_without_type_or_bot_text(self):
+        fake = type("FakeEventManager", (), {})()
+
+        text = EventManager._build_event_request_board_guide_content(fake)
+
+        self.assertIn("[size=18][b]Event Location Requests[/b][/size]", text)
+        self.assertIn("[b]How to request a location[/b]", text)
+        self.assertNotIn("MissionChief type", text)
+        self.assertNotIn("Suprise", text)
+        self.assertNotIn("The bot", text)
+        self.assertNotIn("bot reply", text.casefold())
 
     def test_extract_event_location_request_text_strips_prefixes_and_markers(self):
         self.assertEqual(

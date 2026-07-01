@@ -1299,8 +1299,7 @@ def format_scheduled_locations_text(
                 continue
             rendered_keys.update(keys)
             location = profile_location_list_line(profile)
-            event_type = profile_type_summary(kind, profile)
-            entries.append((location.casefold(), f"{location} / {event_type}"))
+            entries.append((location.casefold(), location))
         if entries:
             lines.extend(entry for _, entry in sorted(entries, key=lambda item: item[0]))
         else:
@@ -2445,8 +2444,7 @@ class EventRequestModal(discord.ui.Modal, title="Request Event Location"):
 
         await interaction.followup.send(
             "Your event location was added to the scheduler.\n"
-            f"Location: `{record.get('resolved_address') or record.get('location')}`\n"
-            "Type: `Suprise`",
+            f"Location: `{record.get('resolved_address') or record.get('location')}`",
             ephemeral=True,
         )
 
@@ -3383,8 +3381,7 @@ class EventManager(commands.Cog):
             title=REQUEST_PANEL_TITLE,
             description=(
                 "Request a future MissionChief alliance event location.\n\n"
-                "The location is added to both the Alliance Event and Large Scale Alliance Mission scheduler "
-                "with a random MissionChief type.\n\n"
+                "The location is added to both the Alliance Event and Large Scale Alliance Mission scheduler.\n\n"
                 f"Requester alliance donation must be at least {EVENT_REQUEST_MIN_CONTRIBUTION_RATE:.0f}%."
             ),
             color=discord.Color.blurple(),
@@ -3721,7 +3718,6 @@ class EventManager(commands.Cog):
             value=truncate_discord_text(record.get("resolved_address") or "Unknown", 1024),
             inline=False,
         )
-        embed.add_field(name="Type", value=str(record.get("type") or "Suprise"), inline=True)
         embed.add_field(name="Added to", value="Alliance Events and Large Scale Alliance Missions", inline=False)
         await channel.send(embed=embed)
 
@@ -3787,24 +3783,24 @@ class EventManager(commands.Cog):
         return "\n".join(
             [
                 EVENT_REQUEST_BOARD_GUIDE_MARKER,
-                "Event Location Requests",
+                "[size=18][b]Event Location Requests[/b][/size]",
                 "",
-                "This post is maintained automatically by Fire & Rescue Academy.",
+                "[i]This post is maintained automatically by Fire & Rescue Academy.[/i]",
                 "",
-                "How to request a location:",
+                "[b]How to request a location[/b]",
                 "Post one clear location in this thread.",
                 "",
-                "Examples:",
+                "[b]Examples[/b]",
                 "- Kansas City, Kansas",
                 "- Amsterdam, Netherlands",
                 "- Bermuda Islands",
                 "",
+                "[b]What happens next[/b]",
                 "Requested locations are added to both Alliance Events and Large Scale Alliance Missions.",
-                "The MissionChief type is set to Suprise unless staff changes it later.",
                 f"Requests are only accepted when the requester alliance donation is at least "
                 f"{EVENT_REQUEST_MIN_CONTRIBUTION_RATE:.0f}%.",
                 "",
-                "Request and bot reply posts are automatically removed after 12 hours.",
+                "[i]Request and reply posts are automatically removed after 12 hours.[/i]",
             ]
         )
 
@@ -3815,13 +3811,13 @@ class EventManager(commands.Cog):
         return "\n".join(
             [
                 EVENT_REQUEST_BOARD_LOCATIONS_MARKER,
-                "Current EventManager Scheduler Locations",
-                f"Last updated: {updated_at}",
+                "[size=18][b]Current EventManager Scheduler Locations[/b][/size]",
+                f"[i]Last updated: {updated_at}[/i]",
                 "",
                 format_scheduled_locations_text(
                     profiles,
                     schedules,
-                    title="Current scheduled locations",
+                    title="[b]Current scheduled locations[/b]",
                 ),
             ]
         )
@@ -4210,9 +4206,8 @@ class EventManager(commands.Cog):
                         EVENT_REQUEST_BOARD_REPLY_MARKER,
                         f"Event location request processed for {post.author_name}.",
                         "",
-                        f"Added location: {record.get('resolved_address') or record.get('location')}",
-                        "Type: Suprise",
-                        "Usable for: Alliance Events and Large Scale Alliance Missions",
+                        f"[b]Added location[/b]: {record.get('resolved_address') or record.get('location')}",
+                        "[b]Usable for[/b]: Alliance Events and Large Scale Alliance Missions",
                     ]
                 )
             except Exception as exc:
@@ -4221,9 +4216,9 @@ class EventManager(commands.Cog):
                         EVENT_REQUEST_BOARD_REPLY_MARKER,
                         f"Event location request could not be processed for {post.author_name}.",
                         "",
-                        f"Reason: {exc}",
+                        f"[b]Reason[/b]: {exc}",
                         "",
-                        "Post one clear location, for example:",
+                        "[b]Post one clear location, for example[/b]",
                         "Kansas City, Kansas",
                         "Amsterdam, Netherlands",
                     ]
@@ -4909,7 +4904,6 @@ class EventManager(commands.Cog):
             f"Alliance event first-start schedule: {weekly_day} at {weekly_time} {DEFAULT_TIMEZONE}.",
             "After a successful scheduled or manual scheduled start, future attempts use the actual start time.",
             "Alliance event defaults: Large area, Circle, Every 30 seconds.",
-            "MissionChief type: random live option at start time, except profiles with a configured type search.",
             "",
             "Large mission rotation order:",
             ", ".join(large_profile_names),

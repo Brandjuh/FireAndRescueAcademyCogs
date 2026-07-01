@@ -1535,10 +1535,11 @@ class BuildingManagerBrowserDiagnosticsTests(unittest.TestCase):
 
         self.assertIn("[BM-GUIDE:overview]", content)
         self.assertIn("<Google Maps link>", content)
-        self.assertIn("The bot detects the type", content)
+        self.assertIn("Fire & Rescue Academy detects the type", content)
         self.assertIn("Clinics, doctor offices, museums", content)
         self.assertIn("removed after 12 hours", content)
         self.assertNotIn("This post is maintained automatically by the Fire & Rescue Academy bot", content)
+        self.assertNotIn("The bot", content)
 
     def test_building_board_reply_with_id_returns_new_bot_reply_post_id(self):
         manager = BuildingManager.__new__(BuildingManager)

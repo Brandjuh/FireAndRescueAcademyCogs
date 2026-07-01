@@ -497,6 +497,7 @@ def test_build_board_guide_content_lists_availability_and_training_names():
     assert "Hotshot Crew Training" in content
     assert "Small typos are supported" in content
     assert "Fire & Rescue Academy bot" not in content
+    assert "The bot" not in content
     assert "Discord requests support automatic reminders" in content
 
 
