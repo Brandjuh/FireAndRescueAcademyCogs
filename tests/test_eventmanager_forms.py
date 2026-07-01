@@ -1446,7 +1446,9 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
 
         text = EventManager._build_event_request_board_guide_content(fake)
 
-        self.assertIn("[size=18][b]Event Location Requests[/b][/size]", text)
+        self.assertIn("[b]Event Location Requests[/b]", text)
+        self.assertNotIn("[size=", text)
+        self.assertNotIn("[i]", text)
         self.assertIn("[b]How to request a location[/b]", text)
         self.assertNotIn("MissionChief type", text)
         self.assertNotIn("Suprise", text)
