@@ -8,7 +8,9 @@ from eventmanager.event_manager import (
     BROWSER_PREPARE_START_SCRIPT,
     build_browser_start_config,
     build_payload,
+    deduplicate_schedule_locations,
     EVENT_DEFAULT_OVERRIDES,
+    EVENT_REQUEST_MIN_CONTRIBUTION_RATE,
     EVENT_REQUEST_BOARD_THREAD_ID,
     DEFAULT_EVENT_ROUTE_TIME,
     DEFAULT_TIMEZONE,
@@ -19,6 +21,7 @@ from eventmanager.event_manager import (
     field_options_for_kind,
     find_type_option,
     format_scheduled_locations_text,
+    location_duplicate_keys_for_location,
     MISSION_TYPE_FIELD,
     normalize_kind,
     normalize_optional_profile_arg,
@@ -201,6 +204,26 @@ class FakeConfigValue:
 
     async def set(self, value):
         self.value = value
+
+
+class FakeConfigSection:
+    def __init__(self, value):
+        self.value = value
+
+    def __call__(self):
+        return self
+
+    def __await__(self):
+        async def _read():
+            return self.value
+
+        return _read().__await__()
+
+    async def __aenter__(self):
+        return self.value
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
 
 class FakeEventManagerConfig:
@@ -1236,6 +1259,120 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("saved only", text)
         self.assertNotIn("(custom,", text)
         self.assertNotIn("(default,", text)
+
+    def test_format_scheduled_locations_text_suppresses_duplicate_places(self):
+        first_profile = custom_route_profile_name("Kansas City")
+        second_profile = custom_route_profile_name("Kansas City Duplicate")
+        duplicate_fields = {
+            LATITUDE_FIELD: "39.099724",
+            LONGITUDE_FIELD: "-94.578331",
+            ADDRESS_FIELD: "Kansas City, Jackson County, Missouri, United States",
+        }
+        profiles = {
+            "large": {
+                first_profile: {
+                    "location_label": "Kansas City",
+                    "fields": duplicate_fields,
+                    RANDOM_TYPE_KEY: True,
+                },
+                second_profile: {
+                    "location_label": "Kansas City Duplicate",
+                    "fields": dict(duplicate_fields),
+                    RANDOM_TYPE_KEY: True,
+                },
+            }
+        }
+        schedules = {"large": {"profiles": [first_profile, second_profile]}}
+
+        text = format_scheduled_locations_text(profiles, schedules, kinds=["large"])
+
+        self.assertEqual(text.count("Kansas City, Jackson County, Missouri, United States"), 1)
+
+    def test_deduplicate_schedule_locations_removes_duplicate_profiles(self):
+        first_profile = custom_route_profile_name("Kansas City")
+        second_profile = custom_route_profile_name("Kansas City Duplicate")
+        profiles = {
+            first_profile: {
+                "location_label": "Kansas City",
+                "fields": {
+                    LATITUDE_FIELD: "39.099724",
+                    LONGITUDE_FIELD: "-94.578331",
+                    ADDRESS_FIELD: "Kansas City, Jackson County, Missouri, United States",
+                },
+            },
+            second_profile: {
+                "location_label": "Kansas City Duplicate",
+                "fields": {
+                    LATITUDE_FIELD: "39.0997244",
+                    LONGITUDE_FIELD: "-94.5783314",
+                    ADDRESS_FIELD: "Kansas City, Jackson County, Missouri, United States",
+                },
+            },
+        }
+        schedule = {"profiles": [first_profile, second_profile], "profile": second_profile, "rotation_index": 1}
+
+        removed = deduplicate_schedule_locations(schedule, profiles)
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(schedule["profiles"], [first_profile])
+        self.assertEqual(schedule["profile"], first_profile)
+        self.assertEqual(schedule["rotation_index"], 0)
+
+    def test_location_duplicate_keys_include_address_and_coordinates(self):
+        keys = location_duplicate_keys_for_location(
+            {
+                "address": "Kansas City, Jackson County, Missouri, United States",
+                "latitude": "39.099724",
+                "longitude": "-94.578331",
+            }
+        )
+
+        self.assertIn("address:kansas city jackson county missouri united states", keys)
+        self.assertIn("coords:39.09972,-94.57833", keys)
+
+    def test_extract_contribution_rate_accepts_tax_aliases(self):
+        self.assertEqual(EventManager._extract_contribution_rate({"tax": "5"}), EVENT_REQUEST_MIN_CONTRIBUTION_RATE)
+        self.assertEqual(EventManager._extract_contribution_rate({"contribution_rate": 10}), 10.0)
+        self.assertIsNone(EventManager._extract_contribution_rate({"tax": "unknown"}))
+
+    async def test_add_location_to_scheduler_reuses_existing_location_profile(self):
+        existing_profile = custom_route_profile_name("Kansas City")
+        existing = {
+            "location_label": "Kansas City",
+            "fields": {
+                LATITUDE_FIELD: "39.099724",
+                LONGITUDE_FIELD: "-94.578331",
+                ADDRESS_FIELD: "Kansas City, Jackson County, Missouri, United States",
+            },
+            TYPE_SEARCH_KEY: "wildfire",
+        }
+        profiles = {"large": {existing_profile: dict(existing)}}
+        schedules = {"large": {"profiles": [existing_profile], "profile": existing_profile, "rotation_index": 0}}
+        fake = type("FakeEventManager", (), {})()
+        fake.config = type(
+            "FakeConfig",
+            (),
+            {
+                "profiles": FakeConfigSection(profiles),
+                "schedules": FakeConfigSection(schedules),
+            },
+        )()
+
+        result = await EventManager._add_location_to_scheduler(
+            fake,
+            {
+                "label": "Kansas City again",
+                "address": "Kansas City, Jackson County, Missouri, United States",
+                "latitude": "39.0997244",
+                "longitude": "-94.5783314",
+            },
+            kinds=("large",),
+        )
+
+        self.assertTrue(result["large"]["reused_existing"])
+        self.assertFalse(result["large"]["added"])
+        self.assertEqual(schedules["large"]["profiles"], [existing_profile])
+        self.assertEqual(profiles["large"][existing_profile], existing)
 
     def test_extract_event_location_request_text_strips_prefixes_and_markers(self):
         self.assertEqual(
