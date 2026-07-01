@@ -1285,7 +1285,14 @@ def format_scheduled_locations_text(
     lines = [title]
     for kind in selected_kinds:
         kind = normalize_kind(kind)
-        lines.append(f"[{LOCATION_LIST_KIND_TITLES.get(kind, EVENT_KINDS[kind]['label'])}]")
+        heading = f"[{LOCATION_LIST_KIND_TITLES.get(kind, EVENT_KINDS[kind]['label'])}]"
+        if kind == "event":
+            if lines and lines[-1] != "":
+                lines.append("")
+            lines.append(f"[b]{heading}[/b]")
+            lines.append("")
+        else:
+            lines.append(heading)
         kind_profiles = profiles.get(kind, {}) or {}
         scheduled_names = schedule_profile_names(schedules.get(kind, {}) or {})
         entries: List[Tuple[str, str]] = []

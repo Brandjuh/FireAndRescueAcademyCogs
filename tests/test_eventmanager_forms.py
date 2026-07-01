@@ -1252,14 +1252,15 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         text = format_scheduled_locations_text(profiles, schedules)
 
         self.assertIn("[Large scale alliance missions]", text)
-        self.assertIn("[Alliance events]", text)
+        self.assertIn("[b][Alliance events][/b]", text)
+        self.assertIn("\n\n[b][Alliance events][/b]\n\n", text)
         self.assertIn("Kansas City, Jackson County, Missouri, United States", text)
         self.assertNotIn("Suprise", text)
         self.assertNotIn(profile_name, text)
         self.assertNotIn("saved only", text)
         self.assertNotIn("(custom,", text)
         self.assertNotIn("(default,", text)
-        self.assertNotIn("\n\n", text)
+        self.assertNotIn("\n\n\n", text)
 
     def test_format_scheduled_locations_text_sorts_entries_alphabetically(self):
         copenhagen_profile = custom_route_profile_name("Copenhagen")
@@ -1290,9 +1291,11 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
 
         text = format_scheduled_locations_text(profiles, schedules, kinds=["event"])
 
+        self.assertIn("[b][Alliance events][/b]", text)
+        self.assertIn("\n\n[b][Alliance events][/b]\n\n", text)
         self.assertLess(text.index("Amsterdam, Netherlands"), text.index("Copenhagen, Denmark"))
         self.assertNotIn("/ Suprise", text)
-        self.assertNotIn("\n\n", text)
+        self.assertNotIn("\n\n\n", text)
 
     def test_format_scheduled_locations_text_suppresses_duplicate_places(self):
         first_profile = custom_route_profile_name("Kansas City")
