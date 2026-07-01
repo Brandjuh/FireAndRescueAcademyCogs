@@ -113,7 +113,14 @@ class MonthlyAdminReport:
             add_section(
                 embed,
                 "⚖️ Sanctions",
-                (count_line("Issued", sanctions.get("issued_period", 0)),),
+                (
+                    count_line("Issued", sanctions.get("issued_period", 0)),
+                    count_line("TAX warnings sent", sanctions.get("tax_warnings_total_period", 0)),
+                    count_line("TAX 1st warnings sent", sanctions.get("tax_warning_1_period", 0)),
+                    count_line("TAX 2nd warnings sent", sanctions.get("tax_warning_2_period", 0)),
+                    count_line("TAX 3rd warnings sent", sanctions.get("tax_warning_3_period", 0)),
+                    count_line("TAX auto-kicks", sanctions.get("tax_auto_kicks_period", 0)),
+                ),
             )
         if "error" not in admin:
             reviewer_count = admin.get("most_active_admin_count", 0)

@@ -112,6 +112,11 @@ class DailyAdminReport:
             lines=(
                 count_line("Sanctions issued", data.get("issued_24h", 0)),
                 count_line("Active warnings", data.get("active_warnings", 0)),
+                count_line("TAX warnings sent", data.get("tax_warnings_total_24h", 0)),
+                count_line("TAX 1st warnings sent", data.get("tax_warning_1_24h", 0)),
+                count_line("TAX 2nd warnings sent", data.get("tax_warning_2_24h", 0)),
+                count_line("TAX 3rd warnings sent", data.get("tax_warning_3_24h", 0)),
+                count_line("TAX auto-kicks", data.get("tax_auto_kicks_24h", 0)),
             ),
         )
 

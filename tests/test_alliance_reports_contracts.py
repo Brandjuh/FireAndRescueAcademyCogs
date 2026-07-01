@@ -135,9 +135,26 @@ class AllianceReportContractTests(unittest.TestCase):
                     "staff_activity_period": 8,
                 }
 
+        class FakeMessageManager:
+            async def get_tax_warning_stats(self, guild_id, *, period_start_ts=None, period_end_ts=None):
+                calls["tax_stats"] = (guild_id, period_start_ts, period_end_ts)
+                return {
+                    "warning_1": 1,
+                    "warning_2": 2,
+                    "warning_3": 3,
+                    "warnings_total": 6,
+                    "auto_kicks": 4,
+                }
+
         bot = types.SimpleNamespace(
             guilds=[types.SimpleNamespace(id=1234)],
-            get_cog=lambda name: FakeSanctionManager() if name == "SanctionManager" else None,
+            get_cog=lambda name: (
+                FakeSanctionManager()
+                if name == "SanctionManager"
+                else FakeMessageManager()
+                if name == "MessageManager"
+                else None
+            ),
         )
         aggregator = DataAggregator(types.SimpleNamespace(_db_cache={}), bot)
         start = datetime(2026, 6, 12, 4, tzinfo=ZoneInfo("UTC"))
@@ -151,7 +168,12 @@ class AllianceReportContractTests(unittest.TestCase):
         self.assertEqual(result["expired_total"], 6)
         self.assertEqual(result["removed_total"], 7)
         self.assertEqual(result["staff_activity_24h"], 8)
+        self.assertEqual(result["tax_warning_1_24h"], 1)
+        self.assertEqual(result["tax_warning_2_24h"], 2)
+        self.assertEqual(result["tax_warning_3_24h"], 3)
+        self.assertEqual(result["tax_auto_kicks_24h"], 4)
         self.assertEqual(calls["stats"], (1234, int(start.timestamp()), int(end.timestamp())))
+        self.assertEqual(calls["tax_stats"], (1234, int(start.timestamp()), int(end.timestamp())))
 
     def test_monthly_sanctions_uses_sanctionmanager_stats_contract_when_available(self):
         import asyncio
@@ -168,9 +190,26 @@ class AllianceReportContractTests(unittest.TestCase):
                     "staff_activity_period": 13,
                 }
 
+        class FakeMessageManager:
+            async def get_tax_warning_stats(self, guild_id, *, period_start_ts=None, period_end_ts=None):
+                del guild_id, period_start_ts, period_end_ts
+                return {
+                    "warning_1": 5,
+                    "warning_2": 4,
+                    "warning_3": 3,
+                    "warnings_total": 12,
+                    "auto_kicks": 2,
+                }
+
         bot = types.SimpleNamespace(
             guilds=[types.SimpleNamespace(id=1234)],
-            get_cog=lambda name: FakeSanctionManager() if name == "SanctionsManager" else None,
+            get_cog=lambda name: (
+                FakeSanctionManager()
+                if name == "SanctionsManager"
+                else FakeMessageManager()
+                if name == "MessageManager"
+                else None
+            ),
         )
         aggregator = DataAggregator(types.SimpleNamespace(_db_cache={}), bot)
 
@@ -187,6 +226,10 @@ class AllianceReportContractTests(unittest.TestCase):
         self.assertEqual(result["expired_total"], 11)
         self.assertEqual(result["removed_total"], 12)
         self.assertEqual(result["staff_activity_period"], 13)
+        self.assertEqual(result["tax_warning_1_period"], 5)
+        self.assertEqual(result["tax_warning_2_period"], 4)
+        self.assertEqual(result["tax_warning_3_period"], 3)
+        self.assertEqual(result["tax_auto_kicks_period"], 2)
 
     def test_monthly_membership_uses_actual_snapshots_for_net_growth(self):
         import asyncio
@@ -671,6 +714,30 @@ class AllianceReportContractTests(unittest.TestCase):
         self.assertNotIn("Recorded Admin Activity", output)
         self.assertNotIn(": 0", output)
 
+    def test_daily_admin_sanctions_show_tax_warning_stats(self):
+        import discord
+
+        embed = discord.Embed()
+        DailyAdminReport._add_sanctions(
+            embed,
+            {
+                "issued_24h": 0,
+                "active_warnings": 0,
+                "tax_warnings_total_24h": 6,
+                "tax_warning_1_24h": 3,
+                "tax_warning_2_24h": 2,
+                "tax_warning_3_24h": 1,
+                "tax_auto_kicks_24h": 1,
+            },
+        )
+        output = "\n".join(field["value"] for field in embed.fields)
+
+        self.assertIn("TAX warnings sent: 6", output)
+        self.assertIn("TAX 1st warnings sent: 3", output)
+        self.assertIn("TAX 2nd warnings sent: 2", output)
+        self.assertIn("TAX 3rd warnings sent: 1", output)
+        self.assertIn("TAX auto-kicks: 1", output)
+
     def test_monthly_outputs_skip_failed_sources_and_fabricated_sections(self):
         from datetime import datetime
 
@@ -747,6 +814,34 @@ class AllianceReportContractTests(unittest.TestCase):
         self.assertNotIn("Courses started", output)
         self.assertNotIn("Extensions started", output)
         self.assertNotIn("Large missions started", output)
+
+    def test_monthly_admin_sanctions_show_tax_warning_stats(self):
+        from datetime import datetime
+
+        data = {
+            "membership": {"error": "unavailable"},
+            "training": {"error": "unavailable"},
+            "buildings": {"error": "unavailable"},
+            "operations": {"error": "unavailable"},
+            "sanctions": {
+                "issued_period": 0,
+                "tax_warnings_total_period": 9,
+                "tax_warning_1_period": 4,
+                "tax_warning_2_period": 3,
+                "tax_warning_3_period": 2,
+                "tax_auto_kicks_period": 1,
+            },
+            "admin_activity": {"error": "unavailable"},
+        }
+
+        embed = MonthlyAdminReport._create_overview(data, "May 2026", datetime(2026, 6, 12), "Europe/Amsterdam")
+        output = "\n".join(field["value"] for field in embed.fields)
+
+        self.assertIn("TAX warnings sent: 9", output)
+        self.assertIn("TAX 1st warnings sent: 4", output)
+        self.assertIn("TAX 2nd warnings sent: 3", output)
+        self.assertIn("TAX 3rd warnings sent: 2", output)
+        self.assertIn("TAX auto-kicks: 1", output)
 
     def test_monthly_member_uses_explicit_scheduled_report_month(self):
         import asyncio

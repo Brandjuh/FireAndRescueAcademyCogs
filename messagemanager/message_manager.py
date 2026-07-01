@@ -622,6 +622,104 @@ def tax_warning_member_identity(member: Dict[str, object]) -> Tuple[str, str, fl
     return mc_id, username, rate
 
 
+def tax_warning_level_from_sanction_type(sanction_type: str) -> Optional[int]:
+    """Return the TAX warning level represented by a stored sanction type."""
+    clean = str(sanction_type or "")
+    for level, expected_type in TAX_WARNING_SANCTION_TYPES.items():
+        if clean == expected_type:
+            return level
+    lowered = clean.casefold()
+    if "1st" in lowered or "first" in lowered:
+        return 1
+    if "2nd" in lowered or "second" in lowered:
+        return 2
+    if "3rd" in lowered or "third" in lowered:
+        return 3
+    return None
+
+
+def empty_tax_warning_stats(*, source: str = "none") -> Dict[str, object]:
+    """Return the common TAX warning stats shape."""
+    return {
+        "source": source,
+        "warnings_total": 0,
+        "warning_1": 0,
+        "warning_2": 0,
+        "warning_3": 0,
+        "auto_kicks": 0,
+        "members_warned": 0,
+        "latest_warning_at": None,
+        "latest_kick_at": None,
+    }
+
+
+def tax_warning_stats_from_sanctions(sanctions: Iterable[dict], *, source: str = "SanctionManager") -> Dict[str, object]:
+    """Build TAX warning stats from SanctionManager records."""
+    stats = empty_tax_warning_stats(source=source)
+    members = set()
+    for sanction in sanctions or []:
+        if sanction.get("effective_status", sanction.get("status")) == "removed":
+            continue
+        reason_detail = str(sanction.get("reason_detail") or "").strip()
+        sanction_type = str(sanction.get("sanction_type") or "").strip()
+        created_at = sanction.get("created_at")
+        try:
+            created_at_int = int(created_at) if created_at is not None else None
+        except (TypeError, ValueError):
+            created_at_int = None
+
+        if reason_detail == TAX_WARNING_REASON_DETAIL and "Warning" in sanction_type:
+            level = tax_warning_level_from_sanction_type(sanction_type)
+            if level in TAX_WARNING_SANCTION_TYPES:
+                stats[f"warning_{level}"] = int(stats[f"warning_{level}"]) + 1
+            stats["warnings_total"] = int(stats["warnings_total"]) + 1
+            member_key = str(sanction.get("mc_user_id") or sanction.get("mc_username") or "").strip()
+            if member_key:
+                members.add(member_key)
+            if created_at_int:
+                stats["latest_warning_at"] = max(created_at_int, int(stats["latest_warning_at"] or 0))
+        elif reason_detail == TAX_WARNING_KICK_REASON_DETAIL and "Kick" in sanction_type:
+            stats["auto_kicks"] = int(stats["auto_kicks"]) + 1
+            if created_at_int:
+                stats["latest_kick_at"] = max(created_at_int, int(stats["latest_kick_at"] or 0))
+
+    stats["members_warned"] = len(members)
+    return stats
+
+
+def tax_warning_stats_from_state(state: Dict[str, dict], *, source: str = "MessageManager state") -> Dict[str, object]:
+    """Build approximate all-time TAX warning stats from MessageManager state."""
+    stats = empty_tax_warning_stats(source=source)
+    members_warned = 0
+    for entry in (state or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            count = max(0, int(entry.get("count") or 0))
+        except (TypeError, ValueError):
+            count = 0
+        if count:
+            members_warned += 1
+        for level in range(1, min(count, 3) + 1):
+            stats[f"warning_{level}"] = int(stats[f"warning_{level}"]) + 1
+            stats["warnings_total"] = int(stats["warnings_total"]) + 1
+        try:
+            last_warning_at = int(entry.get("last_warning_at") or 0)
+        except (TypeError, ValueError):
+            last_warning_at = 0
+        if last_warning_at:
+            stats["latest_warning_at"] = max(last_warning_at, int(stats["latest_warning_at"] or 0))
+        try:
+            kicked_at = int(entry.get("kicked_at") or 0)
+        except (TypeError, ValueError):
+            kicked_at = 0
+        if kicked_at:
+            stats["auto_kicks"] = int(stats["auto_kicks"]) + 1
+            stats["latest_kick_at"] = max(kicked_at, int(stats["latest_kick_at"] or 0))
+    stats["members_warned"] = members_warned
+    return stats
+
+
 def get_sanction_manager_cog(bot):
     """Return the loaded SanctionManager cog, accepting historic cog name variants."""
     get_cog = getattr(bot, "get_cog", None)
@@ -1419,6 +1517,44 @@ class MessageManager(commands.Cog):
     def _sanction_manager(self):
         return get_sanction_manager_cog(self.bot)
 
+    async def get_tax_warning_stats(
+        self,
+        guild_id: int,
+        *,
+        period_start_ts: Optional[int] = None,
+        period_end_ts: Optional[int] = None,
+    ) -> Dict[str, object]:
+        """Public contract for TAX warning message and auto-kick statistics."""
+        sanction_manager = self._sanction_manager()
+        get_by_reasons = (
+            getattr(sanction_manager, "get_sanctions_by_reason_details", None)
+            if sanction_manager
+            else None
+        )
+        if callable(get_by_reasons):
+            sanctions = get_by_reasons(
+                guild_id=int(guild_id),
+                reason_details=[TAX_WARNING_REASON_DETAIL, TAX_WARNING_KICK_REASON_DETAIL],
+                period_start_ts=period_start_ts,
+                period_end_ts=period_end_ts,
+            )
+            stats = tax_warning_stats_from_sanctions(sanctions, source="SanctionManager")
+            if period_start_ts is None and period_end_ts is None:
+                state_stats = tax_warning_stats_from_state(await self.config.tax_warning_state())
+                stats["auto_kicks"] = max(int(stats["auto_kicks"]), int(state_stats["auto_kicks"]))
+                latest_kick_at = state_stats.get("latest_kick_at")
+                if latest_kick_at:
+                    stats["latest_kick_at"] = max(int(stats["latest_kick_at"] or 0), int(latest_kick_at))
+            return stats
+
+        if period_start_ts is not None or period_end_ts is not None:
+            stats = empty_tax_warning_stats(source="MessageManager state unavailable for period stats")
+            stats["partial"] = True
+            return stats
+        stats = tax_warning_stats_from_state(await self.config.tax_warning_state())
+        stats["partial"] = True
+        return stats
+
     async def _tax_warning_history(self, guild_id: int, mc_user_id: str) -> Tuple[int, Optional[int], Optional[int]]:
         count = 0
         latest_at = None
@@ -2158,6 +2294,64 @@ class MessageManager(commands.Cog):
             await ctx.send(
                 f"MissionChief message was not confirmed for `{result['resolved_username']}`: {result['reason']}"
             )
+
+    @staticmethod
+    def _format_stats_timestamp(value: Optional[int]) -> str:
+        if not value:
+            return "None"
+        return f"<t:{int(value)}:F> (<t:{int(value)}:R>)"
+
+    def _build_tax_warning_stats_embed(self, stats: Dict[str, object]) -> discord.Embed:
+        embed = discord.Embed(
+            title="TAX Warning Statistics",
+            color=discord.Color.gold(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(
+            name="Warning Messages Sent",
+            value=(
+                f"Total: `{int(stats.get('warnings_total') or 0)}`\n"
+                f"1st warnings: `{int(stats.get('warning_1') or 0)}`\n"
+                f"2nd warnings: `{int(stats.get('warning_2') or 0)}`\n"
+                f"3rd warnings: `{int(stats.get('warning_3') or 0)}`"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="Auto Actions",
+            value=(
+                f"Auto-kicks: `{int(stats.get('auto_kicks') or 0)}`\n"
+                f"Members warned: `{int(stats.get('members_warned') or 0)}`"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="Latest Activity",
+            value=(
+                f"Latest warning: {self._format_stats_timestamp(stats.get('latest_warning_at'))}\n"
+                f"Latest auto-kick: {self._format_stats_timestamp(stats.get('latest_kick_at'))}"
+            ),
+            inline=False,
+        )
+        source = str(stats.get("source") or "unknown")
+        if stats.get("partial"):
+            source = f"{source} (partial fallback)"
+        embed.set_footer(text=f"Source: {source}")
+        return embed
+
+    @commands.command(name="warnstats")
+    @commands.admin()
+    @commands.guild_only()
+    async def warnstats(self, ctx: commands.Context):
+        """Show compact all-time TAX warning and auto-kick statistics."""
+        async with ctx.typing():
+            try:
+                stats = await self.get_tax_warning_stats(ctx.guild.id)
+            except Exception as exc:
+                await ctx.send(f"Could not build TAX warning statistics: {exc}")
+                return
+
+        await ctx.send(embed=self._build_tax_warning_stats_embed(stats))
 
     @messagemanager.group(name="taxwarnings", invoke_without_command=True)
     @commands.admin()
