@@ -3783,9 +3783,9 @@ class EventManager(commands.Cog):
         return "\n".join(
             [
                 EVENT_REQUEST_BOARD_GUIDE_MARKER,
-                "[size=18][b]Event Location Requests[/b][/size]",
+                "[b]Event Location Requests[/b]",
                 "",
-                "[i]This post is maintained automatically by Fire & Rescue Academy.[/i]",
+                "This post is maintained automatically by Fire & Rescue Academy.",
                 "",
                 "[b]How to request a location[/b]",
                 "Post one clear location in this thread.",
@@ -3800,7 +3800,7 @@ class EventManager(commands.Cog):
                 f"Requests are only accepted when the requester alliance donation is at least "
                 f"{EVENT_REQUEST_MIN_CONTRIBUTION_RATE:.0f}%.",
                 "",
-                "[i]Request and reply posts are automatically removed after 12 hours.[/i]",
+                "Request and reply posts are automatically removed after 12 hours.",
             ]
         )
 
@@ -3811,8 +3811,8 @@ class EventManager(commands.Cog):
         return "\n".join(
             [
                 EVENT_REQUEST_BOARD_LOCATIONS_MARKER,
-                "[size=18][b]Current EventManager Scheduler Locations[/b][/size]",
-                f"[i]Last updated: {updated_at}[/i]",
+                "[b]Current EventManager Scheduler Locations[/b]",
+                f"Last updated: {updated_at}",
                 "",
                 format_scheduled_locations_text(
                     profiles,
