@@ -31,7 +31,10 @@ from messagemanager.message_manager import (
     resolve_alliance_member_name,
     safe_payload_summary,
     split_discord_content,
+    tax_warning_level_from_sanction_type,
     summarize_message_form,
+    tax_warning_stats_from_sanctions,
+    tax_warning_stats_from_state,
     tax_warning_kick_is_due,
     tax_warning_sanction_manager_error,
     tax_warning_is_due,
@@ -483,6 +486,77 @@ class MessageManagerTests(unittest.TestCase):
             ),
             ("456", "CrashTestDummy", 4.5),
         )
+
+    def test_tax_warning_stats_count_warning_levels_and_auto_kicks(self):
+        stats = tax_warning_stats_from_sanctions(
+            [
+                {
+                    "sanction_type": "Warning - Official 1st warning",
+                    "reason_detail": message_manager_module.TAX_WARNING_REASON_DETAIL,
+                    "mc_user_id": "1",
+                    "created_at": 100,
+                    "status": "active",
+                },
+                {
+                    "sanction_type": "Warning - Official 2nd warning",
+                    "reason_detail": message_manager_module.TAX_WARNING_REASON_DETAIL,
+                    "mc_user_id": "1",
+                    "created_at": 200,
+                    "status": "active",
+                },
+                {
+                    "sanction_type": "Warning - Official 3rd and last warning",
+                    "reason_detail": message_manager_module.TAX_WARNING_REASON_DETAIL,
+                    "mc_user_id": "2",
+                    "created_at": 300,
+                    "status": "active",
+                },
+                {
+                    "sanction_type": "Kick",
+                    "reason_detail": message_manager_module.TAX_WARNING_KICK_REASON_DETAIL,
+                    "mc_user_id": "2",
+                    "created_at": 400,
+                    "status": "active",
+                },
+                {
+                    "sanction_type": "Warning - Official 1st warning",
+                    "reason_detail": message_manager_module.TAX_WARNING_REASON_DETAIL,
+                    "mc_user_id": "3",
+                    "created_at": 500,
+                    "effective_status": "removed",
+                },
+            ]
+        )
+
+        self.assertEqual(stats["warnings_total"], 3)
+        self.assertEqual(stats["warning_1"], 1)
+        self.assertEqual(stats["warning_2"], 1)
+        self.assertEqual(stats["warning_3"], 1)
+        self.assertEqual(stats["auto_kicks"], 1)
+        self.assertEqual(stats["members_warned"], 2)
+        self.assertEqual(stats["latest_warning_at"], 300)
+        self.assertEqual(stats["latest_kick_at"], 400)
+
+    def test_tax_warning_stats_from_state_reconstructs_reached_warning_levels(self):
+        stats = tax_warning_stats_from_state(
+            {
+                "1": {"count": 2, "last_warning_at": 200},
+                "2": {"count": 3, "last_warning_at": 300, "kicked_at": 400},
+            }
+        )
+
+        self.assertEqual(stats["warnings_total"], 5)
+        self.assertEqual(stats["warning_1"], 2)
+        self.assertEqual(stats["warning_2"], 2)
+        self.assertEqual(stats["warning_3"], 1)
+        self.assertEqual(stats["auto_kicks"], 1)
+        self.assertEqual(stats["members_warned"], 2)
+
+    def test_tax_warning_level_from_sanction_type_accepts_known_labels(self):
+        self.assertEqual(tax_warning_level_from_sanction_type("Warning - Official 1st warning"), 1)
+        self.assertEqual(tax_warning_level_from_sanction_type("Warning - Official 2nd warning"), 2)
+        self.assertEqual(tax_warning_level_from_sanction_type("Warning - Official 3rd and last warning"), 3)
+        self.assertIsNone(tax_warning_level_from_sanction_type("Kick"))
 
     def test_parse_kick_confirmation_form_selects_ok_submit(self):
         form = parse_kick_confirmation_form(

@@ -386,6 +386,44 @@ class SanctionsDatabase:
         conn.close()
         return dict(result) if result else None
 
+    def get_sanctions_by_reason_details(
+        self,
+        *,
+        guild_id: int,
+        reason_details: List[str],
+        period_start_ts: Optional[int] = None,
+        period_end_ts: Optional[int] = None,
+    ) -> List[dict]:
+        """Return sanctions for exact reason details, optionally limited to a period."""
+        clean_reasons = [str(reason or "").strip() for reason in reason_details if str(reason or "").strip()]
+        if not clean_reasons:
+            return []
+
+        where_parts = ["guild_id = ?", f"reason_detail IN ({','.join('?' for _ in clean_reasons)})"]
+        params: List[Any] = [guild_id, *clean_reasons]
+        if period_start_ts is not None:
+            where_parts.append("created_at >= ?")
+            params.append(int(period_start_ts))
+        if period_end_ts is not None:
+            where_parts.append("created_at < ?")
+            params.append(int(period_end_ts))
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT *
+            FROM sanctions
+            WHERE {" AND ".join(where_parts)}
+            ORDER BY created_at DESC
+            """,
+            params,
+        )
+        results = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return results
+
     @staticmethod
     def effective_status(sanction: dict, now: Optional[int] = None) -> str:
         """Return the current sanction status without changing stored history."""
@@ -2461,6 +2499,26 @@ class SanctionsManager(commands.Cog):
             period_start_ts=period_start_ts,
             period_end_ts=period_end_ts,
         )
+
+    def get_sanctions_by_reason_details(
+        self,
+        *,
+        guild_id: int,
+        reason_details: List[str],
+        period_start_ts: Optional[int] = None,
+        period_end_ts: Optional[int] = None,
+        normalize: bool = True,
+    ) -> List[dict]:
+        """Public contract for exact reason-detail sanction lookups."""
+        sanctions = self.db.get_sanctions_by_reason_details(
+            guild_id=guild_id,
+            reason_details=reason_details,
+            period_start_ts=period_start_ts,
+            period_end_ts=period_end_ts,
+        )
+        if not normalize:
+            return sanctions
+        return [SanctionsDatabase.normalize_sanction(sanction) for sanction in sanctions]
 
     def get_sanction_by_id(self, sanction_id: int) -> Optional[dict]:
         """Public contract for other cogs to read one sanction by ID."""

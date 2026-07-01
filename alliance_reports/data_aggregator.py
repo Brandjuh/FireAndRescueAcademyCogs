@@ -12,6 +12,7 @@ V2 Database Structure:
 - sanctions.db: sanctions (LEGACY)
 """
 
+import inspect
 import logging
 import sqlite3
 from datetime import datetime
@@ -113,6 +114,37 @@ class DataAggregator:
             return None
         except Exception as exc:
             log.exception(f"Error reading SanctionManager stats contract: {exc}")
+            return None
+
+    async def _get_tax_warning_stats_contract(
+        self,
+        start: datetime,
+        end: datetime,
+    ) -> Optional[Dict]:
+        """Read TAX warning stats through MessageManager when available."""
+        guild_id = self._get_primary_guild_id()
+        if guild_id is None:
+            return None
+
+        message_manager = self._get_cog("MessageManager", "messagemanager")
+        get_tax_warning_stats = getattr(message_manager, "get_tax_warning_stats", None) if message_manager else None
+        if not get_tax_warning_stats:
+            return None
+
+        try:
+            result = get_tax_warning_stats(
+                guild_id,
+                period_start_ts=int(start.timestamp()),
+                period_end_ts=int(end.timestamp()),
+            )
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        except TypeError:
+            log.warning("Loaded MessageManager does not support TAX warning stats contract yet")
+            return None
+        except Exception as exc:
+            log.exception(f"Error reading MessageManager TAX warning stats contract: {exc}")
             return None
 
     @staticmethod
@@ -540,6 +572,7 @@ class DataAggregator:
     async def _get_sanctions_data_daily(self, game_day_start: datetime, game_day_end: datetime) -> Dict:
         """Get sanctions metrics from SanctionManager contract with database fallback."""
         try:
+            tax_warning_stats = await self._get_tax_warning_stats_contract(game_day_start, game_day_end) or {}
             contract_stats = self._get_sanction_stats_contract(game_day_start, game_day_end)
             if contract_stats:
                 return {
@@ -549,6 +582,11 @@ class DataAggregator:
                     "expired_total": contract_stats.get("expired_count", 0),
                     "removed_total": contract_stats.get("removed_count", 0),
                     "staff_activity_24h": contract_stats.get("staff_activity_period", 0),
+                    "tax_warning_1_24h": tax_warning_stats.get("warning_1", 0),
+                    "tax_warning_2_24h": tax_warning_stats.get("warning_2", 0),
+                    "tax_warning_3_24h": tax_warning_stats.get("warning_3", 0),
+                    "tax_warnings_total_24h": tax_warning_stats.get("warnings_total", 0),
+                    "tax_auto_kicks_24h": tax_warning_stats.get("auto_kicks", 0),
                 }
 
             conn = self._get_db_connection("sanctions")
@@ -580,6 +618,11 @@ class DataAggregator:
             return {
                 "issued_24h": issued,
                 "active_warnings": active_warnings,
+                "tax_warning_1_24h": tax_warning_stats.get("warning_1", 0),
+                "tax_warning_2_24h": tax_warning_stats.get("warning_2", 0),
+                "tax_warning_3_24h": tax_warning_stats.get("warning_3", 0),
+                "tax_warnings_total_24h": tax_warning_stats.get("warnings_total", 0),
+                "tax_auto_kicks_24h": tax_warning_stats.get("auto_kicks", 0),
             }
         
         except Exception as e:
@@ -989,6 +1032,7 @@ class DataAggregator:
     async def _get_sanctions_data_monthly(self, start: datetime, end: datetime) -> Dict:
         """Get sanctions metrics for full month through contract with database fallback."""
         try:
+            tax_warning_stats = await self._get_tax_warning_stats_contract(start, end) or {}
             contract_stats = self._get_sanction_stats_contract(start, end)
             if contract_stats:
                 return {
@@ -998,6 +1042,11 @@ class DataAggregator:
                     "expired_total": contract_stats.get("expired_count", 0),
                     "removed_total": contract_stats.get("removed_count", 0),
                     "staff_activity_period": contract_stats.get("staff_activity_period", 0),
+                    "tax_warning_1_period": tax_warning_stats.get("warning_1", 0),
+                    "tax_warning_2_period": tax_warning_stats.get("warning_2", 0),
+                    "tax_warning_3_period": tax_warning_stats.get("warning_3", 0),
+                    "tax_warnings_total_period": tax_warning_stats.get("warnings_total", 0),
+                    "tax_auto_kicks_period": tax_warning_stats.get("auto_kicks", 0),
                 }
 
             conn = self._get_db_connection("sanctions")
@@ -1038,6 +1087,11 @@ class DataAggregator:
             return {
                 "issued_period": issued,
                 "by_type": by_type,
+                "tax_warning_1_period": tax_warning_stats.get("warning_1", 0),
+                "tax_warning_2_period": tax_warning_stats.get("warning_2", 0),
+                "tax_warning_3_period": tax_warning_stats.get("warning_3", 0),
+                "tax_warnings_total_period": tax_warning_stats.get("warnings_total", 0),
+                "tax_auto_kicks_period": tax_warning_stats.get("auto_kicks", 0),
             }
         
         except Exception as e:
