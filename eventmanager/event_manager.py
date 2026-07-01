@@ -48,7 +48,8 @@ DEFAULT_REQUEST_PANEL_CHANNEL_ID = 1421627971831070730
 DEFAULT_REQUEST_LOG_CHANNEL_ID = 668919729762730004
 PANEL_TITLE = "EventManager Control Panel"
 REQUEST_PANEL_TITLE = "Event Requests"
-EVENT_REQUEST_BOARD_THREAD_ID = 15292
+LEGACY_EVENT_REQUEST_BOARD_THREAD_ID = 15292
+EVENT_REQUEST_BOARD_THREAD_ID = 15293
 EVENT_REQUEST_BOARD_POLL_SECONDS = 5 * 60
 EVENT_REQUEST_BOARD_DELETE_AFTER_SECONDS = 12 * 60 * 60
 EVENT_REQUEST_BOARD_CLEANUP_SECONDS = 10 * 60
@@ -2609,6 +2610,7 @@ class EventManager(commands.Cog):
         self.bot.add_view(EventManagerPanelView(self))
         self.bot.add_view(EventRequestPanelView(self))
         await self._migrate_default_event_schedule_time()
+        await self._migrate_event_request_board_thread_id()
         await self._migrate_route_profiles()
         self._task = asyncio.create_task(self._scheduler_loop())
         self._panel_task = asyncio.create_task(self._ensure_panels_after_ready())
@@ -2628,6 +2630,17 @@ class EventManager(commands.Cog):
     async def _migrate_default_event_schedule_time(self):
         async with self.config.schedules() as schedules:
             migrate_default_event_schedule_time(schedules)
+
+    async def _migrate_event_request_board_thread_id(self):
+        """Move the managed EventManager request board from the old thread to the current thread."""
+        try:
+            current = int(await self.config.board_thread_id() or 0)
+        except (TypeError, ValueError):
+            current = 0
+        if current in {0, LEGACY_EVENT_REQUEST_BOARD_THREAD_ID}:
+            await self.config.board_thread_id.set(EVENT_REQUEST_BOARD_THREAD_ID)
+            await self.config.board_guide_post_ids.set({})
+            await self.config.board_last_seen_post_id.set(None)
 
     async def _migrate_route_profiles(self):
         """Add newly configured route profiles to existing route schedules without resetting them."""
@@ -3286,7 +3299,6 @@ class EventManager(commands.Cog):
             ),
             color=discord.Color.blurple(),
         )
-        embed.add_field(name="Privacy", value="Your confirmation is private to you.", inline=False)
         return embed
 
     async def find_existing_request_panel_message(self, channel: Any):

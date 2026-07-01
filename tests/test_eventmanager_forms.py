@@ -9,6 +9,7 @@ from eventmanager.event_manager import (
     build_browser_start_config,
     build_payload,
     EVENT_DEFAULT_OVERRIDES,
+    EVENT_REQUEST_BOARD_THREAD_ID,
     DEFAULT_EVENT_ROUTE_TIME,
     DEFAULT_TIMEZONE,
     EVENT_ROUTE_LOCATIONS,
@@ -58,6 +59,7 @@ from eventmanager.event_manager import (
     valid_time,
     EventManager,
     LATITUDE_FIELD,
+    LEGACY_EVENT_REQUEST_BOARD_THREAD_ID,
     LONGITUDE_FIELD,
     ADDRESS_FIELD,
     add_profile_to_schedule_rotation,
@@ -190,13 +192,37 @@ class FakeSession:
         return self.response
 
 
+class FakeConfigValue:
+    def __init__(self, value=None):
+        self.value = value
+
+    async def __call__(self):
+        return self.value
+
+    async def set(self, value):
+        self.value = value
+
+
 class FakeEventManagerConfig:
-    def __init__(self, schedules, profiles, last_runs=None, retry_after=None, last_started_at=None):
+    def __init__(
+        self,
+        schedules,
+        profiles,
+        last_runs=None,
+        retry_after=None,
+        last_started_at=None,
+        board_thread_id=None,
+        board_guide_post_ids=None,
+        board_last_seen_post_id=None,
+    ):
         self._schedules = schedules
         self._profiles = profiles
         self._last_runs = last_runs or {}
         self._retry_after = retry_after or {}
         self._last_started_at = last_started_at or {}
+        self.board_thread_id = FakeConfigValue(board_thread_id)
+        self.board_guide_post_ids = FakeConfigValue(board_guide_post_ids or {})
+        self.board_last_seen_post_id = FakeConfigValue(board_last_seen_post_id)
 
     async def schedules(self):
         return self._schedules
@@ -905,6 +931,22 @@ class EventManagerFormTests(unittest.TestCase):
 
 
 class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
+    async def test_migrates_legacy_event_request_board_thread(self):
+        fake = type("FakeEventManager", (), {})()
+        fake.config = FakeEventManagerConfig(
+            schedules={},
+            profiles={},
+            board_thread_id=LEGACY_EVENT_REQUEST_BOARD_THREAD_ID,
+            board_guide_post_ids={"guide": 123, "locations": 456},
+            board_last_seen_post_id=789,
+        )
+
+        await EventManager._migrate_event_request_board_thread_id(fake)
+
+        self.assertEqual(await fake.config.board_thread_id(), EVENT_REQUEST_BOARD_THREAD_ID)
+        self.assertEqual(await fake.config.board_guide_post_ids(), {})
+        self.assertIsNone(await fake.config.board_last_seen_post_id())
+
     async def test_next_scheduled_profile_summary_uses_profile_after_current(self):
         profile_names = route_profile_names("event")
         event_locations = route_locations_for_kind("event")
@@ -1214,17 +1256,17 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
               <a href="/alliance_posts/123/edit">edit</a>
             </div>
           </div>
-          <form id="new_alliance_post" action="/alliance_posts?alliance_thread_id=15292">
+          <form id="new_alliance_post" action="/alliance_posts?alliance_thread_id=15293">
             <input name="authenticity_token" value="token123" />
           </form>
-          <a href="/alliance_threads/15292?page=3">3</a>
+          <a href="/alliance_threads/15293?page=3">3</a>
         </body></html>
         """
 
         page = parse_event_board_page(html)
 
         self.assertEqual(page.current_user_id, "42")
-        self.assertEqual(page.reply_action, "/alliance_posts?alliance_thread_id=15292")
+        self.assertEqual(page.reply_action, "/alliance_posts?alliance_thread_id=15293")
         self.assertEqual(page.reply_token, "token123")
         self.assertEqual(page.last_page, 3)
         self.assertEqual(len(page.posts), 1)
