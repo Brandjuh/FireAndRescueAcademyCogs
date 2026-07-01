@@ -1253,12 +1253,44 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("[Large scale alliance missions]", text)
         self.assertIn("[Alliance events]", text)
-        self.assertIn("Kansas City, Jackson County, Missouri, United States", text)
-        self.assertIn("Suprise", text)
+        self.assertIn("Kansas City, Jackson County, Missouri, United States / Suprise", text)
         self.assertNotIn(profile_name, text)
         self.assertNotIn("saved only", text)
         self.assertNotIn("(custom,", text)
         self.assertNotIn("(default,", text)
+        self.assertNotIn("\n\n", text)
+
+    def test_format_scheduled_locations_text_sorts_entries_alphabetically(self):
+        copenhagen_profile = custom_route_profile_name("Copenhagen")
+        amsterdam_profile = custom_route_profile_name("Amsterdam")
+        profiles = {
+            "event": {
+                copenhagen_profile: {
+                    "location_label": "Copenhagen",
+                    "fields": {
+                        LATITUDE_FIELD: "55.676098",
+                        LONGITUDE_FIELD: "12.568337",
+                        ADDRESS_FIELD: "Copenhagen, Denmark",
+                    },
+                    RANDOM_TYPE_KEY: True,
+                },
+                amsterdam_profile: {
+                    "location_label": "Amsterdam",
+                    "fields": {
+                        LATITUDE_FIELD: "52.367573",
+                        LONGITUDE_FIELD: "4.904139",
+                        ADDRESS_FIELD: "Amsterdam, Netherlands",
+                    },
+                    RANDOM_TYPE_KEY: True,
+                },
+            }
+        }
+        schedules = {"event": {"profiles": [copenhagen_profile, amsterdam_profile]}}
+
+        text = format_scheduled_locations_text(profiles, schedules, kinds=["event"])
+
+        self.assertLess(text.index("Amsterdam, Netherlands / Suprise"), text.index("Copenhagen, Denmark / Suprise"))
+        self.assertNotIn("\n\n", text)
 
     def test_format_scheduled_locations_text_suppresses_duplicate_places(self):
         first_profile = custom_route_profile_name("Kansas City")
@@ -1373,6 +1405,38 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["large"]["added"])
         self.assertEqual(schedules["large"]["profiles"], [existing_profile])
         self.assertEqual(profiles["large"][existing_profile], existing)
+
+    async def test_board_locations_content_includes_last_updated_time(self):
+        profile_name = custom_route_profile_name("Copenhagen")
+        fake = type("FakeEventManager", (), {})()
+        fake.config = type(
+            "FakeConfig",
+            (),
+            {
+                "profiles": FakeConfigSection(
+                    {
+                        "event": {
+                            profile_name: {
+                                "location_label": "Copenhagen",
+                                "fields": {
+                                    LATITUDE_FIELD: "55.676098",
+                                    LONGITUDE_FIELD: "12.568337",
+                                    ADDRESS_FIELD: "Copenhagen, Denmark",
+                                },
+                                RANDOM_TYPE_KEY: True,
+                            }
+                        }
+                    }
+                ),
+                "schedules": FakeConfigSection({"event": {"profiles": [profile_name]}}),
+            },
+        )()
+
+        text = await EventManager._build_event_request_board_locations_content(fake)
+
+        self.assertIn("Last updated:", text)
+        self.assertRegex(text, r"Last updated: \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC")
+        self.assertIn("Copenhagen, Denmark / Suprise", text)
 
     def test_extract_event_location_request_text_strips_prefixes_and_markers(self):
         self.assertEqual(

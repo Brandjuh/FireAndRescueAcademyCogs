@@ -1285,10 +1285,10 @@ def format_scheduled_locations_text(
     lines = [title]
     for kind in selected_kinds:
         kind = normalize_kind(kind)
-        lines.extend(["", f"[{LOCATION_LIST_KIND_TITLES.get(kind, EVENT_KINDS[kind]['label'])}]"])
+        lines.append(f"[{LOCATION_LIST_KIND_TITLES.get(kind, EVENT_KINDS[kind]['label'])}]")
         kind_profiles = profiles.get(kind, {}) or {}
         scheduled_names = schedule_profile_names(schedules.get(kind, {}) or {})
-        rendered = False
+        entries: List[Tuple[str, str]] = []
         rendered_keys: set[str] = set()
         for profile_name in scheduled_names:
             profile = kind_profiles.get(str(profile_name).strip().lower())
@@ -1298,12 +1298,12 @@ def format_scheduled_locations_text(
             if keys & rendered_keys:
                 continue
             rendered_keys.update(keys)
-            if rendered:
-                lines.append("")
-            lines.append(profile_location_list_line(profile))
-            lines.append(profile_type_summary(kind, profile))
-            rendered = True
-        if not rendered:
+            location = profile_location_list_line(profile)
+            event_type = profile_type_summary(kind, profile)
+            entries.append((location.casefold(), f"{location} / {event_type}"))
+        if entries:
+            lines.extend(entry for _, entry in sorted(entries, key=lambda item: item[0]))
+        else:
             lines.append("none")
     return "\n".join(lines).strip()
 
@@ -3811,10 +3811,12 @@ class EventManager(commands.Cog):
     async def _build_event_request_board_locations_content(self) -> str:
         profiles = await self.config.profiles()
         schedules = await self.config.schedules()
+        updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         return "\n".join(
             [
                 EVENT_REQUEST_BOARD_LOCATIONS_MARKER,
                 "Current EventManager Scheduler Locations",
+                f"Last updated: {updated_at}",
                 "",
                 format_scheduled_locations_text(
                     profiles,
