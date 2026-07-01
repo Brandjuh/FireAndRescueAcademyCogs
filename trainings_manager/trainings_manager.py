@@ -3310,7 +3310,7 @@ class TrainingManager(commands.Cog):
             "- Some trainings exist in more than one academy type. For those, use the prefixed text shown in the agency guide.",
             "- Example: use Fire Station - Lifeguard Training or Water Rescue - Lifeguard Training, not only Lifeguard Training.",
             "- Board requests are opened as free alliance classes.",
-            "- The bot opens 1 class for each recognized training.",
+            "- Fire & Rescue Academy opens 1 class for each recognized training.",
             "- If current data shows your alliance donation is below 5%, the class will not be opened automatically.",
             "",
             "[b]Current academy availability[/b]",
@@ -3326,7 +3326,7 @@ class TrainingManager(commands.Cog):
             [
                 "",
                 "[b]Guide posts[/b]",
-                "The bot keeps one extra post per agency below. Use the training name exactly as shown there when possible.",
+                "Fire & Rescue Academy keeps one extra post per agency below. Use the training name exactly as shown there when possible.",
                 "",
                 "[b]Examples[/b]",
                 "HazMat",

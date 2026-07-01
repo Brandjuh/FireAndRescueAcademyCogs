@@ -2578,7 +2578,7 @@ def build_building_board_guide_content(thread_id: int = BOARD_THREAD_ID) -> str:
             "[b]How to request[/b]",
             "- Create a new post in this topic.",
             "- Paste a Google Maps link to a real hospital or prison/jail.",
-            "- You do not need to type Hospital or Prison. The bot detects the type from the location.",
+            "- You do not need to type Hospital or Prison. Fire & Rescue Academy detects the type from the location.",
             "- Clinics, doctor offices, museums, historic sites, courthouses, and police stations are rejected.",
             "- You do not need to type a building name. The name is detected from Google Maps.",
             "- Requests are reviewed by admins before they are built.",
