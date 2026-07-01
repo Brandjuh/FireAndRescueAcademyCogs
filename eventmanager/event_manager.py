@@ -11,6 +11,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
+from html.parser import HTMLParser
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
@@ -43,8 +44,24 @@ DEFAULT_LARGE_ROUTE_TIME = "07:00"
 DEFAULT_EVENT_ROUTE_TIME = "15:00"
 LEGACY_EVENT_ROUTE_TIME = "07:00"
 DEFAULT_PANEL_CHANNEL_ID = 1421256548977606827
+DEFAULT_REQUEST_PANEL_CHANNEL_ID = 1421627971831070730
+DEFAULT_REQUEST_LOG_CHANNEL_ID = 668919729762730004
 PANEL_TITLE = "EventManager Control Panel"
 REQUEST_PANEL_TITLE = "Event Requests"
+EVENT_REQUEST_BOARD_THREAD_ID = 15292
+EVENT_REQUEST_BOARD_POLL_SECONDS = 5 * 60
+EVENT_REQUEST_BOARD_DELETE_AFTER_SECONDS = 12 * 60 * 60
+EVENT_REQUEST_BOARD_CLEANUP_SECONDS = 10 * 60
+EVENT_REQUEST_BOARD_GUIDE_MAX_SCAN_PAGES = 25
+EVENT_REQUEST_BOARD_PROCESSED_ID_LIMIT = 1000
+EVENT_REQUEST_BOARD_PENDING_DELETE_LIMIT = 1000
+EVENT_REQUEST_BOARD_GUIDE_MARKER = "[EM-GUIDE:request]"
+EVENT_REQUEST_BOARD_LOCATIONS_MARKER = "[EM-GUIDE:locations]"
+EVENT_REQUEST_BOARD_REPLY_MARKER = "[EM-REPLY]"
+LOCATION_LIST_KIND_TITLES = {
+    "large": "Large scale alliance missions",
+    "event": "Alliance events",
+}
 SCHEDULE_RETRY_SECONDS = 90
 COOLDOWN_GRACE_SECONDS = 75
 PLAYWRIGHT_SETUP_MESSAGE = (
@@ -486,6 +503,24 @@ class EventStartResult:
     details: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class EventBoardPost:
+    post_id: int
+    author_id: Optional[str]
+    author_name: str
+    created_at: str
+    content: str
+
+
+@dataclass
+class EventBoardPage:
+    posts: List[EventBoardPost]
+    last_page: int = 1
+    current_user_id: Optional[str] = None
+    reply_action: Optional[str] = None
+    reply_token: Optional[str] = None
+
+
 Payload = List[Tuple[str, str]]
 LATITUDE_FIELD = "mission_position[latitude]"
 LONGITUDE_FIELD = "mission_position[longitude]"
@@ -879,6 +914,187 @@ def parse_location_add_request(value: str) -> Tuple[str, str, str]:
     return kind, location_text, type_search
 
 
+class EventBoardPageParser(HTMLParser):
+    """Parse MissionChief alliance board pages for EventManager location requests."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.posts: List[EventBoardPost] = []
+        self.page_numbers: List[int] = []
+        self.current_user_id: Optional[str] = None
+        self.reply_action: Optional[str] = None
+        self.reply_token: Optional[str] = None
+        self._post: Optional[dict] = None
+        self._post_depth = 0
+        self._content_depth = 0
+        self._capture_author = False
+        self._capture_content = False
+        self._capture_page_number = False
+        self._capture_active_page = False
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]):
+        attr = {key: value for key, value in attrs}
+
+        if tag == "div" and str(attr.get("id") or "").startswith("post-on-page-"):
+            self._post = {
+                "post_id": None,
+                "author_id": None,
+                "author_name": "",
+                "created_at": "",
+                "content": [],
+            }
+            self._post_depth = 1
+            return
+
+        if self._post is not None and tag == "div":
+            self._post_depth += 1
+            classes = str(attr.get("class") or "")
+            if "col-md-11" in classes:
+                self._content_depth = self._post_depth
+                self._capture_content = True
+
+        if self._post is not None and tag == "a":
+            href = str(attr.get("href") or "")
+            profile_match = re.search(r"/profile/(\d+)", href)
+            if profile_match and not self._post.get("author_id"):
+                self._post["author_id"] = profile_match.group(1)
+                self._capture_author = True
+
+            post_match = re.search(r"/alliance_posts/(\d+)", href)
+            if post_match:
+                self._post["post_id"] = int(post_match.group(1))
+
+        if self._post is not None and tag == "span":
+            title = attr.get("title")
+            if title and not self._post.get("created_at"):
+                self._post["created_at"] = str(title)
+
+        if self._post is not None and self._capture_content and tag == "br":
+            self._post["content"].append("\n")
+
+        if tag == "a":
+            href = str(attr.get("href") or "")
+            page_match = re.search(r"[?&]page=(\d+)", href)
+            if page_match:
+                self.page_numbers.append(int(page_match.group(1)))
+            self._capture_page_number = bool(page_match)
+
+        if tag == "li" and "active" in str(attr.get("class") or ""):
+            self._capture_active_page = True
+
+        if tag == "form" and str(attr.get("id") or "") == "new_alliance_post":
+            self.reply_action = attr.get("action")
+
+        if tag == "input" and attr.get("name") == "authenticity_token":
+            token = attr.get("value")
+            if token:
+                self.reply_token = token
+
+    def handle_data(self, data: str):
+        if "user_id =" in data:
+            match = re.search(r"user_id\s*=\s*(\d+)", data)
+            if match:
+                self.current_user_id = match.group(1)
+
+        if self._post is not None and self._capture_author:
+            text = re.sub(r"\s+", " ", data).strip()
+            if text:
+                self._post["author_name"] = text
+
+        if self._post is not None and self._capture_content:
+            self._post["content"].append(data)
+
+        if self._capture_page_number:
+            with suppress(ValueError):
+                self.page_numbers.append(int(data.strip()))
+
+        if self._capture_active_page:
+            with suppress(ValueError):
+                self.page_numbers.append(int(data.strip()))
+
+    def handle_endtag(self, tag: str):
+        if self._capture_author and tag == "a":
+            self._capture_author = False
+
+        if self._capture_page_number and tag == "a":
+            self._capture_page_number = False
+
+        if self._capture_active_page and tag == "li":
+            self._capture_active_page = False
+
+        if self._post is not None and tag == "div":
+            if self._capture_content and self._post_depth == self._content_depth:
+                self._capture_content = False
+                self._content_depth = 0
+
+            self._post_depth -= 1
+            if self._post_depth <= 0:
+                self._finish_post()
+
+    def _finish_post(self) -> None:
+        if self._post is None:
+            return
+
+        post_id = self._post.get("post_id")
+        if post_id is None:
+            self._post = None
+            return
+
+        content = "".join(self._post.get("content") or [])
+        content = re.sub(r"\n\s*\n+", "\n", content)
+        content = re.sub(r"[ \t]+", " ", content).strip()
+        self.posts.append(
+            EventBoardPost(
+                post_id=int(post_id),
+                author_id=self._post.get("author_id"),
+                author_name=str(self._post.get("author_name") or "Unknown"),
+                created_at=str(self._post.get("created_at") or ""),
+                content=content,
+            )
+        )
+        self._post = None
+
+    def page(self) -> EventBoardPage:
+        return EventBoardPage(
+            posts=self.posts,
+            last_page=max(self.page_numbers or [1]),
+            current_user_id=self.current_user_id,
+            reply_action=self.reply_action,
+            reply_token=self.reply_token,
+        )
+
+
+def parse_event_board_page(html: str) -> EventBoardPage:
+    parser = EventBoardPageParser()
+    parser.feed(html or "")
+    return parser.page()
+
+
+def event_board_marker_section(text: str) -> Optional[str]:
+    if EVENT_REQUEST_BOARD_GUIDE_MARKER in str(text or ""):
+        return "guide"
+    if EVENT_REQUEST_BOARD_LOCATIONS_MARKER in str(text or ""):
+        return "locations"
+    if EVENT_REQUEST_BOARD_REPLY_MARKER in str(text or ""):
+        return "reply"
+    return None
+
+
+def extract_event_location_request_text(content: str) -> str:
+    """Extract the requested location from a free-form board post."""
+    text = str(content or "").strip()
+    if not text or event_board_marker_section(text):
+        return ""
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(
+        r"^\s*(event|events|mission|missions|alliance event|large scale mission|location|request)\s*[:\-]\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip()
+    return text[:180].strip()
+
+
 def geocoded_location_from_results(label: str, results: Any) -> Dict[str, str]:
     """Return a scheduled location from geocode.maps.co search results."""
     if not isinstance(results, list):
@@ -935,6 +1151,14 @@ def profile_location_summary(profile: dict) -> str:
     return label or "Unknown location"
 
 
+def profile_location_list_line(profile: dict) -> str:
+    """Return only the public resolved location for compact schedule lists."""
+    fields = profile_fields_for_start(profile)
+    address = str(fields.get(ADDRESS_FIELD) or "").strip()
+    label = str(profile.get("location_label") or "").strip()
+    return address or label or "Unknown location"
+
+
 def profile_type_summary(kind: str, profile: dict) -> str:
     """Return the configured MissionChief type summary for a profile."""
     kind = normalize_kind(kind)
@@ -962,6 +1186,36 @@ def profile_start_summary(kind: str, profile: dict) -> str:
             f"Type: {profile_type_summary(kind, profile)}",
         ]
     )
+
+
+def format_scheduled_locations_text(
+    profiles: Dict[str, Dict[str, dict]],
+    schedules: Dict[str, dict],
+    *,
+    kinds: Optional[List[str]] = None,
+    title: str = "EventManager scheduled locations",
+) -> str:
+    """Format scheduled locations without exposing internal profile names."""
+    selected_kinds = kinds or ["large", "event"]
+    lines = [title]
+    for kind in selected_kinds:
+        kind = normalize_kind(kind)
+        lines.extend(["", f"[{LOCATION_LIST_KIND_TITLES.get(kind, EVENT_KINDS[kind]['label'])}]"])
+        kind_profiles = profiles.get(kind, {}) or {}
+        scheduled_names = schedule_profile_names(schedules.get(kind, {}) or {})
+        rendered = False
+        for profile_name in scheduled_names:
+            profile = kind_profiles.get(str(profile_name).strip().lower())
+            if not profile:
+                continue
+            if rendered:
+                lines.append("")
+            lines.append(profile_location_list_line(profile))
+            lines.append(profile_type_summary(kind, profile))
+            rendered = True
+        if not rendered:
+            lines.append("none")
+    return "\n".join(lines).strip()
 
 
 def profile_run_details(kind: str, profile: dict) -> Dict[str, str]:
@@ -2053,14 +2307,14 @@ class EventManagerPanelView(discord.ui.View):
 
 
 class EventRequestPanelView(discord.ui.View):
-    """Persistent member entry point for requesting an alliance event or mission."""
+    """Persistent member entry point for requesting a scheduler location."""
 
     def __init__(self, cog: "EventManager"):
         super().__init__(timeout=None)
         self.cog = cog
 
     @discord.ui.button(
-        label="Request Event / Mission",
+        label="Request Event Location",
         style=discord.ButtonStyle.primary,
         custom_id="eventmanager:request:create",
     )
@@ -2071,33 +2325,14 @@ class EventRequestPanelView(discord.ui.View):
         await interaction.response.send_modal(EventRequestModal(self.cog))
 
 
-class EventRequestModal(discord.ui.Modal, title="Request Event / Mission"):
-    """Collect a lightweight member request without starting anything automatically."""
+class EventRequestModal(discord.ui.Modal, title="Request Event Location"):
+    """Collect a member location request and add it to the scheduler."""
 
-    request_type = discord.ui.TextInput(
-        label="Request type",
-        placeholder="Alliance event or large scale mission",
-        required=True,
-        max_length=80,
-    )
-    preferred_type = discord.ui.TextInput(
-        label="Preferred MissionChief type",
-        placeholder="Example: Storm, Major fire, Bomb Explosion",
-        required=False,
-        max_length=100,
-    )
     location = discord.ui.TextInput(
-        label="Location preference",
-        placeholder="Example: New York City, Bermuda, no preference",
-        required=False,
-        max_length=160,
-    )
-    notes = discord.ui.TextInput(
-        label="Reason / timing notes",
-        placeholder="Optional details for admins",
-        required=False,
-        style=discord.TextStyle.paragraph,
-        max_length=700,
+        label="Location",
+        placeholder="Example: Kansas City, Kansas or Amsterdam, Netherlands",
+        required=True,
+        max_length=180,
     )
 
     def __init__(self, cog: "EventManager"):
@@ -2105,15 +2340,23 @@ class EventRequestModal(discord.ui.Modal, title="Request Event / Mission"):
         self.cog = cog
 
     async def on_submit(self, interaction: discord.Interaction):
-        request_id = await self.cog.create_event_request(
-            interaction,
-            request_type=str(self.request_type.value or "").strip(),
-            preferred_type=str(self.preferred_type.value or "").strip(),
-            location=str(self.location.value or "").strip(),
-            notes=str(self.notes.value or "").strip(),
-        )
-        await interaction.response.send_message(
-            f"Your event request has been submitted for admin review. Reference: `{request_id}`",
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            record = await self.cog.submit_event_location_request(
+                guild=interaction.guild,
+                location_text=str(self.location.value or "").strip(),
+                source="discord",
+                requester_name=getattr(interaction.user, "display_name", str(interaction.user)),
+                discord_user=interaction.user,
+            )
+        except Exception as exc:
+            await interaction.followup.send(f"Could not add this event location: {exc}", ephemeral=True)
+            return
+
+        await interaction.followup.send(
+            "Your event location was added to the scheduler.\n"
+            f"Location: `{record.get('resolved_address') or record.get('location')}`\n"
+            "Type: `Suprise`",
             ephemeral=True,
         )
 
@@ -2344,14 +2587,21 @@ class EventManager(commands.Cog):
             log_channel_id=None,
             panel_channel_id=DEFAULT_PANEL_CHANNEL_ID,
             panel_message_id=None,
-            request_panel_channel_id=None,
+            request_panel_channel_id=DEFAULT_REQUEST_PANEL_CHANNEL_ID,
             request_panel_message_id=None,
-            request_log_channel_id=None,
+            request_log_channel_id=DEFAULT_REQUEST_LOG_CHANNEL_ID,
             event_requests=[],
             geocode_api_key="",
+            board_thread_id=EVENT_REQUEST_BOARD_THREAD_ID,
+            board_last_seen_post_id=None,
+            board_processed_post_ids=[],
+            board_pending_deletions=[],
+            board_guide_post_ids={},
         )
         self._task: Optional[asyncio.Task] = None
         self._panel_task: Optional[asyncio.Task] = None
+        self._board_poll_task: Optional[asyncio.Task] = None
+        self._board_cleanup_task: Optional[asyncio.Task] = None
         self._start_lock = asyncio.Lock()
         self._notification_contexts: Dict[str, Dict[str, Any]] = {}
 
@@ -2362,12 +2612,18 @@ class EventManager(commands.Cog):
         await self._migrate_route_profiles()
         self._task = asyncio.create_task(self._scheduler_loop())
         self._panel_task = asyncio.create_task(self._ensure_panels_after_ready())
+        self._board_poll_task = asyncio.create_task(self._event_request_board_poll_loop())
+        self._board_cleanup_task = asyncio.create_task(self._event_request_board_cleanup_loop())
 
     async def cog_unload(self):
         if self._task:
             self._task.cancel()
         if self._panel_task:
             self._panel_task.cancel()
+        if self._board_poll_task:
+            self._board_poll_task.cancel()
+        if self._board_cleanup_task:
+            self._board_cleanup_task.cancel()
 
     async def _migrate_default_event_schedule_time(self):
         async with self.config.schedules() as schedules:
@@ -2934,6 +3190,8 @@ class EventManager(commands.Cog):
         for guild in self.bot.guilds:
             with suppress(Exception):
                 await self.ensure_panel_message(guild, create=True)
+            with suppress(Exception):
+                await self.ensure_request_panel_message(guild, create=True)
 
     async def panel_channel(self, guild: discord.Guild):
         channel_id = int(await self.config.panel_channel_id() or DEFAULT_PANEL_CHANNEL_ID)
@@ -3006,7 +3264,7 @@ class EventManager(commands.Cog):
     async def request_panel_channel(self, guild: discord.Guild):
         channel_id = await self.config.request_panel_channel_id()
         if not channel_id:
-            channel_id = await self.config.panel_channel_id() or DEFAULT_PANEL_CHANNEL_ID
+            channel_id = DEFAULT_REQUEST_PANEL_CHANNEL_ID
         return guild.get_channel(int(channel_id)) or self.bot.get_channel(int(channel_id))
 
     def is_request_panel_message(self, message: discord.Message) -> bool:
@@ -3022,12 +3280,13 @@ class EventManager(commands.Cog):
         embed = discord.Embed(
             title=REQUEST_PANEL_TITLE,
             description=(
-                "Request a large scale alliance mission or alliance event for admin review.\n\n"
-                "This does not start anything automatically. Staff will review the request first."
+                "Request a future MissionChief alliance event location.\n\n"
+                "The location is added to both the Alliance Event and Large Scale Alliance Mission scheduler "
+                "with a random MissionChief type."
             ),
             color=discord.Color.blurple(),
         )
-        embed.add_field(name="Privacy", value="Your request confirmation is private to you.", inline=False)
+        embed.add_field(name="Privacy", value="Your confirmation is private to you.", inline=False)
         return embed
 
     async def find_existing_request_panel_message(self, channel: Any):
@@ -3071,6 +3330,97 @@ class EventManager(commands.Cog):
         await self.config.request_panel_message_id.set(message.id)
         return message
 
+    async def _add_location_to_scheduler(
+        self,
+        location: Dict[str, str],
+        *,
+        kinds: Tuple[str, ...] = ("large", "event"),
+    ) -> Dict[str, Dict[str, Any]]:
+        """Add or update a resolved location in the selected scheduler rotations."""
+        result: Dict[str, Dict[str, Any]] = {}
+        profile_name = custom_route_profile_name(location["label"])
+        async with self.config.profiles() as profiles:
+            for kind in kinds:
+                kind = normalize_kind(kind)
+                profile = route_profile_for_location(kind, location)
+                profiles.setdefault(kind, {})[profile_name] = profile
+                result[kind] = {
+                    "profile_name": profile_name,
+                    "profile": profile,
+                }
+
+        async with self.config.schedules() as schedules:
+            for kind in kinds:
+                kind = normalize_kind(kind)
+                schedule = schedules.setdefault(kind, {})
+                result.setdefault(kind, {})["added"] = add_profile_to_schedule_rotation(schedule, profile_name)
+                result[kind]["enabled"] = bool(schedule.get("enabled"))
+        return result
+
+    async def submit_event_location_request(
+        self,
+        *,
+        guild: Optional[discord.Guild],
+        location_text: str,
+        source: str,
+        requester_name: str,
+        discord_user: Optional[Any] = None,
+        mc_user_id: Optional[str] = None,
+        board_post_id: Optional[int] = None,
+        board_created_at: str = "",
+    ) -> Dict[str, Any]:
+        """Resolve and add a member-requested event location to both scheduler rotations."""
+        location_text = str(location_text or "").strip()
+        if not location_text:
+            raise ValueError("Location is required.")
+
+        created_at = datetime.now(timezone.utc)
+        requester_id = getattr(discord_user, "id", None)
+        request_id_seed = requester_id or mc_user_id or board_post_id or 0
+        try:
+            request_id_suffix = int(request_id_seed) % 10000
+        except (TypeError, ValueError):
+            request_id_suffix = 0
+        request_id = f"EVTLOC-{created_at:%Y%m%d%H%M%S}-{request_id_suffix:04d}"
+        resolved = await self._geocode_location(location_text)
+        scheduler_result = await self._add_location_to_scheduler(resolved)
+
+        record = {
+            "id": request_id,
+            "created_at": config_datetime(created_at),
+            "status": "added",
+            "source": source,
+            "discord_user_id": requester_id,
+            "discord_name": str(discord_user) if discord_user else "",
+            "display_name": requester_name,
+            "mc_user_id": str(mc_user_id or ""),
+            "board_post_id": board_post_id,
+            "board_created_at": board_created_at,
+            "location": location_text,
+            "resolved_label": resolved["label"],
+            "resolved_address": resolved["address"],
+            "latitude": resolved["latitude"],
+            "longitude": resolved["longitude"],
+            "type": "Suprise",
+            "schedules": {
+                kind: {
+                    "profile_name": details.get("profile_name"),
+                    "added": bool(details.get("added")),
+                    "enabled": bool(details.get("enabled")),
+                }
+                for kind, details in scheduler_result.items()
+            },
+        }
+        async with self.config.event_requests() as requests:
+            requests.append(record)
+            del requests[:-500]
+        await self._log_event_request(guild, record)
+        if discord_user is not None:
+            await self._record_membermanager_event_location_request(guild, discord_user, record)
+        with suppress(Exception):
+            await self._sync_event_request_board_posts()
+        return record
+
     async def create_event_request(
         self,
         interaction: discord.Interaction,
@@ -3080,30 +3430,20 @@ class EventManager(commands.Cog):
         location: str,
         notes: str,
     ) -> str:
-        created_at = datetime.now(timezone.utc)
-        user = interaction.user
-        request_id = f"EVT-{created_at:%Y%m%d%H%M%S}-{getattr(user, 'id', 0) % 10000:04d}"
-        record = {
-            "id": request_id,
-            "created_at": config_datetime(created_at),
-            "status": "pending",
-            "discord_user_id": getattr(user, "id", None),
-            "discord_name": str(user),
-            "display_name": getattr(user, "display_name", str(user)),
-            "request_type": request_type,
-            "preferred_type": preferred_type,
-            "location": location,
-            "notes": notes,
-        }
-        async with self.config.event_requests() as requests:
-            requests.append(record)
-        await self._log_event_request(interaction.guild, record)
-        return request_id
+        """Backward-compatible pending request recorder for older panels."""
+        record = await self.submit_event_location_request(
+            guild=interaction.guild,
+            location_text=location or notes or request_type,
+            source="discord",
+            requester_name=getattr(interaction.user, "display_name", str(interaction.user)),
+            discord_user=interaction.user,
+        )
+        return str(record.get("id"))
 
     async def _request_log_channel(self, guild: Optional[discord.Guild]):
         channel_id = await self.config.request_log_channel_id()
         if not channel_id:
-            channel_id = await self.config.log_channel_id()
+            channel_id = DEFAULT_REQUEST_LOG_CHANNEL_ID
         if not channel_id:
             return None
         if guild:
@@ -3115,20 +3455,536 @@ class EventManager(commands.Cog):
         if not channel:
             return
         embed = discord.Embed(
-            title="New EventManager request",
+            title="Event location request added",
             color=discord.Color.blurple(),
             timestamp=datetime.now(timezone.utc),
         )
         user_id = record.get("discord_user_id")
         requested_by = f"<@{user_id}>" if user_id else record.get("display_name") or "Unknown"
+        if record.get("mc_user_id"):
+            requested_by = f"{requested_by} ({record['mc_user_id']})"
         embed.add_field(name="Reference", value=str(record.get("id")), inline=True)
+        embed.add_field(name="Source", value=str(record.get("source") or "unknown"), inline=True)
         embed.add_field(name="Requested by", value=requested_by, inline=True)
-        embed.add_field(name="Request type", value=truncate_discord_text(record.get("request_type") or "Not specified", 1024), inline=False)
-        embed.add_field(name="Preferred type", value=truncate_discord_text(record.get("preferred_type") or "No preference", 1024), inline=False)
-        embed.add_field(name="Location", value=truncate_discord_text(record.get("location") or "No preference", 1024), inline=False)
-        if record.get("notes"):
-            embed.add_field(name="Notes", value=truncate_discord_text(record["notes"], 1024), inline=False)
+        embed.add_field(name="Requested location", value=truncate_discord_text(record.get("location") or "Unknown", 1024), inline=False)
+        embed.add_field(
+            name="Resolved location",
+            value=truncate_discord_text(record.get("resolved_address") or "Unknown", 1024),
+            inline=False,
+        )
+        embed.add_field(name="Type", value=str(record.get("type") or "Suprise"), inline=True)
+        embed.add_field(name="Added to", value="Alliance Events and Large Scale Alliance Missions", inline=False)
         await channel.send(embed=embed)
+
+    async def _record_membermanager_event_location_request(
+        self,
+        guild: Optional[discord.Guild],
+        discord_user: Any,
+        record: Dict[str, Any],
+    ) -> None:
+        """Record Discord-originated event location requests in MemberManager."""
+        if guild is None:
+            return
+        member_manager = self.bot.get_cog("MemberManager")
+        member_db = getattr(member_manager, "db", None) if member_manager else None
+        if not member_db:
+            return
+        user_id = getattr(discord_user, "id", None)
+        if not user_id:
+            return
+        payload = {
+            "request_id": record.get("id"),
+            "location": record.get("location"),
+            "resolved_address": record.get("resolved_address"),
+            "type": record.get("type") or "Suprise",
+            "source": "discord",
+        }
+        try:
+            await member_db.add_event(
+                guild_id=guild.id,
+                discord_id=user_id,
+                mc_user_id=None,
+                event_type="event_location_requested",
+                event_data=payload,
+                triggered_by="eventmanager",
+                actor_id=user_id,
+            )
+        except Exception as exc:
+            log.error("Failed to record EventManager request in MemberManager: %s", exc, exc_info=True)
+
+    async def _wait_until_ready_for_background_task(self) -> None:
+        wait_until_red_ready = getattr(self.bot, "wait_until_red_ready", None)
+        if callable(wait_until_red_ready):
+            await wait_until_red_ready()
+        else:
+            await self.bot.wait_until_ready()
+
+    def _primary_guild_for_event_requests(self) -> Optional[discord.Guild]:
+        channel_id = DEFAULT_REQUEST_LOG_CHANNEL_ID
+        channel = self.bot.get_channel(channel_id)
+        guild = getattr(channel, "guild", None)
+        if guild:
+            return guild
+        return self.bot.guilds[0] if self.bot.guilds else None
+
+    async def _event_request_board_thread_id(self) -> int:
+        try:
+            return int(await self.config.board_thread_id() or EVENT_REQUEST_BOARD_THREAD_ID)
+        except (TypeError, ValueError):
+            return EVENT_REQUEST_BOARD_THREAD_ID
+
+    def _build_event_request_board_guide_content(self) -> str:
+        return "\n".join(
+            [
+                EVENT_REQUEST_BOARD_GUIDE_MARKER,
+                "Event Location Requests",
+                "",
+                "This post is maintained automatically by Fire & Rescue Academy.",
+                "",
+                "How to request a location:",
+                "Post one clear location in this thread.",
+                "",
+                "Examples:",
+                "- Kansas City, Kansas",
+                "- Amsterdam, Netherlands",
+                "- Bermuda Islands",
+                "",
+                "Requested locations are added to both Alliance Events and Large Scale Alliance Missions.",
+                "The MissionChief type is set to Suprise unless staff changes it later.",
+                "",
+                "Request and bot reply posts are automatically removed after 12 hours.",
+            ]
+        )
+
+    async def _build_event_request_board_locations_content(self) -> str:
+        profiles = await self.config.profiles()
+        schedules = await self.config.schedules()
+        return "\n".join(
+            [
+                EVENT_REQUEST_BOARD_LOCATIONS_MARKER,
+                "Current EventManager Scheduler Locations",
+                "",
+                format_scheduled_locations_text(
+                    profiles,
+                    schedules,
+                    title="Current scheduled locations",
+                ),
+            ]
+        )
+
+    async def _fetch_event_request_board_latest_page(self, session, thread_id: int) -> Tuple[EventBoardPage, Optional[int]]:
+        base_url = f"{BASE_URL}/alliance_threads/{int(thread_id)}"
+        async with session.get(base_url, allow_redirects=True) as response:
+            status = getattr(response, "status", None)
+            html = await response.text()
+        page = parse_event_board_page(html)
+        if status is not None and int(status) >= 400:
+            return page, status
+
+        if page.last_page > 1:
+            async with session.get(f"{base_url}?page={page.last_page}", allow_redirects=True) as response:
+                status = getattr(response, "status", None)
+                html = await response.text()
+            page = parse_event_board_page(html)
+        return page, status
+
+    async def _post_event_request_board_reply(
+        self,
+        session,
+        thread_id: int,
+        page: EventBoardPage,
+        content: str,
+    ) -> Optional[int]:
+        action = page.reply_action or f"/alliance_posts?alliance_thread_id={int(thread_id)}"
+        post_url = urljoin(BASE_URL, action)
+        payload = {
+            "utf8": "\u2713",
+            "alliance_post[content]": content,
+            "commit": "Save",
+        }
+        if page.reply_token:
+            payload["authenticity_token"] = page.reply_token
+
+        async with session.post(post_url, data=payload, allow_redirects=True) as response:
+            status = getattr(response, "status", None)
+            await response.text()
+        return status
+
+    async def _post_event_request_board_reply_with_id(
+        self,
+        session,
+        thread_id: int,
+        page: EventBoardPage,
+        content: str,
+    ) -> Tuple[Optional[int], Optional[int]]:
+        status = await self._post_event_request_board_reply(session, thread_id, page, content)
+        if status is None or int(status) >= 400:
+            return status, None
+
+        refreshed_page, refreshed_status = await self._fetch_event_request_board_latest_page(session, thread_id)
+        if refreshed_status is not None and int(refreshed_status) >= 400:
+            return status, None
+
+        for post in sorted(refreshed_page.posts, key=lambda item: item.post_id, reverse=True):
+            if EVENT_REQUEST_BOARD_REPLY_MARKER not in str(post.content or ""):
+                continue
+            if refreshed_page.current_user_id and post.author_id and post.author_id != refreshed_page.current_user_id:
+                continue
+            return status, int(post.post_id)
+        return status, None
+
+    async def _find_existing_event_request_board_posts(self, session, thread_id: int) -> Dict[str, int]:
+        found: Dict[str, int] = {}
+        base_url = f"{BASE_URL}/alliance_threads/{int(thread_id)}"
+        async with session.get(base_url, allow_redirects=True) as response:
+            status = getattr(response, "status", None)
+            html = await response.text()
+        if status is not None and int(status) >= 400:
+            return found
+
+        first_page = parse_event_board_page(html)
+        max_page = min(first_page.last_page, EVENT_REQUEST_BOARD_GUIDE_MAX_SCAN_PAGES)
+        for page_number in range(1, max_page + 1):
+            async with session.get(f"{base_url}?page={page_number}", allow_redirects=True) as response:
+                status = getattr(response, "status", None)
+                page_html = await response.text()
+            if status is not None and int(status) >= 400:
+                continue
+            page = parse_event_board_page(page_html)
+            for post in page.posts:
+                section = event_board_marker_section(post.content)
+                if section in {"guide", "locations"}:
+                    found[section] = post.post_id
+        return found
+
+    async def _create_event_request_board_post(
+        self,
+        session,
+        thread_id: int,
+        section: str,
+        content: str,
+    ) -> Tuple[Optional[int], str]:
+        page, status = await self._fetch_event_request_board_latest_page(session, thread_id)
+        if status is not None and int(status) >= 400:
+            return None, f"request thread returned HTTP {status}"
+
+        post_status = await self._post_event_request_board_reply(session, thread_id, page, content)
+        if post_status is None or int(post_status) >= 400:
+            return None, f"create board post returned HTTP {post_status}"
+
+        page, status = await self._fetch_event_request_board_latest_page(session, thread_id)
+        if status is not None and int(status) >= 400:
+            return None, f"could not refetch request thread after create: HTTP {status}"
+
+        for post in sorted(page.posts, key=lambda item: item.post_id, reverse=True):
+            if event_board_marker_section(post.content) == section:
+                return post.post_id, "created"
+        return None, "created board post but could not resolve new post ID"
+
+    def _select_event_request_post_edit_form(self, html: str, post_id: int):
+        soup = BeautifulSoup(html or "", "html.parser")
+        forms = soup.find_all("form")
+        wanted = f"/alliance_posts/{int(post_id)}"
+        for form in forms:
+            if wanted in str(form.get("action") or ""):
+                return form
+        for form in forms:
+            if "/alliance_posts" in str(form.get("action") or ""):
+                return form
+        return forms[0] if forms else None
+
+    def _payload_from_soup_form(self, form) -> Dict[str, str]:
+        payload: Dict[str, str] = {}
+        for input_field in form.find_all("input"):
+            name = input_field.get("name")
+            if not name:
+                continue
+            field_type = str(input_field.get("type") or "").lower()
+            if field_type in {"submit", "button", "image", "reset"}:
+                continue
+            payload[name] = input_field.get("value") or ""
+        for textarea_field in form.find_all("textarea"):
+            name = textarea_field.get("name")
+            if name:
+                payload[name] = textarea_field.text or ""
+        return payload
+
+    async def _edit_event_request_board_post(self, session, post_id: int, content: str) -> Tuple[bool, str]:
+        edit_url = f"{BASE_URL}/alliance_posts/{int(post_id)}/edit"
+        async with session.get(edit_url, allow_redirects=True) as response:
+            status = getattr(response, "status", None)
+            html = await response.text()
+        if status is not None and int(status) >= 400:
+            return False, f"edit form returned HTTP {status}"
+
+        form = self._select_event_request_post_edit_form(html, post_id)
+        if not form:
+            return False, "edit form not found"
+
+        payload = self._payload_from_soup_form(form)
+        payload.setdefault("utf8", "\u2713")
+        payload.setdefault("commit", "Save")
+        if "_method" not in payload and f"/alliance_posts/{int(post_id)}" in str(form.get("action") or ""):
+            payload["_method"] = "patch"
+        payload["alliance_post[content]"] = content
+        action = form.get("action") or f"/alliance_posts/{int(post_id)}"
+        method = str(form.get("method") or "post").lower()
+        url = urljoin(BASE_URL, action)
+        if method == "get":
+            async with session.get(url, params=payload, allow_redirects=True) as response:
+                status = getattr(response, "status", None)
+                await response.text()
+        else:
+            async with session.post(url, data=payload, allow_redirects=True) as response:
+                status = getattr(response, "status", None)
+                await response.text()
+        if status is None or int(status) >= 400:
+            return False, f"edit post returned HTTP {status}"
+        return True, "updated"
+
+    async def _sync_event_request_board_posts(self) -> None:
+        thread_id = await self._event_request_board_thread_id()
+        session = await self._get_session()
+        guide_content = self._build_event_request_board_guide_content()
+        locations_content = await self._build_event_request_board_locations_content()
+        wanted_content = {
+            "guide": guide_content,
+            "locations": locations_content,
+        }
+        post_ids = dict(await self.config.board_guide_post_ids() or {})
+        discovered = await self._find_existing_event_request_board_posts(session, thread_id)
+        post_ids.update(discovered)
+
+        for section, content in wanted_content.items():
+            post_id = post_ids.get(section)
+            if post_id:
+                updated, reason = await self._edit_event_request_board_post(session, int(post_id), content)
+                if updated:
+                    continue
+                log.info("EventManager board %s post update failed: %s", section, reason)
+                post_ids.pop(section, None)
+
+            created_id, reason = await self._create_event_request_board_post(session, thread_id, section, content)
+            if created_id:
+                post_ids[section] = int(created_id)
+            else:
+                log.warning("EventManager board %s post create failed: %s", section, reason)
+
+        await self.config.board_guide_post_ids.set(post_ids)
+
+    async def _schedule_event_request_board_post_deletion(self, thread_id: int, post_id: int, reason: str) -> None:
+        due_ts = int(datetime.now(timezone.utc).timestamp()) + EVENT_REQUEST_BOARD_DELETE_AFTER_SECONDS
+        async with self.config.board_pending_deletions() as pending:
+            normalized = []
+            exists = False
+            for item in pending or []:
+                try:
+                    item_thread_id = int(item.get("thread_id"))
+                    item_post_id = int(item.get("post_id"))
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                item = dict(item)
+                if item_thread_id == int(thread_id) and item_post_id == int(post_id):
+                    exists = True
+                    item["due_ts"] = min(int(item.get("due_ts") or due_ts), due_ts)
+                    item["reason"] = str(item.get("reason") or reason)
+                normalized.append(item)
+
+            if not exists:
+                normalized.append(
+                    {
+                        "thread_id": int(thread_id),
+                        "post_id": int(post_id),
+                        "due_ts": due_ts,
+                        "reason": str(reason),
+                        "attempts": 0,
+                    }
+                )
+            normalized = sorted(normalized, key=lambda item: int(item.get("due_ts") or 0))
+            del normalized[:-EVENT_REQUEST_BOARD_PENDING_DELETE_LIMIT]
+            pending.clear()
+            pending.extend(normalized)
+
+    async def _event_request_board_cleanup_loop(self) -> None:
+        await self._wait_until_ready_for_background_task()
+        while True:
+            try:
+                await self._cleanup_event_request_board_deletions()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.exception("EventManager board cleanup loop error: %s", exc)
+            await asyncio.sleep(EVENT_REQUEST_BOARD_CLEANUP_SECONDS)
+
+    async def _cleanup_event_request_board_deletions(self) -> None:
+        pending = list(await self.config.board_pending_deletions() or [])
+        if not pending:
+            return
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        due_items = []
+        remaining = []
+        for item in pending:
+            try:
+                due_ts = int(item.get("due_ts") or 0)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if due_ts <= now_ts:
+                due_items.append(dict(item))
+            else:
+                remaining.append(dict(item))
+        if not due_items:
+            return
+
+        session = await self._get_session()
+        for item in due_items:
+            try:
+                thread_id = int(item.get("thread_id"))
+                post_id = int(item.get("post_id"))
+            except (TypeError, ValueError):
+                continue
+            deleted, reason = await self._delete_event_request_board_post(session, thread_id, post_id)
+            if deleted:
+                await asyncio.sleep(1)
+                continue
+
+            attempts = int(item.get("attempts") or 0) + 1
+            if attempts < 6:
+                item["attempts"] = attempts
+                item["last_error"] = reason[:200]
+                item["due_ts"] = now_ts + min(EVENT_REQUEST_BOARD_CLEANUP_SECONDS * attempts, 60 * 60)
+                remaining.append(item)
+            else:
+                log.warning("Dropping EventManager board cleanup for post %s after %s attempts: %s", post_id, attempts, reason)
+
+        remaining = sorted(remaining, key=lambda item: int(item.get("due_ts") or 0))
+        del remaining[:-EVENT_REQUEST_BOARD_PENDING_DELETE_LIMIT]
+        await self.config.board_pending_deletions.set(remaining)
+
+    async def _delete_event_request_board_post(self, session, thread_id: int, post_id: int) -> Tuple[bool, str]:
+        page, status = await self._fetch_event_request_board_latest_page(session, int(thread_id))
+        if status is not None and int(status) >= 400:
+            return False, f"thread returned HTTP {status}"
+        payload = {
+            "utf8": "\u2713",
+            "_method": "delete",
+            "commit": "Delete",
+        }
+        if page.reply_token:
+            payload["authenticity_token"] = page.reply_token
+
+        url = f"{BASE_URL}/alliance_posts/{int(post_id)}"
+        async with session.post(url, data=payload, allow_redirects=True) as response:
+            delete_status = getattr(response, "status", None)
+            await response.text()
+        if delete_status is None:
+            return False, "delete returned no HTTP status"
+        if int(delete_status) >= 400:
+            return False, f"delete returned HTTP {delete_status}"
+        return True, "deleted"
+
+    async def _event_request_board_poll_loop(self) -> None:
+        await self._wait_until_ready_for_background_task()
+        while True:
+            try:
+                await self._sync_event_request_board_posts()
+                await self._process_event_request_board_once()
+            except asyncio.CancelledError:
+                break
+            except RuntimeError as exc:
+                log.info("EventManager board poll skipped: %s", exc)
+            except Exception as exc:
+                log.exception("EventManager board poll loop error: %s", exc)
+            await asyncio.sleep(EVENT_REQUEST_BOARD_POLL_SECONDS)
+
+    async def _process_event_request_board_once(self) -> None:
+        thread_id = await self._event_request_board_thread_id()
+        session = await self._get_session()
+        page, status = await self._fetch_event_request_board_latest_page(session, thread_id)
+        if status is not None and int(status) >= 400:
+            log.warning("EventManager request board returned HTTP %s", status)
+            return
+
+        latest_post_id = max((post.post_id for post in page.posts), default=0)
+        last_seen_raw = await self.config.board_last_seen_post_id()
+        try:
+            last_seen = int(last_seen_raw or 0)
+        except (TypeError, ValueError):
+            last_seen = 0
+        if not last_seen:
+            if latest_post_id:
+                await self.config.board_last_seen_post_id.set(latest_post_id)
+            return
+
+        processed = set()
+        for item in await self.config.board_processed_post_ids() or []:
+            with suppress(TypeError, ValueError):
+                processed.add(int(item))
+
+        new_posts = [
+            post
+            for post in page.posts
+            if int(post.post_id) > last_seen and int(post.post_id) not in processed
+        ]
+        if not new_posts:
+            if latest_post_id > last_seen:
+                await self.config.board_last_seen_post_id.set(latest_post_id)
+            return
+
+        guild = self._primary_guild_for_event_requests()
+        for post in sorted(new_posts, key=lambda item: item.post_id):
+            processed.add(int(post.post_id))
+            if event_board_marker_section(post.content):
+                continue
+            if page.current_user_id and post.author_id and post.author_id == page.current_user_id:
+                continue
+            location_text = extract_event_location_request_text(post.content)
+            if not location_text:
+                continue
+
+            try:
+                record = await self.submit_event_location_request(
+                    guild=guild,
+                    location_text=location_text,
+                    source="missionchief_board",
+                    requester_name=post.author_name,
+                    mc_user_id=post.author_id,
+                    board_post_id=post.post_id,
+                    board_created_at=post.created_at,
+                )
+                reply = "\n".join(
+                    [
+                        EVENT_REQUEST_BOARD_REPLY_MARKER,
+                        f"Event location request processed for {post.author_name}.",
+                        "",
+                        f"Added location: {record.get('resolved_address') or record.get('location')}",
+                        "Type: Suprise",
+                        "Usable for: Alliance Events and Large Scale Alliance Missions",
+                    ]
+                )
+            except Exception as exc:
+                reply = "\n".join(
+                    [
+                        EVENT_REQUEST_BOARD_REPLY_MARKER,
+                        f"Event location request could not be processed for {post.author_name}.",
+                        "",
+                        f"Reason: {exc}",
+                        "",
+                        "Post one clear location, for example:",
+                        "Kansas City, Kansas",
+                        "Amsterdam, Netherlands",
+                    ]
+                )
+
+            _status, reply_post_id = await self._post_event_request_board_reply_with_id(session, thread_id, page, reply)
+            await self._schedule_event_request_board_post_deletion(thread_id, post.post_id, "event location request")
+            if reply_post_id:
+                await self._schedule_event_request_board_post_deletion(thread_id, reply_post_id, "event location request reply")
+            await asyncio.sleep(1)
+
+        normalized_processed = sorted(processed)
+        del normalized_processed[:-EVENT_REQUEST_BOARD_PROCESSED_ID_LIMIT]
+        await self.config.board_processed_post_ids.set(normalized_processed)
+        await self.config.board_last_seen_post_id.set(max(latest_post_id, last_seen, max((post.post_id for post in new_posts), default=last_seen)))
 
     async def _remember_notification_context(self, kind: str, profile_name: str, profile: dict) -> None:
         """Remember the next scheduled profile for the MissionChief announcement ping."""
@@ -3926,6 +4782,8 @@ class EventManager(commands.Cog):
         if not enabled:
             lines.append(f"Enable it with `eventmanager schedule enable {kind}` when ready.")
         await status_message.edit(content=box("\n".join(lines), lang="ini"))
+        with suppress(Exception):
+            await self._sync_event_request_board_posts()
 
     @eventmanager.command(name="locations")
     @commands.admin()
@@ -3939,26 +4797,7 @@ class EventManager(commands.Cog):
 
         profiles = await self.config.profiles()
         schedules = await self.config.schedules()
-        lines = ["EventManager scheduled locations"]
-        for current_kind in kinds:
-            lines.extend(["", f"[{EVENT_KINDS[current_kind]['label']}]"])
-            kind_profiles = profiles.get(current_kind, {})
-            scheduled = set(schedule_profile_names(schedules.get(current_kind, {})))
-            location_items = [
-                (name, profile)
-                for name, profile in sorted(kind_profiles.items())
-                if profile.get("location_label")
-            ]
-            if not location_items:
-                lines.append("none")
-                continue
-            for name, profile in location_items:
-                scheduler_status = "scheduled" if name in scheduled else "saved only"
-                custom_status = "custom" if name.startswith(CUSTOM_ROUTE_PROFILE_PREFIX) else "default"
-                lines.append(f"- {profile.get('location_label') or name} ({custom_status}, {scheduler_status})")
-                lines.append(f"  {profile_location_summary(profile)}")
-                lines.append(f"  {profile_type_summary(current_kind, profile)}")
-        await self._send_schedule_text(ctx, "\n".join(lines))
+        await self._send_schedule_text(ctx, format_scheduled_locations_text(profiles, schedules, kinds=kinds))
 
     @eventmanager.command(name="remove")
     @commands.admin()
@@ -3983,6 +4822,8 @@ class EventManager(commands.Cog):
 
         scheduler_text = "Removed from the scheduler." if removed_from_rotation else "It was not in the scheduler."
         await ctx.send(f"Deleted `{location_text}`. {scheduler_text}")
+        with suppress(Exception):
+            await self._sync_event_request_board_posts()
 
     @eventmanager.command(name="geocodekey")
     @commands.is_owner()

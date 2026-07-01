@@ -1125,7 +1125,7 @@ class MemberOverviewView(discord.ui.View):
     
     async def get_events_embed(self) -> discord.Embed:
         """Build the operations embed for alliance storms and large alliance missions."""
-        return await self._build_filtered_logs_embed(
+        embed = await self._build_filtered_logs_embed(
             title=f"Alliance Operations - {self._get_member_display_name()}",
             empty_text="No alliance storm or large alliance mission logs found for this member.",
             action_keys=OPERATIONS_ACTION_KEYS,
@@ -1135,6 +1135,51 @@ class MemberOverviewView(discord.ui.View):
             color=discord.Color.purple(),
             show_actor=True,
         )
+        request_lines = await self._event_location_request_lines()
+        if not request_lines:
+            return embed
+
+        request_text = "\n".join(request_lines)
+        current_description = str(embed.description or "").strip()
+        if current_description.startswith("*No alliance storm or large alliance mission logs"):
+            embed.description = request_text
+        elif current_description:
+            embed.description = f"{request_text}\n\n{current_description}"
+        else:
+            embed.description = request_text
+        return embed
+
+    async def _event_location_request_lines(self) -> List[str]:
+        """Return MemberManager events created by EventManager location requests."""
+        try:
+            events = await self.db.get_events(
+                discord_id=self.member_data.discord_id,
+                mc_user_id=self.member_data.mc_user_id,
+                event_type="event_location_requested",
+                limit=10,
+            )
+        except Exception as e:
+            log.error(f"Error fetching EventManager location request events: {e}", exc_info=True)
+            return []
+
+        lines = []
+        for event in events:
+            data = event.get("event_data") or {}
+            if not isinstance(data, dict):
+                data = {}
+            location = data.get("resolved_address") or data.get("location") or "Unknown location"
+            request_id = data.get("request_id")
+            timestamp = event.get("timestamp")
+            try:
+                dt = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+                timestamp_text = format_timestamp(int(dt.timestamp()), "R")
+            except Exception:
+                timestamp_text = timestamp or "Unknown time"
+
+            suffix = f" - Ref `{request_id}`" if request_id else ""
+            lines.append(f"📍 **Event location requested** - {truncate_text(location, 120)} | {timestamp_text}{suffix}")
+            lines.append("")
+        return lines
 
     async def get_buildings_embed(self) -> discord.Embed:
         """Build the building and extension activity embed."""
