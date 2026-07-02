@@ -1,5 +1,7 @@
 import asyncio
 import importlib.util
+import sqlite3
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -194,6 +196,160 @@ class MemberManagerMemberSyncTests(unittest.TestCase):
                 event_data={"status": "denied", "reason": "Mismatch"},
             )
         )
+
+    def test_membersync_prune_does_not_remove_role_without_exit_record(self):
+        MemberSync = load_membersync_class()
+        role = object()
+
+        class FakeMember:
+            id = 123
+            name = "DiscordUser"
+
+            def __init__(self):
+                self.roles = [role]
+                self.removed = []
+
+            async def remove_roles(self, *args, **kwargs):
+                self.removed.append((args, kwargs))
+
+        class FakeConfig:
+            async def guild_id(self):
+                return 1
+
+            async def verified_role_id(self):
+                return 999
+
+            async def log_channel_id(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "membersync.db"
+            connection = sqlite3.connect(db_path)
+            try:
+                connection.execute(
+                    "CREATE TABLE links (discord_id INTEGER, mc_user_id TEXT, status TEXT)"
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE member_left_alliance (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        mc_user_id TEXT NOT NULL,
+                        username TEXT,
+                        discord_id INTEGER,
+                        exit_detected_at TEXT NOT NULL,
+                        role_removed INTEGER DEFAULT 0
+                    )
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO links (discord_id, mc_user_id, status) VALUES (123, '456', 'approved')"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            member = FakeMember()
+            guild = types.SimpleNamespace(
+                id=1,
+                get_role=lambda role_id: role if role_id == 999 else None,
+                get_member=lambda user_id: member if user_id == 123 else None,
+                get_channel=lambda channel_id: None,
+            )
+            membersync = MemberSync.__new__(MemberSync)
+            membersync.links_db = db_path
+            membersync.config = FakeConfig()
+            membersync.bot = types.SimpleNamespace(get_guild=lambda guild_id: guild, guilds=[guild])
+            membersync._debug_log = AsyncMock()
+
+            asyncio.run(membersync._prune_once_impl())
+
+            self.assertEqual(member.removed, [])
+
+    def test_membersync_prune_removes_role_for_confirmed_exit_record(self):
+        MemberSync = load_membersync_class()
+        role = object()
+
+        class FakeMember:
+            id = 123
+            name = "DiscordUser"
+
+            def __init__(self):
+                self.roles = [role]
+                self.removed = []
+
+            async def remove_roles(self, *args, **kwargs):
+                self.removed.append((args, kwargs))
+                self.roles.remove(args[0])
+
+        class FakeConfig:
+            async def log_channel_id(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "membersync.db"
+            connection = sqlite3.connect(db_path)
+            try:
+                connection.execute(
+                    "CREATE TABLE links (discord_id INTEGER, mc_user_id TEXT, status TEXT)"
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE member_left_alliance (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        mc_user_id TEXT NOT NULL,
+                        username TEXT,
+                        discord_id INTEGER,
+                        exit_detected_at TEXT NOT NULL,
+                        role_removed INTEGER DEFAULT 0
+                    )
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO links (discord_id, mc_user_id, status) VALUES (123, '456', 'approved')"
+                )
+                connection.execute(
+                    """
+                    INSERT INTO member_left_alliance
+                    (mc_user_id, username, discord_id, exit_detected_at, role_removed)
+                    VALUES ('456', 'MCUser', 123, '2026-06-12T12:00:00', 0)
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            member = FakeMember()
+            guild = types.SimpleNamespace(
+                get_member=lambda user_id: member if user_id == 123 else None,
+                get_channel=lambda channel_id: None,
+            )
+            membersync = MemberSync.__new__(MemberSync)
+            membersync.links_db = db_path
+            membersync.config = FakeConfig()
+            membersync._debug_log = AsyncMock()
+
+            asyncio.run(
+                membersync._prune_pending_exit_records(
+                    guild,
+                    role,
+                    {"456": {"discord_id": 123, "mc_user_id": "456"}},
+                )
+            )
+
+            self.assertEqual(len(member.removed), 1)
+            self.assertEqual(member.removed[0][0][0], role)
+            self.assertEqual(
+                member.removed[0][1]["reason"],
+                "MemberSync auto-prune: confirmed alliance exit",
+            )
+            connection = sqlite3.connect(db_path)
+            try:
+                role_removed = connection.execute(
+                    "SELECT role_removed FROM member_left_alliance WHERE mc_user_id='456'"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(role_removed, 1)
 
 
 if __name__ == "__main__":
