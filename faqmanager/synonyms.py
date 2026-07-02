@@ -440,25 +440,25 @@ def _test_synonym_expansion():
     # Test 2: Multi-word query
     result = manager.expand_query("how to set up arr")
     assert "arr" in result or "alarm and response regulation" in result
-    print(f"✓ Test 2 passed: Multi-word query expanded")
+    print("✓ Test 2 passed: Multi-word query expanded")
     
     # Test 3: Credits synonym
     result = manager.expand_query("money")
     assert "credits" in result
     assert "income" in result
-    print(f"✓ Test 3 passed: 'money' linked to credits group")
+    print("✓ Test 3 passed: 'money' linked to credits group")
     
     # Test 4: Case insensitivity
     result1 = manager.expand_query("POI")
     result2 = manager.expand_query("poi")
     assert result1 == result2
-    print(f"✓ Test 4 passed: Case insensitive matching")
+    print("✓ Test 4 passed: Case insensitive matching")
     
     # Test 5: Add custom synonym
     manager.add_synonym("arr", "alarm system")
     result = manager.expand_query("arr")
     assert "alarm system" in result
-    print(f"✓ Test 5 passed: Custom synonym added")
+    print("✓ Test 5 passed: Custom synonym added")
     
     print("\n✅ All synonym tests passed!")
 

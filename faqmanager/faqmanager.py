@@ -5,24 +5,30 @@ Advanced FAQ system with hybrid commands, Helpshift integration, and fuzzy searc
 
 import discord
 from discord import app_commands
-from discord.ext import commands
 from redbot.core import Config, commands as red_commands, checks
 from redbot.core.data_manager import cog_data_path
-from redbot.core.utils.chat_formatting import box, pagify
 
 import asyncio
 import time
 import logging
 from typing import Optional, List, Literal
-from pathlib import Path
 
 from .models import FAQItem, SearchResult, Source, OutdatedReport
 from .database import FAQDatabase
 from .synonyms import SynonymManager
 from .fuzzy_search import FuzzySearchEngine
-from .helpshift_scraper import HelpshiftScraper
+from .helpshift_scraper import (
+    HelpshiftCrawler,
+    HelpshiftScraper,
+    auto_crawl_due,
+    is_missionchief_usa_article,
+)
 
 log = logging.getLogger("red.faqmanager")
+
+AUTO_CRAWL_CHECK_SECONDS = 60 * 60
+AUTO_CRAWL_STARTUP_DELAY_SECONDS = 5 * 60
+DEFAULT_AUTO_CRAWL_INTERVAL_HOURS = 24
 
 
 class FAQManager(red_commands.Cog):
@@ -62,6 +68,10 @@ class FAQManager(red_commands.Cog):
             "debug_mode": False
         }
         self.config.register_guild(**default_guild)
+        self.config.register_global(
+            auto_crawl_enabled=True,
+            auto_crawl_interval_hours=DEFAULT_AUTO_CRAWL_INTERVAL_HOURS,
+        )
         
         # Initialize components
         self.data_path = cog_data_path(self) / "faq.db"
@@ -73,13 +83,14 @@ class FAQManager(red_commands.Cog):
         # Set database reference for compatibility wrapper
         self.helpshift_scraper.set_database(self.database)
         
-        # Initialize crawler
-        from .helpshift_scraper import HelpshiftCrawler
         self.crawler = HelpshiftCrawler(self.database, max_concurrency=4)
         
         # In-memory FAQ cache
         self._faq_cache: List[FAQItem] = []
+        self._helpshift_title_cache: List[str] = []
         self._cache_loaded = False
+        self._crawl_lock = asyncio.Lock()
+        self._auto_crawl_task: Optional[asyncio.Task] = None
         
         # Start initialization
         self.bot.loop.create_task(self._initialize())
@@ -89,6 +100,8 @@ class FAQManager(red_commands.Cog):
         try:
             await self.database.initialize()
             await self._reload_faq_cache()
+            await self._reload_helpshift_title_cache()
+            self._start_auto_crawl_task()
             log.info("FAQManager initialized successfully")
         except Exception as e:
             log.error(f"Failed to initialize FAQManager: {e}", exc_info=True)
@@ -98,6 +111,18 @@ class FAQManager(red_commands.Cog):
         self._faq_cache = await self.database.get_all_faqs()
         self._cache_loaded = True
         log.info(f"Loaded {len(self._faq_cache)} FAQs into cache")
+
+    async def _reload_helpshift_title_cache(self):
+        """Reload local USA Helpshift titles for autocomplete."""
+        articles = await self.database.get_all_articles()
+        titles = [
+            article.title
+            for article in articles
+            if is_missionchief_usa_article(article.title, article.body_md, article.section_name or "")
+        ]
+        self._helpshift_title_cache = titles[:200]
+        self.helpshift_scraper.set_cached_titles(self._helpshift_title_cache)
+        log.info(f"Loaded {len(self._helpshift_title_cache)} Helpshift FAQ titles into cache")
     
     async def _is_editor(self, guild: discord.Guild, member: discord.Member) -> bool:
         """Check if user has editor permissions."""
@@ -113,8 +138,92 @@ class FAQManager(red_commands.Cog):
     
     def cog_unload(self):
         """Cleanup on cog unload."""
+        if self._auto_crawl_task and not self._auto_crawl_task.done():
+            self._auto_crawl_task.cancel()
         asyncio.create_task(self.helpshift_scraper.close())
         asyncio.create_task(self.crawler.close())
+
+    def _start_auto_crawl_task(self):
+        """Start the background task that keeps Helpshift FAQs up to date."""
+        if self._auto_crawl_task and not self._auto_crawl_task.done():
+            return
+        self._auto_crawl_task = self.bot.loop.create_task(self._auto_crawl_loop())
+
+    async def _auto_crawl_loop(self):
+        """Periodically refresh the local USA Helpshift FAQ cache."""
+        try:
+            wait_until_ready = getattr(self.bot, "wait_until_ready", None)
+            if wait_until_ready:
+                await wait_until_ready()
+
+            await asyncio.sleep(AUTO_CRAWL_STARTUP_DELAY_SECONDS)
+
+            while True:
+                try:
+                    await self._maybe_run_auto_crawl()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.error(f"Automatic FAQ crawl failed: {exc}", exc_info=True)
+
+                await asyncio.sleep(AUTO_CRAWL_CHECK_SECONDS)
+        except asyncio.CancelledError:
+            log.debug("FAQ auto-crawl task cancelled")
+
+    async def _maybe_run_auto_crawl(self):
+        """Run an automatic crawl when the local cache is due for refresh."""
+        if not await self.config.auto_crawl_enabled():
+            return None
+
+        interval_hours = max(1, int(await self.config.auto_crawl_interval_hours()))
+        last_report = await self.database.get_last_crawl_report()
+        last_completed = last_report.completed_at if last_report else None
+
+        if not auto_crawl_due(last_completed, interval_hours):
+            return None
+
+        if self._crawl_lock.locked():
+            log.info("Skipping automatic FAQ crawl because a crawl is already running")
+            return None
+
+        return await self._run_helpshift_crawl(reason="automatic")
+
+    async def _run_helpshift_crawl(self, *, reason: str):
+        """Run a Helpshift crawl and refresh local caches."""
+        async with self._crawl_lock:
+            log.info(f"Starting {reason} FAQ crawl for MissionChief USA Helpshift content")
+            report = await self.crawler.crawl_full()
+            await self._reload_helpshift_title_cache()
+            return report
+
+    def _create_crawl_report_embed(self, title: str, report) -> discord.Embed:
+        """Create a consistent crawl report embed."""
+        embed = discord.Embed(
+            title=title,
+            color=discord.Color.green() if not report.errors else discord.Color.orange(),
+        )
+
+        embed.add_field(name="Target", value="MissionChief USA only", inline=False)
+        embed.add_field(name="Duration", value=f"{report.duration_seconds:.1f}s", inline=True)
+        embed.add_field(name="Sections", value=str(report.sections_found), inline=True)
+        embed.add_field(name="Total Articles", value=str(report.articles_total), inline=True)
+
+        embed.add_field(name="New", value=str(report.articles_new), inline=True)
+        embed.add_field(name="Updated", value=str(report.articles_updated), inline=True)
+        embed.add_field(name="Unchanged", value=str(report.articles_unchanged), inline=True)
+        embed.add_field(name="Skipped non-USA", value=str(report.articles_skipped_non_usa), inline=True)
+
+        if report.articles_deleted > 0:
+            embed.add_field(name="Deleted", value=str(report.articles_deleted), inline=True)
+
+        if report.errors:
+            error_text = "\n".join(f"- {err[:100]}" for err in report.errors[:5])
+            if len(report.errors) > 5:
+                error_text += f"\n... and {len(report.errors) - 5} more errors"
+            embed.add_field(name="Errors", value=error_text, inline=False)
+
+        embed.set_footer(text=f"Started: {report.started_at}")
+        return embed
     
     # ==================== SEARCH COMMANDS ====================
     
@@ -541,7 +650,15 @@ class FAQManager(red_commands.Cog):
                         log.debug(f"Skipping duplicate thread: {article.title}")
                         continue
                     
-                    if game_version != "all":
+                    if game_version == "usa":
+                        if not is_missionchief_usa_article(
+                            article.title,
+                            article.body_md,
+                            article.section_name or "",
+                        ):
+                            log.debug(f"Skipping non-USA article: {article.title}")
+                            continue
+                    elif game_version != "all":
                         if self._is_wrong_game_version(article.title, article.body_md, game_version):
                             log.debug(f"Skipping {game_version.upper()}-filtered article: {article.title}")
                             continue
@@ -555,11 +672,11 @@ class FAQManager(red_commands.Cog):
             faqs_to_export = [faq for faq in faqs_to_export if faq.title not in existing_threads]
             
             if not faqs_to_export:
-                await ctx.send(f"No new FAQs to export (all exist or filtered out).", ephemeral=True)
+                await ctx.send("No new FAQs to export (all exist or filtered out).", ephemeral=True)
                 return
             
             setup_msg = await ctx.send(
-                f"Setting up forum tags... Please wait.",
+                "Setting up forum tags... Please wait.",
                 ephemeral=True
             )
             
@@ -646,7 +763,7 @@ class FAQManager(red_commands.Cog):
                             log.error(f"Retry failed for '{result.title}': {retry_error}")
                     
                     if consecutive_failures >= 3:
-                        log.warning(f"Multiple consecutive failures, increasing delay")
+                        log.warning("Multiple consecutive failures, increasing delay")
                         await asyncio.sleep(10)
                     
                     continue
@@ -925,39 +1042,21 @@ class FAQManager(red_commands.Cog):
         """Start a full crawl immediately."""
         if ctx.interaction:
             await ctx.defer(ephemeral=True)
-            send_msg = lambda content=None, embed=None: ctx.send(content=content, embed=embed, ephemeral=True)
+
+            async def send_msg(content=None, embed=None):
+                return await ctx.send(content=content, embed=embed, ephemeral=True)
         else:
             send_msg = ctx.send
         
+        if self._crawl_lock.locked():
+            await send_msg("A FAQ crawl is already running. Wait for it to finish before starting another one.")
+            return
+
         await send_msg("Starting Helpshift crawl... This may take several minutes.")
         
         try:
-            report = await self.crawler.crawl_full()
-            
-            embed = discord.Embed(
-                title="Crawl Report",
-                color=discord.Color.green() if not report.errors else discord.Color.orange()
-            )
-            
-            embed.add_field(name="Duration", value=f"{report.duration_seconds:.1f}s", inline=True)
-            embed.add_field(name="Sections", value=str(report.sections_found), inline=True)
-            embed.add_field(name="Total Articles", value=str(report.articles_total), inline=True)
-            
-            embed.add_field(name="New", value=str(report.articles_new), inline=True)
-            embed.add_field(name="Updated", value=str(report.articles_updated), inline=True)
-            embed.add_field(name="Unchanged", value=str(report.articles_unchanged), inline=True)
-            
-            if report.articles_deleted > 0:
-                embed.add_field(name="Deleted", value=str(report.articles_deleted), inline=True)
-            
-            if report.errors:
-                error_text = "\n".join(f"- {err[:100]}" for err in report.errors[:5])
-                if len(report.errors) > 5:
-                    error_text += f"\n... and {len(report.errors) - 5} more errors"
-                embed.add_field(name="Errors", value=error_text, inline=False)
-            
-            embed.set_footer(text=f"Started: {report.started_at}")
-            
+            report = await self._run_helpshift_crawl(reason="manual")
+            embed = self._create_crawl_report_embed("Crawl Report", report)
             await ctx.send(embed=embed, ephemeral=True)
             
         except Exception as e:
@@ -971,31 +1070,23 @@ class FAQManager(red_commands.Cog):
             report = await self.database.get_last_crawl_report()
             
             if not report:
-                await ctx.send("No crawl reports found. Run `/faqcrawl now` to start a crawl.", ephemeral=True)
+                auto_enabled = await self.config.auto_crawl_enabled()
+                interval_hours = await self.config.auto_crawl_interval_hours()
+                embed = discord.Embed(
+                    title="FAQ Crawl Status",
+                    description="No crawl reports found yet. Run `/faqcrawl now` or wait for automatic sync.",
+                    color=discord.Color.orange(),
+                )
+                embed.add_field(name="Automatic Sync", value=str(auto_enabled), inline=True)
+                embed.add_field(name="Interval", value=f"{interval_hours}h", inline=True)
+                embed.add_field(name="Target", value="MissionChief USA only", inline=False)
+                embed.add_field(name="Due Now", value="True", inline=True)
+                embed.add_field(name="Running Now", value=str(self._crawl_lock.locked()), inline=True)
+                await ctx.send(embed=embed, ephemeral=True)
                 return
             
-            embed = discord.Embed(
-                title="Last Crawl Report",
-                color=discord.Color.blue()
-            )
-            
-            embed.add_field(name="Started", value=report.started_at, inline=True)
-            embed.add_field(name="Duration", value=f"{report.duration_seconds:.1f}s", inline=True)
-            embed.add_field(name="Sections", value=str(report.sections_found), inline=True)
-            
-            embed.add_field(name="Total Articles", value=str(report.articles_total), inline=True)
-            embed.add_field(name="New", value=str(report.articles_new), inline=True)
-            embed.add_field(name="Updated", value=str(report.articles_updated), inline=True)
-            
-            embed.add_field(name="Unchanged", value=str(report.articles_unchanged), inline=True)
-            embed.add_field(name="Deleted", value=str(report.articles_deleted), inline=True)
-            embed.add_field(name="Errors", value=str(len(report.errors)), inline=True)
-            
-            if report.errors:
-                error_text = "\n".join(f"- {err[:100]}" for err in report.errors[:3])
-                if len(report.errors) > 3:
-                    error_text += f"\n... and {len(report.errors) - 3} more"
-                embed.add_field(name="Recent Errors", value=error_text, inline=False)
+            embed = self._create_crawl_report_embed("Last Crawl Report", report)
+            embed.color = discord.Color.blue()
             
             stats = await self.database.get_statistics()
             embed.add_field(
@@ -1003,12 +1094,67 @@ class FAQManager(red_commands.Cog):
                 value=f"Articles: {stats['helpshift_articles']}\nSections: {stats['helpshift_sections']}",
                 inline=False
             )
+
+            auto_enabled = await self.config.auto_crawl_enabled()
+            interval_hours = await self.config.auto_crawl_interval_hours()
+            due_now = auto_crawl_due(report.completed_at, int(interval_hours))
+            embed.add_field(
+                name="Automatic Sync",
+                value=(
+                    f"Enabled: {auto_enabled}\n"
+                    f"Interval: {interval_hours}h\n"
+                    f"Running now: {self._crawl_lock.locked()}\n"
+                    f"Due now: {due_now}"
+                ),
+                inline=False,
+            )
             
             await ctx.send(embed=embed, ephemeral=True)
             
         except Exception as e:
             log.error(f"Failed to get crawl status: {e}", exc_info=True)
             await ctx.send(f"Error getting status: {str(e)}", ephemeral=True)
+
+    @faq_crawl_group.command(name="auto")
+    @app_commands.describe(enabled="Enable or disable automatic FAQ sync")
+    async def crawl_auto(self, ctx: red_commands.Context, enabled: Optional[bool] = None):
+        """Show or update automatic FAQ sync status."""
+        if enabled is not None:
+            await self.config.auto_crawl_enabled.set(enabled)
+
+        auto_enabled = await self.config.auto_crawl_enabled()
+        interval_hours = await self.config.auto_crawl_interval_hours()
+        report = await self.database.get_last_crawl_report()
+        last_completed = report.completed_at if report else None
+        due_now = auto_crawl_due(last_completed, int(interval_hours))
+
+        embed = discord.Embed(
+            title="FAQ Automatic Sync",
+            color=discord.Color.green() if auto_enabled else discord.Color.orange(),
+        )
+        embed.add_field(name="Enabled", value=str(auto_enabled), inline=True)
+        embed.add_field(name="Interval", value=f"{interval_hours}h", inline=True)
+        embed.add_field(name="Target", value="MissionChief USA only", inline=False)
+        embed.add_field(name="Last Completed", value=last_completed or "Never", inline=False)
+        embed.add_field(name="Due Now", value=str(due_now), inline=True)
+        embed.add_field(name="Running Now", value=str(self._crawl_lock.locked()), inline=True)
+
+        await ctx.send(embed=embed, ephemeral=True)
+
+    @faq_crawl_group.command(name="interval")
+    @app_commands.describe(hours="Automatic sync interval in hours, minimum 1")
+    async def crawl_interval(self, ctx: red_commands.Context, hours: int):
+        """Set the automatic FAQ sync interval."""
+        if hours < 1:
+            await ctx.send("Interval must be at least 1 hour.", ephemeral=True)
+            return
+
+        if hours > 168:
+            await ctx.send("Interval cannot be more than 168 hours.", ephemeral=True)
+            return
+
+        await self.config.auto_crawl_interval_hours.set(hours)
+        await ctx.send(f"Automatic FAQ sync interval set to **{hours}h**.", ephemeral=True)
     
     @faq_crawl_group.command(name="test")
     async def crawl_test(self, ctx: red_commands.Context):

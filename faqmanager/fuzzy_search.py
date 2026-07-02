@@ -405,7 +405,7 @@ def _test_fuzzy_search():
     print("\nTest 7: Low score triggers suggestions")
     main, suggestions = engine.search_custom("something vague", MOCK_FAQ_ITEMS)
     if main is None and len(suggestions) > 0:
-        print(f"✓ Correctly showed suggestions instead of weak main result")
+        print("✓ Correctly showed suggestions instead of weak main result")
     
     print("\n✅ All fuzzy search tests passed!")
 

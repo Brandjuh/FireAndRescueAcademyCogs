@@ -9,11 +9,107 @@ import time
 import logging
 from typing import List, Optional, Dict, Set
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timezone
 from .models import HelpshiftArticle, HelpshiftSection, CrawlReport
 from .database import FAQDatabase
 
 log = logging.getLogger("red.faqmanager.crawler")
+
+
+NON_USA_TITLE_INDICATORS = (
+    "(uk version)",
+    "(uk)",
+    "uk version",
+    "uk only",
+    "(au version)",
+    "(au)",
+    "au version",
+    "au only",
+)
+
+NON_USA_BODY_INDICATORS = (
+    "uk version",
+    "uk only",
+    "hart base",
+    "hart station",
+    "uk fire service",
+    "australian",
+    "australia",
+    "new south wales",
+    "queensland",
+    "victoria police",
+    "ses building",
+    "ses station",
+)
+
+
+def parse_utc_iso(value: Optional[str]) -> Optional[datetime]:
+    """Parse the UTC ISO timestamps stored by the FAQ crawler."""
+    if not value:
+        return None
+
+    raw = str(value).strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1]
+
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def auto_crawl_due(
+    last_completed_utc: Optional[str],
+    interval_hours: int,
+    *,
+    now_utc: Optional[datetime] = None,
+) -> bool:
+    """Return whether the local Helpshift cache should be refreshed."""
+    if interval_hours < 1:
+        interval_hours = 1
+
+    completed_at = parse_utc_iso(last_completed_utc)
+    if completed_at is None:
+        return True
+
+    now = now_utc or datetime.now(timezone.utc).replace(tzinfo=None)
+    elapsed_seconds = (now - completed_at).total_seconds()
+    return elapsed_seconds >= interval_hours * 3600
+
+
+def missionchief_usa_filter_reason(
+    title: str,
+    body: str = "",
+    section_name: str = "",
+) -> Optional[str]:
+    """Return a reason when a Helpshift article clearly targets a non-USA game version."""
+    title_lower = (title or "").casefold()
+    body_lower = (body or "").casefold()
+    section_lower = (section_name or "").casefold()
+
+    for indicator in NON_USA_TITLE_INDICATORS:
+        if indicator in title_lower:
+            return f"title contains `{indicator}`"
+
+    combined_context = f"{section_lower}\n{body_lower}"
+    for indicator in NON_USA_BODY_INDICATORS:
+        if indicator in combined_context:
+            return f"content contains `{indicator}`"
+
+    return None
+
+
+def is_missionchief_usa_article(
+    title: str,
+    body: str = "",
+    section_name: str = "",
+) -> bool:
+    """Return True when an article is suitable for the MissionChief USA FAQ cache."""
+    return missionchief_usa_filter_reason(title, body, section_name) is None
 
 
 class RateLimiter:
@@ -64,6 +160,7 @@ class HelpshiftCrawler:
             'articles_new': 0,
             'articles_updated': 0,
             'articles_unchanged': 0,
+            'articles_skipped_non_usa': 0,
             'articles_total': 0,
             'errors': []
         }
@@ -118,6 +215,7 @@ class HelpshiftCrawler:
             'articles_new': 0,
             'articles_updated': 0,
             'articles_unchanged': 0,
+            'articles_skipped_non_usa': 0,
             'articles_total': 0,
             'errors': []
         }
@@ -160,6 +258,7 @@ class HelpshiftCrawler:
                 articles_new=self.stats['articles_new'],
                 articles_updated=self.stats['articles_updated'],
                 articles_unchanged=self.stats['articles_unchanged'],
+                articles_skipped_non_usa=self.stats['articles_skipped_non_usa'],
                 articles_deleted=deleted_count,
                 errors=self.stats['errors']
             )
@@ -191,6 +290,7 @@ class HelpshiftCrawler:
                 articles_new=self.stats['articles_new'],
                 articles_updated=self.stats['articles_updated'],
                 articles_unchanged=self.stats['articles_unchanged'],
+                articles_skipped_non_usa=self.stats['articles_skipped_non_usa'],
                 errors=self.stats['errors']
             )
     
@@ -316,6 +416,17 @@ class HelpshiftCrawler:
                 
                 if len(body_md) > self.MAX_BODY_LENGTH:
                     body_md = body_md[:self.MAX_BODY_LENGTH] + "\n\n[Content truncated...]"
+
+                filter_reason = missionchief_usa_filter_reason(title, body_md, section.name)
+                if filter_reason:
+                    self.stats['articles_skipped_non_usa'] += 1
+                    log.info(
+                        "Skipping non-USA Helpshift article '%s' from section '%s': %s",
+                        title,
+                        section.name,
+                        filter_reason,
+                    )
+                    return None
                 
                 article_id = HelpshiftArticle.parse_id_from_url(url)
                 if not article_id:
@@ -565,6 +676,7 @@ class HelpshiftScraper:
     def __init__(self, cache_ttl: int = 600):
         self.cache_ttl = cache_ttl
         self.database: Optional[FAQDatabase] = None
+        self._cached_titles: List[str] = []
     
     def set_database(self, database: FAQDatabase):
         """Set database reference (called by cog)."""
@@ -582,8 +694,13 @@ class HelpshiftScraper:
         
         try:
             log.debug(f"Searching database for: '{query}'")
-            articles = await self.database.search_articles(query, limit=max_articles)
-            log.info(f"Found {len(articles)} articles in local database for query: '{query}'")
+            articles = await self.database.search_articles(query, limit=max_articles * 3)
+            articles = [
+                article
+                for article in articles
+                if is_missionchief_usa_article(article.title, article.body_md, article.section_name or "")
+            ][:max_articles]
+            log.info(f"Found {len(articles)} USA articles in local database for query: '{query}'")
             return articles
         except Exception as e:
             log.error(f"Error searching local articles: {e}", exc_info=True)
@@ -591,7 +708,11 @@ class HelpshiftScraper:
     
     def get_cached_titles(self) -> List[str]:
         """Get cached article titles for autocomplete."""
-        return []
+        return list(self._cached_titles)
+    
+    def set_cached_titles(self, titles: List[str]):
+        """Set cached article titles for synchronous autocomplete handlers."""
+        self._cached_titles = list(titles)
     
     def clear_cache(self):
         """Compatibility method."""

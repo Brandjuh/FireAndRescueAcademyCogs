@@ -9,8 +9,8 @@ import time
 import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
-from datetime import datetime
-from .models import FAQItem, FAQVersion, HelpshiftArticle, HelpshiftSection, ArticleVersion, CrawlReport
+from datetime import datetime, timezone
+from .models import FAQItem, FAQVersion, HelpshiftArticle, HelpshiftSection, CrawlReport
 
 log = logging.getLogger("red.faqmanager.database")
 
@@ -368,7 +368,7 @@ class FAQDatabase:
             
             # Check if article exists
             cursor = await db.execute("""
-                SELECT id, hash_body, title, section_name FROM helpshift_articles WHERE id = ?
+                SELECT id, hash_body, title, body_md, section_name FROM helpshift_articles WHERE id = ?
             """, (article.id,))
             existing = await cursor.fetchone()
             
@@ -420,7 +420,7 @@ class FAQDatabase:
     
     async def _save_article_version(self, db: aiosqlite.Connection, existing_row: aiosqlite.Row):
         """Save a version snapshot of an article."""
-        now_utc = datetime.utcnow().isoformat() + 'Z'
+        now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         
         await db.execute("""
             INSERT INTO article_versions (article_id, saved_utc, title, body_md, hash_body)
