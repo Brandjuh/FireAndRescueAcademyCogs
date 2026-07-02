@@ -70,9 +70,11 @@ from eventmanager.event_manager import (
     build_browser_event_start_script,
     custom_route_profile_name,
     geocoded_location_from_results,
+    geocode_search_params,
     _ajax_get_headers,
     _ajax_submit_headers,
     _form_position_params,
+    normalize_geocode_api_key,
     _replace_payload_value,
     _validate_free_submit,
     parse_location_add_request,
@@ -589,6 +591,13 @@ class EventManagerFormTests(unittest.TestCase):
         self.assertEqual(location["latitude"], "39.114053")
         self.assertEqual(location["longitude"], "-94.627464")
         self.assertIn("Kansas", location["address"])
+
+    def test_geocode_search_params_use_documented_api_key_parameter(self):
+        params = geocode_search_params("Grand Rapids", "Bearer test-key")
+
+        self.assertEqual(params["q"], "Grand Rapids")
+        self.assertEqual(params["api_key"], "test-key")
+        self.assertEqual(normalize_geocode_api_key("Bearer test-key"), "test-key")
 
     def test_find_type_option_matches_wildfire_without_hardcoded_id(self):
         options = [

@@ -26,6 +26,29 @@ GEOCODE_CACHE_TTL_SECONDS = 90 * 24 * 60 * 60
 GEOCODE_MIN_INTERVAL_SECONDS = 1.1
 
 
+def normalize_geocode_api_key(api_key: str) -> str:
+    """Return the raw geocode.maps.co key, accepting values pasted with a Bearer prefix."""
+    key = str(api_key or "").strip().strip("'\"")
+    if key.casefold().startswith("bearer "):
+        key = key[7:].strip().strip("'\"")
+    return key
+
+
+def geocode_search_params(address: str, api_key: str) -> dict[str, str]:
+    """Build geocode.maps.co search params with the documented API key parameter."""
+    key = normalize_geocode_api_key(api_key)
+    params = {
+        "q": address,
+        "format": "json",
+        "addressdetails": "1",
+        "limit": "3",
+        "accept-language": "en",
+    }
+    if key:
+        params["api_key"] = key
+    return params
+
+
 US_REGION_NAMES = {
     "AL": "Alabama",
     "AK": "Alaska",
@@ -790,23 +813,17 @@ class EventPinger(commands.Cog):
                 await asyncio.sleep(GEOCODE_MIN_INTERVAL_SECONDS - elapsed)
 
             session = await self._get_session()
-            params = {
-                "q": address,
-                "format": "json",
-                "addressdetails": "1",
-                "limit": "3",
-                "accept-language": "en",
-            }
-            headers = {"Authorization": f"Bearer {api_key}"}
+            params = geocode_search_params(address, api_key)
             timeout = aiohttp.ClientTimeout(total=GEOCODE_TIMEOUT_SECONDS)
             async with session.get(
                 GEOCODE_SEARCH_URL,
                 params=params,
-                headers=headers,
                 timeout=timeout,
             ) as response:
                 self._last_geocode_at = time.monotonic()
                 if int(response.status) >= 400:
+                    if int(response.status) == 401:
+                        raise RuntimeError("Geocode API rejected the configured API key (HTTP 401).")
                     raise RuntimeError(f"Geocode API returned HTTP {response.status}")
                 return await response.json(content_type=None)
 

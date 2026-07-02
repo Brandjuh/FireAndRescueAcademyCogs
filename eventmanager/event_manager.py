@@ -1154,6 +1154,29 @@ def geocoded_location_from_results(label: str, results: Any) -> Dict[str, str]:
     raise ValueError("Location could not be resolved to GPS coordinates.")
 
 
+def normalize_geocode_api_key(api_key: str) -> str:
+    """Return the raw geocode.maps.co key, accepting values pasted with a Bearer prefix."""
+    key = str(api_key or "").strip().strip("'\"")
+    if key.casefold().startswith("bearer "):
+        key = key[7:].strip().strip("'\"")
+    return key
+
+
+def geocode_search_params(location_text: str, api_key: str) -> Dict[str, str]:
+    """Build geocode.maps.co search params with the documented API key parameter."""
+    key = normalize_geocode_api_key(api_key)
+    params = {
+        "q": location_text,
+        "format": "json",
+        "addressdetails": "1",
+        "limit": "3",
+        "accept-language": "en",
+    }
+    if key:
+        params["api_key"] = key
+    return params
+
+
 def profile_with_selected_type(kind: str, profile: dict, option: FormOption) -> dict:
     """Return a copy of a profile with a concrete live MissionChief option selected."""
     kind = normalize_kind(kind)
@@ -2855,7 +2878,7 @@ class EventManager(commands.Cog):
 
     async def _geocode_location(self, location_text: str) -> Dict[str, str]:
         """Resolve a human location into a fixed MissionChief start location."""
-        api_key = await self._get_geocode_api_key()
+        api_key = normalize_geocode_api_key(await self._get_geocode_api_key())
         if not api_key:
             raise RuntimeError(
                 "Geocode API key is not configured. Set it with `eventmanager geocodekey <key>` "
@@ -2868,18 +2891,16 @@ class EventManager(commands.Cog):
             results = await fetcher(location_text, api_key)
             return geocoded_location_from_results(location_text, results)
 
-        params = {
-            "q": location_text,
-            "format": "json",
-            "addressdetails": "1",
-            "limit": "3",
-            "accept-language": "en",
-        }
-        headers = {"Authorization": f"Bearer {api_key}"}
+        params = geocode_search_params(location_text, api_key)
         timeout = aiohttp.ClientTimeout(total=GEOCODE_TIMEOUT_SECONDS)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(GEOCODE_SEARCH_URL, params=params, headers=headers) as response:
+            async with session.get(GEOCODE_SEARCH_URL, params=params) as response:
                 if int(response.status) >= 400:
+                    if int(response.status) == 401:
+                        raise RuntimeError(
+                            "Geocode API rejected the configured API key (HTTP 401). "
+                            "Set a valid key with `eventmanager geocodekey <key>`."
+                        )
                     raise RuntimeError(f"Geocode API returned HTTP {response.status}")
                 results = await response.json(content_type=None)
         return geocoded_location_from_results(location_text, results)
