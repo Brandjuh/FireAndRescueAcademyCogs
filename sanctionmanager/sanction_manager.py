@@ -424,6 +424,39 @@ class SanctionsDatabase:
         conn.close()
         return results
 
+    def get_sanctions(
+        self,
+        *,
+        guild_id: int,
+        period_start_ts: Optional[int] = None,
+        period_end_ts: Optional[int] = None,
+    ) -> List[dict]:
+        """Return all sanctions for a guild, optionally limited to a period."""
+        where_parts = ["guild_id = ?"]
+        params: List[Any] = [guild_id]
+        if period_start_ts is not None:
+            where_parts.append("created_at >= ?")
+            params.append(int(period_start_ts))
+        if period_end_ts is not None:
+            where_parts.append("created_at < ?")
+            params.append(int(period_end_ts))
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT *
+            FROM sanctions
+            WHERE {" AND ".join(where_parts)}
+            ORDER BY created_at DESC
+            """,
+            params,
+        )
+        results = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return results
+
     @staticmethod
     def effective_status(sanction: dict, now: Optional[int] = None) -> str:
         """Return the current sanction status without changing stored history."""
@@ -2513,6 +2546,24 @@ class SanctionsManager(commands.Cog):
         sanctions = self.db.get_sanctions_by_reason_details(
             guild_id=guild_id,
             reason_details=reason_details,
+            period_start_ts=period_start_ts,
+            period_end_ts=period_end_ts,
+        )
+        if not normalize:
+            return sanctions
+        return [SanctionsDatabase.normalize_sanction(sanction) for sanction in sanctions]
+
+    def get_sanctions(
+        self,
+        *,
+        guild_id: int,
+        period_start_ts: Optional[int] = None,
+        period_end_ts: Optional[int] = None,
+        normalize: bool = True,
+    ) -> List[dict]:
+        """Public contract for other cogs to read all sanctions in an optional period."""
+        sanctions = self.db.get_sanctions(
+            guild_id=guild_id,
             period_start_ts=period_start_ts,
             period_end_ts=period_end_ts,
         )

@@ -35,8 +35,15 @@ TAX_WARNING_MIN_DAYS_BETWEEN = 7
 TAX_WARNING_SEND_DELAY_SECONDS = 90
 TAX_WARNING_MAX_PER_RUN = 5
 TAX_WARNING_AUTOKICK_MAX_PER_RUN = 1
+TAX_WARNING_NEW_MEMBER_GRACE_HOURS = 24
 TAX_WARNING_REASON_CATEGORY = "Contribution"
 TAX_WARNING_REASON_DETAIL = "4.1. 5% donation to alliance - Minimum 5% donation required."
+TAX_WARNING_REASON_DETAIL_ALIASES = (
+    TAX_WARNING_REASON_DETAIL,
+    "5% donation to alliance - Minimum 5% donation required.",
+    "4.1. 5% donation to alliance",
+    "Low contribution",
+)
 TAX_WARNING_KICK_REASON_DETAIL = "Automatic kick after three unresolved 5% alliance donation warnings."
 SANCTION_MANAGER_COG_NAMES = ("SanctionsManager", "SanctionManager")
 TAX_WARNING_SANCTION_TYPES = {
@@ -600,6 +607,39 @@ def tax_warning_kick_is_due(
     return int(now) - int(last_warning_at) >= min_gap
 
 
+def parse_member_first_seen_timestamp(value: object) -> Optional[int]:
+    """Parse a MembersScraper first-seen value into a Unix timestamp."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp())
+
+
+def tax_warning_member_is_in_grace_period(
+    *,
+    first_seen_at: Optional[int],
+    now: int,
+    grace_hours: int,
+) -> bool:
+    """Return whether a member is too new for automated TAX warnings."""
+    if not first_seen_at:
+        return False
+    grace_seconds = max(0, int(grace_hours or 0)) * 3600
+    if grace_seconds <= 0:
+        return False
+    return int(now) - int(first_seen_at) < grace_seconds
+
+
 def tax_warning_member_identity(member: Dict[str, object]) -> Tuple[str, str, float]:
     """Extract the MissionChief id, username, and contribution rate from a member record."""
     mc_id = str(
@@ -620,6 +660,21 @@ def tax_warning_member_identity(member: Dict[str, object]) -> Tuple[str, str, fl
     except (TypeError, ValueError):
         rate = 0.0
     return mc_id, username, rate
+
+
+def tax_warning_reason_matches(reason_detail: str) -> bool:
+    """Return whether a sanction reason is one of the known TAX warning reasons."""
+    clean = str(reason_detail or "").strip()
+    if clean in TAX_WARNING_REASON_DETAIL_ALIASES:
+        return True
+    lowered = clean.casefold()
+    if "low contribution" in lowered:
+        return True
+    if "tax" in lowered and ("5%" in lowered or "5 percent" in lowered):
+        return True
+    if "donation" in lowered and "alliance" in lowered and ("5%" in lowered or "5 percent" in lowered):
+        return True
+    return False
 
 
 def tax_warning_level_from_sanction_type(sanction_type: str) -> Optional[int]:
@@ -668,7 +723,7 @@ def tax_warning_stats_from_sanctions(sanctions: Iterable[dict], *, source: str =
         except (TypeError, ValueError):
             created_at_int = None
 
-        if reason_detail == TAX_WARNING_REASON_DETAIL and "Warning" in sanction_type:
+        if tax_warning_reason_matches(reason_detail) and "Warning" in sanction_type:
             level = tax_warning_level_from_sanction_type(sanction_type)
             if level in TAX_WARNING_SANCTION_TYPES:
                 stats[f"warning_{level}"] = int(stats[f"warning_{level}"]) + 1
@@ -1083,6 +1138,7 @@ class MessageManager(commands.Cog):
             tax_warning_max_per_run=TAX_WARNING_MAX_PER_RUN,
             tax_warning_autokick_enabled=True,
             tax_warning_autokick_max_per_run=TAX_WARNING_AUTOKICK_MAX_PER_RUN,
+            tax_warning_new_member_grace_hours=TAX_WARNING_NEW_MEMBER_GRACE_HOURS,
             tax_warning_state={},
         )
         self._panel_task: Optional[asyncio.Task] = None
@@ -1526,6 +1582,22 @@ class MessageManager(commands.Cog):
     ) -> Dict[str, object]:
         """Public contract for TAX warning message and auto-kick statistics."""
         sanction_manager = self._sanction_manager()
+        get_sanctions = getattr(sanction_manager, "get_sanctions", None) if sanction_manager else None
+        if callable(get_sanctions):
+            sanctions = get_sanctions(
+                guild_id=int(guild_id),
+                period_start_ts=period_start_ts,
+                period_end_ts=period_end_ts,
+            )
+            stats = tax_warning_stats_from_sanctions(sanctions, source="SanctionManager")
+            if period_start_ts is None and period_end_ts is None:
+                state_stats = tax_warning_stats_from_state(await self.config.tax_warning_state())
+                stats["auto_kicks"] = max(int(stats["auto_kicks"]), int(state_stats["auto_kicks"]))
+                latest_kick_at = state_stats.get("latest_kick_at")
+                if latest_kick_at:
+                    stats["latest_kick_at"] = max(int(stats["latest_kick_at"] or 0), int(latest_kick_at))
+            return stats
+
         get_by_reasons = (
             getattr(sanction_manager, "get_sanctions_by_reason_details", None)
             if sanction_manager
@@ -1534,7 +1606,7 @@ class MessageManager(commands.Cog):
         if callable(get_by_reasons):
             sanctions = get_by_reasons(
                 guild_id=int(guild_id),
-                reason_details=[TAX_WARNING_REASON_DETAIL, TAX_WARNING_KICK_REASON_DETAIL],
+                reason_details=[*TAX_WARNING_REASON_DETAIL_ALIASES, TAX_WARNING_KICK_REASON_DETAIL],
                 period_start_ts=period_start_ts,
                 period_end_ts=period_end_ts,
             )
@@ -1568,7 +1640,7 @@ class MessageManager(commands.Cog):
             for sanction in sanctions:
                 if "Warning" not in str(sanction.get("sanction_type") or ""):
                     continue
-                if str(sanction.get("reason_detail") or "").strip() != TAX_WARNING_REASON_DETAIL:
+                if not tax_warning_reason_matches(str(sanction.get("reason_detail") or "")):
                     continue
                 if sanction.get("effective_status", sanction.get("status")) == "removed":
                     continue
@@ -1586,10 +1658,24 @@ class MessageManager(commands.Cog):
             latest_at = max(int(state_latest_at), int(latest_at or 0))
         return max(count, state_count), latest_at, int(kicked_at) if kicked_at else None
 
+    async def _member_first_seen_timestamp(self, mc_user_id: str) -> Optional[int]:
+        get_cog = getattr(self.bot, "get_cog", None)
+        members_scraper = get_cog("MembersScraper") if callable(get_cog) else None
+        get_member_first_seen = getattr(members_scraper, "get_member_first_seen", None) if members_scraper else None
+        if not callable(get_member_first_seen):
+            return None
+        try:
+            first_seen = await get_member_first_seen(str(mc_user_id))
+        except Exception:
+            log.exception("Could not read MembersScraper first-seen timestamp for %s", mc_user_id)
+            return None
+        return parse_member_first_seen_timestamp(first_seen)
+
     async def _tax_warning_candidates(self, guild: discord.Guild) -> List[dict]:
         members = await self._get_alliance_members()
         min_rate = float(await self.config.tax_warning_min_rate())
         min_days_between = int(await self.config.tax_warning_min_days_between())
+        new_member_grace_hours = int(await self.config.tax_warning_new_member_grace_hours())
         now = int(time.time())
         candidates = []
 
@@ -1598,6 +1684,13 @@ class MessageManager(commands.Cog):
                 continue
             mc_id, username, rate = tax_warning_member_identity(member)
             if not mc_id or not username or rate >= min_rate:
+                continue
+            first_seen_at = await self._member_first_seen_timestamp(mc_id)
+            if tax_warning_member_is_in_grace_period(
+                first_seen_at=first_seen_at,
+                now=now,
+                grace_hours=new_member_grace_hours,
+            ):
                 continue
             warning_count, last_warning_at, kicked_at = await self._tax_warning_history(guild.id, mc_id)
             next_level = tax_warning_level(warning_count)
@@ -1623,6 +1716,7 @@ class MessageManager(commands.Cog):
                     "next_level": next_level,
                     "last_warning_at": last_warning_at,
                     "kicked_at": kicked_at,
+                    "first_seen_at": first_seen_at,
                     "due": due,
                     "kick_due": kick_due,
                 }
@@ -2372,11 +2466,13 @@ class MessageManager(commands.Cog):
         max_per_run = await self.config.tax_warning_max_per_run()
         autokick_enabled = await self.config.tax_warning_autokick_enabled()
         max_kicks = await self.config.tax_warning_autokick_max_per_run()
+        new_member_grace = await self.config.tax_warning_new_member_grace_hours()
         await ctx.send(
             "MessageManager TAX warning settings:\n"
             f"- Enabled: `{enabled}`\n"
             f"- Minimum contribution: `{float(min_rate):.1f}%`\n"
             f"- Minimum days between warnings: `{min_days}`\n"
+            f"- New member grace period: `{new_member_grace}` hour(s)\n"
             f"- Send delay between members: `{delay}` seconds\n"
             f"- Max warnings per run: `{max_per_run}`\n"
             f"- Auto-kick after warning 3: `{autokick_enabled}`\n"
@@ -2413,6 +2509,17 @@ class MessageManager(commands.Cog):
             return
         await self.config.tax_warning_min_days_between.set(int(days))
         await ctx.send(f"TAX warning minimum gap set to `{days}` day(s).")
+
+    @taxwarnings.command(name="newmembergrace")
+    @commands.admin()
+    @commands.guild_only()
+    async def taxwarnings_newmembergrace(self, ctx: commands.Context, hours: int):
+        """Set how long new alliance members are protected from automatic TAX warnings."""
+        if hours < 0 or hours > 168:
+            await ctx.send("New member grace must be between 0 and 168 hours.")
+            return
+        await self.config.tax_warning_new_member_grace_hours.set(int(hours))
+        await ctx.send(f"TAX warning new member grace period set to `{hours}` hour(s).")
 
     @taxwarnings.command(name="delay")
     @commands.admin()
