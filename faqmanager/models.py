@@ -6,7 +6,6 @@ Defines all data structures used throughout the FAQ system.
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, List, Dict, Any
-from datetime import datetime
 import hashlib
 
 
@@ -330,6 +329,7 @@ class CrawlReport:
         articles_new: New articles added
         articles_updated: Articles with changes
         articles_unchanged: Articles with no changes
+        articles_skipped_non_usa: Articles skipped because they target another game version
         articles_deleted: Articles marked as deleted
         errors: List of error messages
     """
@@ -341,6 +341,7 @@ class CrawlReport:
     articles_new: int = 0
     articles_updated: int = 0
     articles_unchanged: int = 0
+    articles_skipped_non_usa: int = 0
     articles_deleted: int = 0
     errors: List[str] = field(default_factory=list)
 
@@ -355,6 +356,7 @@ class CrawlReport:
             'articles_new': self.articles_new,
             'articles_updated': self.articles_updated,
             'articles_unchanged': self.articles_unchanged,
+            'articles_skipped_non_usa': self.articles_skipped_non_usa,
             'articles_deleted': self.articles_deleted,
             'errors': self.errors
         }
