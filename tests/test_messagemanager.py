@@ -1,4 +1,5 @@
 import asyncio
+import time
 import unittest
 import types
 from unittest.mock import AsyncMock
@@ -9,6 +10,7 @@ from messagemanager.message_manager import (
     INBOX_SCAN_JITTER_SECONDS,
     MemberResolutionError,
     MessageManager,
+    TAX_WARNING_NEW_MEMBER_GRACE_HOURS,
     TAX_WARNING_MIN_DAYS_BETWEEN,
     TAX_WARNING_PRESETS,
     build_forum_thread_title,
@@ -31,6 +33,9 @@ from messagemanager.message_manager import (
     resolve_alliance_member_name,
     safe_payload_summary,
     split_discord_content,
+    parse_member_first_seen_timestamp,
+    tax_warning_member_is_in_grace_period,
+    tax_warning_reason_matches,
     tax_warning_level_from_sanction_type,
     summarize_message_form,
     tax_warning_stats_from_sanctions,
@@ -487,6 +492,13 @@ class MessageManagerTests(unittest.TestCase):
             ("456", "CrashTestDummy", 4.5),
         )
 
+    def test_tax_warning_reason_matches_current_and_legacy_reason_texts(self):
+        self.assertTrue(tax_warning_reason_matches(message_manager_module.TAX_WARNING_REASON_DETAIL))
+        self.assertTrue(tax_warning_reason_matches("5% donation to alliance - Minimum 5% donation required."))
+        self.assertTrue(tax_warning_reason_matches("Low contribution"))
+        self.assertTrue(tax_warning_reason_matches("Low TAX: below 5 percent"))
+        self.assertFalse(tax_warning_reason_matches("Inactivity"))
+
     def test_tax_warning_stats_count_warning_levels_and_auto_kicks(self):
         stats = tax_warning_stats_from_sanctions(
             [
@@ -525,17 +537,96 @@ class MessageManagerTests(unittest.TestCase):
                     "created_at": 500,
                     "effective_status": "removed",
                 },
+                {
+                    "sanction_type": "Warning - Official 1st warning",
+                    "reason_detail": "5% donation to alliance - Minimum 5% donation required.",
+                    "mc_user_id": "4",
+                    "created_at": 600,
+                    "status": "active",
+                },
+                {
+                    "sanction_type": "Warning - Official 1st warning",
+                    "reason_detail": "Low contribution",
+                    "mc_user_id": "5",
+                    "created_at": 700,
+                    "status": "active",
+                },
             ]
         )
 
-        self.assertEqual(stats["warnings_total"], 3)
-        self.assertEqual(stats["warning_1"], 1)
+        self.assertEqual(stats["warnings_total"], 5)
+        self.assertEqual(stats["warning_1"], 3)
         self.assertEqual(stats["warning_2"], 1)
         self.assertEqual(stats["warning_3"], 1)
         self.assertEqual(stats["auto_kicks"], 1)
-        self.assertEqual(stats["members_warned"], 2)
-        self.assertEqual(stats["latest_warning_at"], 300)
+        self.assertEqual(stats["members_warned"], 4)
+        self.assertEqual(stats["latest_warning_at"], 700)
         self.assertEqual(stats["latest_kick_at"], 400)
+
+    def test_get_tax_warning_stats_uses_full_sanction_contract_when_available(self):
+        class FakeSanctionManager:
+            def get_sanctions(self, *, guild_id, period_start_ts=None, period_end_ts=None):
+                self.request = {
+                    "guild_id": guild_id,
+                    "period_start_ts": period_start_ts,
+                    "period_end_ts": period_end_ts,
+                }
+                return [
+                    {
+                        "sanction_type": "Warning - Official 1st warning",
+                        "reason_detail": "Alliance donation below 5 percent",
+                        "mc_user_id": "1",
+                        "created_at": 100,
+                        "status": "active",
+                    },
+                    {
+                        "sanction_type": "Warning - Official 1st warning",
+                        "reason_detail": "Inactivity",
+                        "mc_user_id": "2",
+                        "created_at": 200,
+                        "status": "active",
+                    },
+                ]
+
+            def get_sanctions_by_reason_details(self, **kwargs):
+                raise AssertionError("Exact reason lookup should not be used when full contract is available")
+
+        sanction_manager = FakeSanctionManager()
+        manager = MessageManager.__new__(MessageManager)
+        manager._sanction_manager = lambda: sanction_manager
+
+        stats = asyncio.run(
+            manager.get_tax_warning_stats(
+                123,
+                period_start_ts=10,
+                period_end_ts=20,
+            )
+        )
+
+        self.assertEqual(sanction_manager.request["guild_id"], 123)
+        self.assertEqual(sanction_manager.request["period_start_ts"], 10)
+        self.assertEqual(sanction_manager.request["period_end_ts"], 20)
+        self.assertEqual(stats["warnings_total"], 1)
+        self.assertEqual(stats["warning_1"], 1)
+
+    def test_tax_warning_new_member_grace_helpers(self):
+        first_seen = parse_member_first_seen_timestamp("2026-07-02T10:00:00+00:00")
+        now = parse_member_first_seen_timestamp("2026-07-02T12:00:00+00:00")
+
+        self.assertTrue(
+            tax_warning_member_is_in_grace_period(
+                first_seen_at=first_seen,
+                now=now,
+                grace_hours=TAX_WARNING_NEW_MEMBER_GRACE_HOURS,
+            )
+        )
+        self.assertFalse(
+            tax_warning_member_is_in_grace_period(
+                first_seen_at=first_seen,
+                now=now,
+                grace_hours=0,
+            )
+        )
 
     def test_tax_warning_stats_from_state_reconstructs_reached_warning_levels(self):
         stats = tax_warning_stats_from_state(
@@ -613,6 +704,47 @@ class MessageManagerTests(unittest.TestCase):
         self.assertEqual(result["kicked"], 1)
         manager._send_tax_warning.assert_not_awaited()
         manager._kick_tax_warning_member.assert_awaited_once()
+
+    def test_tax_warning_candidates_skip_members_inside_new_member_grace(self):
+        now = int(time.time())
+
+        class FakeConfig:
+            async def tax_warning_min_rate(self):
+                return 5.0
+
+            async def tax_warning_min_days_between(self):
+                return TAX_WARNING_MIN_DAYS_BETWEEN
+
+            async def tax_warning_new_member_grace_hours(self):
+                return TAX_WARNING_NEW_MEMBER_GRACE_HOURS
+
+        class FakeMembersScraper:
+            async def get_members(self):
+                return [
+                    {
+                        "mc_user_id": "456",
+                        "name": "NewLowTaxMember",
+                        "contribution_rate": 0.0,
+                    }
+                ]
+
+            async def get_member_first_seen(self, mc_user_id):
+                assert str(mc_user_id) == "456"
+                return message_manager_module.datetime.fromtimestamp(
+                    now - 3600,
+                    tz=message_manager_module.timezone.utc,
+                ).isoformat()
+
+        scraper = FakeMembersScraper()
+        manager = MessageManager.__new__(MessageManager)
+        manager.bot = types.SimpleNamespace(get_cog=lambda name: scraper if name == "MembersScraper" else None)
+        manager.config = FakeConfig()
+        manager._tax_warning_history = AsyncMock(return_value=(0, None, None))
+
+        candidates = asyncio.run(manager._tax_warning_candidates(types.SimpleNamespace(id=123)))
+
+        self.assertEqual(candidates, [])
+        manager._tax_warning_history.assert_not_awaited()
 
     def test_sanction_manager_lookup_accepts_loaded_cog_name(self):
         expected_cog = object()
