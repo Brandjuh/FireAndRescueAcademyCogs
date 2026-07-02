@@ -14,6 +14,8 @@ log = logging.getLogger("red.FARA.MembersScraper")
 # SQLite INTEGER limits
 INT64_MAX = 9223372036854775807
 INT64_MIN = -9223372036854775808
+MIN_EXIT_DETECTION_BASELINE = 100
+MIN_EXIT_DETECTION_RETENTION = 0.50
 
 class MembersScraper(commands.Cog):
     """Scrapes alliance members data from MissionChief"""
@@ -563,6 +565,19 @@ class MembersScraper(commands.Cog):
         
         # Get current member IDs
         current_ids = {m['member_id'] for m in current_members if not m.get('suspicious', False)}
+
+        previous_count = len(previous_members)
+        current_count = len(current_ids)
+        if previous_count >= MIN_EXIT_DETECTION_BASELINE:
+            retention = current_count / max(previous_count, 1)
+            if retention < MIN_EXIT_DETECTION_RETENTION:
+                await self._debug_log(
+                    "Exit detection skipped: current scrape is too small "
+                    f"({current_count}/{previous_count}, {retention:.0%}). "
+                    "This usually means the member scrape was incomplete.",
+                    ctx,
+                )
+                return []
         
         # Find who left (in previous but not in current)
         exits = []

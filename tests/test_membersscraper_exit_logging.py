@@ -117,6 +117,43 @@ class MembersScraperExitLoggingTests(unittest.TestCase):
         self.assertEqual(field_names, ["Name", "MC ID", "Last Credits", "Contribution Rate"])
         self.assertNotIn("Rank", field_names)
 
+    def test_exit_detection_skips_extremely_incomplete_scrape(self):
+        previous_timestamp = "2026-07-03T00:00:00"
+        connection = sqlite3.connect(self.scraper.db_path)
+        try:
+            for member_id in range(1, 121):
+                connection.execute(
+                    """
+                    INSERT INTO members
+                    (member_id, username, rank, earned_credits, contribution_rate, timestamp, snapshot_source)
+                    VALUES (?, ?, 'Member', 1000, 5.0, ?, 'live')
+                    """,
+                    (member_id, f"Member {member_id}", previous_timestamp),
+                )
+            connection.commit()
+        finally:
+            connection.close()
+
+        current_members = [
+            {
+                "member_id": member_id,
+                "username": f"Member {member_id}",
+                "rank": "Member",
+                "earned_credits": 1000,
+                "contribution_rate": 5.0,
+                "timestamp": "2026-07-03T01:00:00",
+            }
+            for member_id in range(1, 41)
+        ]
+
+        exits = asyncio.run(self.scraper._detect_exits(current_members))
+
+        self.assertEqual(exits, [])
+        self.scraper._debug_log.assert_any_await(
+            "Exit detection skipped: current scrape is too small (40/120, 33%). This usually means the member scrape was incomplete.",
+            None,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

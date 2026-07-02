@@ -7,7 +7,7 @@ import logging
 import re
 import sqlite3
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List, Set, Tuple
 
 import discord
 from discord import app_commands
@@ -16,6 +16,11 @@ from redbot.core.bot import Red
 from redbot.core.data_manager import cog_data_path
 
 log = logging.getLogger("red.FARA.MemberSync")
+
+MIN_SAFE_ROSTER_COUNT = 100
+MIN_SAFE_ROSTER_RETENTION = 0.80
+MAX_SAFE_ROSTER_AGE_HOURS = 8
+EXIT_RECORD_IGNORED_MEMBER_PRESENT = 2
 
 DEFAULTS = {
     "alliance_db_path": None,
@@ -42,6 +47,29 @@ def _lower(s: Optional[str]) -> str:
 
 def _mc_profile_url(mc_id: str) -> str:
     return f"https://www.missionchief.com/users/{mc_id}"
+
+def _parse_utc_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        text = str(value).strip().replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+def _mc_id_from_alliance_row(row: sqlite3.Row) -> Optional[str]:
+    keys = set(row.keys())
+    mc_id = row["user_id"] if "user_id" in keys else None
+    if not mc_id and "mc_user_id" in keys:
+        mc_id = row["mc_user_id"]
+    if not mc_id and "profile_href" in keys and row["profile_href"]:
+        match = re.search(r"/users/(\d+)", row["profile_href"])
+        if match:
+            mc_id = match.group(1)
+    return str(mc_id) if mc_id else None
 
 class MemberSync(commands.Cog):
     """Synchronises Missionchief members with Discord and handles verification workflow.
@@ -243,7 +271,7 @@ class MemberSync(commands.Cog):
             log.warning("MemberSync exit table unavailable: %s", e)
             return []
 
-    async def _mark_exit_records_role_removed(self, exit_ids: List[int]) -> None:
+    async def _mark_exit_records_role_removed(self, exit_ids: List[int], *, status: int = 1) -> None:
         if not exit_ids:
             return
 
@@ -252,8 +280,8 @@ class MemberSync(commands.Cog):
             try:
                 placeholders = ",".join("?" for _ in exit_ids)
                 con.execute(
-                    f"UPDATE member_left_alliance SET role_removed=1 WHERE id IN ({placeholders})",
-                    tuple(exit_ids),
+                    f"UPDATE member_left_alliance SET role_removed=? WHERE id IN ({placeholders})",
+                    (status, *exit_ids),
                 )
                 con.commit()
             finally:
@@ -281,6 +309,100 @@ class MemberSync(commands.Cog):
             log.warning("Unexpected member fetch error for %s during prune: %s", discord_id, e)
             return None, False
 
+    async def _current_roster_state(self) -> Dict[str, Any]:
+        path = await self.config.alliance_db_path()
+        if not path:
+            return {"healthy": False, "reason": "No alliance DB path configured", "ids": set()}
+
+        def _run() -> Dict[str, Any]:
+            con = sqlite3.connect(path)
+            con.row_factory = sqlite3.Row
+            try:
+                current_rows = con.execute(
+                    "SELECT user_id, mc_user_id, profile_href, scraped_at FROM members_current"
+                ).fetchall()
+                current_ids = {mc_id for row in current_rows if (mc_id := _mc_id_from_alliance_row(row))}
+                latest_scraped_at = None
+                for row in current_rows:
+                    keys = set(row.keys())
+                    if "scraped_at" in keys and row["scraped_at"]:
+                        candidate = str(row["scraped_at"])
+                        if latest_scraped_at is None or candidate > latest_scraped_at:
+                            latest_scraped_at = candidate
+
+                snapshot_counts = []
+                try:
+                    snapshot_counts = [
+                        dict(row)
+                        for row in con.execute(
+                            """
+                            SELECT timestamp, COUNT(*) AS count
+                            FROM members
+                            GROUP BY timestamp
+                            ORDER BY timestamp DESC
+                            LIMIT 2
+                            """
+                        ).fetchall()
+                    ]
+                except sqlite3.Error:
+                    snapshot_counts = []
+
+                return {
+                    "healthy": True,
+                    "reason": "ok",
+                    "ids": current_ids,
+                    "current_count": len(current_ids),
+                    "latest_scraped_at": latest_scraped_at,
+                    "snapshot_counts": snapshot_counts,
+                }
+            finally:
+                con.close()
+
+        try:
+            state = await asyncio.get_running_loop().run_in_executor(None, _run)
+        except Exception as e:
+            return {"healthy": False, "reason": f"Alliance roster query failed: {e}", "ids": set()}
+
+        current_count = int(state.get("current_count") or 0)
+        if current_count < MIN_SAFE_ROSTER_COUNT:
+            state["healthy"] = False
+            state["reason"] = (
+                f"Roster snapshot too small: {current_count} members "
+                f"(minimum {MIN_SAFE_ROSTER_COUNT})"
+            )
+            return state
+
+        latest_dt = _parse_utc_datetime(state.get("latest_scraped_at"))
+        if not latest_dt:
+            state["healthy"] = False
+            state["reason"] = "Roster snapshot timestamp missing or invalid"
+            return state
+
+        age_hours = (datetime.now(timezone.utc) - latest_dt).total_seconds() / 3600
+        if age_hours > MAX_SAFE_ROSTER_AGE_HOURS:
+            state["healthy"] = False
+            state["reason"] = (
+                f"Roster snapshot is stale: {age_hours:.1f}h old "
+                f"(maximum {MAX_SAFE_ROSTER_AGE_HOURS}h)"
+            )
+            return state
+
+        counts = state.get("snapshot_counts") or []
+        if len(counts) >= 2:
+            latest_count = int(counts[0].get("count") or 0)
+            previous_count = int(counts[1].get("count") or 0)
+            if previous_count >= MIN_SAFE_ROSTER_COUNT:
+                retention = latest_count / max(previous_count, 1)
+                if retention < MIN_SAFE_ROSTER_RETENTION:
+                    state["healthy"] = False
+                    state["reason"] = (
+                        f"Roster snapshot dropped from {previous_count} to {latest_count} "
+                        f"({retention:.0%}); waiting for a stable scrape"
+                    )
+                    return state
+
+        return state
+
     async def _prune_pending_exit_records(
         self,
         guild: discord.Guild,
@@ -290,35 +412,56 @@ class MemberSync(commands.Cog):
         log_ch_id = await self.config.log_channel_id()
         ch = guild.get_channel(int(log_ch_id)) if log_ch_id else None
 
-        exit_rows = await self._pending_exit_records()
-        if not exit_rows:
-            await self._debug_log("Prune skipped: no pending alliance exit records")
+        roster_state = await self._current_roster_state()
+        if not roster_state.get("healthy"):
+            await self._debug_log(
+                f"Prune deferred: current alliance roster is not safe to use. {roster_state.get('reason')}",
+                "warning",
+            )
             return
+        current_roster_ids = set(roster_state.get("ids") or set())
 
         removed = 0
+        restored = 0
         processed_exit_ids: List[int] = []
+        ignored_exit_ids: List[int] = []
 
+        exit_rows = await self._pending_exit_records()
         for exit_row in exit_rows:
             exit_id = int(exit_row["id"])
             mcid = str(exit_row["mc_user_id"])
             link = links_by_mcid.get(mcid)
             did = exit_row.get("discord_id") or (link.get("discord_id") if link else None)
+            still_in_alliance = mcid in current_roster_ids
 
             if not did:
-                processed_exit_ids.append(exit_id)
-                await self._debug_log(f"Prune marked MC {mcid} handled: no linked Discord account")
+                if still_in_alliance:
+                    ignored_exit_ids.append(exit_id)
+                    await self._debug_log(f"Prune ignored MC {mcid}: member is still in the alliance")
+                else:
+                    processed_exit_ids.append(exit_id)
+                    await self._debug_log(f"Prune marked MC {mcid} handled: no linked Discord account")
                 continue
 
             try:
                 discord_id = int(did)
             except (TypeError, ValueError):
-                processed_exit_ids.append(exit_id)
-                await self._debug_log(f"Prune marked MC {mcid} handled: invalid Discord ID {did}", "warning")
+                if still_in_alliance:
+                    ignored_exit_ids.append(exit_id)
+                    await self._debug_log(f"Prune ignored MC {mcid}: member is still in the alliance")
+                else:
+                    processed_exit_ids.append(exit_id)
+                    await self._debug_log(f"Prune marked MC {mcid} handled: invalid Discord ID {did}", "warning")
                 continue
 
             member, definitely_absent = await self._resolve_guild_member(guild, discord_id)
             if not member:
-                if definitely_absent:
+                if still_in_alliance:
+                    await self._debug_log(
+                        f"Prune deferred MC {mcid}: member is still in alliance but Discord member {discord_id} could not be confirmed",
+                        "warning",
+                    )
+                elif definitely_absent:
                     processed_exit_ids.append(exit_id)
                     await self._debug_log(f"Prune marked MC {mcid} handled: Discord member {discord_id} not in guild")
                 else:
@@ -326,6 +469,25 @@ class MemberSync(commands.Cog):
                         f"Prune deferred MC {mcid}: Discord member {discord_id} could not be confirmed",
                         "warning",
                     )
+                continue
+
+            if still_in_alliance:
+                if role not in member.roles:
+                    try:
+                        await member.add_roles(role, reason="MemberSync auto-restore: confirmed still in alliance")
+                        restored += 1
+                        await self._debug_log(f"Auto-restored Verified for {member.name} (MC {mcid})")
+                    except Exception as e:
+                        await self._debug_log(f"Failed to restore Verified for {member.name}: {e}", "error")
+                        continue
+
+                    if ch is not None and isinstance(ch, discord.TextChannel):
+                        await ch.send(
+                            f"Auto-prune ignored false exit for <@{discord_id}> (MC `{mcid}` still in alliance); Verified restored."
+                        )
+                else:
+                    await self._debug_log(f"Prune ignored {member.name} (MC {mcid}): still in alliance")
+                ignored_exit_ids.append(exit_id)
                 continue
 
             if role not in member.roles:
@@ -344,13 +506,58 @@ class MemberSync(commands.Cog):
             if ch is not None and isinstance(ch, discord.TextChannel):
                 await ch.send(f"Auto-prune removed Verified from <@{discord_id}> (MC `{mcid}` confirmed left alliance).")
 
+        restored += await self._restore_verified_for_current_links(
+            guild,
+            role,
+            links_by_mcid,
+            current_roster_ids,
+        )
+
         await self._mark_exit_records_role_removed(processed_exit_ids)
+        await self._mark_exit_records_role_removed(
+            ignored_exit_ids,
+            status=EXIT_RECORD_IGNORED_MEMBER_PRESENT,
+        )
 
         if removed:
             log.info("Auto-prune removed %s roles", removed)
+        if restored:
+            log.info("Auto-prune restored %s roles for false exit records", restored)
         await self._debug_log(
-            f"Auto-prune completed: {removed} roles removed, {len(processed_exit_ids)} exit records handled"
+            f"Auto-prune completed: {removed} roles removed, {restored} roles restored, "
+            f"{len(processed_exit_ids)} exit records handled, {len(ignored_exit_ids)} false exits ignored"
         )
+
+    async def _restore_verified_for_current_links(
+        self,
+        guild: discord.Guild,
+        role: discord.Role,
+        links_by_mcid: Dict[str, Dict[str, Any]],
+        current_roster_ids: Set[str],
+    ) -> int:
+        restored = 0
+        for mcid, link in links_by_mcid.items():
+            if str(mcid) not in current_roster_ids:
+                continue
+
+            did = link.get("discord_id")
+            try:
+                discord_id = int(did)
+            except (TypeError, ValueError):
+                continue
+
+            member = guild.get_member(discord_id)
+            if not member or role in member.roles:
+                continue
+
+            try:
+                await member.add_roles(role, reason="MemberSync auto-restore: approved link still in alliance")
+                restored += 1
+                await self._debug_log(f"Auto-restored Verified for {member.name} (MC {mcid}) from current roster")
+            except Exception as e:
+                await self._debug_log(f"Failed to restore Verified for {member.name}: {e}", "error")
+
+        return restored
 
     async def _latest_snapshot(self) -> Optional[str]:
         """Get timestamp of latest member data snapshot"""
