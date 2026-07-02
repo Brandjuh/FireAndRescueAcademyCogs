@@ -46,6 +46,7 @@ from eventmanager.event_manager import (
     TYPE_SEARCH_KEY,
     route_profile_for_location,
     route_locations_for_kind,
+    route_profile_name,
     route_profile_names,
     safe_debug_mapping,
     safe_debug_payload,
@@ -1410,6 +1411,60 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["large"]["added"])
         self.assertEqual(schedules["large"]["profiles"], [existing_profile])
         self.assertEqual(profiles["large"][existing_profile], existing)
+
+    async def test_route_profile_migration_replaces_stale_fixed_large_type(self):
+        stale_large_profile = route_profile_name(EVENT_ROUTE_LOCATIONS[0])
+        yakima = next(location for location in route_locations_for_kind("large") if location["label"] == "Yakima Wildfire, WA")
+        yakima_profile = route_profile_name(yakima)
+        profiles = {
+            "large": {
+                stale_large_profile: {
+                    "location_label": "New York City",
+                    "fields": {
+                        LATITUDE_FIELD: "40.712800",
+                        LONGITUDE_FIELD: "-74.006000",
+                        ADDRESS_FIELD: "New York City, NY, USA",
+                        MISSION_TYPE_FIELD: "62",
+                    },
+                    "selected_type_label": "Pile-up",
+                },
+                yakima_profile: {
+                    "location_label": "Yakima Wildfire, WA",
+                    "fields": {
+                        LATITUDE_FIELD: "46.793900",
+                        LONGITUDE_FIELD: "-121.074000",
+                        ADDRESS_FIELD: "Okanogan-Wenatchee National Forest near Yakima, WA, USA",
+                        MISSION_TYPE_FIELD: "62",
+                    },
+                },
+            },
+            "event": {},
+        }
+        schedules = {
+            "large": {"profiles": [stale_large_profile, yakima_profile], "profile": stale_large_profile, "rotation_index": 0},
+            "event": {"profiles": [], "profile": None, "rotation_index": 0},
+        }
+        fake = type("FakeEventManager", (), {})()
+        fake.config = type(
+            "FakeConfig",
+            (),
+            {
+                "profiles": FakeConfigSection(profiles),
+                "schedules": FakeConfigSection(schedules),
+            },
+        )()
+
+        await EventManager._migrate_route_profiles(fake)
+
+        migrated_large = profiles["large"][stale_large_profile]
+        migrated_yakima = profiles["large"][yakima_profile]
+        self.assertTrue(migrated_large[RANDOM_TYPE_KEY])
+        self.assertNotIn(MISSION_TYPE_FIELD, migrated_large["fields"])
+        self.assertNotIn("selected_type_label", migrated_large)
+        self.assertEqual(profile_type_summary("large", migrated_large), "Suprise")
+        self.assertEqual(migrated_yakima[TYPE_SEARCH_KEY], "Wildfire")
+        self.assertNotIn(MISSION_TYPE_FIELD, migrated_yakima["fields"])
+        self.assertEqual(profile_type_summary("large", migrated_yakima), "Wildfire")
 
     async def test_board_locations_content_includes_last_updated_time(self):
         profile_name = custom_route_profile_name("Copenhagen")

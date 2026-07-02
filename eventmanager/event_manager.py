@@ -841,6 +841,35 @@ def route_profile_for_location(kind: str, location: Dict[str, str]) -> dict:
     }
 
 
+def refresh_managed_location_profile(kind: str, saved_profile: dict, desired_profile: dict) -> dict:
+    """Update a bot-managed location profile without keeping stale fixed type values."""
+    kind = normalize_kind(kind)
+    refreshed = dict(saved_profile or {})
+    fields = dict(refreshed.get("fields") or {})
+    desired_fields = dict(desired_profile.get("fields") or {})
+    fields.update(desired_fields)
+
+    if desired_profile.get(TYPE_SEARCH_KEY):
+        refreshed[TYPE_SEARCH_KEY] = desired_profile[TYPE_SEARCH_KEY]
+        refreshed.pop(RANDOM_TYPE_KEY, None)
+    elif desired_profile.get(RANDOM_TYPE_KEY):
+        refreshed[RANDOM_TYPE_KEY] = True
+        refreshed.pop(TYPE_SEARCH_KEY, None)
+    else:
+        refreshed.pop(TYPE_SEARCH_KEY, None)
+        refreshed.pop(RANDOM_TYPE_KEY, None)
+
+    if refreshed.get(RANDOM_TYPE_KEY) or refreshed.get(TYPE_SEARCH_KEY):
+        fields.pop(MISSION_TYPE_FIELD, None)
+        fields.pop(EVENT_RADIO_FIELD, None)
+        refreshed.pop("selected_type_label", None)
+
+    refreshed["fields"] = fields
+    if desired_profile.get("location_label"):
+        refreshed["location_label"] = desired_profile["location_label"]
+    return refreshed
+
+
 def route_locations_for_kind(kind: Optional[str] = None) -> List[Dict[str, str]]:
     """Return configured route locations, optionally filtered by schedule kind."""
     if kind is None:
@@ -2749,7 +2778,11 @@ class EventManager(commands.Cog):
             for kind, kind_profiles in desired_profiles.items():
                 saved = profiles.setdefault(kind, {})
                 for profile_name, profile_data in kind_profiles.items():
-                    saved.setdefault(profile_name, profile_data)
+                    existing = saved.get(profile_name)
+                    if existing:
+                        saved[profile_name] = refresh_managed_location_profile(kind, existing, profile_data)
+                    else:
+                        saved[profile_name] = profile_data
 
         async with self.config.schedules() as schedules:
             for kind, kind_desired_profiles in desired_profiles.items():
@@ -3575,10 +3608,17 @@ class EventManager(commands.Cog):
                 kind_profiles = profiles.setdefault(kind, {})
                 existing_profile_name = find_existing_location_profile_name(kind_profiles, location)
                 profile_name = existing_profile_name or custom_route_profile_name(location["label"])
+                desired_profile = route_profile_for_location(kind, location)
                 if existing_profile_name:
-                    profile = kind_profiles.get(profile_name) or route_profile_for_location(kind, location)
+                    profile = kind_profiles.get(profile_name) or desired_profile
+                    if (
+                        profile_name.startswith((EVENT_ROUTE_PROFILE_PREFIX, CUSTOM_ROUTE_PROFILE_PREFIX))
+                        and not profile.get(TYPE_SEARCH_KEY)
+                    ):
+                        profile = refresh_managed_location_profile(kind, profile, desired_profile)
+                        kind_profiles[profile_name] = profile
                 else:
-                    profile = route_profile_for_location(kind, location)
+                    profile = desired_profile
                     kind_profiles[profile_name] = profile
                 result[kind] = {
                     "profile_name": profile_name,
