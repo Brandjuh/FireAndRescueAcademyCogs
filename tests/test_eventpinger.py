@@ -11,6 +11,8 @@ from eventpinger.eventpinger import (
     discord_timestamp,
     extract_announcement_from_message,
     find_region_role,
+    geocode_search_params,
+    normalize_geocode_api_key,
     parse_next_summary,
     region_from_geocode_results,
     resolve_region,
@@ -44,6 +46,14 @@ class FakeChannel:
 
     async def send(self, content=None, **kwargs):
         self.sent.append((content, kwargs))
+
+
+def test_geocode_search_params_use_documented_api_key_parameter():
+    params = geocode_search_params("Grand Rapids", "Bearer test-key")
+
+    assert params["q"] == "Grand Rapids"
+    assert params["api_key"] == "test-key"
+    assert normalize_geocode_api_key("Bearer test-key") == "test-key"
 
 
 def embed_field_values(embed):
