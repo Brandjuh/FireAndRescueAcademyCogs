@@ -6,12 +6,20 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 import re
 
-from fara_db import (
-    connect_database,
-    ensure_scrape_runs_table,
-    finish_scrape_run_for_path,
-    start_scrape_run_for_path,
-)
+try:
+    from .fara_db import (
+        connect_database,
+        ensure_scrape_runs_table,
+        finish_scrape_run_for_path,
+        start_scrape_run_for_path,
+    )
+except ImportError:  # pragma: no cover - direct module loading in local tooling
+    from fara_db import (
+        connect_database,
+        ensure_scrape_runs_table,
+        finish_scrape_run_for_path,
+        start_scrape_run_for_path,
+    )
 
 class ApplicationsScraper(commands.Cog):
     """Scrapes alliance applications from MissionChief"""

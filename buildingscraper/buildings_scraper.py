@@ -6,12 +6,20 @@ import logging
 import sqlite3
 from datetime import datetime
 
-from fara_db import (
-    connect_database,
-    ensure_scrape_runs_table,
-    finish_scrape_run_for_path,
-    start_scrape_run_for_path,
-)
+try:
+    from .fara_db import (
+        connect_database,
+        ensure_scrape_runs_table,
+        finish_scrape_run_for_path,
+        start_scrape_run_for_path,
+    )
+except ImportError:  # pragma: no cover - direct module loading in local tooling
+    from fara_db import (
+        connect_database,
+        ensure_scrape_runs_table,
+        finish_scrape_run_for_path,
+        start_scrape_run_for_path,
+    )
 
 from .parsing import next_hourly_run, parse_buildings_html
 

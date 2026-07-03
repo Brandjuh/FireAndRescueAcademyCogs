@@ -10,13 +10,22 @@ import re
 import logging
 from typing import Any, Dict, List, Optional
 
-from fara_db import (
-    backup_database,
-    connect_database,
-    ensure_scrape_runs_table,
-    finish_scrape_run,
-    start_scrape_run,
-)
+try:
+    from .fara_db import (
+        backup_database,
+        connect_database,
+        ensure_scrape_runs_table,
+        finish_scrape_run,
+        start_scrape_run,
+    )
+except ImportError:  # pragma: no cover - direct module loading in local tooling
+    from fara_db import (
+        backup_database,
+        connect_database,
+        ensure_scrape_runs_table,
+        finish_scrape_run,
+        start_scrape_run,
+    )
 
 log = logging.getLogger("red.FARA.MembersScraper")
 
