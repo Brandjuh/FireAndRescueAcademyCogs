@@ -10,6 +10,14 @@ import re
 import logging
 from typing import Any, Dict, List, Optional
 
+from fara_db import (
+    backup_database,
+    connect_database,
+    ensure_scrape_runs_table,
+    finish_scrape_run,
+    start_scrape_run,
+)
+
 log = logging.getLogger("red.FARA.MembersScraper")
 
 # SQLite INTEGER limits
@@ -91,7 +99,7 @@ class MembersScraper(commands.Cog):
         max_retries = 5
         for attempt in range(max_retries):
             try:
-                conn = sqlite3.connect(self.db_path, timeout=10.0)
+                conn = connect_database(self.db_path, timeout=10.0)
                 cursor = conn.cursor()
                 
                 cursor.execute('''
@@ -113,11 +121,13 @@ class MembersScraper(commands.Cog):
                 columns = [col[1] for col in cursor.fetchall()]
                 
                 if 'contribution_rate' not in columns:
+                    backup_database(self.db_path, "add-members-contribution-rate", logger=log)
                     log.info("🔧 MIGRATION: Adding contribution_rate column")
                     cursor.execute('ALTER TABLE members ADD COLUMN contribution_rate REAL DEFAULT 0.0')
                     log.info("✅ Migration complete")
                 
                 if 'snapshot_source' not in columns:
+                    backup_database(self.db_path, "add-members-snapshot-source", logger=log)
                     log.info("MIGRATION: Adding snapshot_source column")
                     cursor.execute("ALTER TABLE members ADD COLUMN snapshot_source TEXT DEFAULT 'unknown'")
                     log.info("Migration complete")
@@ -126,6 +136,7 @@ class MembersScraper(commands.Cog):
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_member_id ON members(member_id)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_contribution_rate ON members(contribution_rate)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_snapshot_source ON members(snapshot_source)')
+                ensure_scrape_runs_table(cursor)
                 
                 # Suspicious members table
                 cursor.execute('''
@@ -157,7 +168,20 @@ class MembersScraper(commands.Cog):
                         '' as profile_href,
                         timestamp as scraped_at
                     FROM members
-                    WHERE timestamp = (SELECT MAX(timestamp) FROM members)
+                    WHERE timestamp = COALESCE(
+                        (
+                            SELECT source_timestamp
+                            FROM scrape_runs
+                            WHERE scraper = 'members'
+                              AND source = 'live'
+                              AND status = 'success'
+                              AND source_timestamp IS NOT NULL
+                            ORDER BY finished_at DESC, run_id DESC
+                            LIMIT 1
+                        ),
+                        (SELECT MAX(timestamp) FROM members WHERE snapshot_source = 'live'),
+                        (SELECT MAX(timestamp) FROM members)
+                    )
                 ''')
                 log.info("✅ MemberSync VIEW created (using MAX(timestamp) for latest scrape only)")
                 
@@ -178,7 +202,7 @@ class MembersScraper(commands.Cog):
     def _init_membersync_exit_table(self):
         """Ensure the exit tracking table exists in MemberSync database"""
         try:
-            conn = sqlite3.connect(self.membersync_db, timeout=10.0)
+            conn = connect_database(self.membersync_db, timeout=10.0)
             cursor = conn.cursor()
             
             cursor.execute('''
@@ -228,6 +252,59 @@ class MembersScraper(commands.Cog):
             self._scrape_lock = asyncio.Lock()
         return self._scrape_lock
 
+    def _start_scrape_run(self, source: str, source_timestamp: str) -> Optional[int]:
+        if not getattr(self, "db_path", None):
+            return None
+        try:
+            conn = connect_database(self.db_path)
+            try:
+                return start_scrape_run(
+                    conn,
+                    "members",
+                    source=source,
+                    source_timestamp=source_timestamp,
+                )
+            finally:
+                conn.close()
+        except Exception:
+            log.exception("Failed to start members scrape run")
+            return None
+
+    def _finish_scrape_run(
+        self,
+        run_id: Optional[int],
+        status: str,
+        *,
+        pages_attempted: int = 0,
+        pages_succeeded: int = 0,
+        rows_parsed: int = 0,
+        rows_inserted: int = 0,
+        duplicates: int = 0,
+        errors: int = 0,
+        message: Optional[str] = None,
+    ) -> None:
+        if run_id is None or not getattr(self, "db_path", None):
+            return
+        try:
+            conn = connect_database(self.db_path)
+            try:
+                finish_scrape_run(
+                    conn,
+                    run_id,
+                    status,
+                    pages_attempted=pages_attempted,
+                    pages_succeeded=pages_succeeded,
+                    rows_parsed=rows_parsed,
+                    rows_inserted=rows_inserted,
+                    duplicates=duplicates,
+                    errors=errors,
+                    message=message,
+                )
+            finally:
+                conn.close()
+        except Exception:
+            log.exception("Failed to finish members scrape run")
+
     def _retry_after_seconds(self, response) -> Optional[float]:
         headers = getattr(response, "headers", {}) or {}
         retry_after = None
@@ -258,7 +335,7 @@ class MembersScraper(commands.Cog):
     def _query_member_snapshot_sync(self, mc_user_id: str) -> Optional[Dict[str, Any]]:
         """Return the latest stored member snapshot for a MissionChief user."""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = connect_database(self.db_path)
             conn.row_factory = sqlite3.Row
             try:
                 cursor = conn.cursor()
@@ -819,8 +896,13 @@ class MembersScraper(commands.Cog):
 
     async def _scrape_all_members_impl(self, ctx=None, custom_timestamp=None):
         """Scrape all pages of members"""
+        scrape_timestamp = custom_timestamp if custom_timestamp else datetime.utcnow().isoformat()
+        snapshot_source = "backfill" if custom_timestamp else "live"
+        run_id = self._start_scrape_run(snapshot_source, scrape_timestamp)
+
         session = await self._get_session(ctx)
         if not session:
+            self._finish_scrape_run(run_id, "failed", message="session unavailable", errors=1)
             if ctx:
                 await ctx.send("❌ Failed to get session. Is CookieManager loaded and logged in?")
             return False
@@ -828,10 +910,6 @@ class MembersScraper(commands.Cog):
         all_members = []
         page = 1
         max_pages = 100
-        
-        # CRITICAL FIX: Create single timestamp for entire scrape
-        scrape_timestamp = custom_timestamp if custom_timestamp else datetime.utcnow().isoformat()
-        snapshot_source = "backfill" if custom_timestamp else "live"
         
         await self._debug_log(f"🚀 Starting member scrape (max {max_pages} pages)", ctx)
         await self._debug_log(f"📅 Scrape timestamp: {scrape_timestamp}", ctx)
@@ -848,6 +926,15 @@ class MembersScraper(commands.Cog):
                 )
                 if ctx:
                     await ctx.send("Member scrape aborted because MissionChief returned an error or the session expired. No member data was saved.")
+                self._finish_scrape_run(
+                    run_id,
+                    "failed",
+                    pages_attempted=page,
+                    pages_succeeded=max(0, page - 1),
+                    rows_parsed=len(all_members),
+                    errors=1,
+                    message=f"page {page} unavailable",
+                )
                 return False
 
             if not members:
@@ -940,6 +1027,17 @@ class MembersScraper(commands.Cog):
             
             conn.commit()
             conn.close()
+            self._finish_scrape_run(
+                run_id,
+                "success",
+                pages_attempted=page - 1,
+                pages_succeeded=page - 1,
+                rows_parsed=len(all_members),
+                rows_inserted=inserted,
+                duplicates=duplicates,
+                errors=suspicious_count,
+                message=f"{len(all_members)} members scraped",
+            )
             
             await self._debug_log(f"💾 Database: {inserted} inserted, {duplicates} duplicates, {suspicious_count} suspicious", ctx)
             
@@ -953,6 +1051,14 @@ class MembersScraper(commands.Cog):
                 await ctx.send(msg)
             return True
         else:
+            self._finish_scrape_run(
+                run_id,
+                "failed",
+                pages_attempted=page - 1,
+                pages_succeeded=max(0, page - empty_page_count - 1),
+                rows_parsed=0,
+                message="no member rows found",
+            )
             if ctx:
                 await ctx.send("⚠️ No members data found")
             return False
