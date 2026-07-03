@@ -11,6 +11,30 @@ from membersscraper.members_scraper import MembersScraper
 
 
 class ScraperRunMetadataTests(unittest.TestCase):
+    def test_scraper_cogs_package_fara_db_locally(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        scraper_sources = {
+            "applicationscraper": "applications_scraper.py",
+            "buildingscraper": "buildings_scraper.py",
+            "incomescraper": "income_scraper.py",
+            "logscraper": "logs_scraper.py",
+            "membersscraper": "members_scraper.py",
+        }
+
+        for cog_folder, source_name in scraper_sources.items():
+            with self.subTest(cog_folder=cog_folder):
+                helper_path = repo_root / cog_folder / "fara_db.py"
+                source_path = repo_root / cog_folder / source_name
+
+                self.assertTrue(
+                    helper_path.is_file(),
+                    f"{cog_folder} must package fara_db.py for Redbot cog loading",
+                )
+                self.assertIn(
+                    "from .fara_db import",
+                    source_path.read_text(encoding="utf-8"),
+                )
+
     def _table_names(self, db_path):
         connection = sqlite3.connect(db_path)
         try:

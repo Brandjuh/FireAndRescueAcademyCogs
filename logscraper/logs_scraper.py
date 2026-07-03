@@ -10,13 +10,22 @@ import hashlib
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, Iterable, Optional
 
-from fara_db import (
-    backup_database,
-    connect_database,
-    ensure_scrape_runs_table,
-    finish_scrape_run_for_path,
-    start_scrape_run_for_path,
-)
+try:
+    from .fara_db import (
+        backup_database,
+        connect_database,
+        ensure_scrape_runs_table,
+        finish_scrape_run_for_path,
+        start_scrape_run_for_path,
+    )
+except ImportError:  # pragma: no cover - direct module loading in local tooling
+    from fara_db import (
+        backup_database,
+        connect_database,
+        ensure_scrape_runs_table,
+        finish_scrape_run_for_path,
+        start_scrape_run_for_path,
+    )
 
 
 class LogsScrapePageError(RuntimeError):
