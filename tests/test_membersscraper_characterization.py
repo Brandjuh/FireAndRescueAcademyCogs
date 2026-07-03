@@ -9,10 +9,10 @@ from membersscraper.members_scraper import MembersScraper
 
 
 class _FakeResponse:
-    status = 200
-
-    def __init__(self, html):
+    def __init__(self, html, *, status=200, headers=None):
         self.html = html
+        self.status = status
+        self.headers = headers or {}
 
     async def __aenter__(self):
         return self
@@ -25,12 +25,14 @@ class _FakeResponse:
 
 
 class _FakeSession:
-    def __init__(self, html):
+    def __init__(self, html, *, status=200, headers=None):
         self.html = html
+        self.status = status
+        self.headers = headers or {}
 
     def get(self, url):
         del url
-        return _FakeResponse(self.html)
+        return _FakeResponse(self.html, status=self.status, headers=self.headers)
 
 
 class MembersScraperCharacterizationTests(unittest.TestCase):
@@ -113,7 +115,24 @@ class MembersScraperCharacterizationTests(unittest.TestCase):
     def test_returns_no_members_when_login_check_fails(self):
         self.scraper._check_logged_in = AsyncMock(return_value=False)
 
-        self.assertEqual(self.scrape("<tr><td>Not available</td></tr>"), [])
+        self.assertIsNone(self.scrape("<tr><td>Not available</td></tr>"))
+
+    def test_returns_none_after_rate_limit_retries_are_exhausted(self):
+        with patch("membersscraper.members_scraper.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+            members = asyncio.run(
+                self.scraper._scrape_members_page(
+                    _FakeSession(
+                        "Too Many Requests",
+                        status=429,
+                        headers={"Retry-After": "0"},
+                    ),
+                    page_num=1,
+                    timestamp="2026-06-11T19:30:00",
+                )
+            )
+
+        self.assertIsNone(members)
+        self.assertGreaterEqual(sleep_mock.await_count, 3)
 
 
 class MembersScraperDatabaseCharacterizationTests(unittest.TestCase):

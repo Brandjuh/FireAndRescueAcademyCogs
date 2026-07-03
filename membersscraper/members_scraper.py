@@ -5,6 +5,7 @@ import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
+import random
 import re
 import logging
 from typing import Any, Dict, List, Optional
@@ -16,6 +17,9 @@ INT64_MAX = 9223372036854775807
 INT64_MIN = -9223372036854775808
 MIN_EXIT_DETECTION_BASELINE = 100
 MIN_EXIT_DETECTION_RETENTION = 0.50
+PAGE_REQUEST_BASE_DELAY_SECONDS = 1.5
+PAGE_REQUEST_MAX_ATTEMPTS = 3
+PAGE_REQUEST_BACKOFF_CAP_SECONDS = 60.0
 
 class MembersScraper(commands.Cog):
     """Scrapes alliance members data from MissionChief"""
@@ -43,6 +47,7 @@ class MembersScraper(commands.Cog):
         self.base_url = "https://www.missionchief.com"
         self.members_url = f"{self.base_url}/verband/mitglieder/1621"
         self.scraping_task = None
+        self._scrape_lock = asyncio.Lock()
         self.debug_mode = False
         self.debug_channel = None
         self._init_database()
@@ -203,9 +208,12 @@ class MembersScraper(commands.Cog):
         except Exception as e:
             log.error(f"Failed to init MemberSync exit table: {e}")
     
-    async def _debug_log(self, message, ctx=None):
+    async def _debug_log(self, message, ctx=None, *, discord=True):
         """Log debug messages to console AND Discord"""
         print(f"[MembersScraper DEBUG] {message}")
+
+        if not discord:
+            return
         
         if self.debug_mode and (ctx or self.debug_channel):
             try:
@@ -214,6 +222,38 @@ class MembersScraper(commands.Cog):
                     await channel.send(f"🐛 `{message}`")
             except Exception as e:
                 print(f"[MembersScraper DEBUG] Failed to send to Discord: {e}")
+
+    def _get_scrape_lock(self):
+        if not hasattr(self, "_scrape_lock") or self._scrape_lock is None:
+            self._scrape_lock = asyncio.Lock()
+        return self._scrape_lock
+
+    def _retry_after_seconds(self, response) -> Optional[float]:
+        headers = getattr(response, "headers", {}) or {}
+        retry_after = None
+        if hasattr(headers, "get"):
+            retry_after = headers.get("Retry-After") or headers.get("retry-after")
+
+        if not retry_after:
+            return None
+
+        try:
+            return max(0.0, min(float(retry_after), PAGE_REQUEST_BACKOFF_CAP_SECONDS))
+        except (TypeError, ValueError):
+            return None
+
+    def _page_retry_delay(self, response, attempt: int) -> Optional[float]:
+        status = getattr(response, "status", None)
+        if status == 429:
+            retry_after = self._retry_after_seconds(response)
+            if retry_after is not None:
+                return retry_after
+            return min(15.0 * (attempt + 1), PAGE_REQUEST_BACKOFF_CAP_SECONDS)
+
+        if status is not None and 500 <= int(status) < 600:
+            return min(5.0 * (2 ** attempt), PAGE_REQUEST_BACKOFF_CAP_SECONDS)
+
+        return None
 
     def _query_member_snapshot_sync(self, mc_user_id: str) -> Optional[Dict[str, Any]]:
         """Return the latest stored member snapshot for a MissionChief user."""
@@ -383,23 +423,31 @@ class MembersScraper(commands.Cog):
         url = f"{self.members_url}?page={page_num}"
         await self._debug_log(f"🌐 Scraping page {page_num}: {url}", ctx)
         
-        for attempt in range(3):
+        for attempt in range(PAGE_REQUEST_MAX_ATTEMPTS):
             try:
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(PAGE_REQUEST_BASE_DELAY_SECONDS + random.uniform(0.0, 0.75))
                 
                 async with session.get(url) as response:
                     await self._debug_log(f"📡 Response status: {response.status}", ctx)
                     
                     if response.status != 200:
                         await self._debug_log(f"❌ Page {page_num} returned status {response.status}", ctx)
-                        return []
+                        retry_delay = self._page_retry_delay(response, attempt)
+                        if retry_delay is None or attempt == PAGE_REQUEST_MAX_ATTEMPTS - 1:
+                            return None
+                        await self._debug_log(
+                            f"Retrying page {page_num} after {retry_delay:.1f}s due to HTTP {response.status}",
+                            ctx,
+                        )
+                        await asyncio.sleep(retry_delay + random.uniform(0.0, 1.0))
+                        continue
                     
                     html = await response.text()
                     await self._debug_log(f"📄 HTML length: {len(html)} chars", ctx)
                     
                     if not await self._check_logged_in(html, ctx):
                         await self._debug_log(f"❌ Session expired on page {page_num}", ctx)
-                        return []
+                        return None
                     
                     soup = BeautifulSoup(html, 'html.parser')
                     members_data = []
@@ -500,21 +548,27 @@ class MembersScraper(commands.Cog):
                                 'suspicious': False
                             })
                             
-                            await self._debug_log(f"👤 Found: {name} (ID: {user_id}, Credits: {credits:,}, Rate: {rate}%, Role: {role})", ctx)
+                            await self._debug_log(
+                                f"👤 Found: {name} (ID: {user_id}, Credits: {credits:,}, Rate: {rate}%, Role: {role})",
+                                ctx,
+                                discord=False,
+                            )
                     
                     await self._debug_log(f"✅ Parsed {len(members_data)} members from page {page_num}", ctx)
                     return members_data
                     
             except asyncio.TimeoutError:
                 await self._debug_log(f"⏱️ Timeout on page {page_num}, attempt {attempt + 1}/3", ctx)
-                if attempt == 2:
-                    return []
+                if attempt == PAGE_REQUEST_MAX_ATTEMPTS - 1:
+                    return None
+                await asyncio.sleep(min(5.0 * (2 ** attempt), PAGE_REQUEST_BACKOFF_CAP_SECONDS))
             except Exception as e:
                 await self._debug_log(f"❌ Error scraping page {page_num}: {e}", ctx)
-                if attempt == 2:
-                    return []
+                if attempt == PAGE_REQUEST_MAX_ATTEMPTS - 1:
+                    return None
+                await asyncio.sleep(min(5.0 * (2 ** attempt), PAGE_REQUEST_BACKOFF_CAP_SECONDS))
         
-        return []
+        return None
     
     async def _detect_exits(self, current_members, ctx=None):
         """
@@ -751,9 +805,17 @@ class MembersScraper(commands.Cog):
                     await self._debug_log(f"❌ Failed to send notification for {name}: {e}", ctx)
     
     async def _scrape_all_members(self, ctx=None, custom_timestamp=None):
+        lock = self._get_scrape_lock()
+        if lock.locked():
+            await self._debug_log("Members scrape skipped: another scrape is already running", ctx)
+            if ctx:
+                await ctx.send("A members scrape is already running. Try again after it finishes.")
+            return False
+
         detail = "backfilling member snapshots" if custom_timestamp else "scraping alliance members"
-        async with self._bot_status(detail):
-            return await self._scrape_all_members_impl(ctx, custom_timestamp)
+        async with lock:
+            async with self._bot_status(detail):
+                return await self._scrape_all_members_impl(ctx, custom_timestamp)
 
     async def _scrape_all_members_impl(self, ctx=None, custom_timestamp=None):
         """Scrape all pages of members"""
@@ -779,6 +841,15 @@ class MembersScraper(commands.Cog):
         while page <= max_pages:
             members = await self._scrape_members_page(session, page, scrape_timestamp, ctx)
             
+            if members is None:
+                await self._debug_log(
+                    f"Member scrape aborted on page {page}; transient MissionChief failure or expired session",
+                    ctx,
+                )
+                if ctx:
+                    await ctx.send("Member scrape aborted because MissionChief returned an error or the session expired. No member data was saved.")
+                return False
+
             if not members:
                 empty_page_count += 1
                 await self._debug_log(f"⚠️ Page {page} returned 0 members (empty count: {empty_page_count})", ctx)
