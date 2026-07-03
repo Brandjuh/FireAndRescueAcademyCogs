@@ -3,7 +3,7 @@
         "FireAndRescueAcademy"
     ],
     "description": "Comprehensive member management system for Fire & Rescue Academy alliance. Tracks Discord and MissionChief data, notes, infractions, contribution rates, and provides automated monitoring.",
-    "install_msg": "Thank you for installing MemberManager!\n\nThis cog integrates with:\n- MemberSync (for Discord <-> MC linking)\n- AllianceScraper (for MC member data)\n- Red's modlog (for Discord infractions)\n\nUse `[p]member help` to get started.\n\nRecommended setup:\n1. Configure admin roles: `[p]memberset adminroles`\n2. Configure the MemberManager panel channel if needed: `[p]memberset panelchannel`\n3. Keep legacy contribution alerts disabled unless you explicitly need the old admin-channel alert flow.\n\nFor full documentation, see the README.",
+    "install_msg": "Thank you for installing MemberManager!\n\nThis cog integrates with:\n- MemberSync (for Discord <-> MC linking)\n- MembersScraper (for MissionChief member and contribution data)\n- LogsScraper (for MissionChief audit history)\n- SanctionManager (for official sanctions)\n\nUse `[p]member help` to get started.\n\nRecommended setup:\n1. Configure admin roles: `[p]memberset adminroles`\n2. Configure moderator roles if needed: `[p]memberset modroles`\n3. Configure or repost the MemberManager panel: `[p]memberset panelchannel` and `[p]memberpanel post`\n\nAutomatic TAX warning delivery is owned by MessageManager and SanctionManager. MemberManager contribution alerts are legacy diagnostics only.\n\nFor full documentation, see the README.",
     "short": "Member management with notes, infractions, and automation",
     "name": "MemberManager",
     "tags": [

@@ -5,6 +5,8 @@ Fire & Rescue Academy Alliance
 
 from .membermanager import MemberManager, setup
 
+__all__ = ["MemberManager", "setup"]
+
 __red_end_user_data_statement__ = (
     "This cog stores member notes, infractions, and audit logs. "
     "Users can request deletion of their data by contacting server administrators."

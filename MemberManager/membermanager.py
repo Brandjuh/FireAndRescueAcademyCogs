@@ -254,18 +254,12 @@ class MemberManager(ConfigCommands, commands.Cog):
         await asyncio.sleep(5)
         await self._register_context_menu()
         
-        # Initialize contribution monitor
         if await self.config.auto_contribution_alert():
-            self.contribution_monitor = ContributionMonitor(
-                self.bot,
-                self.db,
-                self.config,
-                self._get_member_source()
+            log.warning(
+                "Legacy MemberManager contribution monitoring is configured on, "
+                "but it is no longer started automatically. Use MessageManager "
+                "TAX warnings and SanctionManager logging instead."
             )
-            self._automation_task = asyncio.create_task(
-                self.contribution_monitor.run()
-            )
-            log.info("Contribution monitoring started")
 
         await self._ensure_panel_message()
     
@@ -306,9 +300,30 @@ class MemberManager(ConfigCommands, commands.Cog):
         return {
             "membersync": self.membersync,
             "alliance_scraper": self.alliance_scraper,
+            "members_scraper": self.members_scraper,
             "logs_scraper": self.logs_scraper,
             "sanction_manager": self.sanction_manager,
         }
+
+    async def get_stats(
+        self,
+        guild_id: int,
+        period_start: Optional[int] = None,
+        period_end: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Public stats contract for AllianceReports and admin dashboards."""
+        if not self.db:
+            return {
+                "guild_id": guild_id,
+                "available": False,
+                "reason": "database_not_ready",
+            }
+
+        return await self.db.get_stats(
+            guild_id=guild_id,
+            period_start=period_start,
+            period_end=period_end,
+        )
     
     # ==================== PERMISSIONS ====================
     
@@ -871,97 +886,21 @@ class MemberManager(ConfigCommands, commands.Cog):
             return
         
         await ctx.typing()
-        
-        from .utils import fuzzy_match_score
-        
-        results = []
-        query_lower = query.lower().strip()
-        
-        # Search Discord members
-        for member in ctx.guild.members:
-            if member.bot:
-                continue
-            
-            score = fuzzy_match_score(query_lower, str(member))
-            if score >= 0.5:
-                results.append({
-                    "score": score,
-                    "discord_id": member.id,
-                    "mc_user_id": None,
-                    "name": str(member),
-                    "display_name": member.display_name,
-                    "source": "discord"
-                })
-            
-            if member.display_name != str(member):
-                score = fuzzy_match_score(query_lower, member.display_name)
-                if score >= 0.5:
-                    results.append({
-                        "score": score,
-                        "discord_id": member.id,
-                        "mc_user_id": None,
-                        "name": str(member),
-                        "display_name": member.display_name,
-                        "source": "discord"
-                    })
-        
-        # Search MC members
-        if self.alliance_scraper:
-            try:
-                mc_members = await self.alliance_scraper.get_members()
-                
-                for mc_member in mc_members:
-                    mc_name = mc_member.get("name", "")
-                    mc_id = mc_member.get("user_id") or mc_member.get("mc_user_id")
-                    
-                    if not mc_id:
-                        continue
-                    
-                    score = fuzzy_match_score(query_lower, mc_name)
-                    
-                    if query_lower.isdigit() and query_lower in str(mc_id):
-                        score = max(score, 0.8)
-                    
-                    if score >= 0.5:
-                        discord_id = None
-                        if self.membersync:
-                            link = await self.membersync.get_link_for_mc(mc_id)
-                            if link:
-                                discord_id = link.get("discord_id")
-                        
-                        results.append({
-                            "score": score,
-                            "discord_id": discord_id,
-                            "mc_user_id": mc_id,
-                            "name": mc_name,
-                            "source": "missionchief"
-                        })
-            except Exception as e:
-                log.error(f"Error searching MC members: {e}")
+        await self._connect_integrations()
+        results = await self._search_member_candidates(ctx.guild, query, limit=15)
         
         if not results:
             await ctx.send(f"❌ No members found matching `{query}`")
             return
         
-        # Remove duplicates
-        seen = set()
-        unique_results = []
-        for result in sorted(results, key=lambda x: x["score"], reverse=True):
-            key = (result.get("discord_id"), result.get("mc_user_id"))
-            if key not in seen:
-                seen.add(key)
-                unique_results.append(result)
-        
-        unique_results = unique_results[:15]
-        
         embed = discord.Embed(
             title=f"🔍 Search Results: {query}",
-            description=f"Found {len(unique_results)} member(s)",
+            description=f"Found {len(results)} member(s)",
             color=discord.Color.blue()
         )
         
         lines = []
-        for i, result in enumerate(unique_results, 1):
+        for i, result in enumerate(results, 1):
             name = result.get("name", "Unknown")
             display_name = result.get("display_name")
             discord_id = result.get("discord_id")
@@ -2129,6 +2068,7 @@ class MemberManager(ConfigCommands, commands.Cog):
         if self.db:
             try:
                 notes = await self.db.get_notes(
+                    guild_id=guild.id,
                     discord_id=data.discord_id,
                     mc_user_id=data.mc_user_id
                 )
@@ -2194,6 +2134,21 @@ class MemberManager(ConfigCommands, commands.Cog):
                 log.error(f"Failed to get sanctions: {e}")
                 data.infractions_count = 0
                 data.severity_score = 0
+
+        if self.db:
+            try:
+                watch_entries = await self.db.get_member_watchlist(
+                    guild_id=guild.id,
+                    discord_id=data.discord_id,
+                    mc_user_id=data.mc_user_id,
+                    status="active",
+                    limit=1,
+                )
+                if watch_entries:
+                    data.on_watchlist = True
+                    data.watchlist_reason = watch_entries[0].get("reason")
+            except Exception as e:
+                log.error(f"Failed to get watchlist status: {e}")
         
         return data
 

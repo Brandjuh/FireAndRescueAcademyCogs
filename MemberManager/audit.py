@@ -39,6 +39,8 @@ ADMIN_EVENT_TYPES = {
     "admin_timer_accepted",
     "admin_timer_ignored",
     "admin_timer_snoozed",
+    "watchlist_added",
+    "watchlist_resolved",
 }
 
 EXCLUDED_PERSON_AUDIT_ACTION_KEYS = {
@@ -187,7 +189,17 @@ def normalize_member_event(event: dict[str, Any]) -> Optional[AuditTimelineEvent
         event_data = {}
 
     details = []
-    for key in ("reason", "note", "status", "old_value", "new_value", "title", "recurrence"):
+    for key in (
+        "reason",
+        "note",
+        "status",
+        "old_value",
+        "new_value",
+        "title",
+        "recurrence",
+        "watch_type",
+        "resolved_count",
+    ):
         value = event_data.get(key)
         if value:
             details.append(str(value))
@@ -227,6 +239,14 @@ def normalize_member_event(event: dict[str, Any]) -> Optional[AuditTimelineEvent
             title += f" - {target_name}"
     elif event_type == "sanction_removed":
         title = f"{sanction_type or 'Sanction'} removed"
+        if target_name:
+            title += f" - {target_name}"
+    elif event_type == "watchlist_added":
+        title = "Watchlist added"
+        if target_name:
+            title += f" - {target_name}"
+    elif event_type == "watchlist_resolved":
+        title = "Watchlist resolved"
         if target_name:
             title += f" - {target_name}"
 
