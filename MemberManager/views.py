@@ -100,6 +100,7 @@ class MemberOverviewView(discord.ui.View):
 
         if self.current_tab == "overview":
             self.add_item(ToggleOverviewModeButton(self, row=2))
+            self.add_item(ManageWatchlistButton(self, row=2))
 
         elif self.current_tab == "notes":
             self.add_item(AddNoteButton(self, row=2))
@@ -568,6 +569,7 @@ class MemberOverviewView(discord.ui.View):
         
         try:
             notes = await self.db.get_notes(
+                guild_id=getattr(self.guild, "id", None),
                 discord_id=data.discord_id,
                 mc_user_id=data.mc_user_id,
                 status="active",
@@ -1153,6 +1155,7 @@ class MemberOverviewView(discord.ui.View):
         """Return MemberManager events created by EventManager location requests."""
         try:
             events = await self.db.get_events(
+                guild_id=getattr(self.guild, "id", None),
                 discord_id=self.member_data.discord_id,
                 mc_user_id=self.member_data.mc_user_id,
                 event_type="event_location_requested",
@@ -1368,6 +1371,7 @@ class MemberOverviewView(discord.ui.View):
 
         try:
             member_events = await self.db.get_events(
+                guild_id=getattr(self.guild, "id", None),
                 discord_id=data.discord_id,
                 mc_user_id=data.mc_user_id,
                 limit=10000,
@@ -1558,6 +1562,175 @@ class ToggleOverviewModeButton(discord.ui.Button):
         self.parent_view.overview_mode = (
             "advanced" if self.parent_view.overview_mode == "simple" else "simple"
         )
+        await self.parent_view._update_view(interaction)
+
+
+class ManageWatchlistButton(discord.ui.Button):
+    """Open a small watchlist management modal."""
+
+    def __init__(self, parent_view: MemberOverviewView, row: int):
+        label = "Resolve Watchlist" if parent_view.member_data.on_watchlist else "Add Watchlist"
+        style = (
+            discord.ButtonStyle.secondary
+            if parent_view.member_data.on_watchlist
+            else discord.ButtonStyle.danger
+        )
+        super().__init__(
+            label=label,
+            style=style,
+            custom_id="mm:manage_watchlist",
+            row=row,
+        )
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(ManageWatchlistModal(self.parent_view))
+
+
+class ManageWatchlistModal(discord.ui.Modal, title="Manage Watchlist"):
+    """Add or resolve an active watchlist entry."""
+
+    action = discord.ui.TextInput(
+        label="Action",
+        style=discord.TextStyle.short,
+        placeholder="add or resolve",
+        required=True,
+        max_length=20,
+    )
+
+    reason = discord.ui.TextInput(
+        label="Reason / resolution note",
+        style=discord.TextStyle.paragraph,
+        placeholder="Short reason for adding, or resolution notes",
+        required=False,
+        max_length=500,
+    )
+
+    watch_type = discord.ui.TextInput(
+        label="Watch type",
+        style=discord.TextStyle.short,
+        placeholder="general, contribution, sanctions, behavior",
+        required=False,
+        max_length=50,
+    )
+
+    def __init__(self, parent_view: MemberOverviewView):
+        super().__init__()
+        self.parent_view = parent_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        action = self.action.value.strip().lower()
+        reason = self.reason.value.strip()
+        watch_type = self.watch_type.value.strip() or "general"
+        data = self.parent_view.member_data
+
+        if action not in {"add", "watch", "resolve", "remove", "clear"}:
+            await interaction.response.send_message(
+                "Use `add` to place this member on the watchlist or `resolve` to clear active watchlist entries.",
+                ephemeral=True,
+            )
+            return
+
+        if action in {"add", "watch"} and not reason:
+            await interaction.response.send_message(
+                "A reason is required when adding a member to the watchlist.",
+                ephemeral=True,
+            )
+            return
+
+        if action in {"add", "watch"}:
+            existing_entries = await self.parent_view.db.get_member_watchlist(
+                guild_id=interaction.guild.id,
+                discord_id=data.discord_id,
+                mc_user_id=data.mc_user_id,
+                status="active",
+                limit=1,
+            )
+            if existing_entries:
+                await interaction.response.send_message(
+                    "This member already has an active watchlist entry.",
+                    ephemeral=True,
+                )
+                return
+
+            try:
+                watchlist_id = await self.parent_view.db.add_to_watchlist(
+                    guild_id=interaction.guild.id,
+                    discord_id=data.discord_id,
+                    mc_user_id=data.mc_user_id,
+                    reason=reason,
+                    added_by=interaction.user.id,
+                    watch_type=watch_type,
+                )
+            except aiosqlite.IntegrityError:
+                await interaction.response.send_message(
+                    "This member already has an active watchlist entry.",
+                    ephemeral=True,
+                )
+                return
+
+            await self.parent_view.db.add_event(
+                guild_id=interaction.guild.id,
+                discord_id=data.discord_id,
+                mc_user_id=data.mc_user_id,
+                event_type="watchlist_added",
+                event_data={
+                    "watchlist_id": watchlist_id,
+                    "reason": truncate_text(reason, 160),
+                    "watch_type": watch_type,
+                    "target_name": self.parent_view._get_member_display_name(),
+                },
+                triggered_by="MemberManager",
+                actor_id=interaction.user.id,
+            )
+            data.on_watchlist = True
+            data.watchlist_reason = reason
+            await interaction.response.send_message(
+                "Member added to the watchlist.",
+                ephemeral=True,
+            )
+        else:
+            entries = await self.parent_view.db.get_member_watchlist(
+                guild_id=interaction.guild.id,
+                discord_id=data.discord_id,
+                mc_user_id=data.mc_user_id,
+                status="active",
+                limit=100,
+            )
+            if not entries:
+                await interaction.response.send_message(
+                    "This member has no active watchlist entries.",
+                    ephemeral=True,
+                )
+                return
+
+            for entry in entries:
+                await self.parent_view.db.resolve_watchlist(
+                    watchlist_id=int(entry["watchlist_id"]),
+                    resolved_by=interaction.user.id,
+                    notes=reason or None,
+                )
+
+            await self.parent_view.db.add_event(
+                guild_id=interaction.guild.id,
+                discord_id=data.discord_id,
+                mc_user_id=data.mc_user_id,
+                event_type="watchlist_resolved",
+                event_data={
+                    "resolved_count": len(entries),
+                    "reason": truncate_text(reason, 160) if reason else None,
+                    "target_name": self.parent_view._get_member_display_name(),
+                },
+                triggered_by="MemberManager",
+                actor_id=interaction.user.id,
+            )
+            data.on_watchlist = False
+            data.watchlist_reason = None
+            await interaction.response.send_message(
+                f"Resolved {len(entries)} active watchlist entries.",
+                ephemeral=True,
+            )
+
         await self.parent_view._update_view(interaction)
 
 

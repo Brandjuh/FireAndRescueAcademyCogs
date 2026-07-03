@@ -3,9 +3,8 @@ Configuration commands for MemberManager
 Extension of the main cog for settings management
 """
 
-import asyncio
-
 import discord
+import asyncio
 from redbot.core import commands
 from redbot.core.utils.chat_formatting import box
 
@@ -43,10 +42,11 @@ class ConfigCommands:
 MemberManager Configuration
 ═══════════════════════════
 
-Contribution Monitoring:
+Contribution Diagnostics:
   Threshold: {config.get('contribution_threshold', 5.0)}%
   Trend weeks: {config.get('contribution_trend_weeks', 3)}
-  Auto alerts: {'✅ Enabled' if config.get('auto_contribution_alert') else '❌ Disabled'}
+  Delivery owner: MessageManager TAX warnings + SanctionManager logging
+  Legacy auto alerts: Disabled
 
 Automation:
   Role drift check: {'✅ Enabled' if config.get('auto_role_drift_check') else '❌ Disabled'}
@@ -64,7 +64,9 @@ Notes:
   
 Integrations:
   MemberSync: {'✅ Connected' if self.membersync else '❌ Not found'}
+  MembersScraper: {'✅ Connected' if self.members_scraper else '❌ Not found'}
   AllianceScraper: {'✅ Connected' if self.alliance_scraper else '❌ Not found'}
+  LogsScraper: {'✅ Connected' if self.logs_scraper else '❌ Not found'}
   SanctionManager: {'✅ Connected' if self.sanction_manager else '❌ Not found'}
         """
         
@@ -183,36 +185,24 @@ Integrations:
         enabled: bool
     ):
         """
-        Enable or disable automatic contribution monitoring.
-        
-        When enabled, the bot will check contributions twice per day
-        and send alerts for members below the threshold.
+        Keep the legacy MemberManager contribution monitor disabled.
+
+        MessageManager owns automatic TAX warning delivery. MemberManager only
+        keeps contribution diagnostics.
         """
-        await self.config.auto_contribution_alert.set(enabled)
-        
+        await self.config.auto_contribution_alert.set(False)
+
+        if self._automation_task and not self._automation_task.done():
+            self._automation_task.cancel()
+            self._automation_task = None
+
         if enabled:
-            # Start monitoring if not already running
-            if not self._automation_task or self._automation_task.done():
-                if await self.config.auto_contribution_alert():
-                    from .automation import ContributionMonitor
-                    self.contribution_monitor = ContributionMonitor(
-                        self.bot,
-                        self.db,
-                        self.config,
-                        self._get_member_source()
-                    )
-                    self._automation_task = self.bot.loop.create_task(
-                        self.contribution_monitor.run()
-                    )
-            
-            await ctx.send("✅ Automatic contribution monitoring **enabled**")
+            await ctx.send(
+                "Legacy MemberManager contribution monitoring is deprecated and remains disabled. "
+                "Use MessageManager TAX warnings for automatic delivery and SanctionManager logging."
+            )
         else:
-            # Stop monitoring
-            if self._automation_task and not self._automation_task.done():
-                self._automation_task.cancel()
-                self._automation_task = None
-            
-            await ctx.send("❌ Automatic contribution monitoring **disabled**")
+            await ctx.send("Legacy MemberManager contribution monitoring is disabled.")
     
     @memberset.command(name="autoroledrift")
     async def memberset_autoroledrift(

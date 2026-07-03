@@ -184,6 +184,7 @@ class MemberDatabase:
         await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_ref ON notes(ref_code)")
         await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_infractions_discord ON infractions(discord_id)")
         await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_infractions_mc ON infractions(mc_user_id)")
+        await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_guild ON member_events(guild_id)")
         await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_discord ON member_events(discord_id)")
         await self._conn.execute("CREATE INDEX IF NOT EXISTS idx_events_mc ON member_events(mc_user_id)")
         
@@ -289,6 +290,7 @@ class MemberDatabase:
     
     async def get_notes(
         self,
+        guild_id: Optional[int] = None,
         discord_id: Optional[int] = None,
         mc_user_id: Optional[str] = None,
         ref_code: Optional[str] = None,
@@ -299,6 +301,9 @@ class MemberDatabase:
         query = "SELECT * FROM notes WHERE 1=1"
         params = []
         
+        if guild_id:
+            query += " AND guild_id=?"
+            params.append(guild_id)
         if ref_code:
             query += " AND ref_code=?"
             params.append(ref_code)
@@ -505,6 +510,7 @@ class MemberDatabase:
     
     async def get_events(
         self,
+        guild_id: Optional[int] = None,
         discord_id: Optional[int] = None,
         mc_user_id: Optional[str] = None,
         event_type: Optional[str] = None,
@@ -514,6 +520,9 @@ class MemberDatabase:
         query = "SELECT * FROM member_events WHERE 1=1"
         params = []
         
+        if guild_id:
+            query += " AND guild_id=?"
+            params.append(guild_id)
         if discord_id:
             query += " AND discord_id=?"
             params.append(discord_id)
@@ -584,6 +593,37 @@ class MemberDatabase:
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    async def get_member_watchlist(
+        self,
+        guild_id: int,
+        discord_id: Optional[int] = None,
+        mc_user_id: Optional[str] = None,
+        status: str = "active",
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Get watchlist entries for one member identity."""
+        query = "SELECT * FROM watchlist WHERE guild_id=? AND status=?"
+        params: List[Any] = [guild_id, status]
+
+        identity_parts = []
+        if discord_id is not None:
+            identity_parts.append("discord_id=?")
+            params.append(discord_id)
+        if mc_user_id:
+            identity_parts.append("mc_user_id=?")
+            params.append(str(mc_user_id))
+
+        if not identity_parts:
+            return []
+
+        query += " AND (" + " OR ".join(identity_parts) + ")"
+        query += " ORDER BY added_at DESC LIMIT ?"
+        params.append(limit)
+
+        cursor = await self._conn.execute(query, params)
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
     
     async def resolve_watchlist(
         self,
@@ -603,6 +643,104 @@ class MemberDatabase:
         await self._conn.commit()
         
         return result.rowcount > 0
+
+    async def get_stats(
+        self,
+        guild_id: int,
+        period_start: Optional[int] = None,
+        period_end: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Return compact MemberManager stats for reports and dashboards."""
+
+        def add_period_filter(column: str, params: List[Any]) -> str:
+            where = ""
+            if period_start is not None:
+                where += f" AND {column}>=?"
+                params.append(period_start)
+            if period_end is not None:
+                where += f" AND {column}<?"
+                params.append(period_end)
+            return where
+
+        note_params: List[Any] = [guild_id]
+        note_period = add_period_filter("created_at", note_params)
+        note_cursor = await self._conn.execute(
+            f"""
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) AS active,
+                   SUM(CASE WHEN status='deleted' THEN 1 ELSE 0 END) AS deleted,
+                   SUM(CASE WHEN is_pinned=1 AND status='active' THEN 1 ELSE 0 END) AS pinned
+            FROM notes
+            WHERE guild_id=?{note_period}
+            """,
+            note_params,
+        )
+        note_row = dict(await note_cursor.fetchone())
+
+        event_params: List[Any] = [guild_id]
+        event_period = add_period_filter("timestamp", event_params)
+        event_cursor = await self._conn.execute(
+            f"""
+            SELECT event_type, COUNT(*) AS count
+            FROM member_events
+            WHERE guild_id=?{event_period}
+            GROUP BY event_type
+            ORDER BY count DESC, event_type ASC
+            """,
+            event_params,
+        )
+        event_rows = await event_cursor.fetchall()
+        events_by_type = {row["event_type"]: int(row["count"]) for row in event_rows}
+
+        watch_active_cursor = await self._conn.execute(
+            "SELECT COUNT(*) FROM watchlist WHERE guild_id=? AND status='active'",
+            (guild_id,),
+        )
+        watch_active_row = await watch_active_cursor.fetchone()
+
+        watch_resolved_params: List[Any] = [guild_id]
+        watch_resolved_period = add_period_filter("resolved_at", watch_resolved_params)
+        watch_resolved_cursor = await self._conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM watchlist
+            WHERE guild_id=? AND status='resolved'{watch_resolved_period}
+            """,
+            watch_resolved_params,
+        )
+        watch_resolved_row = await watch_resolved_cursor.fetchone()
+
+        return {
+            "guild_id": guild_id,
+            "available": True,
+            "period_start": period_start,
+            "period_end": period_end,
+            "notes": {
+                "created": int(note_row.get("total") or 0),
+                "active": int(note_row.get("active") or 0),
+                "deleted": int(note_row.get("deleted") or 0),
+                "pinned": int(note_row.get("pinned") or 0),
+            },
+            "events": {
+                "total": sum(events_by_type.values()),
+                "by_type": events_by_type,
+                "sanctions": sum(
+                    count
+                    for event_type, count in events_by_type.items()
+                    if event_type.startswith(("sanction_", "infraction_"))
+                ),
+                "notes": sum(
+                    count
+                    for event_type, count in events_by_type.items()
+                    if event_type.startswith("note_")
+                ),
+                "event_requests": events_by_type.get("event_location_requested", 0),
+            },
+            "watchlist": {
+                "active": int(watch_active_row[0] if watch_active_row else 0),
+                "resolved": int(watch_resolved_row[0] if watch_resolved_row else 0),
+            },
+        }
     
     # ==================== ROLE HISTORY ====================
     
