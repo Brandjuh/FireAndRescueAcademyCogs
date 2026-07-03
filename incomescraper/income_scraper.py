@@ -9,6 +9,13 @@ import re
 import hashlib
 from zoneinfo import ZoneInfo
 
+from fara_db import (
+    connect_database,
+    ensure_scrape_runs_table,
+    finish_scrape_run_for_path,
+    start_scrape_run_for_path,
+)
+
 # SQLite INTEGER limits
 INT64_MAX = 9223372036854775807
 INT64_MIN = -9223372036854775808
@@ -42,7 +49,7 @@ class IncomeScraper(commands.Cog):
         max_retries = 5
         for attempt in range(max_retries):
             try:
-                conn = sqlite3.connect(self.db_path)
+                conn = connect_database(self.db_path)
                 cursor = conn.cursor()
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS income (
@@ -73,6 +80,7 @@ class IncomeScraper(commands.Cog):
                     "CREATE INDEX IF NOT EXISTS idx_expenses_event_timestamp "
                     "ON expenses(event_timestamp)"
                 )
+                ensure_scrape_runs_table(cursor)
                 conn.commit()
                 conn.close()
                 return
@@ -541,8 +549,24 @@ class IncomeScraper(commands.Cog):
 
     async def _scrape_all_income_unlocked_impl(self, ctx=None, include_expenses=True, max_expense_pages=100):
         """Scrape daily income, monthly income, and expenses from the treasury page"""
+        scraped_at_dt = datetime.now(ZoneInfo("UTC"))
+        timestamp = scraped_at_dt.isoformat()
+        source = "live" if include_expenses else "snapshot"
+        run_id = start_scrape_run_for_path(
+            self.db_path,
+            "income",
+            source=source,
+            source_timestamp=timestamp,
+        )
         session = await self._get_session(ctx)
         if not session:
+            finish_scrape_run_for_path(
+                self.db_path,
+                run_id,
+                "failed",
+                errors=1,
+                message="session unavailable",
+            )
             if ctx:
                 await ctx.send("❌ Failed to get session")
             return False
@@ -572,13 +596,18 @@ class IncomeScraper(commands.Cog):
         
         # Store in database
         if not income_data and not expenses_data:
+            finish_scrape_run_for_path(
+                self.db_path,
+                run_id,
+                "failed",
+                rows_parsed=0,
+                message="no income or expense rows found",
+            )
             if ctx:
                 await ctx.send("❌ No income/expense data found")
             return False
         
-        scraped_at_dt = datetime.now(ZoneInfo("UTC"))
-        timestamp = scraped_at_dt.isoformat()
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_database(self.db_path)
         cursor = conn.cursor()
         
         inserted = 0
@@ -645,6 +674,16 @@ class IncomeScraper(commands.Cog):
         
         conn.commit()
         conn.close()
+        finish_scrape_run_for_path(
+            self.db_path,
+            run_id,
+            "success",
+            pages_attempted=max_expense_pages if include_expenses else 0,
+            rows_parsed=len(income_data) + len(expenses_data),
+            rows_inserted=inserted,
+            duplicates=duplicates,
+            message=f"{len(income_data)} income rows and {len(expenses_data)} expense rows scraped",
+        )
         
         await self._debug_log(f"💾 Database: {inserted} inserted, {duplicates} duplicates", ctx)
         

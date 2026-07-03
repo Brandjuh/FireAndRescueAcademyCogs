@@ -6,6 +6,13 @@ import logging
 import sqlite3
 from datetime import datetime
 
+from fara_db import (
+    connect_database,
+    ensure_scrape_runs_table,
+    finish_scrape_run_for_path,
+    start_scrape_run_for_path,
+)
+
 from .parsing import next_hourly_run, parse_buildings_html
 
 log = logging.getLogger("red.FARA.BuildingsScraper")
@@ -31,7 +38,7 @@ class BuildingsScraper(commands.Cog):
     
     def _init_database(self):
         """Initialize SQLite database"""
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_database(self.db_path)
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS buildings (
@@ -43,6 +50,7 @@ class BuildingsScraper(commands.Cog):
                 PRIMARY KEY (building_id, timestamp)
             )
         ''')
+        ensure_scrape_runs_table(cursor)
         conn.commit()
         conn.close()
     
@@ -113,8 +121,24 @@ class BuildingsScraper(commands.Cog):
 
     async def _scrape_all_buildings_impl(self, ctx=None):
         """Scrape all buildings from the buildings page"""
+        timestamp = datetime.now().isoformat()
+        run_id = start_scrape_run_for_path(
+            self.db_path,
+            "buildings",
+            source="live",
+            source_timestamp=timestamp,
+            logger=log,
+        )
         session = await self._get_session(ctx)
         if not session:
+            finish_scrape_run_for_path(
+                self.db_path,
+                run_id,
+                "failed",
+                errors=1,
+                message="session unavailable",
+                logger=log,
+            )
             if ctx:
                 await ctx.send("❌ Failed to get session")
             return False
@@ -124,6 +148,15 @@ class BuildingsScraper(commands.Cog):
         try:
             async with session.get(self.buildings_url) as resp:
                 if resp.status != 200:
+                    finish_scrape_run_for_path(
+                        self.db_path,
+                        run_id,
+                        "failed",
+                        pages_attempted=1,
+                        errors=1,
+                        message=f"HTTP {resp.status}",
+                        logger=log,
+                    )
                     await self._debug_log(f"❌ Bad status {resp.status}", ctx)
                     return False
                 
@@ -141,12 +174,21 @@ class BuildingsScraper(commands.Cog):
                         )
                 
                 if not buildings:
+                    finish_scrape_run_for_path(
+                        self.db_path,
+                        run_id,
+                        "failed",
+                        pages_attempted=1,
+                        pages_succeeded=1,
+                        rows_parsed=0,
+                        message="no building rows found",
+                        logger=log,
+                    )
                     await self._debug_log("⚠️ No buildings found", ctx)
                     return False
                 
                 # Store in database
-                timestamp = datetime.now().isoformat()
-                conn = sqlite3.connect(self.db_path)
+                conn = connect_database(self.db_path)
                 cursor = conn.cursor()
                 
                 inserted = 0
@@ -165,6 +207,18 @@ class BuildingsScraper(commands.Cog):
                 
                 conn.commit()
                 conn.close()
+                finish_scrape_run_for_path(
+                    self.db_path,
+                    run_id,
+                    "success",
+                    pages_attempted=1,
+                    pages_succeeded=1,
+                    rows_parsed=len(buildings),
+                    rows_inserted=inserted,
+                    duplicates=duplicates,
+                    message=f"{len(buildings)} buildings scraped",
+                    logger=log,
+                )
                 
                 await self._debug_log(f"💾 Database: {inserted} new, {duplicates} duplicates", ctx)
                 
@@ -175,6 +229,15 @@ class BuildingsScraper(commands.Cog):
                 return True
                 
         except Exception as e:
+            finish_scrape_run_for_path(
+                self.db_path,
+                run_id,
+                "failed",
+                pages_attempted=1,
+                errors=1,
+                message=str(e),
+                logger=log,
+            )
             await self._debug_log(f"❌ Error: {str(e)}", ctx)
             if ctx:
                 await ctx.send(f"❌ Scrape failed: {str(e)}")

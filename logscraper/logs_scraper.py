@@ -10,6 +10,14 @@ import hashlib
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, Iterable, Optional
 
+from fara_db import (
+    backup_database,
+    connect_database,
+    ensure_scrape_runs_table,
+    finish_scrape_run_for_path,
+    start_scrape_run_for_path,
+)
+
 
 class LogsScrapePageError(RuntimeError):
     """Raised when a required MissionChief logs page cannot be parsed."""
@@ -41,7 +49,7 @@ class LogsScraper(commands.Cog):
     
     def _init_database(self):
         """Initialize SQLite database"""
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_database(self.db_path)
         cursor = conn.cursor()
         
         cursor.execute('''
@@ -70,10 +78,13 @@ class LogsScraper(commands.Cog):
         cursor.execute("PRAGMA table_info(logs)")
         columns = {column[1] for column in cursor.fetchall()}
         if "event_timestamp" not in columns:
+            backup_database(self.db_path, "add-logs-event-timestamp")
             cursor.execute("ALTER TABLE logs ADD COLUMN event_timestamp TEXT")
         if "signature" not in columns:
+            backup_database(self.db_path, "add-logs-signature")
             cursor.execute("ALTER TABLE logs ADD COLUMN signature TEXT")
         if "occurrence_index" not in columns:
+            backup_database(self.db_path, "add-logs-occurrence-index")
             cursor.execute(
                 "ALTER TABLE logs ADD COLUMN occurrence_index INTEGER NOT NULL DEFAULT 1"
             )
@@ -95,6 +106,7 @@ class LogsScraper(commands.Cog):
                 FOREIGN KEY (log_id) REFERENCES logs(id)
             )
         ''')
+        ensure_scrape_runs_table(cursor)
         
         conn.commit()
         conn.close()
@@ -564,8 +576,24 @@ class LogsScraper(commands.Cog):
 
     async def _scrape_all_logs_impl(self, ctx, max_pages=5):
         """Scrape multiple pages of logs"""
+        scraped_at_dt = datetime.now(ZoneInfo("UTC"))
+        scraped_at = scraped_at_dt.isoformat()
+        db_path = getattr(self, "db_path", None)
+        run_id = start_scrape_run_for_path(
+            db_path,
+            "logs",
+            source="live",
+            source_timestamp=scraped_at,
+        )
         session = await self._get_session(ctx)
         if not session:
+            finish_scrape_run_for_path(
+                db_path,
+                run_id,
+                "failed",
+                errors=1,
+                message="session unavailable",
+            )
             return False
         
         await self._debug_log(f"🔄 Starting logs scrape (max {max_pages} pages)", ctx)
@@ -585,15 +613,22 @@ class LogsScraper(commands.Cog):
             await self._debug_log(f"Logs scrape failed: {exc}", ctx)
             if ctx:
                 await ctx.send(f"Logs scrape failed: {exc}")
+            finish_scrape_run_for_path(
+                db_path,
+                run_id,
+                "failed",
+                pages_attempted=max_pages,
+                rows_parsed=len(all_logs),
+                errors=1,
+                message=str(exc),
+            )
             return False
 
         self._assign_occurrence_hashes(all_logs)
         
         # Store in database
-        scraped_at_dt = datetime.now(ZoneInfo("UTC"))
-        scraped_at = scraped_at_dt.isoformat()
         event_timezone = await self.config.event_timezone()
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_database(self.db_path)
         cursor = conn.cursor()
         
         inserted = 0
@@ -638,6 +673,17 @@ class LogsScraper(commands.Cog):
         
         conn.commit()
         conn.close()
+        finish_scrape_run_for_path(
+            db_path,
+            run_id,
+            "success",
+            pages_attempted=max_pages,
+            pages_succeeded=max_pages,
+            rows_parsed=len(all_logs),
+            rows_inserted=inserted,
+            duplicates=duplicates,
+            message=f"{len(all_logs)} logs scraped",
+        )
         
         await self._debug_log(f"💾 Database: {inserted} new logs, {training_inserted} training courses, {duplicates} duplicates", ctx)
         

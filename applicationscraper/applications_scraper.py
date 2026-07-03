@@ -1,13 +1,17 @@
-import discord
 from redbot.core import commands, Config, data_manager
-import aiohttp
 import asyncio
 import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime
 from bs4 import BeautifulSoup
-from pathlib import Path
 import re
+
+from fara_db import (
+    connect_database,
+    ensure_scrape_runs_table,
+    finish_scrape_run_for_path,
+    start_scrape_run_for_path,
+)
 
 class ApplicationsScraper(commands.Cog):
     """Scrapes alliance applications from MissionChief"""
@@ -58,7 +62,7 @@ class ApplicationsScraper(commands.Cog):
     
     def _init_database(self):
         """Initialize SQLite database with schema"""
-        conn = sqlite3.connect(self.db_path)
+        conn = connect_database(self.db_path)
         cursor = conn.cursor()
         
         cursor.execute('''
@@ -79,6 +83,7 @@ class ApplicationsScraper(commands.Cog):
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_status ON applications(status)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_scrape_time ON applications(scrape_timestamp)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_applicant ON applications(applicant_id)')
+        ensure_scrape_runs_table(cursor)
         
         conn.commit()
         conn.close()
@@ -192,7 +197,7 @@ class ApplicationsScraper(commands.Cog):
                     html = await response.text()
                     
                     if not await self._check_logged_in(html):
-                        print(f"[ApplicationsScraper] Session expired, will retry on next run")
+                        print("[ApplicationsScraper] Session expired, will retry on next run")
                         return []
                     
                     soup = BeautifulSoup(html, 'html.parser')
@@ -242,8 +247,22 @@ class ApplicationsScraper(commands.Cog):
 
     async def _scrape_all_applications_impl(self, ctx=None):
         """Scrape all applications"""
+        scrape_timestamp = datetime.utcnow().isoformat()
+        run_id = start_scrape_run_for_path(
+            self.db_path,
+            "applications",
+            source="live",
+            source_timestamp=scrape_timestamp,
+        )
         session = await self._get_session()
         if not session:
+            finish_scrape_run_for_path(
+                self.db_path,
+                run_id,
+                "failed",
+                errors=1,
+                message="session unavailable",
+            )
             if ctx:
                 await ctx.send("❌ Failed to get session. Is CookieManager loaded and logged in?")
             return False
@@ -252,7 +271,7 @@ class ApplicationsScraper(commands.Cog):
         
         # Save to database
         if applications:
-            conn = sqlite3.connect(self.db_path)
+            conn = connect_database(self.db_path)
             cursor = conn.cursor()
             
             new_count = 0
@@ -280,12 +299,32 @@ class ApplicationsScraper(commands.Cog):
             
             conn.commit()
             conn.close()
+            finish_scrape_run_for_path(
+                self.db_path,
+                run_id,
+                "success",
+                pages_attempted=1,
+                pages_succeeded=1,
+                rows_parsed=len(applications),
+                rows_inserted=new_count,
+                duplicates=max(0, len(applications) - new_count),
+                message=f"{len(applications)} applications scraped",
+            )
             
             if ctx:
                 pending = sum(1 for a in applications if a['status'] == 'pending')
                 await ctx.send(f"✅ Scraped {len(applications)} applications ({pending} pending, {new_count} new)")
             return True
         else:
+            finish_scrape_run_for_path(
+                self.db_path,
+                run_id,
+                "success",
+                pages_attempted=1,
+                pages_succeeded=1,
+                rows_parsed=0,
+                message="no applications found",
+            )
             if ctx:
                 await ctx.send("ℹ️ No applications found (this is normal if there are no pending applications)")
             return True  # Not an error, just no applications
@@ -299,7 +338,7 @@ class ApplicationsScraper(commands.Cog):
             try:
                 print(f"[ApplicationsScraper] Starting automatic scrape at {datetime.utcnow()}")
                 await self._scrape_all_applications()
-                print(f"[ApplicationsScraper] Automatic scrape completed")
+                print("[ApplicationsScraper] Automatic scrape completed")
             except Exception as e:
                 print(f"[ApplicationsScraper] Background task error: {e}")
             
