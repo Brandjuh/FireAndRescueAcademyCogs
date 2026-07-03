@@ -4261,6 +4261,113 @@ class BuildingDatabase:
             "top_admins": top_admins,
             "avg_response_time": avg_response_time
         }
+
+    def get_request_stats(
+        self,
+        guild_id: int,
+        period_start_ts: Optional[int] = None,
+        period_end_ts: Optional[int] = None,
+    ) -> dict:
+        """Public contract: building request statistics for reports."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        period_clause = ""
+        period_params = []
+        if period_start_ts is not None and period_end_ts is not None:
+            period_clause = "AND updated_at >= ? AND updated_at < ?"
+            period_params = [int(period_start_ts), int(period_end_ts)]
+
+        cursor.execute(
+            f'''
+                SELECT status, COUNT(*)
+                FROM building_requests
+                WHERE guild_id = ?
+                {period_clause}
+                GROUP BY status
+            ''',
+            (guild_id, *period_params),
+        )
+        status_counts = dict(cursor.fetchall())
+
+        cursor.execute(
+            f'''
+                SELECT building_type, COUNT(*)
+                FROM building_requests
+                WHERE guild_id = ?
+                AND status = 'approved'
+                {period_clause}
+                GROUP BY building_type
+            ''',
+            (guild_id, *period_params),
+        )
+        by_type = dict(cursor.fetchall())
+
+        cursor.execute(
+            '''
+                SELECT COUNT(*)
+                FROM building_requests
+                WHERE guild_id = ? AND status = 'pending'
+            ''',
+            (guild_id,),
+        )
+        pending = cursor.fetchone()[0]
+        conn.close()
+
+        return {
+            "approved": status_counts.get("approved", 0),
+            "denied": status_counts.get("denied", 0),
+            "pending": pending,
+            "by_type": by_type,
+        }
+
+    def get_admin_activity_stats(
+        self,
+        guild_id: int,
+        period_start_ts: Optional[int] = None,
+        period_end_ts: Optional[int] = None,
+    ) -> dict:
+        """Public contract: building admin activity statistics for reports."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        period_clause = ""
+        period_params = []
+        if period_start_ts is not None and period_end_ts is not None:
+            period_clause = "AND timestamp >= ? AND timestamp < ?"
+            period_params = [int(period_start_ts), int(period_end_ts)]
+
+        cursor.execute(
+            f'''
+                SELECT COUNT(*)
+                FROM building_actions
+                WHERE guild_id = ?
+                {period_clause}
+            ''',
+            (guild_id, *period_params),
+        )
+        total_actions = cursor.fetchone()[0]
+
+        cursor.execute(
+            f'''
+                SELECT admin_username, COUNT(*) as count
+                FROM building_actions
+                WHERE guild_id = ?
+                {period_clause}
+                GROUP BY admin_username
+                ORDER BY count DESC
+                LIMIT 1
+            ''',
+            (guild_id, *period_params),
+        )
+        result = cursor.fetchone()
+        conn.close()
+
+        return {
+            "building_reviews": total_actions,
+            "most_active_admin": result[0] if result else "N/A",
+            "most_active_admin_count": result[1] if result else 0,
+        }
     
     def get_stats_user(self, guild_id: int, user_id: int) -> dict:
         """Get user statistics."""
@@ -5303,6 +5410,32 @@ class BuildingManager(commands.Cog):
             self._board_cleanup_task.cancel()
         if getattr(self, "_auto_candidate_task", None):
             self._auto_candidate_task.cancel()
+
+    def get_request_stats(
+        self,
+        guild_id: int,
+        period_start_ts: Optional[int] = None,
+        period_end_ts: Optional[int] = None,
+    ) -> dict:
+        """Public contract for report cogs to read building request stats."""
+        return self.db.get_request_stats(
+            guild_id,
+            period_start_ts=period_start_ts,
+            period_end_ts=period_end_ts,
+        )
+
+    def get_admin_activity_stats(
+        self,
+        guild_id: int,
+        period_start_ts: Optional[int] = None,
+        period_end_ts: Optional[int] = None,
+    ) -> dict:
+        """Public contract for report cogs to read building admin activity stats."""
+        return self.db.get_admin_activity_stats(
+            guild_id,
+            period_start_ts=period_start_ts,
+            period_end_ts=period_end_ts,
+        )
 
     async def cog_load(self):
         """Register persistent views and ensure the default request panel exists."""
