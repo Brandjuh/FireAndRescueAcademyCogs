@@ -9,12 +9,20 @@ import re
 import hashlib
 from zoneinfo import ZoneInfo
 
-from fara_db import (
-    connect_database,
-    ensure_scrape_runs_table,
-    finish_scrape_run_for_path,
-    start_scrape_run_for_path,
-)
+try:
+    from .fara_db import (
+        connect_database,
+        ensure_scrape_runs_table,
+        finish_scrape_run_for_path,
+        start_scrape_run_for_path,
+    )
+except ImportError:  # pragma: no cover - direct module loading in local tooling
+    from fara_db import (
+        connect_database,
+        ensure_scrape_runs_table,
+        finish_scrape_run_for_path,
+        start_scrape_run_for_path,
+    )
 
 # SQLite INTEGER limits
 INT64_MAX = 9223372036854775807
