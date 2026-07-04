@@ -231,6 +231,131 @@ class AllianceReportContractTests(unittest.TestCase):
         self.assertEqual(result["tax_warning_3_period"], 3)
         self.assertEqual(result["tax_auto_kicks_period"], 2)
 
+    def test_daily_membership_prefers_owner_contracts_before_database_fallback(self):
+        import asyncio
+
+        class FakeMembersScraper:
+            async def get_members(self):
+                return [{"name": "A"}, {"name": "B"}, {"name": "C"}]
+
+        class FakeLogsScraper:
+            async def get_action_counts(self, action_keys, start_iso, end_iso):
+                del action_keys, start_iso, end_iso
+                return {"added_to_alliance": 2, "left_alliance": 1}
+
+        class FakeSanctionManager:
+            def get_sanction_stats(self, guild_id, *, period_start_ts=None, period_end_ts=None):
+                del guild_id, period_start_ts, period_end_ts
+                return {"by_type_period": {"kicks": 4}}
+
+        bot = types.SimpleNamespace(
+            guilds=[types.SimpleNamespace(id=1234)],
+            get_cog=lambda name: {
+                "MembersScraper": FakeMembersScraper(),
+                "LogsScraper": FakeLogsScraper(),
+                "SanctionManager": FakeSanctionManager(),
+            }.get(name),
+        )
+        aggregator = DataAggregator(types.SimpleNamespace(_db_cache={}), bot)
+
+        def guarded_db_connection(db_name):
+            if db_name in {"members_v2", "logs_v2", "sanctions"}:
+                raise AssertionError(f"DB fallback used for {db_name}")
+            return None
+
+        aggregator._get_db_connection = guarded_db_connection
+
+        result = asyncio.run(
+            aggregator._get_membership_data_daily(
+                datetime(2026, 6, 12, 4, tzinfo=ZoneInfo("UTC")),
+                datetime(2026, 6, 12, 12, tzinfo=ZoneInfo("UTC")),
+            )
+        )
+
+        self.assertEqual(result["total_members"], 3)
+        self.assertEqual(result["new_joins_24h"], 2)
+        self.assertEqual(result["left_24h"], 1)
+        self.assertEqual(result["kicked_24h"], 4)
+
+    def test_daily_buildings_prefers_buildingmanager_and_logscraper_contracts(self):
+        import asyncio
+
+        class FakeBuildingManager:
+            def get_request_stats(self, guild_id, *, period_start_ts=None, period_end_ts=None):
+                del guild_id, period_start_ts, period_end_ts
+                return {
+                    "approved": 5,
+                    "denied": 2,
+                    "pending": 3,
+                    "by_type": {"Hospital": 4, "Prison": 1},
+                }
+
+        class FakeLogsScraper:
+            async def get_action_counts(self, action_keys, start_iso, end_iso):
+                del action_keys, start_iso, end_iso
+                return {"extension_started": 6, "expansion_finished": 7}
+
+        bot = types.SimpleNamespace(
+            guilds=[types.SimpleNamespace(id=1234)],
+            get_cog=lambda name: {
+                "BuildingManager": FakeBuildingManager(),
+                "LogsScraper": FakeLogsScraper(),
+            }.get(name),
+        )
+        aggregator = DataAggregator(types.SimpleNamespace(_db_cache={}), bot)
+
+        def guarded_db_connection(db_name):
+            if db_name in {"building_manager", "logs_v2"}:
+                raise AssertionError(f"DB fallback used for {db_name}")
+            return None
+
+        aggregator._get_db_connection = guarded_db_connection
+
+        result = asyncio.run(
+            aggregator._get_buildings_data_daily(
+                datetime(2026, 6, 12, 4, tzinfo=ZoneInfo("UTC")),
+                datetime(2026, 6, 12, 12, tzinfo=ZoneInfo("UTC")),
+            )
+        )
+
+        self.assertEqual(result["processed_24h"], 7)
+        self.assertEqual(result["approved_24h"], 5)
+        self.assertEqual(result["denied_24h"], 2)
+        self.assertEqual(result["pending"], 3)
+        self.assertEqual(result["extensions_started_24h"], 6)
+        self.assertEqual(result["extensions_completed_24h"], 7)
+        self.assertEqual(result["by_type_24h"], {"Hospital": 4, "Prison": 1})
+
+    def test_monthly_training_respects_logscraper_coverage_contract(self):
+        import asyncio
+
+        class FakeLogsScraper:
+            async def has_event_coverage(self, start_iso, end_iso):
+                del start_iso, end_iso
+                return False
+
+            async def get_action_counts(self, action_keys, start_iso, end_iso):
+                raise AssertionError("Counts should not be read without coverage")
+
+        bot = types.SimpleNamespace(
+            guilds=[types.SimpleNamespace(id=1234)],
+            get_cog=lambda name: FakeLogsScraper() if name == "LogsScraper" else None,
+        )
+        aggregator = DataAggregator(types.SimpleNamespace(_db_cache={}), bot)
+        aggregator._get_db_connection = lambda db_name: (_ for _ in ()).throw(
+            AssertionError(f"DB fallback used for {db_name}")
+        )
+
+        result = asyncio.run(
+            aggregator._get_training_data_monthly(
+                datetime(2026, 6, 1, 4, tzinfo=ZoneInfo("UTC")),
+                datetime(2026, 7, 1, 4, tzinfo=ZoneInfo("UTC")),
+            )
+        )
+
+        self.assertIn("error", result)
+        self.assertIn("Log event timestamps", result["error"])
+
     def test_monthly_membership_uses_actual_snapshots_for_net_growth(self):
         import asyncio
 

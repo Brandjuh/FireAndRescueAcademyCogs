@@ -17,7 +17,7 @@ import logging
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 from zoneinfo import ZoneInfo
 
 log = logging.getLogger("red.FARA.AllianceReports.DataAggregator")
@@ -87,6 +87,138 @@ class DataAggregator:
         if guilds:
             return getattr(guilds[0], "id", None)
         return None
+
+    @staticmethod
+    async def _await_if_needed(result):
+        """Await contract results only when the owner cog exposes an async API."""
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    async def _get_current_member_count_contract(self) -> Optional[int]:
+        """Read current member count through MembersScraper when available."""
+        members_scraper = self._get_cog("MembersScraper", "membersscraper")
+        get_members = getattr(members_scraper, "get_members", None) if members_scraper else None
+        if not get_members:
+            return None
+
+        try:
+            members = await self._await_if_needed(get_members())
+            if members is None:
+                return None
+            return len(members)
+        except Exception as exc:
+            log.exception(f"Error reading MembersScraper members contract: {exc}")
+            return None
+
+    async def _get_log_action_counts_contract(
+        self,
+        start: datetime,
+        end: datetime,
+        action_keys: Iterable[str],
+    ) -> Optional[Dict[str, int]]:
+        """Read log action counts through LogsScraper when available."""
+        keys = [str(key) for key in action_keys if key]
+        if not keys:
+            return {}
+
+        logs_scraper = self._get_cog("LogsScraper", "logscraper")
+        get_action_counts = getattr(logs_scraper, "get_action_counts", None) if logs_scraper else None
+        if not get_action_counts:
+            return None
+
+        try:
+            result = get_action_counts(
+                keys,
+                start.isoformat(),
+                end.isoformat(),
+            )
+            result = await self._await_if_needed(result)
+            if not isinstance(result, dict):
+                return None
+            counts = result.get("counts") if isinstance(result.get("counts"), dict) else result
+            return {key: int(counts.get(key, 0) or 0) for key in keys}
+        except Exception as exc:
+            log.exception(f"Error reading LogsScraper action-count contract: {exc}")
+            return None
+
+    async def _has_log_event_coverage_contract(
+        self,
+        start: datetime,
+        end: datetime,
+    ) -> Optional[bool]:
+        """Read log event timestamp coverage through LogsScraper when available."""
+        logs_scraper = self._get_cog("LogsScraper", "logscraper")
+        has_event_coverage = getattr(logs_scraper, "has_event_coverage", None) if logs_scraper else None
+        if not has_event_coverage:
+            return None
+
+        try:
+            result = has_event_coverage(start.isoformat(), end.isoformat())
+            return bool(await self._await_if_needed(result))
+        except Exception as exc:
+            log.exception(f"Error reading LogsScraper coverage contract: {exc}")
+            return None
+
+    def _get_building_request_stats_contract(
+        self,
+        start: datetime,
+        end: datetime,
+    ) -> Optional[Dict[str, Any]]:
+        """Read building request stats through BuildingManager when available."""
+        guild_id = self._get_primary_guild_id()
+        if guild_id is None:
+            return None
+
+        building_manager = self._get_cog("BuildingManager", "buildingmanager")
+        get_request_stats = getattr(building_manager, "get_request_stats", None) if building_manager else None
+        if not get_request_stats:
+            return None
+
+        try:
+            return get_request_stats(
+                guild_id,
+                period_start_ts=int(start.timestamp()),
+                period_end_ts=int(end.timestamp()),
+            )
+        except TypeError:
+            log.warning("Loaded BuildingManager does not support period request stats contract yet")
+            return None
+        except Exception as exc:
+            log.exception(f"Error reading BuildingManager request stats contract: {exc}")
+            return None
+
+    def _get_building_admin_activity_contract(
+        self,
+        start: datetime,
+        end: datetime,
+    ) -> Optional[Dict[str, Any]]:
+        """Read building admin activity through BuildingManager when available."""
+        guild_id = self._get_primary_guild_id()
+        if guild_id is None:
+            return None
+
+        building_manager = self._get_cog("BuildingManager", "buildingmanager")
+        get_admin_activity_stats = (
+            getattr(building_manager, "get_admin_activity_stats", None)
+            if building_manager
+            else None
+        )
+        if not get_admin_activity_stats:
+            return None
+
+        try:
+            return get_admin_activity_stats(
+                guild_id,
+                period_start_ts=int(start.timestamp()),
+                period_end_ts=int(end.timestamp()),
+            )
+        except TypeError:
+            log.warning("Loaded BuildingManager does not support period admin stats contract yet")
+            return None
+        except Exception as exc:
+            log.exception(f"Error reading BuildingManager admin stats contract: {exc}")
+            return None
 
     def _get_sanction_stats_contract(
         self,
@@ -237,85 +369,98 @@ class DataAggregator:
     # ==================== DAILY DATA METHODS (V2) ====================
     
     async def _get_membership_data_daily(self, game_day_start: datetime, game_day_end: datetime) -> Dict:
-        """Get membership metrics for last game day using V2 members_v2.db."""
+        """Get membership metrics for last game day using contracts with DB fallback."""
         try:
-            conn = self._get_db_connection("members_v2")
-            if not conn:
-                return {"error": "Database not found"}
+            total_members = await self._get_current_member_count_contract()
+            if total_members is None:
+                conn = self._get_db_connection("members_v2")
+                if not conn:
+                    return {"error": "Database not found"}
+
+                cursor = conn.cursor()
+
+                # Total current members (latest snapshot)
+                cursor.execute("SELECT COUNT(DISTINCT member_id) FROM members WHERE timestamp = (SELECT MAX(timestamp) FROM members)")
+                total_members = cursor.fetchone()[0]
+                conn.close()
             
-            cursor = conn.cursor()
-            
-            # Total current members (latest snapshot)
-            cursor.execute("SELECT COUNT(DISTINCT member_id) FROM members WHERE timestamp = (SELECT MAX(timestamp) FROM members)")
-            total_members = cursor.fetchone()[0]
-            
-            # New joins from logs_v2.db
-            conn_logs = self._get_db_connection("logs_v2")
             new_joins = 0
             left = 0
-            
-            if conn_logs:
-                cursor_logs = conn_logs.cursor()
-                
-                # New joins (action_key = 'added_to_alliance')
-                cursor_logs.execute("""
-                    SELECT COUNT(*) FROM logs 
-                    WHERE action_key = 'added_to_alliance' 
-                    AND datetime(event_timestamp) >= datetime(?)
-                    AND datetime(event_timestamp) < datetime(?)
-                """, (game_day_start.isoformat(), game_day_end.isoformat()))
-                new_joins = cursor_logs.fetchone()[0]
-                
-                # Leaves (action_key = 'left_alliance')
-                cursor_logs.execute("""
-                    SELECT COUNT(*) FROM logs 
-                    WHERE action_key = 'left_alliance' 
-                    AND datetime(event_timestamp) >= datetime(?)
-                    AND datetime(event_timestamp) < datetime(?)
-                """, (game_day_start.isoformat(), game_day_end.isoformat()))
-                left = cursor_logs.fetchone()[0]
-                
-                conn_logs.close()
-            
-            # Kicks from sanctions.db
-            conn_s = self._get_db_connection("sanctions")
+            log_counts = await self._get_log_action_counts_contract(
+                game_day_start,
+                game_day_end,
+                ["added_to_alliance", "left_alliance"],
+            )
+
+            if log_counts is not None:
+                new_joins = log_counts.get("added_to_alliance", 0)
+                left = log_counts.get("left_alliance", 0)
+            else:
+                conn_logs = self._get_db_connection("logs_v2")
+                if conn_logs:
+                    cursor_logs = conn_logs.cursor()
+
+                    # New joins (action_key = 'added_to_alliance')
+                    cursor_logs.execute("""
+                        SELECT COUNT(*) FROM logs
+                        WHERE action_key = 'added_to_alliance'
+                        AND datetime(event_timestamp) >= datetime(?)
+                        AND datetime(event_timestamp) < datetime(?)
+                    """, (game_day_start.isoformat(), game_day_end.isoformat()))
+                    new_joins = cursor_logs.fetchone()[0]
+
+                    # Leaves (action_key = 'left_alliance')
+                    cursor_logs.execute("""
+                        SELECT COUNT(*) FROM logs
+                        WHERE action_key = 'left_alliance'
+                        AND datetime(event_timestamp) >= datetime(?)
+                        AND datetime(event_timestamp) < datetime(?)
+                    """, (game_day_start.isoformat(), game_day_end.isoformat()))
+                    left = cursor_logs.fetchone()[0]
+
+                    conn_logs.close()
+
+            contract_stats = self._get_sanction_stats_contract(game_day_start, game_day_end)
             kicked = 0
-            if conn_s:
-                cursor_s = conn_s.cursor()
-                cursor_s.execute("""
-                    SELECT COUNT(*) FROM sanctions 
-                    WHERE sanction_type = 'Kick' 
-                    AND created_at >= ?
-                    AND created_at < ?
-                """, (int(game_day_start.timestamp()), int(game_day_end.timestamp())))
-                kicked = cursor_s.fetchone()[0]
-                conn_s.close()
-            
-            conn.close()
-            
+            if contract_stats:
+                kicked = contract_stats.get("by_type_period", {}).get("kicks", 0)
+            else:
+                # Kicks from sanctions.db
+                conn_s = self._get_db_connection("sanctions")
+                if conn_s:
+                    cursor_s = conn_s.cursor()
+                    cursor_s.execute("""
+                        SELECT COUNT(*) FROM sanctions
+                        WHERE sanction_type = 'Kick'
+                        AND created_at >= ?
+                        AND created_at < ?
+                    """, (int(game_day_start.timestamp()), int(game_day_end.timestamp())))
+                    kicked = cursor_s.fetchone()[0]
+                    conn_s.close()
+
             # Verifications from membersync.db
             conn_ms = self._get_db_connection("membersync")
             verif_approved = 0
             verif_pending = 0
-            
+
             if conn_ms:
                 cursor_ms = conn_ms.cursor()
-                
+
                 # Approved verifications
                 cursor_ms.execute("""
-                    SELECT COUNT(*) FROM links 
-                    WHERE status = 'approved' 
+                    SELECT COUNT(*) FROM links
+                    WHERE status = 'approved'
                     AND datetime(updated_at) >= datetime(?)
                     AND datetime(updated_at) < datetime(?)
                 """, (game_day_start.isoformat(), game_day_end.isoformat()))
                 verif_approved = cursor_ms.fetchone()[0]
-                
+
                 # Pending verifications
                 cursor_ms.execute("SELECT COUNT(*) FROM links WHERE status = 'pending'")
                 verif_pending = cursor_ms.fetchone()[0]
-                
+
                 conn_ms.close()
-            
+
             return {
                 "total_members": total_members,
                 "new_joins_24h": new_joins,
@@ -324,121 +469,147 @@ class DataAggregator:
                 "verifications_approved_24h": verif_approved,
                 "verifications_pending": verif_pending,
             }
-        
+
         except Exception as e:
             log.exception(f"Error getting daily membership data: {e}")
             return {"error": str(e)}
-    
+
     async def _get_training_data_daily(self, game_day_start: datetime, game_day_end: datetime) -> Dict:
-        """Get training metrics from logs_v2.db."""
+        """Get training metrics from LogsScraper contract with DB fallback."""
         try:
+            log_counts = await self._get_log_action_counts_contract(
+                game_day_start,
+                game_day_end,
+                ["created_course", "course_completed"],
+            )
+            if log_counts is not None:
+                return {
+                    "started_24h": log_counts.get("created_course", 0),
+                    "completed_24h": log_counts.get("course_completed", 0),
+                }
+
             conn = self._get_db_connection("logs_v2")
             if not conn:
                 return {"error": "Database not found"}
-            
+
             cursor = conn.cursor()
-            
+
             # Training courses started (action_key = 'created_course')
             cursor.execute("""
-                SELECT COUNT(*) FROM logs 
-                WHERE action_key = 'created_course' 
+                SELECT COUNT(*) FROM logs
+                WHERE action_key = 'created_course'
                 AND datetime(event_timestamp) >= datetime(?)
                 AND datetime(event_timestamp) < datetime(?)
             """, (game_day_start.isoformat(), game_day_end.isoformat()))
             started = cursor.fetchone()[0]
-            
+
             # Training courses completed (action_key = 'course_completed')
             cursor.execute("""
-                SELECT COUNT(*) FROM logs 
-                WHERE action_key = 'course_completed' 
+                SELECT COUNT(*) FROM logs
+                WHERE action_key = 'course_completed'
                 AND datetime(event_timestamp) >= datetime(?)
                 AND datetime(event_timestamp) < datetime(?)
             """, (game_day_start.isoformat(), game_day_end.isoformat()))
             completed = cursor.fetchone()[0]
-            
+
             conn.close()
-            
+
             return {
                 "started_24h": started,
                 "completed_24h": completed,
             }
-        
+
         except Exception as e:
             log.exception(f"Error getting daily training data: {e}")
             return {"error": str(e)}
-    
+
     async def _get_buildings_data_daily(self, game_day_start: datetime, game_day_end: datetime) -> Dict:
-        """Get building metrics from building_manager.db."""
+        """Get building metrics from BuildingManager/LogsScraper contracts with DB fallback."""
         try:
-            conn = self._get_db_connection("building_manager")
-            if not conn:
-                return {"error": "Database not found"}
-            
-            cursor = conn.cursor()
-            game_day_start_ts = int(game_day_start.timestamp())
-            game_day_end_ts = int(game_day_end.timestamp())
-            
-            # Approved buildings
-            cursor.execute("""
-                SELECT COUNT(*) FROM building_requests 
-                WHERE status = 'approved' 
-                AND updated_at >= ?
-                AND updated_at < ?
-            """, (game_day_start_ts, game_day_end_ts))
-            approved = cursor.fetchone()[0]
-            
-            # Denied buildings
-            cursor.execute("""
-                SELECT COUNT(*) FROM building_requests 
-                WHERE status = 'denied' 
-                AND updated_at >= ?
-                AND updated_at < ?
-            """, (game_day_start_ts, game_day_end_ts))
-            denied = cursor.fetchone()[0]
-            
-            # Pending buildings
-            cursor.execute("SELECT COUNT(*) FROM building_requests WHERE status = 'pending'")
-            pending = cursor.fetchone()[0]
-            
-            # By type
-            cursor.execute("""
-                SELECT building_type, COUNT(*) 
-                FROM building_requests 
-                WHERE status = 'approved' 
-                AND updated_at >= ?
-                AND updated_at < ?
-                GROUP BY building_type
-            """, (game_day_start_ts, game_day_end_ts))
-            by_type = dict(cursor.fetchall())
-            
-            conn.close()
-            
-            # Extensions from logs_v2.db
-            conn_logs = self._get_db_connection("logs_v2")
+            contract_stats = self._get_building_request_stats_contract(game_day_start, game_day_end)
+            if contract_stats is not None:
+                approved = int(contract_stats.get("approved", 0) or 0)
+                denied = int(contract_stats.get("denied", 0) or 0)
+                pending = int(contract_stats.get("pending", 0) or 0)
+                by_type = contract_stats.get("by_type", {}) or {}
+            else:
+                conn = self._get_db_connection("building_manager")
+                if not conn:
+                    return {"error": "Database not found"}
+
+                cursor = conn.cursor()
+                game_day_start_ts = int(game_day_start.timestamp())
+                game_day_end_ts = int(game_day_end.timestamp())
+
+                # Approved buildings
+                cursor.execute("""
+                    SELECT COUNT(*) FROM building_requests
+                    WHERE status = 'approved'
+                    AND updated_at >= ?
+                    AND updated_at < ?
+                """, (game_day_start_ts, game_day_end_ts))
+                approved = cursor.fetchone()[0]
+
+                # Denied buildings
+                cursor.execute("""
+                    SELECT COUNT(*) FROM building_requests
+                    WHERE status = 'denied'
+                    AND updated_at >= ?
+                    AND updated_at < ?
+                """, (game_day_start_ts, game_day_end_ts))
+                denied = cursor.fetchone()[0]
+
+                # Pending buildings
+                cursor.execute("SELECT COUNT(*) FROM building_requests WHERE status = 'pending'")
+                pending = cursor.fetchone()[0]
+
+                # By type
+                cursor.execute("""
+                    SELECT building_type, COUNT(*)
+                    FROM building_requests
+                    WHERE status = 'approved'
+                    AND updated_at >= ?
+                    AND updated_at < ?
+                    GROUP BY building_type
+                """, (game_day_start_ts, game_day_end_ts))
+                by_type = dict(cursor.fetchall())
+
+                conn.close()
+
             ext_started = 0
             ext_completed = 0
-            
-            if conn_logs:
-                cursor_logs = conn_logs.cursor()
-                
-                cursor_logs.execute("""
-                    SELECT COUNT(*) FROM logs 
-                    WHERE action_key = 'extension_started' 
-                    AND datetime(event_timestamp) >= datetime(?)
-                    AND datetime(event_timestamp) < datetime(?)
-                """, (game_day_start.isoformat(), game_day_end.isoformat()))
-                ext_started = cursor_logs.fetchone()[0]
-                
-                cursor_logs.execute("""
-                    SELECT COUNT(*) FROM logs 
-                    WHERE action_key = 'expansion_finished' 
-                    AND datetime(event_timestamp) >= datetime(?)
-                    AND datetime(event_timestamp) < datetime(?)
-                """, (game_day_start.isoformat(), game_day_end.isoformat()))
-                ext_completed = cursor_logs.fetchone()[0]
-                
-                conn_logs.close()
-            
+            log_counts = await self._get_log_action_counts_contract(
+                game_day_start,
+                game_day_end,
+                ["extension_started", "expansion_finished"],
+            )
+            if log_counts is not None:
+                ext_started = log_counts.get("extension_started", 0)
+                ext_completed = log_counts.get("expansion_finished", 0)
+            else:
+                # Extensions from logs_v2.db
+                conn_logs = self._get_db_connection("logs_v2")
+                if conn_logs:
+                    cursor_logs = conn_logs.cursor()
+
+                    cursor_logs.execute("""
+                        SELECT COUNT(*) FROM logs
+                        WHERE action_key = 'extension_started'
+                        AND datetime(event_timestamp) >= datetime(?)
+                        AND datetime(event_timestamp) < datetime(?)
+                    """, (game_day_start.isoformat(), game_day_end.isoformat()))
+                    ext_started = cursor_logs.fetchone()[0]
+
+                    cursor_logs.execute("""
+                        SELECT COUNT(*) FROM logs
+                        WHERE action_key = 'expansion_finished'
+                        AND datetime(event_timestamp) >= datetime(?)
+                        AND datetime(event_timestamp) < datetime(?)
+                    """, (game_day_start.isoformat(), game_day_end.isoformat()))
+                    ext_completed = cursor_logs.fetchone()[0]
+
+                    conn_logs.close()
+
             return {
                 "processed_24h": approved + denied,
                 "approved_24h": approved,
@@ -448,113 +619,126 @@ class DataAggregator:
                 "extensions_completed_24h": ext_completed,
                 "by_type_24h": by_type,
             }
-        
+
         except Exception as e:
             log.exception(f"Error getting daily buildings data: {e}")
             return {"error": str(e)}
-    
+
     async def _get_operations_data_daily(self, game_day_start: datetime, game_day_end: datetime) -> Dict:
-        """Get operations metrics from logs_v2.db."""
+        """Get operations metrics from LogsScraper contract with DB fallback."""
         try:
+            log_counts = await self._get_log_action_counts_contract(
+                game_day_start,
+                game_day_end,
+                ["large_mission_started", "alliance_event_started"],
+            )
+            if log_counts is not None:
+                return {
+                    "large_missions_started_24h": log_counts.get("large_mission_started", 0),
+                    "alliance_events_started_24h": log_counts.get("alliance_event_started", 0),
+                    "custom_missions_created_24h": 0,
+                    "custom_missions_removed_24h": 0,
+                }
+
             conn = self._get_db_connection("logs_v2")
             if not conn:
                 return {"error": "Database not found"}
-            
+
             cursor = conn.cursor()
-            
+
             # Large missions
             cursor.execute("""
-                SELECT COUNT(*) FROM logs 
-                WHERE action_key = 'large_mission_started' 
+                SELECT COUNT(*) FROM logs
+                WHERE action_key = 'large_mission_started'
                 AND datetime(event_timestamp) >= datetime(?)
                 AND datetime(event_timestamp) < datetime(?)
             """, (game_day_start.isoformat(), game_day_end.isoformat()))
             large_missions = cursor.fetchone()[0]
-            
+
             # Alliance events
             cursor.execute("""
-                SELECT COUNT(*) FROM logs 
-                WHERE action_key = 'alliance_event_started' 
+                SELECT COUNT(*) FROM logs
+                WHERE action_key = 'alliance_event_started'
                 AND datetime(event_timestamp) >= datetime(?)
                 AND datetime(event_timestamp) < datetime(?)
             """, (game_day_start.isoformat(), game_day_end.isoformat()))
             events = cursor.fetchone()[0]
-            
+
             conn.close()
-            
+
             return {
                 "large_missions_started_24h": large_missions,
                 "alliance_events_started_24h": events,
                 "custom_missions_created_24h": 0,
                 "custom_missions_removed_24h": 0,
             }
-        
+
         except Exception as e:
             log.exception(f"Error getting daily operations data: {e}")
             return {"error": str(e)}
-    
+
     async def _get_treasury_data_daily(self, game_day_start: datetime, game_day_end: datetime) -> Dict:
         """Get treasury metrics from alliance.db (LEGACY - still used)."""
         try:
             conn = self._get_db_connection("alliance")
             if not conn:
                 return {"error": "Database not found"}
-            
+
             cursor = conn.cursor()
-            
+
             # Current balance
             cursor.execute("SELECT total_funds FROM treasury_balance ORDER BY scraped_at DESC LIMIT 1")
             result = cursor.fetchone()
             current_balance = result[0] if result else 0
-            
+
             # Balance 24h ago
             cursor.execute("""
-                SELECT total_funds FROM treasury_balance 
+                SELECT total_funds FROM treasury_balance
                 WHERE datetime(scraped_at) <= datetime(?)
                 ORDER BY scraped_at DESC LIMIT 1
             """, (game_day_start.isoformat(),))
             result = cursor.fetchone()
             balance_24h_ago = result[0] if result else current_balance
-            
+
             change_24h = current_balance - balance_24h_ago
             change_pct = (change_24h / balance_24h_ago * 100) if balance_24h_ago > 0 else 0
-            
+
             # Income (from treasury_income table)
             cursor.execute("""
-                SELECT SUM(credits) FROM treasury_income 
+                SELECT SUM(credits) FROM treasury_income
                 WHERE period = 'daily'
             """)
             result = cursor.fetchone()
             income_24h = result[0] if result and result[0] else 0
-            
+
             # Contributors
             cursor.execute("""
-                SELECT COUNT(DISTINCT user_id) FROM treasury_income 
+                SELECT COUNT(DISTINCT user_id) FROM treasury_income
                 WHERE period = 'daily' AND credits > 0
             """)
             result = cursor.fetchone()
             contributors = result[0] if result else 0
-            
+
             # Expenses
             cursor.execute("""
-                SELECT SUM(credits) FROM treasury_expenses 
+                SELECT SUM(credits) FROM treasury_expenses
                 WHERE datetime(scraped_at) >= datetime(?)
                 AND datetime(scraped_at) < datetime(?)
             """, (game_day_start.isoformat(), game_day_end.isoformat()))
             result = cursor.fetchone()
             expenses_24h = result[0] if result and result[0] else 0
-            
+
             # Largest expense
             cursor.execute("""
-                SELECT MAX(credits) FROM treasury_expenses 
+                SELECT MAX(credits) FROM treasury_expenses
                 WHERE datetime(scraped_at) >= datetime(?)
                 AND datetime(scraped_at) < datetime(?)
             """, (game_day_start.isoformat(), game_day_end.isoformat()))
             result = cursor.fetchone()
             largest_expense = result[0] if result and result[0] else 0
-            
+
             conn.close()
-            
+
             return {
                 "current_balance": current_balance,
                 "change_24h": change_24h,
@@ -564,11 +748,11 @@ class DataAggregator:
                 "contributors_24h": contributors,
                 "largest_expense_24h": largest_expense,
             }
-        
+
         except Exception as e:
             log.exception(f"Error getting daily treasury data: {e}")
             return {"error": str(e)}
-    
+
     async def _get_sanctions_data_daily(self, game_day_start: datetime, game_day_end: datetime) -> Dict:
         """Get sanctions metrics from SanctionManager contract with database fallback."""
         try:
@@ -592,29 +776,29 @@ class DataAggregator:
             conn = self._get_db_connection("sanctions")
             if not conn:
                 return {"error": "Database not found"}
-            
+
             cursor = conn.cursor()
             game_day_start_ts = int(game_day_start.timestamp())
             game_day_end_ts = int(game_day_end.timestamp())
-            
+
             # Sanctions issued
             cursor.execute("""
-                SELECT COUNT(*) FROM sanctions 
+                SELECT COUNT(*) FROM sanctions
                 WHERE created_at >= ?
                 AND created_at < ?
             """, (game_day_start_ts, game_day_end_ts))
             issued = cursor.fetchone()[0]
-            
+
             # Active warnings
             cursor.execute("""
-                SELECT COUNT(*) FROM sanctions 
-                WHERE status = 'active' 
+                SELECT COUNT(*) FROM sanctions
+                WHERE status = 'active'
                 AND sanction_type LIKE '%Warning%'
             """)
             active_warnings = cursor.fetchone()[0]
-            
+
             conn.close()
-            
+
             return {
                 "issued_24h": issued,
                 "active_warnings": active_warnings,
@@ -624,46 +808,52 @@ class DataAggregator:
                 "tax_warnings_total_24h": tax_warning_stats.get("warnings_total", 0),
                 "tax_auto_kicks_24h": tax_warning_stats.get("auto_kicks", 0),
             }
-        
+
         except Exception as e:
             log.exception(f"Error getting daily sanctions data: {e}")
             return {"error": str(e)}
-    
+
     async def _get_admin_activity_daily(self, game_day_start: datetime, game_day_end: datetime) -> Dict:
         """Get admin activity metrics."""
         try:
-            conn = self._get_db_connection("building_manager")
-            if not conn:
-                return {"error": "Database not found"}
-            
-            cursor = conn.cursor()
-            game_day_start_ts = int(game_day_start.timestamp())
-            game_day_end_ts = int(game_day_end.timestamp())
-            
-            # Building reviews
-            cursor.execute("""
-                SELECT COUNT(*) FROM building_actions 
-                WHERE timestamp >= ?
-                AND timestamp < ?
-            """, (game_day_start_ts, game_day_end_ts))
-            building_reviews = cursor.fetchone()[0]
-            
-            # Most active admin
-            cursor.execute("""
-                SELECT admin_username, COUNT(*) as count 
-                FROM building_actions 
-                WHERE timestamp >= ?
-                AND timestamp < ?
-                GROUP BY admin_username 
-                ORDER BY count DESC 
-                LIMIT 1
-            """, (game_day_start_ts, game_day_end_ts))
-            result = cursor.fetchone()
-            most_active = result[0] if result else "N/A"
-            most_active_count = result[1] if result else 0
-            
-            conn.close()
-            
+            contract_stats = self._get_building_admin_activity_contract(game_day_start, game_day_end)
+            if contract_stats is not None:
+                building_reviews = int(contract_stats.get("building_reviews", 0) or 0)
+                most_active = contract_stats.get("most_active_admin") or "N/A"
+                most_active_count = int(contract_stats.get("most_active_admin_count", 0) or 0)
+            else:
+                conn = self._get_db_connection("building_manager")
+                if not conn:
+                    return {"error": "Database not found"}
+
+                cursor = conn.cursor()
+                game_day_start_ts = int(game_day_start.timestamp())
+                game_day_end_ts = int(game_day_end.timestamp())
+
+                # Building reviews
+                cursor.execute("""
+                    SELECT COUNT(*) FROM building_actions
+                    WHERE timestamp >= ?
+                    AND timestamp < ?
+                """, (game_day_start_ts, game_day_end_ts))
+                building_reviews = cursor.fetchone()[0]
+
+                # Most active admin
+                cursor.execute("""
+                    SELECT admin_username, COUNT(*) as count
+                    FROM building_actions
+                    WHERE timestamp >= ?
+                    AND timestamp < ?
+                    GROUP BY admin_username
+                    ORDER BY count DESC
+                    LIMIT 1
+                """, (game_day_start_ts, game_day_end_ts))
+                result = cursor.fetchone()
+                most_active = result[0] if result else "N/A"
+                most_active_count = result[1] if result else 0
+
+                conn.close()
+
             # Sanction actions
             contract_stats = self._get_sanction_stats_contract(game_day_start, game_day_end)
             sanction_actions = (
@@ -678,20 +868,20 @@ class DataAggregator:
             if conn_s:
                 cursor_s = conn_s.cursor()
                 cursor_s.execute("""
-                    SELECT COUNT(*) FROM sanctions 
+                    SELECT COUNT(*) FROM sanctions
                     WHERE created_at >= ?
                     AND created_at < ?
-                """, (game_day_start_ts, game_day_end_ts))
+                """, (int(game_day_start.timestamp()), int(game_day_end.timestamp())))
                 sanction_actions = cursor_s.fetchone()[0]
                 conn_s.close()
-            
+
             return {
                 "building_reviews_24h": building_reviews,
                 "sanctions_24h": sanction_actions,
                 "most_active_admin": most_active,
                 "most_active_admin_count": most_active_count,
             }
-        
+
         except Exception as e:
             log.exception(f"Error getting daily admin activity data: {e}")
             return {"error": str(e)}
@@ -744,42 +934,59 @@ class DataAggregator:
             
             conn.close()
             
-            # Get joins/leaves from logs_v2
-            conn_logs = self._get_db_connection("logs_v2")
             new_joins = 0
             left = 0
-            log_activity_available = False
-            
-            if conn_logs:
-                cursor_logs = conn_logs.cursor()
-                log_activity_available = self._has_log_event_coverage(conn_logs, start, end)
-                
-                cursor_logs.execute("""
-                    SELECT COUNT(*) FROM logs 
-                    WHERE action_key = 'added_to_alliance' 
-                    AND datetime(event_timestamp) >= datetime(?)
-                    AND datetime(event_timestamp) < datetime(?)
-                """, (start.isoformat(), end.isoformat()))
-                new_joins = cursor_logs.fetchone()[0]
-                
-                cursor_logs.execute("""
-                    SELECT COUNT(*) FROM logs 
-                    WHERE action_key = 'left_alliance' 
-                    AND datetime(event_timestamp) >= datetime(?)
-                    AND datetime(event_timestamp) < datetime(?)
-                """, (start.isoformat(), end.isoformat()))
-                left = cursor_logs.fetchone()[0]
-                
-                conn_logs.close()
-            
-            # Kicks from sanctions
-            conn_s = self._get_db_connection("sanctions")
+            log_activity_available = await self._has_log_event_coverage_contract(start, end)
+            log_counts = await self._get_log_action_counts_contract(
+                start,
+                end,
+                ["added_to_alliance", "left_alliance"],
+            )
+
+            if log_counts is not None:
+                new_joins = log_counts.get("added_to_alliance", 0)
+                left = log_counts.get("left_alliance", 0)
+                if log_activity_available is None:
+                    log_activity_available = bool(new_joins or left)
+            else:
+                # Get joins/leaves from logs_v2
+                conn_logs = self._get_db_connection("logs_v2")
+                log_activity_available = False
+
+                if conn_logs:
+                    cursor_logs = conn_logs.cursor()
+                    log_activity_available = self._has_log_event_coverage(conn_logs, start, end)
+
+                    cursor_logs.execute("""
+                        SELECT COUNT(*) FROM logs
+                        WHERE action_key = 'added_to_alliance'
+                        AND datetime(event_timestamp) >= datetime(?)
+                        AND datetime(event_timestamp) < datetime(?)
+                    """, (start.isoformat(), end.isoformat()))
+                    new_joins = cursor_logs.fetchone()[0]
+
+                    cursor_logs.execute("""
+                        SELECT COUNT(*) FROM logs
+                        WHERE action_key = 'left_alliance'
+                        AND datetime(event_timestamp) >= datetime(?)
+                        AND datetime(event_timestamp) < datetime(?)
+                    """, (start.isoformat(), end.isoformat()))
+                    left = cursor_logs.fetchone()[0]
+
+                    conn_logs.close()
+
+            contract_stats = self._get_sanction_stats_contract(start, end)
             kicked = 0
-            if conn_s:
+            if contract_stats:
+                kicked = contract_stats.get("by_type_period", {}).get("kicks", 0)
+            else:
+                # Kicks from sanctions
+                conn_s = self._get_db_connection("sanctions")
+            if not contract_stats and conn_s:
                 cursor_s = conn_s.cursor()
                 cursor_s.execute("""
-                    SELECT COUNT(*) FROM sanctions 
-                    WHERE sanction_type = 'Kick' 
+                    SELECT COUNT(*) FROM sanctions
+                    WHERE sanction_type = 'Kick'
                     AND created_at >= ?
                     AND created_at < ?
                 """, (int(start.timestamp()), int(end.timestamp())))
@@ -803,8 +1010,29 @@ class DataAggregator:
             return {"error": str(e)}
     
     async def _get_training_data_monthly(self, start: datetime, end: datetime) -> Dict:
-        """Get training metrics for full month from logs_v2.db."""
+        """Get training metrics for full month through LogsScraper with DB fallback."""
         try:
+            coverage = await self._has_log_event_coverage_contract(start, end)
+            if coverage is False:
+                return {"error": "Log event timestamps are unavailable for this period"}
+
+            log_counts = await self._get_log_action_counts_contract(
+                start,
+                end,
+                ["created_course", "course_completed"],
+            )
+            if log_counts is not None:
+                started = log_counts.get("created_course", 0)
+                completed = log_counts.get("course_completed", 0)
+                success_rate = (completed / started * 100) if started > 0 else 0
+                return {
+                    "started_period": started,
+                    "completed_period": completed,
+                    "success_rate": success_rate,
+                    "top_5_trainings": [],
+                    "by_discipline_counts": {},
+                }
+
             conn = self._get_db_connection("logs_v2")
             if not conn:
                 return {"error": "Database not found"}
@@ -849,78 +1077,97 @@ class DataAggregator:
             return {"error": str(e)}
     
     async def _get_buildings_data_monthly(self, start: datetime, end: datetime) -> Dict:
-        """Get building metrics for full month."""
+        """Get building metrics for full month through contracts with DB fallback."""
         try:
-            conn = self._get_db_connection("building_manager")
-            if not conn:
-                return {"error": "Database not found"}
-            
-            cursor = conn.cursor()
-            start_ts = int(start.timestamp())
-            end_ts = int(end.timestamp())
-            
-            # Approved
-            cursor.execute("""
-                SELECT COUNT(*) FROM building_requests 
-                WHERE status = 'approved' 
-                AND updated_at >= ?
-                AND updated_at < ?
-            """, (start_ts, end_ts))
-            approved = cursor.fetchone()[0]
-            
-            # Denied
-            cursor.execute("""
-                SELECT COUNT(*) FROM building_requests 
-                WHERE status = 'denied' 
-                AND updated_at >= ?
-                AND updated_at < ?
-            """, (start_ts, end_ts))
-            denied = cursor.fetchone()[0]
-            
-            # By type
-            cursor.execute("""
-                SELECT building_type, COUNT(*) 
-                FROM building_requests 
-                WHERE status = 'approved' 
-                AND updated_at >= ?
-                AND updated_at < ?
-                GROUP BY building_type
-            """, (start_ts, end_ts))
-            by_type = dict(cursor.fetchall())
-            
-            conn.close()
-            
-            # Extensions from logs_v2
-            conn_logs = self._get_db_connection("logs_v2")
+            contract_stats = self._get_building_request_stats_contract(start, end)
+            if contract_stats is not None:
+                approved = int(contract_stats.get("approved", 0) or 0)
+                denied = int(contract_stats.get("denied", 0) or 0)
+                by_type = contract_stats.get("by_type", {}) or {}
+            else:
+                conn = self._get_db_connection("building_manager")
+                if not conn:
+                    return {"error": "Database not found"}
+
+                cursor = conn.cursor()
+                start_ts = int(start.timestamp())
+                end_ts = int(end.timestamp())
+
+                # Approved
+                cursor.execute("""
+                    SELECT COUNT(*) FROM building_requests
+                    WHERE status = 'approved'
+                    AND updated_at >= ?
+                    AND updated_at < ?
+                """, (start_ts, end_ts))
+                approved = cursor.fetchone()[0]
+
+                # Denied
+                cursor.execute("""
+                    SELECT COUNT(*) FROM building_requests
+                    WHERE status = 'denied'
+                    AND updated_at >= ?
+                    AND updated_at < ?
+                """, (start_ts, end_ts))
+                denied = cursor.fetchone()[0]
+
+                # By type
+                cursor.execute("""
+                    SELECT building_type, COUNT(*)
+                    FROM building_requests
+                    WHERE status = 'approved'
+                    AND updated_at >= ?
+                    AND updated_at < ?
+                    GROUP BY building_type
+                """, (start_ts, end_ts))
+                by_type = dict(cursor.fetchall())
+
+                conn.close()
+
             ext_started = 0
             ext_completed = 0
-            extension_activity_available = False
-            
-            if conn_logs:
-                cursor_logs = conn_logs.cursor()
-                extension_activity_available = self._has_log_event_coverage(
-                    conn_logs,
-                    start,
-                    end,
-                )
-                
-                cursor_logs.execute("""
-                    SELECT COUNT(*) FROM logs 
-                    WHERE action_key = 'extension_started' 
-                    AND datetime(event_timestamp) >= datetime(?)
-                    AND datetime(event_timestamp) < datetime(?)
-                """, (start.isoformat(), end.isoformat()))
-                ext_started = cursor_logs.fetchone()[0]
-                
-                cursor_logs.execute("""
-                    SELECT COUNT(*) FROM logs 
-                    WHERE action_key = 'expansion_finished' 
-                    AND datetime(event_timestamp) >= datetime(?)
-                    AND datetime(event_timestamp) < datetime(?)
-                """, (start.isoformat(), end.isoformat()))
-                ext_completed = cursor_logs.fetchone()[0]
-                
-                conn_logs.close()
+            extension_activity_available = await self._has_log_event_coverage_contract(start, end)
+            log_counts = await self._get_log_action_counts_contract(
+                start,
+                end,
+                ["extension_started", "expansion_finished"],
+            )
+
+            if log_counts is not None:
+                ext_started = log_counts.get("extension_started", 0)
+                ext_completed = log_counts.get("expansion_finished", 0)
+                if extension_activity_available is None:
+                    extension_activity_available = bool(ext_started or ext_completed)
+            else:
+                # Extensions from logs_v2
+                conn_logs = self._get_db_connection("logs_v2")
+                extension_activity_available = False
+
+                if conn_logs:
+                    cursor_logs = conn_logs.cursor()
+                    extension_activity_available = self._has_log_event_coverage(
+                        conn_logs,
+                        start,
+                        end,
+                    )
+
+                    cursor_logs.execute("""
+                        SELECT COUNT(*) FROM logs
+                        WHERE action_key = 'extension_started'
+                        AND datetime(event_timestamp) >= datetime(?)
+                        AND datetime(event_timestamp) < datetime(?)
+                    """, (start.isoformat(), end.isoformat()))
+                    ext_started = cursor_logs.fetchone()[0]
+
+                    cursor_logs.execute("""
+                        SELECT COUNT(*) FROM logs
+                        WHERE action_key = 'expansion_finished'
+                        AND datetime(event_timestamp) >= datetime(?)
+                        AND datetime(event_timestamp) < datetime(?)
+                    """, (start.isoformat(), end.isoformat()))
+                    ext_completed = cursor_logs.fetchone()[0]
+
+                    conn_logs.close()
             
             return {
                 "approved_period": approved,
@@ -936,8 +1183,23 @@ class DataAggregator:
             return {"error": str(e)}
     
     async def _get_operations_data_monthly(self, start: datetime, end: datetime) -> Dict:
-        """Get operations metrics for full month."""
+        """Get operations metrics for full month through LogsScraper with DB fallback."""
         try:
+            coverage = await self._has_log_event_coverage_contract(start, end)
+            if coverage is False:
+                return {"error": "Log event timestamps are unavailable for this period"}
+
+            log_counts = await self._get_log_action_counts_contract(
+                start,
+                end,
+                ["large_mission_started", "alliance_event_started"],
+            )
+            if log_counts is not None:
+                return {
+                    "large_missions_period": log_counts.get("large_mission_started", 0),
+                    "alliance_events_period": log_counts.get("alliance_event_started", 0),
+                }
+
             conn = self._get_db_connection("logs_v2")
             if not conn:
                 return {"error": "Database not found"}
@@ -1101,37 +1363,44 @@ class DataAggregator:
     async def _get_admin_activity_monthly(self, start: datetime, end: datetime) -> Dict:
         """Get admin activity metrics for full month."""
         try:
-            conn = self._get_db_connection("building_manager")
-            if not conn:
-                return {"error": "Database not found"}
-            
-            cursor = conn.cursor()
             start_ts = int(start.timestamp())
             end_ts = int(end.timestamp())
-            
-            # Total actions
-            cursor.execute("""
-                SELECT COUNT(*) FROM building_actions 
-                WHERE timestamp >= ?
-                AND timestamp < ?
-            """, (start_ts, end_ts))
-            total_actions = cursor.fetchone()[0]
-            
-            # Most active admin
-            cursor.execute("""
-                SELECT admin_username, COUNT(*) as count 
-                FROM building_actions 
-                WHERE timestamp >= ?
-                AND timestamp < ?
-                GROUP BY admin_username 
-                ORDER BY count DESC 
-                LIMIT 1
-            """, (start_ts, end_ts))
-            result = cursor.fetchone()
-            most_active = result[0] if result else "N/A"
-            most_active_count = result[1] if result else 0
-            
-            conn.close()
+
+            contract_stats = self._get_building_admin_activity_contract(start, end)
+            if contract_stats is not None:
+                total_actions = int(contract_stats.get("building_reviews", 0) or 0)
+                most_active = contract_stats.get("most_active_admin") or "N/A"
+                most_active_count = int(contract_stats.get("most_active_admin_count", 0) or 0)
+            else:
+                conn = self._get_db_connection("building_manager")
+                if not conn:
+                    return {"error": "Database not found"}
+
+                cursor = conn.cursor()
+
+                # Total actions
+                cursor.execute("""
+                    SELECT COUNT(*) FROM building_actions
+                    WHERE timestamp >= ?
+                    AND timestamp < ?
+                """, (start_ts, end_ts))
+                total_actions = cursor.fetchone()[0]
+
+                # Most active admin
+                cursor.execute("""
+                    SELECT admin_username, COUNT(*) as count
+                    FROM building_actions
+                    WHERE timestamp >= ?
+                    AND timestamp < ?
+                    GROUP BY admin_username
+                    ORDER BY count DESC
+                    LIMIT 1
+                """, (start_ts, end_ts))
+                result = cursor.fetchone()
+                most_active = result[0] if result else "N/A"
+                most_active_count = result[1] if result else 0
+
+                conn.close()
             
             contract_stats = self._get_sanction_stats_contract(start, end)
             if contract_stats:
