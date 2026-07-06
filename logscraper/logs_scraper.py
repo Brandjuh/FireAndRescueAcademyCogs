@@ -769,49 +769,6 @@ class LogsScraper(commands.Cog):
         conn.close()
 
         return list(reversed(rows))
-
-    async def get_action_counts(self, action_keys, start_iso: str, end_iso: str):
-        """Public API: count stored log actions by MissionChief event timestamp."""
-        keys = [str(key) for key in action_keys if key]
-        if not keys:
-            return {}
-
-        placeholders = ",".join("?" for _ in keys)
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            f'''
-                SELECT action_key, COUNT(*)
-                FROM logs
-                WHERE action_key IN ({placeholders})
-                AND datetime(event_timestamp) >= datetime(?)
-                AND datetime(event_timestamp) < datetime(?)
-                GROUP BY action_key
-            ''',
-            (*keys, start_iso, end_iso),
-        )
-        counts = {key: 0 for key in keys}
-        counts.update({row[0]: row[1] for row in cursor.fetchall()})
-        conn.close()
-        return counts
-
-    async def has_event_coverage(self, start_iso: str, end_iso: str) -> bool:
-        """Public API: report whether logs have real event timestamps in a period."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            '''
-                SELECT 1
-                FROM logs
-                WHERE datetime(event_timestamp) >= datetime(?)
-                AND datetime(event_timestamp) < datetime(?)
-                LIMIT 1
-            ''',
-            (start_iso, end_iso),
-        )
-        available = cursor.fetchone() is not None
-        conn.close()
-        return available
     
     # ==================== COMMANDS ====================
     
