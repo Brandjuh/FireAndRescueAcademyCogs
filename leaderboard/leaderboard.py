@@ -795,6 +795,15 @@ class Leaderboard(commands.Cog):
                 async with db.execute("SELECT COUNT(DISTINCT timestamp) FROM members") as cursor:
                     total_timestamps = (await cursor.fetchone())[0]
 
+                all_timestamps = []
+                async with db.execute("SELECT DISTINCT timestamp FROM members") as cursor:
+                    timestamp_rows = await cursor.fetchall()
+                for (raw_timestamp,) in timestamp_rows:
+                    parsed = self._parse_member_timestamp(raw_timestamp)
+                    if parsed is not None:
+                        all_timestamps.append((parsed, raw_timestamp))
+                all_timestamps.sort(key=lambda item: item[0])
+
                 raw_start = current_start.isoformat()
                 raw_end = current_end.isoformat()
                 async with db.execute(
@@ -866,6 +875,15 @@ class Leaderboard(commands.Cog):
 
                 first_selected = selected_timestamps[0] if selected_timestamps else "none"
                 last_selected = selected_timestamps[-1] if selected_timestamps else "none"
+                previous_known = [raw for parsed, raw in all_timestamps if parsed < current_start]
+                next_known = [raw for parsed, raw in all_timestamps if parsed > current_end]
+                nearest_before = previous_known[-1] if previous_known else "none"
+                nearest_after = next_known[0] if next_known else "none"
+                latest_known = all_timestamps[-5:] if all_timestamps else []
+                latest_text = "\n".join(
+                    f"- `{raw}`"
+                    for parsed, raw in reversed(latest_known)
+                ) or "none"
                 sample_text = "\n".join(
                     f"- {username}: {delta:,} ({min_credits:,} -> {max_credits:,})"
                     for username, min_credits, max_credits, delta in sample_rows
@@ -892,13 +910,20 @@ class Leaderboard(commands.Cog):
                         f"Raw SQL window timestamps: `{raw_window_timestamps}`\n"
                         f"Parsed window timestamps: `{len(selected_timestamps)}`\n"
                         f"First parsed: `{first_selected}`\n"
-                        f"Last parsed: `{last_selected}`"
+                        f"Last parsed: `{last_selected}`\n"
+                        f"Nearest before window: `{nearest_before}`\n"
+                        f"Nearest after window: `{nearest_after}`"
                     ),
                     inline=False,
                 )
                 embed.add_field(
                     name="Positive Earned Deltas",
                     value=f"Members with positive growth: `{positive_members}`\nTop sample:\n{sample_text}",
+                    inline=False,
+                )
+                embed.add_field(
+                    name="Latest Known Member Snapshots",
+                    value=latest_text,
                     inline=False,
                 )
                 embed.set_footer(text=f"Database: {self.members_db_path}")
