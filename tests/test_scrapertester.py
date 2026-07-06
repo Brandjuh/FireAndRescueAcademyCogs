@@ -5,6 +5,8 @@ from pathlib import Path
 
 from scrapertester.scraper_tester import SCRAPER_SPECS, ScraperTester
 
+DEFAULT_FINISHED_AT = object()
+
 
 class FakeTask:
     def cancelled(self):
@@ -28,8 +30,15 @@ class FakeBot:
         return self._cogs.get(name)
 
 
-def make_scrape_runs_db(path: Path, *, finished_at: str | None = None):
-    finished_at = finished_at or datetime.now(timezone.utc).isoformat()
+def make_scrape_runs_db(
+    path: Path,
+    *,
+    status: str = "success",
+    started_at: str = "2026-07-03T10:00:00+00:00",
+    finished_at=DEFAULT_FINISHED_AT,
+):
+    if finished_at is DEFAULT_FINISHED_AT:
+        finished_at = datetime.now(timezone.utc).isoformat()
     conn = sqlite3.connect(path)
     try:
         conn.execute(
@@ -50,10 +59,9 @@ def make_scrape_runs_db(path: Path, *, finished_at: str | None = None):
             """
             INSERT INTO scrape_runs (
                 status, started_at, finished_at, rows_parsed, rows_inserted, errors, message
-            ) VALUES ('success', '2026-07-03T10:00:00+00:00', ?, 1, 1, 0, 'ok')
-            """
-            ,
-            (finished_at,),
+            ) VALUES (?, ?, ?, 1, 1, 0, 'ok')
+            """,
+            (status, started_at, finished_at),
         )
         conn.commit()
     finally:
@@ -103,6 +111,28 @@ def test_members_database_status_fails_when_latest_scrape_is_stale(tmp_path):
 
     assert members_database.ok is False
     assert "stale_for=" in members_database.detail
+
+
+def test_running_database_status_reports_started_not_finished(tmp_path):
+    cogs_root = tmp_path / "cogs"
+    cogs_root.mkdir()
+    package_dir = cogs_root / "membersscraper"
+    package_dir.mkdir()
+    (package_dir / "fara_db.py").write_text("# helper\n", encoding="utf-8")
+
+    db_path = tmp_path / "members.db"
+    started_at = datetime.now(timezone.utc).isoformat()
+    make_scrape_runs_db(db_path, status="running", started_at=started_at, finished_at=None)
+    tester = ScraperTester(FakeBot({"MembersScraper": FakeScraperCog(db_path)}))
+    tester._cogs_root = cogs_root
+
+    results = tester._collect_static_results()
+    members_database = next(result for result in results if result.label == "Members database")
+
+    assert members_database.ok is True
+    assert "latest=running" in members_database.detail
+    assert "started=" in members_database.detail
+    assert "finished=" not in members_database.detail
 
 
 def test_members_live_check_reads_only_page_one_without_full_scrape():

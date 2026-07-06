@@ -304,10 +304,15 @@ class ScraperTester(commands.Cog):
 
         status, started_at, finished_at, rows_parsed, rows_inserted, errors, message = row
         ok = status != "failed"
+        timestamp_label = "finished"
+        timestamp_value = finished_at or started_at
+        if status == "running" and not finished_at:
+            timestamp_label = "started"
+
         detail = (
             f"{path.name}, {size_kb:.1f} KB, latest={status}, "
             f"parsed={rows_parsed}, inserted={rows_inserted}, errors={errors}, "
-            f"finished={finished_at or started_at}"
+            f"{timestamp_label}={timestamp_value}"
         )
         stale_after = STALE_AFTER_SECONDS.get(spec.key)
         if stale_after:
