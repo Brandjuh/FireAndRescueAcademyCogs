@@ -205,12 +205,139 @@ class Leaderboard(commands.Cog):
         logger.info(f"Found last scrape: {last_scrape} ({last_count} members)")
         
         return first_scrape, last_scrape
+
+    def _parse_member_timestamp(self, timestamp: str) -> Optional[datetime]:
+        """Parse member scraper timestamps as UTC-aware datetimes."""
+        if not timestamp:
+            return None
+
+        value = timestamp.strip()
+        if value.endswith("Z"):
+            value = f"{value[:-1]}+00:00"
+
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+
+        if parsed.tzinfo is None:
+            # MembersScraper stores datetime.utcnow().isoformat() for live rows.
+            parsed = pytz.UTC.localize(parsed)
+
+        return parsed.astimezone(pytz.UTC)
+
+    async def _member_snapshot_source_column_exists(self, db) -> bool:
+        async with db.execute("PRAGMA table_info(members)") as cursor:
+            columns = await cursor.fetchall()
+        return any(column[1] == "snapshot_source" for column in columns)
+
+    async def _get_member_snapshot_timestamps(self, db) -> list[tuple[datetime, str]]:
+        """Return parsed member snapshot timestamps, preferring live snapshots."""
+        has_snapshot_source = await self._member_snapshot_source_column_exists(db)
+        queries = []
+        if has_snapshot_source:
+            queries.append(
+                """
+                SELECT DISTINCT timestamp
+                FROM members
+                WHERE snapshot_source = 'live'
+                """
+            )
+        queries.append("SELECT DISTINCT timestamp FROM members")
+
+        for query in queries:
+            async with db.execute(query) as cursor:
+                rows = await cursor.fetchall()
+
+            timestamps = []
+            for (raw_timestamp,) in rows:
+                parsed = self._parse_member_timestamp(raw_timestamp)
+                if parsed is not None:
+                    timestamps.append((parsed, raw_timestamp))
+
+            if timestamps:
+                timestamps.sort(key=lambda item: item[0])
+                return timestamps
+
+        return []
+
+    def _select_earned_snapshot_pair(
+        self,
+        timestamps: list[tuple[datetime, str]],
+        start_time: datetime,
+        end_time: datetime,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """
+        Pick the end snapshot and baseline snapshot for cumulative earned credits.
+
+        The scraper stores lifetime earned credits. A daily/monthly delta therefore needs
+        the latest snapshot inside the reporting window and the closest snapshot before
+        the window started. If no before-window baseline exists, fall back to the first
+        in-window snapshot only when there are at least two in-window snapshots.
+        """
+        in_window = [(parsed, raw) for parsed, raw in timestamps if start_time <= parsed <= end_time]
+        if not in_window:
+            return None, None
+
+        current = in_window[-1]
+        baselines = [(parsed, raw) for parsed, raw in timestamps if parsed < start_time]
+        if baselines:
+            baseline = baselines[-1]
+        elif len(in_window) >= 2:
+            baseline = in_window[0]
+        else:
+            return None, None
+
+        if baseline[0] >= current[0]:
+            return None, None
+
+        return current[1], baseline[1]
+
+    async def _get_earned_delta_rankings_for_snapshots(
+        self,
+        db,
+        current_timestamp: str,
+        baseline_timestamp: str,
+        limit: int,
+    ) -> list[Dict]:
+        query = """
+            SELECT
+                current.member_id,
+                current.username,
+                current.earned_credits - baseline.earned_credits AS delta
+            FROM members AS current
+            JOIN members AS baseline ON baseline.member_id = current.member_id
+            WHERE current.timestamp = ?
+            AND baseline.timestamp = ?
+            AND current.earned_credits > baseline.earned_credits
+            ORDER BY delta DESC
+            LIMIT 30
+        """
+        async with db.execute(query, (current_timestamp, baseline_timestamp)) as cursor:
+            rows = await cursor.fetchall()
+
+        delta_list = [
+            {
+                "username": username,
+                "credits": delta,
+                "user_id": str(member_id),
+            }
+            for member_id, username, delta in rows
+        ]
+        delta_filtered = self._filter_invalid_entries(delta_list)
+        delta_filtered.sort(key=lambda entry: entry["credits"], reverse=True)
+        rankings = delta_filtered[:limit]
+
+        for index, entry in enumerate(rankings, 1):
+            entry["rank"] = index
+
+        return rankings
     
     async def _get_earned_credits_rankings(self, period: str) -> Optional[Dict]:
         """
         Get earned credits rankings from members_v2.db.
-        For each member, finds MIN and MAX earned_credits within the period.
-        Delta = MAX - MIN for that member on that day.
+        Compares the latest snapshot in the completed period against the closest
+        baseline snapshot before that period started.
         Returns dict with 'current' and 'previous' lists of {username, credits, rank}
         """
         if not self.members_db_path.exists():
@@ -224,81 +351,54 @@ class Leaderboard(commands.Cog):
                 current_start, current_end, previous_start, previous_end = self._get_period_boundaries(period, now)
                 
                 logger.info(f"Earned credits {period} - Current period: {current_start} to {current_end}")
-                
-                # For each member, get MIN and MAX earned_credits in the period
-                query = """
-                    SELECT 
-                        member_id,
-                        username,
-                        MIN(earned_credits) as min_credits,
-                        MAX(earned_credits) as max_credits,
-                        (MAX(earned_credits) - MIN(earned_credits)) as delta
-                    FROM members
-                    WHERE timestamp >= ? AND timestamp <= ?
-                    GROUP BY member_id
-                    HAVING delta > 0
-                    ORDER BY delta DESC
-                """
-                
-                current_start_iso = current_start.isoformat()
-                current_end_iso = current_end.isoformat()
-                
-                async with db.execute(query, (current_start_iso, current_end_iso)) as cursor:
-                    current_data = await cursor.fetchall()
-                
-                if not current_data:
+
+                timestamps = await self._get_member_snapshot_timestamps(db)
+                current_ts, baseline_ts = self._select_earned_snapshot_pair(
+                    timestamps,
+                    current_start,
+                    current_end,
+                )
+
+                if not current_ts or not baseline_ts:
+                    logger.warning("No usable member snapshot pair found in current period")
+                    return None
+
+                logger.info(
+                    "Earned credits %s - Current snapshot: %s, baseline: %s",
+                    period,
+                    current_ts,
+                    baseline_ts,
+                )
+
+                current_rankings = await self._get_earned_delta_rankings_for_snapshots(
+                    db,
+                    current_ts,
+                    baseline_ts,
+                    10,
+                )
+                if not current_rankings:
                     logger.warning("No members with positive credit growth in current period")
                     return None
-                
-                logger.info(f"Found {len(current_data)} members with positive growth")
-                
-                # Convert to list of dicts
-                delta_list = []
-                for member_id, username, min_cred, max_cred, delta in current_data:
-                    delta_list.append({
-                        "username": username,
-                        "credits": delta,
-                        "user_id": str(member_id)
-                    })
-                
-                # Filter invalid entries
-                delta_filtered = self._filter_invalid_entries(delta_list)
-                
-                logger.info(f"After filtering: {len(delta_filtered)} members")
-                
-                # Sort by delta and get top 10
-                delta_filtered.sort(key=lambda x: x["credits"], reverse=True)
-                current_rankings = delta_filtered[:10]
-                
-                # Add ranks
-                for i, entry in enumerate(current_rankings, 1):
-                    entry["rank"] = i
-                
-                # Do the same for previous period
-                previous_start_iso = previous_start.isoformat()
-                previous_end_iso = previous_end.isoformat()
-                
-                async with db.execute(query, (previous_start_iso, previous_end_iso)) as cursor:
-                    previous_data = await cursor.fetchall()
-                
+
                 previous_rankings = []
-                if previous_data:
-                    logger.info(f"Previous period: {len(previous_data)} members with positive growth")
-                    
-                    prev_delta_list = []
-                    for member_id, username, min_cred, max_cred, delta in previous_data:
-                        prev_delta_list.append({
-                            "username": username,
-                            "credits": delta,
-                            "user_id": str(member_id)
-                        })
-                    
-                    prev_delta_filtered = self._filter_invalid_entries(prev_delta_list)
-                    prev_delta_filtered.sort(key=lambda x: x["credits"], reverse=True)
-                    previous_rankings = prev_delta_filtered[:20]
-                    
-                    for i, entry in enumerate(previous_rankings, 1):
-                        entry["rank"] = i
+                previous_ts, previous_baseline_ts = self._select_earned_snapshot_pair(
+                    timestamps,
+                    previous_start,
+                    previous_end,
+                )
+                if previous_ts and previous_baseline_ts:
+                    logger.info(
+                        "Earned credits %s - Previous snapshot: %s, baseline: %s",
+                        period,
+                        previous_ts,
+                        previous_baseline_ts,
+                    )
+                    previous_rankings = await self._get_earned_delta_rankings_for_snapshots(
+                        db,
+                        previous_ts,
+                        previous_baseline_ts,
+                        20,
+                    )
                 
                 return {
                     "current": current_rankings,
