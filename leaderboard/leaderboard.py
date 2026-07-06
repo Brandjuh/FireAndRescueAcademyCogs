@@ -308,37 +308,11 @@ class Leaderboard(commands.Cog):
         except Exception as e:
             logger.error(f"Error getting earned credits rankings: {e}", exc_info=True)
             return None
-
-    async def _get_latest_income_snapshot_in_window(
-        self,
-        db,
-        period: str,
-        start_time: datetime,
-        end_time: datetime,
-    ) -> Optional[str]:
-        """Return the newest cumulative income snapshot inside a completed NY period."""
-        query = """
-            SELECT timestamp
-            FROM income
-            WHERE entry_type = 'income'
-            AND period = ?
-            AND timestamp >= ?
-            AND timestamp <= ?
-            GROUP BY timestamp
-            ORDER BY timestamp DESC
-            LIMIT 1
-        """
-        async with db.execute(
-            query,
-            (period, start_time.isoformat(), end_time.isoformat()),
-        ) as cursor:
-            row = await cursor.fetchone()
-        return row[0] if row else None
     
     async def _get_treasury_rankings(self, period: str) -> Optional[Dict]:
         """
         Get treasury contribution rankings from income_v2.db.
-        Uses the newest cumulative snapshot inside the completed NY day/month.
+        Uses the most recent scrape from the specified period.
         Returns dict with 'current' and 'previous' lists of {username, credits, rank}
         """
         if not self.income_db_path.exists():
@@ -347,31 +321,26 @@ class Leaderboard(commands.Cog):
         
         try:
             async with aiosqlite.connect(self.income_db_path) as db:
-                now = datetime.now(self.tz_amsterdam)
-                current_start, current_end, previous_start, previous_end = self._get_period_boundaries(period, now)
-
-                current_ts = await self._get_latest_income_snapshot_in_window(
-                    db,
-                    period,
-                    current_start,
-                    current_end,
-                )
-                previous_ts = await self._get_latest_income_snapshot_in_window(
-                    db,
-                    period,
-                    previous_start,
-                    previous_end,
-                )
-
-                if not current_ts:
-                    logger.warning(
-                        "No treasury %s snapshot found between %s and %s",
-                        period,
-                        current_start.isoformat(),
-                        current_end.isoformat(),
-                    )
+                # Get the two most recent timestamps for this period
+                query = """
+                    SELECT DISTINCT timestamp
+                    FROM income
+                    WHERE entry_type = 'income' 
+                    AND period = ?
+                    ORDER BY timestamp DESC
+                    LIMIT 2
+                """
+                
+                async with db.execute(query, (period,)) as cursor:
+                    timestamps = await cursor.fetchall()
+                
+                if not timestamps:
+                    logger.warning(f"No timestamp found for treasury {period}")
                     return None
-
+                
+                current_ts = timestamps[0][0]
+                previous_ts = timestamps[1][0] if len(timestamps) > 1 else None
+                
                 logger.info(f"Treasury {period} - Current: {current_ts}, Previous: {previous_ts}")
                 
                 # Get current period rankings (fetch more to account for filtering)
