@@ -37,6 +37,7 @@ MIN_EXIT_DETECTION_RETENTION = 0.50
 PAGE_REQUEST_BASE_DELAY_SECONDS = 1.5
 PAGE_REQUEST_MAX_ATTEMPTS = 3
 PAGE_REQUEST_BACKOFF_CAP_SECONDS = 60.0
+FULL_MEMBER_SCRAPE_TIMEOUT_SECONDS = 30 * 60
 
 class MembersScraper(commands.Cog):
     """Scrapes alliance members data from MissionChief"""
@@ -68,6 +69,10 @@ class MembersScraper(commands.Cog):
         self.last_auto_scrape_finished_at = None
         self.last_auto_scrape_status = "never"
         self.last_auto_scrape_error = None
+        self.current_scrape_run_id = None
+        self.current_scrape_page = None
+        self.last_scrape_page_finished = None
+        self.last_scrape_page_finished_at = None
         self._scrape_lock = asyncio.Lock()
         self.debug_mode = False
         self.debug_channel = None
@@ -938,13 +943,47 @@ class MembersScraper(commands.Cog):
         detail = "backfilling member snapshots" if custom_timestamp else "scraping alliance members"
         async with lock:
             async with self._bot_status(detail):
-                return await self._scrape_all_members_impl(ctx, custom_timestamp)
+                self.current_scrape_page = None
+                self.last_scrape_page_finished = None
+                self.last_scrape_page_finished_at = None
+                try:
+                    scrape = self._scrape_all_members_impl(ctx, custom_timestamp)
+                    if custom_timestamp:
+                        return await scrape
+                    return await asyncio.wait_for(scrape, timeout=FULL_MEMBER_SCRAPE_TIMEOUT_SECONDS)
+                except asyncio.TimeoutError:
+                    self.last_auto_scrape_error = (
+                        f"TimeoutError: members scrape exceeded "
+                        f"{FULL_MEMBER_SCRAPE_TIMEOUT_SECONDS // 60} minutes"
+                    )
+                    self._finish_scrape_run(
+                        self.current_scrape_run_id,
+                        "failed",
+                        pages_attempted=self.current_scrape_page or 0,
+                        pages_succeeded=self.last_scrape_page_finished or 0,
+                        errors=1,
+                        message=f"scrape timed out after {FULL_MEMBER_SCRAPE_TIMEOUT_SECONDS // 60} minutes",
+                    )
+                    await self._debug_log(
+                        f"Members scrape timed out after {FULL_MEMBER_SCRAPE_TIMEOUT_SECONDS // 60} minutes",
+                        ctx,
+                    )
+                    if ctx:
+                        await ctx.send(
+                            f"Members scrape timed out after {FULL_MEMBER_SCRAPE_TIMEOUT_SECONDS // 60} minutes. "
+                            "No new member snapshot was saved."
+                        )
+                    return False
+                finally:
+                    self.current_scrape_page = None
+                    self.current_scrape_run_id = None
 
     async def _scrape_all_members_impl(self, ctx=None, custom_timestamp=None):
         """Scrape all pages of members"""
         scrape_timestamp = custom_timestamp if custom_timestamp else datetime.utcnow().isoformat()
         snapshot_source = "backfill" if custom_timestamp else "live"
         run_id = self._start_scrape_run(snapshot_source, scrape_timestamp)
+        self.current_scrape_run_id = run_id
 
         session = await self._get_session(ctx)
         if not session:
@@ -963,6 +1002,7 @@ class MembersScraper(commands.Cog):
         empty_page_count = 0
         
         while page <= max_pages:
+            self.current_scrape_page = page
             members = await self._scrape_members_page(session, page, scrape_timestamp, ctx)
             
             if members is None:
@@ -996,6 +1036,8 @@ class MembersScraper(commands.Cog):
                 all_members.extend(members)
                 await self._debug_log(f"✅ Page {page}: {len(members)} members (total so far: {len(all_members)})", ctx)
             
+            self.last_scrape_page_finished = page
+            self.last_scrape_page_finished_at = datetime.utcnow().isoformat()
             page += 1
         
         await self._debug_log(f"📊 Total members scraped: {len(all_members)} across {page - 1} pages", ctx)
@@ -1266,6 +1308,12 @@ class MembersScraper(commands.Cog):
             elapsed = self._format_elapsed_since(self.last_auto_scrape_started_at)
             if elapsed:
                 lines.append(f"Current auto scrape elapsed: {elapsed}")
+            if self.current_scrape_page:
+                lines.append(f"Current page: {self.current_scrape_page}")
+            if self.last_scrape_page_finished:
+                lines.append(f"Last completed page: {self.last_scrape_page_finished}")
+                if self.last_scrape_page_finished_at:
+                    lines.append(f"Last completed page at: {self.last_scrape_page_finished_at}")
         if self.last_auto_scrape_error:
             lines.append(f"Last auto error: {self.last_auto_scrape_error}")
         lines.append(f"Database: {self.db_path}")
