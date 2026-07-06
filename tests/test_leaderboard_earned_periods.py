@@ -180,6 +180,37 @@ class LeaderboardEarnedPeriodTests(unittest.TestCase):
         self.assertEqual(result["current"][0]["username"], "LiveWinner")
         self.assertEqual(result["current"][0]["credits"], 500)
 
+    def test_daily_earned_uses_unknown_baseline_when_current_snapshot_is_live(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "members_v2.db"
+            connection = create_members_db(db_path)
+            try:
+                insert_member_snapshot(
+                    connection,
+                    member_id=1,
+                    username="MigratedBaseline",
+                    earned_credits=2_000,
+                    timestamp="2026-07-05T03:55:00",
+                    snapshot_source="unknown",
+                )
+                insert_member_snapshot(
+                    connection,
+                    member_id=1,
+                    username="MigratedBaseline",
+                    earned_credits=2_600,
+                    timestamp="2026-07-06T03:55:00",
+                    snapshot_source="live",
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            result = asyncio.run(fixed_leaderboard(db_path)._get_earned_credits_rankings("daily"))
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["current"][0]["username"], "MigratedBaseline")
+        self.assertEqual(result["current"][0]["credits"], 600)
+
 
 if __name__ == "__main__":
     unittest.main()

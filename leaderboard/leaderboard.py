@@ -231,39 +231,39 @@ class Leaderboard(commands.Cog):
             columns = await cursor.fetchall()
         return any(column[1] == "snapshot_source" for column in columns)
 
-    async def _get_member_snapshot_timestamps(self, db) -> list[tuple[datetime, str]]:
-        """Return parsed member snapshot timestamps, preferring live snapshots."""
+    async def _get_member_snapshot_timestamps(
+        self,
+        db,
+        *,
+        live_only: bool = False,
+    ) -> list[tuple[datetime, str]]:
+        """Return parsed member snapshot timestamps."""
         has_snapshot_source = await self._member_snapshot_source_column_exists(db)
-        queries = []
-        if has_snapshot_source:
-            queries.append(
-                """
+        if has_snapshot_source and live_only:
+            query = """
                 SELECT DISTINCT timestamp
                 FROM members
                 WHERE snapshot_source = 'live'
-                """
-            )
-        queries.append("SELECT DISTINCT timestamp FROM members")
+            """
+        else:
+            query = "SELECT DISTINCT timestamp FROM members"
 
-        for query in queries:
-            async with db.execute(query) as cursor:
-                rows = await cursor.fetchall()
+        async with db.execute(query) as cursor:
+            rows = await cursor.fetchall()
 
-            timestamps = []
-            for (raw_timestamp,) in rows:
-                parsed = self._parse_member_timestamp(raw_timestamp)
-                if parsed is not None:
-                    timestamps.append((parsed, raw_timestamp))
+        timestamps = []
+        for (raw_timestamp,) in rows:
+            parsed = self._parse_member_timestamp(raw_timestamp)
+            if parsed is not None:
+                timestamps.append((parsed, raw_timestamp))
 
-            if timestamps:
-                timestamps.sort(key=lambda item: item[0])
-                return timestamps
-
-        return []
+        timestamps.sort(key=lambda item: item[0])
+        return timestamps
 
     def _select_earned_snapshot_pair(
         self,
-        timestamps: list[tuple[datetime, str]],
+        preferred_timestamps: list[tuple[datetime, str]],
+        fallback_timestamps: list[tuple[datetime, str]],
         start_time: datetime,
         end_time: datetime,
     ) -> tuple[Optional[str], Optional[str]]:
@@ -272,19 +272,31 @@ class Leaderboard(commands.Cog):
 
         The scraper stores lifetime earned credits. A daily/monthly delta therefore needs
         the latest snapshot inside the reporting window and the closest snapshot before
-        the window started. If no before-window baseline exists, fall back to the first
-        in-window snapshot only when there are at least two in-window snapshots.
+        the window started. Prefer live snapshots for both sides, but allow the baseline
+        to come from older unknown-source rows so migrated databases do not go blank.
         """
-        in_window = [(parsed, raw) for parsed, raw in timestamps if start_time <= parsed <= end_time]
+        preferred_in_window = [
+            (parsed, raw) for parsed, raw in preferred_timestamps if start_time <= parsed <= end_time
+        ]
+        fallback_in_window = [
+            (parsed, raw) for parsed, raw in fallback_timestamps if start_time <= parsed <= end_time
+        ]
+        in_window = preferred_in_window or fallback_in_window
         if not in_window:
             return None, None
 
         current = in_window[-1]
-        baselines = [(parsed, raw) for parsed, raw in timestamps if parsed < start_time]
+        preferred_baselines = [
+            (parsed, raw) for parsed, raw in preferred_timestamps if parsed < start_time
+        ]
+        fallback_baselines = [
+            (parsed, raw) for parsed, raw in fallback_timestamps if parsed < start_time
+        ]
+        baselines = preferred_baselines or fallback_baselines
         if baselines:
             baseline = baselines[-1]
-        elif len(in_window) >= 2:
-            baseline = in_window[0]
+        elif len(fallback_in_window) >= 2:
+            baseline = fallback_in_window[0]
         else:
             return None, None
 
@@ -352,9 +364,11 @@ class Leaderboard(commands.Cog):
                 
                 logger.info(f"Earned credits {period} - Current period: {current_start} to {current_end}")
 
-                timestamps = await self._get_member_snapshot_timestamps(db)
+                live_timestamps = await self._get_member_snapshot_timestamps(db, live_only=True)
+                all_timestamps = await self._get_member_snapshot_timestamps(db)
                 current_ts, baseline_ts = self._select_earned_snapshot_pair(
-                    timestamps,
+                    live_timestamps,
+                    all_timestamps,
                     current_start,
                     current_end,
                 )
@@ -382,7 +396,8 @@ class Leaderboard(commands.Cog):
 
                 previous_rankings = []
                 previous_ts, previous_baseline_ts = self._select_earned_snapshot_pair(
-                    timestamps,
+                    live_timestamps,
+                    all_timestamps,
                     previous_start,
                     previous_end,
                 )
