@@ -64,6 +64,10 @@ class MembersScraper(commands.Cog):
         self.base_url = "https://www.missionchief.com"
         self.members_url = f"{self.base_url}/verband/mitglieder/1621"
         self.scraping_task = None
+        self.last_auto_scrape_started_at = None
+        self.last_auto_scrape_finished_at = None
+        self.last_auto_scrape_status = "never"
+        self.last_auto_scrape_error = None
         self._scrape_lock = asyncio.Lock()
         self.debug_mode = False
         self.debug_channel = None
@@ -71,13 +75,29 @@ class MembersScraper(commands.Cog):
         
     def cog_load(self):
         """Start background task when cog loads"""
-        self.scraping_task = self.bot.loop.create_task(self._background_scraper())
+        self._ensure_background_task()
         log.info("MembersScraper loaded - WITH exit detection")
         
     def cog_unload(self):
         """Cancel background task when cog unloads"""
         if self.scraping_task:
             self.scraping_task.cancel()
+
+    def _task_is_running(self, task=None) -> bool:
+        task = self.scraping_task if task is None else task
+        if task is None:
+            return False
+        try:
+            return not task.cancelled() and not task.done()
+        except Exception:
+            return False
+
+    def _ensure_background_task(self) -> bool:
+        """Start the hourly background task if it is missing or stopped."""
+        if self._task_is_running():
+            return False
+        self.scraping_task = self.bot.loop.create_task(self._background_scraper())
+        return True
 
     @asynccontextmanager
     async def _bot_status(self, detail, *, priority=80):
@@ -1078,10 +1098,18 @@ class MembersScraper(commands.Cog):
         
         while not self.bot.is_closed():
             try:
-                print(f"[MembersScraper] Starting automatic scrape at {datetime.utcnow()}")
-                await self._scrape_all_members()
+                self.last_auto_scrape_started_at = datetime.utcnow().isoformat()
+                self.last_auto_scrape_status = "running"
+                self.last_auto_scrape_error = None
+                print(f"[MembersScraper] Starting automatic scrape at {self.last_auto_scrape_started_at}")
+                success = await self._scrape_all_members()
+                self.last_auto_scrape_finished_at = datetime.utcnow().isoformat()
+                self.last_auto_scrape_status = "success" if success else "failed"
                 print("[MembersScraper] Automatic scrape completed")
             except Exception as e:
+                self.last_auto_scrape_finished_at = datetime.utcnow().isoformat()
+                self.last_auto_scrape_status = "error"
+                self.last_auto_scrape_error = f"{type(e).__name__}: {e}"
                 print(f"[MembersScraper] Background task error: {e}")
                 log.exception("Background scraper error")
             
@@ -1192,6 +1220,62 @@ class MembersScraper(commands.Cog):
         await ctx.send(f"🐛 Debug mode: {'**ENABLED**' if enable else '**DISABLED**'}\n"
                       f"Debug messages will be sent to this channel.")
     
+    @members_group.command(name="task")
+    async def task_members(self, ctx):
+        """Show MembersScraper background task status."""
+        task = self.scraping_task
+        if task is None:
+            task_state = "missing"
+        else:
+            try:
+                if task.cancelled():
+                    task_state = "cancelled"
+                elif task.done():
+                    exception = task.exception()
+                    task_state = f"done with exception: {exception}" if exception else "done"
+                else:
+                    task_state = "running"
+            except Exception as exc:
+                task_state = f"could not inspect task: {exc}"
+
+        lines = [
+            "MembersScraper background task",
+            f"Task: {task_state}",
+            f"Last auto start: {self.last_auto_scrape_started_at or 'never'}",
+            f"Last auto finish: {self.last_auto_scrape_finished_at or 'never'}",
+            f"Last auto status: {self.last_auto_scrape_status or 'unknown'}",
+        ]
+        if self.last_auto_scrape_error:
+            lines.append(f"Last auto error: {self.last_auto_scrape_error}")
+        lines.append(f"Database: {self.db_path}")
+        await ctx.send("\n".join(lines))
+
+    @members_group.command(name="restarttask")
+    async def restart_members_task(self, ctx):
+        """Restart the MembersScraper hourly background task."""
+        old_task = self.scraping_task
+        restart_notice = None
+        if self._task_is_running(old_task):
+            old_task.cancel()
+            try:
+                await asyncio.wait_for(old_task, timeout=10)
+            except asyncio.CancelledError:
+                pass
+            except asyncio.TimeoutError:
+                await ctx.send(
+                    "MembersScraper background task did not stop within 10 seconds. "
+                    "No replacement task was started; reload the cog to avoid duplicate loops."
+                )
+                return
+            except Exception as exc:
+                restart_notice = f"Previous MembersScraper task stopped with error: {type(exc).__name__}: {exc}"
+        self.scraping_task = None
+        self._ensure_background_task()
+        message = "MembersScraper background task restarted."
+        if restart_notice:
+            message = f"{message}\n{restart_notice}"
+        await ctx.send(message)
+
     @members_group.command(name="setexitchannel")
     async def set_exit_channel(self, ctx, channel: discord.TextChannel):
         """

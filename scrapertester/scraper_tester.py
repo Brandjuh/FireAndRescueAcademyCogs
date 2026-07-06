@@ -37,6 +37,10 @@ SCRAPER_SPECS: tuple[ScraperSpec, ...] = (
     ScraperSpec("logs", "Logs", "LogsScraper", "logscraper"),
 )
 
+STALE_AFTER_SECONDS: dict[str, int] = {
+    "members": 2 * 60 * 60,
+}
+
 
 class ScraperTester(commands.Cog):
     """Owner-only health checks for the MissionChief scraper cogs."""
@@ -299,14 +303,50 @@ class ScraperTester(commands.Cog):
             return CheckResult(f"{spec.label} database", True, f"{path.name}, {size_kb:.1f} KB, no scrape_runs yet")
 
         status, started_at, finished_at, rows_parsed, rows_inserted, errors, message = row
+        ok = status != "failed"
         detail = (
             f"{path.name}, {size_kb:.1f} KB, latest={status}, "
             f"parsed={rows_parsed}, inserted={rows_inserted}, errors={errors}, "
             f"finished={finished_at or started_at}"
         )
+        stale_after = STALE_AFTER_SECONDS.get(spec.key)
+        if stale_after:
+            age_seconds = self._age_seconds(finished_at or started_at)
+            if age_seconds is None:
+                ok = False
+                detail = f"{detail}, age=unknown"
+            elif age_seconds > stale_after:
+                ok = False
+                detail = f"{detail}, stale_for={self._format_age(age_seconds)}"
         if message:
             detail = f"{detail}, message={message}"
-        return CheckResult(f"{spec.label} database", status != "failed", detail)
+        return CheckResult(f"{spec.label} database", ok, detail)
+
+    def _age_seconds(self, value: Optional[str]) -> Optional[float]:
+        if not value:
+            return None
+        timestamp = value.strip()
+        if timestamp.endswith("Z"):
+            timestamp = f"{timestamp[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(timestamp)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.astimezone(timezone.utc)
+        return (datetime.now(timezone.utc) - parsed).total_seconds()
+
+    def _format_age(self, seconds: float) -> str:
+        seconds = max(0, int(seconds))
+        days, remainder = divmod(seconds, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, _ = divmod(remainder, 60)
+        if days:
+            return f"{days}d {hours}h"
+        if hours:
+            return f"{hours}h {minutes}m"
+        return f"{minutes}m"
 
     async def _send_report(self, ctx, title: str, results: list[CheckResult]) -> None:
         ok_count = sum(1 for result in results if result.ok)
