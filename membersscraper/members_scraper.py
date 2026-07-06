@@ -99,6 +99,23 @@ class MembersScraper(commands.Cog):
         self.scraping_task = self.bot.loop.create_task(self._background_scraper())
         return True
 
+    def _format_elapsed_since(self, value) -> Optional[str]:
+        if not value:
+            return None
+        try:
+            started = datetime.fromisoformat(str(value))
+        except ValueError:
+            return None
+        now = datetime.now(started.tzinfo) if started.tzinfo else datetime.utcnow()
+        seconds = max(0, int((now - started).total_seconds()))
+        hours, remainder = divmod(seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours:
+            return f"{hours}h {minutes}m {seconds}s"
+        if minutes:
+            return f"{minutes}m {seconds}s"
+        return f"{seconds}s"
+
     @asynccontextmanager
     async def _bot_status(self, detail, *, priority=80):
         bot = getattr(self, "bot", None)
@@ -1245,6 +1262,10 @@ class MembersScraper(commands.Cog):
             f"Last auto finish: {self.last_auto_scrape_finished_at or 'never'}",
             f"Last auto status: {self.last_auto_scrape_status or 'unknown'}",
         ]
+        if self.last_auto_scrape_status == "running":
+            elapsed = self._format_elapsed_since(self.last_auto_scrape_started_at)
+            if elapsed:
+                lines.append(f"Current auto scrape elapsed: {elapsed}")
         if self.last_auto_scrape_error:
             lines.append(f"Last auto error: {self.last_auto_scrape_error}")
         lines.append(f"Database: {self.db_path}")
