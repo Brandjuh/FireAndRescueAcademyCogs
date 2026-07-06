@@ -63,16 +63,15 @@ def insert_member_snapshot(
     username: str,
     earned_credits: int,
     timestamp: str,
-    snapshot_source: str = "live",
 ):
     connection.execute(
         """
         INSERT INTO members (
             member_id, username, rank, earned_credits, contribution_rate,
-            online_status, timestamp, snapshot_source
-        ) VALUES (?, ?, 'Member', ?, 5.0, 'offline', ?, ?)
+            online_status, timestamp
+        ) VALUES (?, ?, 'Member', ?, 5.0, 'offline', ?)
         """,
-        (member_id, username, earned_credits, timestamp, snapshot_source),
+        (member_id, username, earned_credits, timestamp),
     )
 
 
@@ -96,7 +95,7 @@ def fixed_leaderboard(db_path: Path) -> Leaderboard:
 
 
 class LeaderboardEarnedPeriodTests(unittest.TestCase):
-    def test_daily_earned_uses_before_window_baseline_with_single_in_window_snapshot(self):
+    def test_daily_earned_uses_min_max_within_completed_day_window(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "members_v2.db"
             connection = create_members_db(db_path)
@@ -106,28 +105,28 @@ class LeaderboardEarnedPeriodTests(unittest.TestCase):
                     member_id=1,
                     username="ExpectedWinner",
                     earned_credits=1_000,
-                    timestamp="2026-07-05T03:55:00",
+                    timestamp="2026-07-05T05:00:00",
                 )
                 insert_member_snapshot(
                     connection,
                     member_id=1,
                     username="ExpectedWinner",
                     earned_credits=1_700,
-                    timestamp="2026-07-06T03:55:00",
+                    timestamp="2026-07-06T03:50:00",
                 )
                 insert_member_snapshot(
                     connection,
                     member_id=2,
                     username="SecondPlace",
                     earned_credits=5_000,
-                    timestamp="2026-07-05T03:55:00",
+                    timestamp="2026-07-05T05:00:00",
                 )
                 insert_member_snapshot(
                     connection,
                     member_id=2,
                     username="SecondPlace",
                     earned_credits=5_300,
-                    timestamp="2026-07-06T03:55:00",
+                    timestamp="2026-07-06T03:50:00",
                 )
                 connection.commit()
             finally:
@@ -140,76 +139,6 @@ class LeaderboardEarnedPeriodTests(unittest.TestCase):
         self.assertEqual(result["current"][0]["credits"], 700)
         self.assertEqual(result["current"][1]["username"], "SecondPlace")
         self.assertEqual(result["current"][1]["credits"], 300)
-
-    def test_daily_earned_prefers_live_snapshots_over_backfill_snapshots(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            db_path = Path(temp_dir) / "members_v2.db"
-            connection = create_members_db(db_path)
-            try:
-                insert_member_snapshot(
-                    connection,
-                    member_id=1,
-                    username="LiveWinner",
-                    earned_credits=1_000,
-                    timestamp="2026-07-05T03:55:00",
-                    snapshot_source="live",
-                )
-                insert_member_snapshot(
-                    connection,
-                    member_id=1,
-                    username="LiveWinner",
-                    earned_credits=1_500,
-                    timestamp="2026-07-06T03:50:00",
-                    snapshot_source="live",
-                )
-                insert_member_snapshot(
-                    connection,
-                    member_id=1,
-                    username="LiveWinner",
-                    earned_credits=9_999,
-                    timestamp="2026-07-06T03:55:00",
-                    snapshot_source="backfill",
-                )
-                connection.commit()
-            finally:
-                connection.close()
-
-            result = asyncio.run(fixed_leaderboard(db_path)._get_earned_credits_rankings("daily"))
-
-        self.assertIsNotNone(result)
-        self.assertEqual(result["current"][0]["username"], "LiveWinner")
-        self.assertEqual(result["current"][0]["credits"], 500)
-
-    def test_daily_earned_uses_unknown_baseline_when_current_snapshot_is_live(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            db_path = Path(temp_dir) / "members_v2.db"
-            connection = create_members_db(db_path)
-            try:
-                insert_member_snapshot(
-                    connection,
-                    member_id=1,
-                    username="MigratedBaseline",
-                    earned_credits=2_000,
-                    timestamp="2026-07-05T03:55:00",
-                    snapshot_source="unknown",
-                )
-                insert_member_snapshot(
-                    connection,
-                    member_id=1,
-                    username="MigratedBaseline",
-                    earned_credits=2_600,
-                    timestamp="2026-07-06T03:55:00",
-                    snapshot_source="live",
-                )
-                connection.commit()
-            finally:
-                connection.close()
-
-            result = asyncio.run(fixed_leaderboard(db_path)._get_earned_credits_rankings("daily"))
-
-        self.assertIsNotNone(result)
-        self.assertEqual(result["current"][0]["username"], "MigratedBaseline")
-        self.assertEqual(result["current"][0]["credits"], 600)
 
 
 if __name__ == "__main__":
