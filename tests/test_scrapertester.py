@@ -1,5 +1,6 @@
 import asyncio
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from scrapertester.scraper_tester import SCRAPER_SPECS, ScraperTester
@@ -27,7 +28,8 @@ class FakeBot:
         return self._cogs.get(name)
 
 
-def make_scrape_runs_db(path: Path):
+def make_scrape_runs_db(path: Path, *, finished_at: str | None = None):
+    finished_at = finished_at or datetime.now(timezone.utc).isoformat()
     conn = sqlite3.connect(path)
     try:
         conn.execute(
@@ -48,8 +50,10 @@ def make_scrape_runs_db(path: Path):
             """
             INSERT INTO scrape_runs (
                 status, started_at, finished_at, rows_parsed, rows_inserted, errors, message
-            ) VALUES ('success', '2026-07-03T10:00:00+00:00', '2026-07-03T10:00:01+00:00', 1, 1, 0, 'ok')
+            ) VALUES ('success', '2026-07-03T10:00:00+00:00', ?, 1, 1, 0, 'ok')
             """
+            ,
+            (finished_at,),
         )
         conn.commit()
     finally:
@@ -79,6 +83,26 @@ def test_static_results_check_packaged_helpers_loaded_cogs_tasks_and_databases(t
     assert all(result.ok for result in results)
     assert any(result.label == "Applications package helper" for result in results)
     assert any(result.label == "Logs database" and "latest=success" in result.detail for result in results)
+
+
+def test_members_database_status_fails_when_latest_scrape_is_stale(tmp_path):
+    cogs_root = tmp_path / "cogs"
+    cogs_root.mkdir()
+    package_dir = cogs_root / "membersscraper"
+    package_dir.mkdir()
+    (package_dir / "fara_db.py").write_text("# helper\n", encoding="utf-8")
+
+    db_path = tmp_path / "members.db"
+    stale_finished_at = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+    make_scrape_runs_db(db_path, finished_at=stale_finished_at)
+    tester = ScraperTester(FakeBot({"MembersScraper": FakeScraperCog(db_path)}))
+    tester._cogs_root = cogs_root
+
+    results = tester._collect_static_results()
+    members_database = next(result for result in results if result.label == "Members database")
+
+    assert members_database.ok is False
+    assert "stale_for=" in members_database.detail
 
 
 def test_members_live_check_reads_only_page_one_without_full_scrape():
