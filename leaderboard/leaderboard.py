@@ -318,63 +318,20 @@ class Leaderboard(commands.Cog):
     ) -> Optional[str]:
         """Return the newest cumulative income snapshot inside a completed NY period."""
         query = """
-            SELECT DISTINCT timestamp
-            FROM income
-            WHERE entry_type = 'income'
-            AND period = ?
-        """
-        async with db.execute(query, (period,)) as cursor:
-            rows = await cursor.fetchall()
-
-        candidates = []
-        for (timestamp,) in rows:
-            parsed = self._parse_db_timestamp(timestamp)
-            if parsed is None:
-                continue
-            if start_time <= parsed <= end_time:
-                candidates.append((parsed, timestamp))
-
-        if not candidates:
-            return None
-
-        candidates.sort(key=lambda item: item[0], reverse=True)
-        return candidates[0][1]
-
-    def _parse_db_timestamp(self, timestamp: str) -> Optional[datetime]:
-        """Parse legacy naive and timezone-aware DB timestamps as UTC-aware values."""
-        if not timestamp:
-            return None
-
-        value = timestamp.strip()
-        if value.endswith("Z"):
-            value = f"{value[:-1]}+00:00"
-
-        try:
-            parsed = datetime.fromisoformat(value)
-        except ValueError:
-            return None
-
-        if parsed.tzinfo is None:
-            # Older scraper rows used datetime.now().isoformat() on the Amsterdam host.
-            if hasattr(self.tz_amsterdam, "localize"):
-                parsed = self.tz_amsterdam.localize(parsed)
-            else:
-                parsed = parsed.replace(tzinfo=self.tz_amsterdam)
-
-        return parsed.astimezone(pytz.UTC)
-
-    async def _get_latest_income_snapshot_overall(self, db, period: str) -> Optional[str]:
-        """Return the newest cumulative income snapshot for legacy fallback diagnostics."""
-        query = """
             SELECT timestamp
             FROM income
             WHERE entry_type = 'income'
             AND period = ?
+            AND timestamp >= ?
+            AND timestamp <= ?
             GROUP BY timestamp
             ORDER BY timestamp DESC
             LIMIT 1
         """
-        async with db.execute(query, (period,)) as cursor:
+        async with db.execute(
+            query,
+            (period, start_time.isoformat(), end_time.isoformat()),
+        ) as cursor:
             row = await cursor.fetchone()
         return row[0] if row else None
     
@@ -413,14 +370,7 @@ class Leaderboard(commands.Cog):
                         current_start.isoformat(),
                         current_end.isoformat(),
                     )
-                    current_ts = await self._get_latest_income_snapshot_overall(db, period)
-                    if not current_ts:
-                        return None
-                    logger.warning(
-                        "Falling back to latest treasury %s snapshot outside the reporting window: %s",
-                        period,
-                        current_ts,
-                    )
+                    return None
 
                 logger.info(f"Treasury {period} - Current: {current_ts}, Previous: {previous_ts}")
                 
