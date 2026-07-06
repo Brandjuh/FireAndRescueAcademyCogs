@@ -140,6 +140,35 @@ class LeaderboardEarnedPeriodTests(unittest.TestCase):
         self.assertEqual(result["current"][1]["username"], "SecondPlace")
         self.assertEqual(result["current"][1]["credits"], 300)
 
+    def test_daily_earned_handles_mixed_member_timestamp_formats(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "members_v2.db"
+            connection = create_members_db(db_path)
+            try:
+                insert_member_snapshot(
+                    connection,
+                    member_id=1,
+                    username="MixedTimestampWinner",
+                    earned_credits=10_000,
+                    timestamp="2026-07-05T05:00:00+00:00",
+                )
+                insert_member_snapshot(
+                    connection,
+                    member_id=1,
+                    username="MixedTimestampWinner",
+                    earned_credits=10_900,
+                    timestamp="2026-07-06T03:50:00Z",
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            result = asyncio.run(fixed_leaderboard(db_path)._get_earned_credits_rankings("daily"))
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["current"][0]["username"], "MixedTimestampWinner")
+        self.assertEqual(result["current"][0]["credits"], 900)
+
 
 if __name__ == "__main__":
     unittest.main()

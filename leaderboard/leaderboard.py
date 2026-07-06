@@ -206,6 +206,109 @@ class Leaderboard(commands.Cog):
         
         return first_scrape, last_scrape
 
+    def _parse_member_timestamp(self, timestamp: str) -> Optional[datetime]:
+        """Parse member scraper timestamps as UTC-aware datetimes."""
+        if not timestamp:
+            return None
+
+        value = timestamp.strip()
+        if value.endswith("Z"):
+            value = f"{value[:-1]}+00:00"
+
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+
+        if parsed.tzinfo is None:
+            parsed = pytz.UTC.localize(parsed)
+
+        return parsed.astimezone(pytz.UTC)
+
+    async def _get_member_timestamps_in_window(
+        self,
+        db,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> list[str]:
+        """
+        Return raw member snapshot timestamps that fall inside the UTC window.
+
+        MemberScraper has used multiple ISO timestamp styles over time. Comparing
+        those as raw strings in SQLite can miss valid scrapes, so window selection is
+        done after parsing timestamps into UTC-aware datetimes.
+        """
+        async with db.execute("SELECT DISTINCT timestamp FROM members") as cursor:
+            rows = await cursor.fetchall()
+
+        selected = []
+        for (raw_timestamp,) in rows:
+            parsed = self._parse_member_timestamp(raw_timestamp)
+            if parsed is not None and start_time <= parsed <= end_time:
+                selected.append((parsed, raw_timestamp))
+
+        selected.sort(key=lambda item: item[0])
+        return [raw for _, raw in selected]
+
+    async def _get_earned_credits_rankings_for_timestamps(
+        self,
+        db,
+        timestamps: list[str],
+        limit: int,
+    ) -> list[Dict]:
+        """Calculate MIN/MAX earned-credit deltas across selected snapshot timestamps."""
+        if not timestamps:
+            return []
+
+        await db.execute("DROP TABLE IF EXISTS temp_leaderboard_member_timestamps")
+        await db.execute(
+            """
+            CREATE TEMP TABLE temp_leaderboard_member_timestamps (
+                timestamp TEXT PRIMARY KEY
+            )
+            """
+        )
+        await db.executemany(
+            "INSERT OR IGNORE INTO temp_leaderboard_member_timestamps (timestamp) VALUES (?)",
+            [(timestamp,) for timestamp in timestamps],
+        )
+
+        query = """
+            SELECT
+                member_id,
+                username,
+                MIN(earned_credits) as min_credits,
+                MAX(earned_credits) as max_credits,
+                (MAX(earned_credits) - MIN(earned_credits)) as delta
+            FROM members
+            WHERE timestamp IN (SELECT timestamp FROM temp_leaderboard_member_timestamps)
+            GROUP BY member_id
+            HAVING delta > 0
+            ORDER BY delta DESC
+        """
+
+        async with db.execute(query) as cursor:
+            rows = await cursor.fetchall()
+
+        delta_list = []
+        for member_id, username, min_cred, max_cred, delta in rows:
+            delta_list.append({
+                "username": username,
+                "credits": delta,
+                "user_id": str(member_id),
+            })
+
+        delta_filtered = self._filter_invalid_entries(delta_list)
+        logger.info(f"After filtering: {len(delta_filtered)} members")
+
+        delta_filtered.sort(key=lambda entry: entry["credits"], reverse=True)
+        rankings = delta_filtered[:limit]
+
+        for index, entry in enumerate(rankings, 1):
+            entry["rank"] = index
+
+        return rankings
+
     async def _get_earned_credits_rankings(self, period: str) -> Optional[Dict]:
         """
         Get earned credits rankings from members_v2.db.
@@ -224,81 +327,36 @@ class Leaderboard(commands.Cog):
                 current_start, current_end, previous_start, previous_end = self._get_period_boundaries(period, now)
                 
                 logger.info(f"Earned credits {period} - Current period: {current_start} to {current_end}")
-                
-                # For each member, get MIN and MAX earned_credits in the period
-                query = """
-                    SELECT 
-                        member_id,
-                        username,
-                        MIN(earned_credits) as min_credits,
-                        MAX(earned_credits) as max_credits,
-                        (MAX(earned_credits) - MIN(earned_credits)) as delta
-                    FROM members
-                    WHERE timestamp >= ? AND timestamp <= ?
-                    GROUP BY member_id
-                    HAVING delta > 0
-                    ORDER BY delta DESC
-                """
-                
-                current_start_iso = current_start.isoformat()
-                current_end_iso = current_end.isoformat()
-                
-                async with db.execute(query, (current_start_iso, current_end_iso)) as cursor:
-                    current_data = await cursor.fetchall()
-                
-                if not current_data:
+
+                current_timestamps = await self._get_member_timestamps_in_window(
+                    db,
+                    current_start,
+                    current_end,
+                )
+                logger.info(f"Earned credits {period} - Current timestamps: {len(current_timestamps)}")
+
+                current_rankings = await self._get_earned_credits_rankings_for_timestamps(
+                    db,
+                    current_timestamps,
+                    10,
+                )
+
+                if not current_rankings:
                     logger.warning("No members with positive credit growth in current period")
                     return None
-                
-                logger.info(f"Found {len(current_data)} members with positive growth")
-                
-                # Convert to list of dicts
-                delta_list = []
-                for member_id, username, min_cred, max_cred, delta in current_data:
-                    delta_list.append({
-                        "username": username,
-                        "credits": delta,
-                        "user_id": str(member_id)
-                    })
-                
-                # Filter invalid entries
-                delta_filtered = self._filter_invalid_entries(delta_list)
-                
-                logger.info(f"After filtering: {len(delta_filtered)} members")
-                
-                # Sort by delta and get top 10
-                delta_filtered.sort(key=lambda x: x["credits"], reverse=True)
-                current_rankings = delta_filtered[:10]
-                
-                # Add ranks
-                for i, entry in enumerate(current_rankings, 1):
-                    entry["rank"] = i
-                
-                # Do the same for previous period
-                previous_start_iso = previous_start.isoformat()
-                previous_end_iso = previous_end.isoformat()
-                
-                async with db.execute(query, (previous_start_iso, previous_end_iso)) as cursor:
-                    previous_data = await cursor.fetchall()
-                
+
                 previous_rankings = []
-                if previous_data:
-                    logger.info(f"Previous period: {len(previous_data)} members with positive growth")
-                    
-                    prev_delta_list = []
-                    for member_id, username, min_cred, max_cred, delta in previous_data:
-                        prev_delta_list.append({
-                            "username": username,
-                            "credits": delta,
-                            "user_id": str(member_id)
-                        })
-                    
-                    prev_delta_filtered = self._filter_invalid_entries(prev_delta_list)
-                    prev_delta_filtered.sort(key=lambda x: x["credits"], reverse=True)
-                    previous_rankings = prev_delta_filtered[:20]
-                    
-                    for i, entry in enumerate(previous_rankings, 1):
-                        entry["rank"] = i
+                previous_timestamps = await self._get_member_timestamps_in_window(
+                    db,
+                    previous_start,
+                    previous_end,
+                )
+                if previous_timestamps:
+                    previous_rankings = await self._get_earned_credits_rankings_for_timestamps(
+                        db,
+                        previous_timestamps,
+                        20,
+                    )
                 
                 return {
                     "current": current_rankings,
@@ -716,6 +774,138 @@ class Leaderboard(commands.Cog):
         embed = self._create_leaderboard_embed(title, data, board_type, is_test=True)
         
         await ctx.send(embed=embed)
+
+    @topplayers.command(name="debugearned")
+    @checks.is_owner()
+    async def debug_earned(self, ctx, period: str = "daily"):
+        """Debug earned-credit leaderboard window and snapshot coverage."""
+        if period not in {"daily", "monthly"}:
+            await ctx.send("Invalid period. Use `daily` or `monthly`.")
+            return
+
+        if not self.members_db_path.exists():
+            await ctx.send("members_v2.db not found.")
+            return
+
+        now = datetime.now(self.tz_amsterdam)
+        current_start, current_end, previous_start, previous_end = self._get_period_boundaries(period, now)
+
+        try:
+            async with aiosqlite.connect(self.members_db_path) as db:
+                async with db.execute("SELECT COUNT(DISTINCT timestamp) FROM members") as cursor:
+                    total_timestamps = (await cursor.fetchone())[0]
+
+                raw_start = current_start.isoformat()
+                raw_end = current_end.isoformat()
+                async with db.execute(
+                    """
+                    SELECT COUNT(DISTINCT timestamp)
+                    FROM members
+                    WHERE timestamp >= ? AND timestamp <= ?
+                    """,
+                    (raw_start, raw_end),
+                ) as cursor:
+                    raw_window_timestamps = (await cursor.fetchone())[0]
+
+                selected_timestamps = await self._get_member_timestamps_in_window(
+                    db,
+                    current_start,
+                    current_end,
+                )
+
+                positive_members = 0
+                sample_rows = []
+                if selected_timestamps:
+                    await db.execute("DROP TABLE IF EXISTS temp_leaderboard_member_timestamps")
+                    await db.execute(
+                        """
+                        CREATE TEMP TABLE temp_leaderboard_member_timestamps (
+                            timestamp TEXT PRIMARY KEY
+                        )
+                        """
+                    )
+                    await db.executemany(
+                        "INSERT OR IGNORE INTO temp_leaderboard_member_timestamps (timestamp) VALUES (?)",
+                        [(timestamp,) for timestamp in selected_timestamps],
+                    )
+
+                    async with db.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM (
+                            SELECT member_id
+                            FROM members
+                            WHERE timestamp IN (
+                                SELECT timestamp FROM temp_leaderboard_member_timestamps
+                            )
+                            GROUP BY member_id
+                            HAVING MAX(earned_credits) - MIN(earned_credits) > 0
+                        )
+                        """
+                    ) as cursor:
+                        positive_members = (await cursor.fetchone())[0]
+
+                    async with db.execute(
+                        """
+                        SELECT
+                            username,
+                            MIN(earned_credits) AS min_credits,
+                            MAX(earned_credits) AS max_credits,
+                            MAX(earned_credits) - MIN(earned_credits) AS delta
+                        FROM members
+                        WHERE timestamp IN (
+                            SELECT timestamp FROM temp_leaderboard_member_timestamps
+                        )
+                        GROUP BY member_id
+                        HAVING delta > 0
+                        ORDER BY delta DESC
+                        LIMIT 5
+                        """
+                    ) as cursor:
+                        sample_rows = await cursor.fetchall()
+
+                first_selected = selected_timestamps[0] if selected_timestamps else "none"
+                last_selected = selected_timestamps[-1] if selected_timestamps else "none"
+                sample_text = "\n".join(
+                    f"- {username}: {delta:,} ({min_credits:,} -> {max_credits:,})"
+                    for username, min_credits, max_credits, delta in sample_rows
+                ) or "none"
+
+                embed = discord.Embed(
+                    title=f"Earned Leaderboard Debug - {period}",
+                    color=discord.Color.orange(),
+                )
+                embed.add_field(
+                    name="Window",
+                    value=(
+                        f"Start UTC: `{current_start.isoformat()}`\n"
+                        f"End UTC: `{current_end.isoformat()}`\n"
+                        f"Start NY: `{current_start.astimezone(self.tz_ny).strftime('%Y-%m-%d %H:%M:%S %Z')}`\n"
+                        f"End NY: `{current_end.astimezone(self.tz_ny).strftime('%Y-%m-%d %H:%M:%S %Z')}`"
+                    ),
+                    inline=False,
+                )
+                embed.add_field(
+                    name="Snapshots",
+                    value=(
+                        f"Total DB timestamps: `{total_timestamps}`\n"
+                        f"Raw SQL window timestamps: `{raw_window_timestamps}`\n"
+                        f"Parsed window timestamps: `{len(selected_timestamps)}`\n"
+                        f"First parsed: `{first_selected}`\n"
+                        f"Last parsed: `{last_selected}`"
+                    ),
+                    inline=False,
+                )
+                embed.add_field(
+                    name="Positive Earned Deltas",
+                    value=f"Members with positive growth: `{positive_members}`\nTop sample:\n{sample_text}",
+                    inline=False,
+                )
+                embed.set_footer(text=f"Database: {self.members_db_path}")
+                await ctx.send(embed=embed)
+        except Exception as e:
+            await ctx.send(f"Error while debugging earned leaderboard: {e}")
+            logger.error("Earned leaderboard debug failed: %s", e, exc_info=True)
     
     @topplayers.command(name="timestamps")
     @checks.is_owner()
