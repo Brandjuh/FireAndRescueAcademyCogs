@@ -308,80 +308,11 @@ class Leaderboard(commands.Cog):
         except Exception as e:
             logger.error(f"Error getting earned credits rankings: {e}", exc_info=True)
             return None
-
-    async def _get_latest_income_snapshot_in_window(
-        self,
-        db,
-        period: str,
-        start_time: datetime,
-        end_time: datetime,
-    ) -> Optional[str]:
-        """Return the newest cumulative income snapshot inside a completed NY period."""
-        query = """
-            SELECT DISTINCT timestamp
-            FROM income
-            WHERE entry_type = 'income'
-            AND period = ?
-        """
-        async with db.execute(query, (period,)) as cursor:
-            rows = await cursor.fetchall()
-
-        candidates = []
-        for (timestamp,) in rows:
-            parsed = self._parse_db_timestamp(timestamp)
-            if parsed is None:
-                continue
-            if start_time <= parsed <= end_time:
-                candidates.append((parsed, timestamp))
-
-        if not candidates:
-            return None
-
-        candidates.sort(key=lambda item: item[0], reverse=True)
-        return candidates[0][1]
-
-    def _parse_db_timestamp(self, timestamp: str) -> Optional[datetime]:
-        """Parse legacy naive and timezone-aware DB timestamps as UTC-aware values."""
-        if not timestamp:
-            return None
-
-        value = timestamp.strip()
-        if value.endswith("Z"):
-            value = f"{value[:-1]}+00:00"
-
-        try:
-            parsed = datetime.fromisoformat(value)
-        except ValueError:
-            return None
-
-        if parsed.tzinfo is None:
-            # Older scraper rows used datetime.now().isoformat() on the Amsterdam host.
-            if hasattr(self.tz_amsterdam, "localize"):
-                parsed = self.tz_amsterdam.localize(parsed)
-            else:
-                parsed = parsed.replace(tzinfo=self.tz_amsterdam)
-
-        return parsed.astimezone(pytz.UTC)
-
-    async def _get_latest_income_snapshot_overall(self, db, period: str) -> Optional[str]:
-        """Return the newest cumulative income snapshot for legacy fallback diagnostics."""
-        query = """
-            SELECT timestamp
-            FROM income
-            WHERE entry_type = 'income'
-            AND period = ?
-            GROUP BY timestamp
-            ORDER BY timestamp DESC
-            LIMIT 1
-        """
-        async with db.execute(query, (period,)) as cursor:
-            row = await cursor.fetchone()
-        return row[0] if row else None
     
     async def _get_treasury_rankings(self, period: str) -> Optional[Dict]:
         """
         Get treasury contribution rankings from income_v2.db.
-        Uses the newest cumulative snapshot inside the completed NY day/month.
+        Uses the most recent scrape from the specified period.
         Returns dict with 'current' and 'previous' lists of {username, credits, rank}
         """
         if not self.income_db_path.exists():
@@ -390,38 +321,26 @@ class Leaderboard(commands.Cog):
         
         try:
             async with aiosqlite.connect(self.income_db_path) as db:
-                now = datetime.now(self.tz_amsterdam)
-                current_start, current_end, previous_start, previous_end = self._get_period_boundaries(period, now)
-
-                current_ts = await self._get_latest_income_snapshot_in_window(
-                    db,
-                    period,
-                    current_start,
-                    current_end,
-                )
-                previous_ts = await self._get_latest_income_snapshot_in_window(
-                    db,
-                    period,
-                    previous_start,
-                    previous_end,
-                )
-
-                if not current_ts:
-                    logger.warning(
-                        "No treasury %s snapshot found between %s and %s",
-                        period,
-                        current_start.isoformat(),
-                        current_end.isoformat(),
-                    )
-                    current_ts = await self._get_latest_income_snapshot_overall(db, period)
-                    if not current_ts:
-                        return None
-                    logger.warning(
-                        "Falling back to latest treasury %s snapshot outside the reporting window: %s",
-                        period,
-                        current_ts,
-                    )
-
+                # Get the two most recent timestamps for this period
+                query = """
+                    SELECT DISTINCT timestamp
+                    FROM income
+                    WHERE entry_type = 'income' 
+                    AND period = ?
+                    ORDER BY timestamp DESC
+                    LIMIT 2
+                """
+                
+                async with db.execute(query, (period,)) as cursor:
+                    timestamps = await cursor.fetchall()
+                
+                if not timestamps:
+                    logger.warning(f"No timestamp found for treasury {period}")
+                    return None
+                
+                current_ts = timestamps[0][0]
+                previous_ts = timestamps[1][0] if len(timestamps) > 1 else None
+                
                 logger.info(f"Treasury {period} - Current: {current_ts}, Previous: {previous_ts}")
                 
                 # Get current period rankings (fetch more to account for filtering)
