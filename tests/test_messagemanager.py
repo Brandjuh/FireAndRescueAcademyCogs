@@ -12,6 +12,8 @@ from messagemanager.message_manager import (
     MessageManager,
     TAX_WARNING_NEW_MEMBER_GRACE_HOURS,
     TAX_WARNING_MIN_DAYS_BETWEEN,
+    TAX_WARNING_KICK_NOTICE_BODY,
+    TAX_WARNING_KICK_NOTICE_SUBJECT,
     TAX_WARNING_PRESETS,
     build_forum_thread_title,
     build_reply_payload,
@@ -480,6 +482,16 @@ class MessageManagerTests(unittest.TestCase):
         self.assertIn("This is an official warning", TAX_WARNING_PRESETS[2][1])
         self.assertIn("This is your final opportunity", TAX_WARNING_PRESETS[3][1])
 
+    def test_tax_warning_kick_notice_allows_reapply_without_staff_contact(self):
+        self.assertEqual(TAX_WARNING_KICK_NOTICE_SUBJECT, "Removed from Fire & Rescue Academy")
+        self.assertIn(
+            "You are welcome to reapply if you are willing to follow the alliance rules",
+            TAX_WARNING_KICK_NOTICE_BODY,
+        )
+        self.assertIn("setting your alliance donation to at least 5%", TAX_WARNING_KICK_NOTICE_BODY)
+        self.assertNotIn("contact alliance staff", TAX_WARNING_KICK_NOTICE_BODY)
+        self.assertNotIn("after correcting your alliance donation setting", TAX_WARNING_KICK_NOTICE_BODY)
+
     def test_tax_warning_member_identity_reads_scraper_member_shapes(self):
         self.assertEqual(
             tax_warning_member_identity(
@@ -704,6 +716,73 @@ class MessageManagerTests(unittest.TestCase):
         self.assertEqual(result["kicked"], 1)
         manager._send_tax_warning.assert_not_awaited()
         manager._kick_tax_warning_member.assert_awaited_once()
+
+    def test_kick_tax_warning_member_sends_notice_before_kick(self):
+        call_order = []
+
+        async def send_notice(username, subject, body):
+            call_order.append("notice")
+            self.assertEqual(username, "CrashTestDummy")
+            self.assertEqual(subject, TAX_WARNING_KICK_NOTICE_SUBJECT)
+            self.assertIn("You are welcome to reapply", body)
+            return {
+                "ok": True,
+                "resolved_username": "CrashTestDummy",
+                "conversation_id": "238294",
+                "thread": None,
+            }
+
+        async def kick_member(mc_user_id):
+            call_order.append("kick")
+            self.assertEqual(mc_user_id, "456")
+            return True, "MissionChief confirmed the member was kicked."
+
+        manager = MessageManager.__new__(MessageManager)
+        manager._sanction_manager = lambda: types.SimpleNamespace(create_sanction_for_member=object())
+        manager._send_message_and_link = AsyncMock(side_effect=send_notice)
+        manager._kick_member_from_alliance = AsyncMock(side_effect=kick_member)
+        manager._record_tax_kick_sanction = AsyncMock()
+        manager._save_tax_warning_kick_state = AsyncMock()
+
+        result = asyncio.run(
+            manager._kick_tax_warning_member(
+                types.SimpleNamespace(id=123),
+                {
+                    "mc_user_id": "456",
+                    "username": "CrashTestDummy",
+                    "rate": 0.0,
+                    "last_warning_at": 123456,
+                },
+            )
+        )
+
+        self.assertTrue(result["kicked"])
+        self.assertEqual(result["notice_conversation_id"], "238294")
+        self.assertEqual(call_order, ["notice", "kick"])
+        manager._record_tax_kick_sanction.assert_awaited_once()
+        manager._save_tax_warning_kick_state.assert_awaited_once()
+
+    def test_kick_tax_warning_member_does_not_kick_when_notice_fails(self):
+        manager = MessageManager.__new__(MessageManager)
+        manager._sanction_manager = lambda: types.SimpleNamespace(create_sanction_for_member=object())
+        manager._send_message_and_link = AsyncMock(return_value={"ok": False, "reason": "Message failed."})
+        manager._kick_member_from_alliance = AsyncMock()
+
+        result = asyncio.run(
+            manager._kick_tax_warning_member(
+                types.SimpleNamespace(id=123),
+                {
+                    "mc_user_id": "456",
+                    "username": "CrashTestDummy",
+                    "rate": 0.0,
+                    "last_warning_at": 123456,
+                },
+            )
+        )
+
+        self.assertFalse(result["kicked"])
+        self.assertEqual(result["reason"], "Kick notice could not be sent: Message failed.")
+        manager._kick_member_from_alliance.assert_not_awaited()
 
     def test_tax_warning_candidates_skip_members_inside_new_member_grace(self):
         now = int(time.time())

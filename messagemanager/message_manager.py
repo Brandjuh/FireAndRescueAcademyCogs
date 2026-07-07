@@ -45,6 +45,17 @@ TAX_WARNING_REASON_DETAIL_ALIASES = (
     "Low contribution",
 )
 TAX_WARNING_KICK_REASON_DETAIL = "Automatic kick after three unresolved 5% alliance donation warnings."
+TAX_WARNING_KICK_NOTICE_SUBJECT = "Removed from Fire & Rescue Academy"
+TAX_WARNING_KICK_NOTICE_BODY = (
+    "Hello {username},\n\n"
+    "You have been removed from Fire & Rescue Academy because your alliance donation was not set to the "
+    "required minimum of 5% after multiple reminders and warnings.\n\n"
+    "This is required by our Code of Conduct, rule 4.1. All members are expected to contribute at least 5% "
+    "to support alliance hospitals, prisons, academies, and other shared infrastructure.\n\n"
+    "You are welcome to reapply if you are willing to follow the alliance rules, including setting your alliance "
+    "donation to at least 5%.\n\n"
+    "Fire & Rescue Academy"
+)
 SANCTION_MANAGER_COG_NAMES = ("SanctionsManager", "SanctionManager")
 TAX_WARNING_SANCTION_TYPES = {
     1: "Warning - Official 1st warning",
@@ -1857,19 +1868,44 @@ class MessageManager(commands.Cog):
             return True, "MissionChief confirmed the member was kicked."
         return True, "MissionChief accepted the kick confirmation request."
 
+    async def _send_tax_kick_notice(self, candidate: dict) -> dict:
+        body = TAX_WARNING_KICK_NOTICE_BODY.format(username=candidate["username"])
+        return await self._send_message_and_link(
+            str(candidate["username"]),
+            TAX_WARNING_KICK_NOTICE_SUBJECT,
+            body,
+        )
+
     async def _kick_tax_warning_member(self, guild: discord.Guild, candidate: dict) -> dict:
         sanction_manager = self._sanction_manager()
         if not getattr(sanction_manager, "create_sanction_for_member", None):
             return {"kicked": False, "reason": tax_warning_sanction_manager_error(self.bot)}
 
+        notice_result = await self._send_tax_kick_notice(candidate)
+        if not notice_result.get("ok"):
+            return {
+                "kicked": False,
+                "reason": f"Kick notice could not be sent: {notice_result.get('reason', 'unknown error')}",
+            }
+
         ok, reason = await self._kick_member_from_alliance(str(candidate["mc_user_id"]))
         if not ok:
             return {"kicked": False, "reason": reason}
 
-        await self._record_tax_kick_sanction(guild=guild, candidate=candidate)
+        sanction_candidate = {
+            **candidate,
+            "username": notice_result.get("resolved_username") or candidate["username"],
+        }
+        await self._record_tax_kick_sanction(guild=guild, candidate=sanction_candidate)
         kicked_at = int(time.time())
         await self._save_tax_warning_kick_state(str(candidate["mc_user_id"]), kicked_at=kicked_at)
-        return {"kicked": True, "reason": reason, "kicked_at": kicked_at}
+        return {
+            "kicked": True,
+            "reason": reason,
+            "kicked_at": kicked_at,
+            "notice_conversation_id": notice_result.get("conversation_id"),
+            "notice_thread": notice_result.get("thread"),
+        }
 
     async def _send_tax_warning(self, guild: discord.Guild, candidate: dict) -> dict:
         level = int(candidate.get("next_level") or 0)
