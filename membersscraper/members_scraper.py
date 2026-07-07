@@ -518,7 +518,7 @@ class MembersScraper(commands.Cog):
                     
                     if response.status != 200:
                         await self._debug_log(f"❌ Page {page_num} returned status {response.status}", ctx)
-                        if response.status == 404:
+                        if response.status == 404 and page_num > 1:
                             await self._debug_log(
                                 f"Page {page_num} returned 404; treating it as the end of member pagination",
                                 ctx,

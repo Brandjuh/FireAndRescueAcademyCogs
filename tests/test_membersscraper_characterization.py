@@ -146,6 +146,18 @@ class MembersScraperCharacterizationTests(unittest.TestCase):
 
         self.assertEqual(members, [])
 
+    def test_404_first_member_page_remains_a_scrape_failure(self):
+        with patch("membersscraper.members_scraper.asyncio.sleep", new=AsyncMock()):
+            members = asyncio.run(
+                self.scraper._scrape_members_page(
+                    _FakeSession("Not Found", status=404),
+                    page_num=1,
+                    timestamp="2026-06-11T19:30:00",
+                )
+            )
+
+        self.assertIsNone(members)
+
 
 class MembersScraperDatabaseCharacterizationTests(unittest.TestCase):
     def setUp(self):
