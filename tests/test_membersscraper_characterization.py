@@ -134,6 +134,18 @@ class MembersScraperCharacterizationTests(unittest.TestCase):
         self.assertIsNone(members)
         self.assertGreaterEqual(sleep_mock.await_count, 3)
 
+    def test_404_member_page_is_treated_as_pagination_end(self):
+        with patch("membersscraper.members_scraper.asyncio.sleep", new=AsyncMock()):
+            members = asyncio.run(
+                self.scraper._scrape_members_page(
+                    _FakeSession("Not Found", status=404),
+                    page_num=22,
+                    timestamp="2026-06-11T19:30:00",
+                )
+            )
+
+        self.assertEqual(members, [])
+
 
 class MembersScraperDatabaseCharacterizationTests(unittest.TestCase):
     def setUp(self):

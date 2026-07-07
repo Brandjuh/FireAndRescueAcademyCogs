@@ -518,6 +518,12 @@ class MembersScraper(commands.Cog):
                     
                     if response.status != 200:
                         await self._debug_log(f"❌ Page {page_num} returned status {response.status}", ctx)
+                        if response.status == 404:
+                            await self._debug_log(
+                                f"Page {page_num} returned 404; treating it as the end of member pagination",
+                                ctx,
+                            )
+                            return []
                         retry_delay = self._page_retry_delay(response, attempt)
                         if retry_delay is None or attempt == PAGE_REQUEST_MAX_ATTEMPTS - 1:
                             return None
