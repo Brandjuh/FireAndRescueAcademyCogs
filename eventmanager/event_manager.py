@@ -3046,9 +3046,18 @@ class EventManager(commands.Cog):
             option = find_type_option(options, type_search)
             if not option:
                 available = ", ".join(option.label for option in options[:12]) or "none"
-                raise RuntimeError(
-                    f"MissionChief type matching `{type_search}` was not found on the live "
-                    f"{EVENT_KINDS[kind]['label']} form. Available examples: {available}"
+                if not options:
+                    raise RuntimeError(
+                        f"MissionChief type matching `{type_search}` was not found on the live "
+                        f"{EVENT_KINDS[kind]['label']} form. Available examples: {available}"
+                    )
+                option = random.choice(options)
+                log.warning(
+                    "EventManager %s type search %r was not available; falling back to %r. Available examples: %s",
+                    kind,
+                    type_search,
+                    option.label,
+                    available,
                 )
             return profile_with_selected_type(kind, profile, option)
         if not profile.get(RANDOM_TYPE_KEY):

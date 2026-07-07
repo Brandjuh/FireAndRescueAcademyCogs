@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from eventmanager.event_manager import (
@@ -1075,6 +1076,33 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(details["location"], "Portland, OR, USA")
         self.assertEqual(details["type"], "Suprise")
         self.assertEqual(details["scheduled_at"].isoformat(), "2099-06-27T15:08:30-04:00")
+
+    async def test_missing_type_search_falls_back_to_available_live_type(self):
+        fake = type("FakeEventManager", (), {})()
+        form = parse_event_form(MISSIONCHIEF_LARGE_HTML, "https://www.missionchief.com/missionAllianceNew")
+        fallback_option = field_options_for_kind(form, "large")[0]
+
+        async def fetch_form(kind):
+            self.assertEqual(kind, "large")
+            return form
+
+        fake._fetch_form = fetch_form
+        profile = {
+            TYPE_SEARCH_KEY: "Wildfire",
+            "fields": {
+                LATITUDE_FIELD: "46.793900",
+                LONGITUDE_FIELD: "-121.074000",
+                ADDRESS_FIELD: "Okanogan-Wenatchee National Forest near Yakima, WA, USA",
+            },
+        }
+
+        with patch("eventmanager.event_manager.random.choice", return_value=fallback_option):
+            resolved = await EventManager._resolve_profile_runtime_options(fake, "large", profile)
+
+        self.assertNotIn(TYPE_SEARCH_KEY, resolved)
+        self.assertEqual(resolved["selected_type_label"], "Major fire")
+        self.assertEqual(resolved["fields"][MISSION_TYPE_FIELD], "41")
+        self.assertEqual(resolved["fields"][ADDRESS_FIELD], profile["fields"][ADDRESS_FIELD])
 
     async def test_scheduled_failure_is_logged_to_configured_channel(self):
         class FakeChannel:
