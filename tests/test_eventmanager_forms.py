@@ -12,6 +12,7 @@ from eventmanager.event_manager import (
     EVENT_DEFAULT_OVERRIDES,
     EVENT_REQUEST_MIN_CONTRIBUTION_RATE,
     EVENT_REQUEST_BOARD_THREAD_ID,
+    EventStartResult,
     DEFAULT_EVENT_ROUTE_TIME,
     DEFAULT_TIMEZONE,
     EVENT_ROUTE_LOCATIONS,
@@ -240,6 +241,7 @@ class FakeEventManagerConfig:
         board_thread_id=None,
         board_guide_post_ids=None,
         board_last_seen_post_id=None,
+        log_channel_id=None,
     ):
         self._schedules = schedules
         self._profiles = profiles
@@ -249,6 +251,7 @@ class FakeEventManagerConfig:
         self.board_thread_id = FakeConfigValue(board_thread_id)
         self.board_guide_post_ids = FakeConfigValue(board_guide_post_ids or {})
         self.board_last_seen_post_id = FakeConfigValue(board_last_seen_post_id)
+        self.log_channel_id = FakeConfigValue(log_channel_id)
 
     async def schedules(self):
         return self._schedules
@@ -1072,6 +1075,56 @@ class EventManagerAddressTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(details["location"], "Portland, OR, USA")
         self.assertEqual(details["type"], "Suprise")
         self.assertEqual(details["scheduled_at"].isoformat(), "2099-06-27T15:08:30-04:00")
+
+    async def test_scheduled_failure_is_logged_to_configured_channel(self):
+        class FakeChannel:
+            def __init__(self):
+                self.embeds = []
+
+            async def send(self, *, embed=None):
+                self.embeds.append(embed)
+
+        class FakeBot:
+            def __init__(self, channel):
+                self.channel = channel
+
+            def get_channel(self, channel_id):
+                return self.channel if channel_id == 123 else None
+
+        channel = FakeChannel()
+        fake = type("FakeEventManager", (), {})()
+        fake.bot = FakeBot(channel)
+        fake.config = FakeEventManagerConfig(
+            schedules={"event": {"timezone": DEFAULT_TIMEZONE}},
+            profiles={},
+            retry_after={"event": "2026-06-27T19:01:15+00:00"},
+            log_channel_id=123,
+        )
+
+        await EventManager._log_schedule_failure(
+            fake,
+            "event",
+            "route_new_york_city",
+            EventStartResult(
+                False,
+                "MissionChief start button was not found.",
+                details={
+                    "last_free_text": "Last free mission: Sat, 20 Jun 2026 14:09:10 -0400",
+                    "snapshot_summary": "buttons: Start Event ( Free )",
+                },
+            ),
+        )
+
+        self.assertEqual(len(channel.embeds), 1)
+        embed = channel.embeds[0]
+        self.assertEqual(embed.kwargs["title"], "EventManager scheduled start failed")
+        field_values = {field["name"]: field["value"] for field in embed.fields}
+        self.assertEqual(field_values["Type"], "Alliance event")
+        self.assertEqual(field_values["Profile"], "route_new_york_city")
+        self.assertIn("MissionChief start button", field_values["Reason"])
+        self.assertIn("Sat 2026-06-27", field_values["Next retry"])
+        self.assertIn("Last free mission", field_values["MissionChief free cooldown"])
+        self.assertIn("Start Event", field_values["Browser snapshot"])
 
     async def test_reverse_address_replaces_payload_address(self):
         session = FakeSession(FakeResponse("MissionChief Address"))

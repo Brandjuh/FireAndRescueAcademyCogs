@@ -4491,6 +4491,56 @@ class EventManager(commands.Cog):
             )
         await channel.send(embed=embed)
 
+    async def _log_schedule_failure(
+        self,
+        kind: str,
+        profile_name: Optional[str],
+        result: EventStartResult,
+    ):
+        """Post automatic scheduler failures to the configured EventManager log channel."""
+        channel_id = await self.config.log_channel_id()
+        if not channel_id:
+            return
+        channel = self.bot.get_channel(channel_id)
+        if not channel:
+            return
+
+        retry_after = await self.config.schedule_retry_after()
+        retry_at = parse_config_datetime((retry_after or {}).get(kind))
+        timezone_name = DEFAULT_TIMEZONE
+        schedules = await self.config.schedules()
+        schedule = schedules.get(kind, {}) if schedules else {}
+        if schedule:
+            timezone_name = schedule.get("timezone") or DEFAULT_TIMEZONE
+
+        embed = discord.Embed(
+            title="EventManager scheduled start failed",
+            color=discord.Color.red(),
+            timestamp=datetime.utcnow(),
+        )
+        embed.add_field(name="Type", value=EVENT_KINDS[kind]["label"], inline=True)
+        if profile_name:
+            embed.add_field(name="Profile", value=str(profile_name), inline=True)
+        if result.status is not None:
+            embed.add_field(name="HTTP Status", value=str(result.status), inline=True)
+        embed.add_field(name="Reason", value=truncate_discord_text(str(result.reason), 1024), inline=False)
+        if retry_at:
+            embed.add_field(
+                name="Next retry",
+                value=schedule_time_text(retry_at, timezone_name),
+                inline=False,
+            )
+
+        details = result.details or {}
+        last_free_text = str(details.get("last_free_text") or "").strip()
+        if last_free_text:
+            embed.add_field(name="MissionChief free cooldown", value=truncate_discord_text(last_free_text, 1024), inline=False)
+        snapshot = str(details.get("snapshot_summary") or "").strip()
+        if snapshot:
+            embed.add_field(name="Browser snapshot", value=truncate_discord_text(snapshot, 1024), inline=False)
+
+        await channel.send(embed=embed)
+
     async def _run_due_schedules(self):
         schedules = await self.config.schedules()
         last_runs = await self.config.last_runs()
@@ -4512,6 +4562,7 @@ class EventManager(commands.Cog):
             result, _, _ = await self._start_scheduled_kind(kind)
             if not result.ok:
                 log.warning("Scheduled %s failed: %s", kind, result.reason)
+                await self._log_schedule_failure(kind, profile_name, result)
 
     @commands.group(name="eventmanager", aliases=["eventmgr"], invoke_without_command=True)
     @commands.admin()
