@@ -50,8 +50,8 @@ def format_channel_line(mention: str, topic: Optional[str]) -> str:
 
 def format_category_header(name: str, emoji: str) -> str:
     if emoji:
-        return f"**[{emoji}] [{name.upper()}] [{emoji}]**"
-    return f"**[{name.upper()}]**"
+        return f"**[{emoji}] [{name}] [{emoji}]**"
+    return f"**[{name}]**"
 
 
 def render_blocks(

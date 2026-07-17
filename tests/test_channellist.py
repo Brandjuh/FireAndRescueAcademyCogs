@@ -40,14 +40,14 @@ class FormatLineTests(unittest.TestCase):
         self.assertEqual(format_channel_line("<#1>", None), "<#1>")
         self.assertEqual(format_channel_line("<#1>", "   "), "<#1>")
 
-    def test_category_header(self):
+    def test_category_header_keeps_name_verbatim(self):
         self.assertEqual(
             format_category_header("General Chat", DEFAULT_EMOJI),
-            "**[⏬] [GENERAL CHAT] [⏬]**",
+            "**[⏬] [General Chat] [⏬]**",
         )
 
     def test_category_header_without_emoji(self):
-        self.assertEqual(format_category_header("Reception", ""), "**[RECEPTION]**")
+        self.assertEqual(format_category_header("Reception", ""), "**[Reception]**")
 
 
 class RenderBlocksTests(unittest.TestCase):
@@ -63,7 +63,7 @@ class RenderBlocksTests(unittest.TestCase):
         self.assertEqual(
             blocks,
             [
-                ["**[⏬] [RECEPTION] [⏬]**", "<#1> - Welcome", "<#2>"],
+                ["**[⏬] [Reception] [⏬]**", "<#1> - Welcome", "<#2>"],
                 ["<#9> - Top level"],
             ],
         )
