@@ -1,0 +1,23 @@
+{
+    "author": ["FARA"],
+    "name": "ChannelList",
+    "description": "Post and maintain a directory of every category and channel, using each channel's topic as its description. Channel visibility is based on a configurable role, and the posted list updates automatically when channels change, editing the existing messages in place when possible or reposting when it has to grow.",
+    "install_msg": "Thanks for installing ChannelList!\n\n**Quick Setup:**\n1. `[p]channellistset channel #channel` - Where the list is posted\n2. `[p]channellistset role @role` - Base visibility on this role (optional, defaults to @everyone)\n3. `[p]channellist post` - Publish the list\n\n**Handy Commands:**\n• `[p]channellist update` - Refresh the list now\n• `[p]channellistset settings` - Review the configuration\n• `[p]channellistset ignore #channel` - Hide a channel or category\n• `[p]channellistset autoupdate` - Toggle automatic updates\n\nThe list refreshes on its own whenever a channel is created, deleted, renamed, moved, or its topic or permissions change.",
+    "short": "Directory of all categories and channels with auto updates",
+    "tags": [
+        "channels",
+        "categories",
+        "directory",
+        "list",
+        "topic",
+        "automation",
+        "management"
+    ],
+    "type": "COG",
+    "end_user_data_statement": "This cog stores channel and message IDs and the configured list text per guild. It does not store any personal data.",
+    "min_bot_version": "3.5.0",
+    "hidden": false,
+    "disabled": false,
+    "required_cogs": {},
+    "requirements": []
+}
