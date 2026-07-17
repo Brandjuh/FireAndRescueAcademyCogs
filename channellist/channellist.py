@@ -10,11 +10,14 @@ from redbot.core.bot import Red
 
 log = logging.getLogger("red.fara.channellist")
 
-MESSAGE_CHAR_LIMIT = 1900
+EMBED_DESCRIPTION_LIMIT = 4096
+# Stay just under Discord's embed description limit so the rendered text always fits.
+CHUNK_CHAR_LIMIT = 4000
 AUTO_UPDATE_DELAY_SECONDS = 10
 MAX_HEADER_LENGTH = 1500
 DEFAULT_HEADER = "All public channels and their description are listed below."
 DEFAULT_EMOJI = "⏬"
+DEFAULT_EMBED_COLOR = 0x5865F2
 EMPTY_LIST_PLACEHOLDER = "*There are no channels to display.*"
 
 ACTION_SKIP = "skip"
@@ -28,6 +31,7 @@ DEFAULT_GUILD = {
     "role_id": None,
     "header": DEFAULT_HEADER,
     "emoji": DEFAULT_EMOJI,
+    "embed_color": DEFAULT_EMBED_COLOR,
     "include_voice": True,
     "auto_update": True,
     "ignored_ids": [],
@@ -78,9 +82,9 @@ def render_blocks(
 def chunk_blocks(
     header: str,
     blocks: Sequence[Sequence[str]],
-    limit: int = MESSAGE_CHAR_LIMIT,
+    limit: int = CHUNK_CHAR_LIMIT,
 ) -> List[str]:
-    """Pack the header and blocks into message-sized chunks.
+    """Pack the header and blocks into embed-sized chunks.
 
     Blocks are separated by a blank line. A block's first line is kept together
     with the line after it, so a category header is never stranded at the
@@ -201,6 +205,20 @@ class ChannelList(commands.Cog):
         chunks = chunk_blocks(conf["header"], render_blocks(categories, conf["emoji"]))
         return chunks or [EMPTY_LIST_PLACEHOLDER]
 
+    def _build_embed(self, description: str, color: int) -> discord.Embed:
+        return discord.Embed(
+            description=description[:EMBED_DESCRIPTION_LIMIT],
+            color=discord.Color(int(color)),
+        )
+
+    @staticmethod
+    def _embed_description(message: discord.Message) -> str:
+        """The description of a stored list embed, or ``""`` if it has none."""
+        embeds = getattr(message, "embeds", None)
+        if embeds:
+            return embeds[0].description or ""
+        return ""
+
     async def _fetch_existing(
         self, channel: discord.TextChannel, message_ids: Sequence[int]
     ) -> Optional[List[discord.Message]]:
@@ -258,6 +276,7 @@ class ChannelList(commands.Cog):
                 return "forbidden"
 
         chunks = await self._render_chunks(guild)
+        color = conf["embed_color"]
         stored_ids: List[int] = conf["message_ids"]
         stored_channel_id: Optional[int] = conf["message_channel_id"]
 
@@ -268,7 +287,11 @@ class ChannelList(commands.Cog):
         if force_repost:
             action = ACTION_REPOST
         else:
-            contents = [message.content for message in existing] if existing is not None else None
+            contents = (
+                [self._embed_description(message) for message in existing]
+                if existing is not None
+                else None
+            )
             action = decide_action(chunks, contents)
 
         if action == ACTION_SKIP:
@@ -278,8 +301,12 @@ class ChannelList(commands.Cog):
 
         if action == ACTION_EDIT and existing is not None:
             for message, content in zip(existing, chunks):
-                if message.content != content:
-                    await message.edit(content=content, allowed_mentions=no_mentions)
+                if self._embed_description(message) != content:
+                    await message.edit(
+                        content=None,
+                        embed=self._build_embed(content, color),
+                        allowed_mentions=no_mentions,
+                    )
             for message in existing[len(chunks):]:
                 try:
                     await message.delete()
@@ -294,7 +321,9 @@ class ChannelList(commands.Cog):
         await self._delete_stored_messages(guild, stored_ids, stored_channel_id, existing)
         new_ids: List[int] = []
         for content in chunks:
-            message = await channel.send(content, allowed_mentions=no_mentions)
+            message = await channel.send(
+                embed=self._build_embed(content, color), allowed_mentions=no_mentions
+            )
             new_ids.append(message.id)
         await self.config.guild(guild).message_ids.set(new_ids)
         await self.config.guild(guild).message_channel_id.set(channel.id)
@@ -535,6 +564,30 @@ class ChannelList(commands.Cog):
         )
         await self._schedule_auto_update(ctx.guild)
 
+    @channellistset.command(name="color", aliases=["colour"])
+    async def channellistset_color(self, ctx: commands.Context, color: Optional[str] = None):
+        """Set the embed color as a hex value, for example `#5865f2`.
+
+        Leave it empty to restore the default.
+        """
+        if color is None:
+            await self.config.guild(ctx.guild).embed_color.set(DEFAULT_EMBED_COLOR)
+            await ctx.send(f"Embed color restored to #{DEFAULT_EMBED_COLOR:06x}.")
+            await self._schedule_auto_update(ctx.guild)
+            return
+        cleaned = color.strip().lstrip("#")
+        try:
+            value = int(cleaned, 16)
+        except ValueError:
+            await ctx.send("Use a hex color like `#5865f2`.")
+            return
+        if not 0 <= value <= 0xFFFFFF:
+            await ctx.send("Use a valid RGB hex color.")
+            return
+        await self.config.guild(ctx.guild).embed_color.set(value)
+        await ctx.send(f"Embed color set to #{value:06x}.")
+        await self._schedule_auto_update(ctx.guild)
+
     @channellistset.command(name="voice")
     async def channellistset_voice(self, ctx: commands.Context):
         """Toggle whether voice and stage channels are included."""
@@ -623,7 +676,10 @@ class ChannelList(commands.Cog):
         )
         embed.add_field(name="Category emoji", value=conf["emoji"] or "None", inline=True)
         embed.add_field(
-            name="Posted messages", value=str(len(conf["message_ids"])), inline=True
+            name="Embed color", value=f"#{int(conf['embed_color']):06x}", inline=True
+        )
+        embed.add_field(
+            name="Posted embeds", value=str(len(conf["message_ids"])), inline=True
         )
         embed.add_field(name="Header", value=conf["header"][:1024] or "None", inline=False)
         if ignored_display:
