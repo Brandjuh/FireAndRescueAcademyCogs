@@ -42,12 +42,18 @@ class FormatLineTests(unittest.TestCase):
 
     def test_category_header_keeps_name_verbatim(self):
         self.assertEqual(
-            format_category_header("General Chat", DEFAULT_EMOJI),
+            format_category_header("General Chat", "⏬"),
             "**[⏬] [General Chat] [⏬]**",
         )
 
     def test_category_header_without_emoji(self):
         self.assertEqual(format_category_header("Reception", ""), "**[Reception]**")
+
+    def test_category_header_default_has_no_emoji(self):
+        self.assertEqual(DEFAULT_EMOJI, "")
+        self.assertEqual(
+            format_category_header("Reception", DEFAULT_EMOJI), "**[Reception]**"
+        )
 
 
 class RenderBlocksTests(unittest.TestCase):
@@ -58,7 +64,7 @@ class RenderBlocksTests(unittest.TestCase):
                 ("Empty", []),
                 (None, [("<#9>", "Top level")]),
             ],
-            DEFAULT_EMOJI,
+            "⏬",
         )
         self.assertEqual(
             blocks,
@@ -67,6 +73,13 @@ class RenderBlocksTests(unittest.TestCase):
                 ["<#9> - Top level"],
             ],
         )
+
+    def test_groups_headers_without_emoji(self):
+        blocks = render_blocks(
+            [("Reception", [("<#1>", "Welcome")])],
+            DEFAULT_EMOJI,
+        )
+        self.assertEqual(blocks, [["**[Reception]**", "<#1> - Welcome"]])
 
 
 class ChunkBlocksTests(unittest.TestCase):

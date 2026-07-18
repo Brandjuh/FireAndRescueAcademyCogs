@@ -16,7 +16,7 @@ CHUNK_CHAR_LIMIT = 4000
 AUTO_UPDATE_DELAY_SECONDS = 10
 MAX_HEADER_LENGTH = 1500
 DEFAULT_HEADER = "All public channels and their description are listed below."
-DEFAULT_EMOJI = "⏬"
+DEFAULT_EMOJI = ""
 DEFAULT_EMBED_COLOR = 0x5865F2
 EMPTY_LIST_PLACEHOLDER = "*There are no channels to display.*"
 
@@ -548,9 +548,10 @@ class ChannelList(commands.Cog):
     async def channellistset_emoji(
         self, ctx: commands.Context, emoji: Optional[str] = None
     ):
-        """Set the emoji decorating category headers.
+        """Set an emoji decorating category headers.
 
-        Leave it empty to restore ⏬, or pass `none` to drop the decoration.
+        Category headers have no emoji by default. Pass an emoji to add one on
+        either side of the name, or leave it empty (or pass `none`) to remove it.
         """
         if emoji is None:
             value = DEFAULT_EMOJI
